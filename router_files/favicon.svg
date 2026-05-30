@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-label="Detour">
+  <defs>
+    <linearGradient id="d" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1f6feb"/>
+      <stop offset="1" stop-color="#2ea043"/>
+    </linearGradient>
+  </defs>
+  <!-- rounded badge -->
+  <rect width="32" height="32" rx="7" fill="url(#d)"/>
+  <!-- detour route: enters left, arcs up and over the blocked node, exits right -->
+  <path d="M4.5 21 H10 C14 21 14 9 16.5 9 C19 9 19 21 23 21 H25"
+        fill="none" stroke="#ffffff" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- arrowhead -->
+  <path d="M22 17.8 L26.2 21 L22 24.2"
+        fill="none" stroke="#ffffff" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- blocked node the traffic reroutes around -->
+  <circle cx="16.5" cy="21" r="2.7" fill="#f85149" stroke="#0f1419" stroke-width="1"/>
+</svg>

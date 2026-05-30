@@ -1,0 +1,444 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/bin/sing-box
+CONF=/etc/sing-box/config.json
+CONFIG_DIR=/etc/sing-box
+DOMAINS_FILE=/etc/sing-box/proxy-domains.list
+WHITELIST_FILE=/etc/sing-box/whitelist-domains.list
+ROUTE_MAP=/etc/sing-box/route-map.list
+SETTINGS_FILE=/etc/sing-box/settings.json
+IPSET_NAME=singbox_domains
+IPSET_WL=singbox_whitelist
+LOG=/var/log/sing-box.log
+
+# Detect whether nftables (fw4) is available on this router.
+# OpenWrt 23.05+ uses nftables; older firmwares (e.g. GL.iNet 21.02 builds) use fw3+iptables only.
+has_nft() {
+    command -v nft >/dev/null 2>&1
+}
+
+# Parse a line from the domains file.
+# Supports: domains, IPs, CIDRs, // comments, # comments, section headers.
+# Returns via globals: LINE_TYPE (domain|ip|skip), LINE_VALUE
+parse_line() {
+    local raw="$1"
+
+    # Strip // comments and # comments, trim
+    local line=$(echo "$raw" | sed 's|//.*||; s|#.*||' | tr -d '\r' | xargs)
+
+    # Skip empty
+    if [ -z "$line" ]; then
+        LINE_TYPE="skip"
+        return
+    fi
+
+    # Check if it's an IP or CIDR: digits.digits.digits.digits[/mask]
+    if echo "$line" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$'; then
+        LINE_TYPE="ip"
+        LINE_VALUE="$line"
+        return
+    fi
+
+    # Check if it looks like a domain (contains at least one dot and letters)
+    if echo "$line" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$'; then
+        LINE_TYPE="domain"
+        LINE_VALUE="$line"
+        return
+    fi
+
+    # Everything else (section headers like "Telegram", garbage) — skip
+    LINE_TYPE="skip"
+}
+
+# Read routing_mode from settings.json
+get_routing_mode() {
+    local m=""
+    [ -f "$SETTINGS_FILE" ] && m=$(sed -n 's/.*"routing_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS_FILE" | head -1)
+    [ -z "$m" ] && m="proxy-list"
+    echo "$m"
+}
+
+# Get upstream IPs from settings/config (to avoid routing loops in all-except mode)
+get_upstream_ips() {
+    local from_settings=""
+    local from_config=""
+
+    [ -f "$SETTINGS_FILE" ] && from_settings=$(sed -n 's/.*"upstream_ips"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS_FILE" | head -1)
+    from_config=$(sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' "$CONF" 2>/dev/null)
+
+    {
+        echo "$from_settings" | tr ',' '\n'
+        echo "$from_config"
+    } | awk 'NF && !seen[$0]++ { if (out) out = out "," $0; else out = $0 } END { print out }'
+}
+
+# Populate ipset and dnsmasq from a domains file
+# $1 = domains file, $2 = ipset name, $3 = dnsmasq conf file
+setup_domains_file() {
+    local domains_file="$1"
+    local ipset_name="$2"
+    local dnsmasq_conf="$3"
+    local ipset_tmp="/tmp/ipset-restore-$ipset_name.txt"
+
+    > "$dnsmasq_conf"
+    > "$ipset_tmp"
+
+    if [ -f "$domains_file" ]; then
+        # Use awk for fast parsing instead of per-line shell+grep
+        awk -v ipset="$ipset_name" -v dnsmasq="$dnsmasq_conf" -v iptmp="$ipset_tmp" '
+        {
+            # Strip // and # comments, trim whitespace
+            sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+            if ($0 == "") next
+            # IP or CIDR
+            if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) {
+                print "add " ipset " " $0 >> iptmp
+                next
+            }
+            # Domain
+            if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) {
+                print "ipset=/" $0 "/" ipset >> dnsmasq
+                next
+            }
+        }' "$domains_file"
+
+        # Bulk-load IPs/CIDRs via ipset restore (single process, much faster)
+        if [ -s "$ipset_tmp" ]; then
+            ipset restore -exist < "$ipset_tmp"
+        fi
+        rm -f "$ipset_tmp"
+    fi
+}
+
+# Resolve domains from file to populate ipset via DNS
+resolve_domains() {
+    local domains_file="$1"
+    if [ -f "$domains_file" ]; then
+        awk '{
+            sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+            if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/)
+                print $0
+        }' "$domains_file" | while IFS= read -r d; do
+            nslookup "$d" 127.0.0.1 >/dev/null 2>&1 &
+        done
+    fi
+}
+
+# Open LAN-side port for sing-box.
+# nft fw4 path: insert ACCEPT rule into input_lan chain.
+# iptables/fw3 path: rely on LAN zone default ACCEPT (already permissive).
+open_port_lan() {
+    local port="$1"
+    if has_nft; then
+        nft list chain inet fw4 input_lan 2>/dev/null | grep -q "$port" || \
+            nft insert rule inet fw4 input_lan tcp dport "$port" accept comment '"sing-box proxy"'
+    fi
+    # On fw3 routers, LAN zone has input=ACCEPT by default; nothing to do.
+}
+
+close_port_lan() {
+    has_nft || return 0
+    # Remove ALL sing-box LAN-accept rules (default 12345 + every per-target port).
+    local handle
+    while : ; do
+        handle=$(nft -a list chain inet fw4 input_lan 2>/dev/null | grep "sing-box" | grep -o 'handle [0-9]*' | awk '{print $2}' | head -1)
+        [ -n "$handle" ] || break
+        nft delete rule inet fw4 input_lan handle "$handle" 2>/dev/null || break
+    done
+}
+
+# Instance mode: "single" (one process, route.rules) or "multi" (one process
+# per route target). Default single.
+get_singbox_mode() {
+    local m=""
+    [ -f "$SETTINGS_FILE" ] && m=$(sed -n 's/.*"singbox_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS_FILE" | head -1)
+    case "$m" in single|multi) echo "$m" ;; *) echo "single" ;; esac
+}
+
+# Unique route-map target profile ids, in file order. Header: // === route:ID ===
+route_map_targets() {
+    [ -f "$ROUTE_MAP" ] || return 0
+    awk '
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        line=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", line)
+        sub(/[[:space:]]*===.*$/, "", line)
+        gsub(/[^a-zA-Z0-9_-]/, "", line)
+        if (line != "" && !seen[line]++) print line
+    }' "$ROUTE_MAP"
+}
+
+# Plain host/IP/CIDR lines (no D/I prefix) belonging to ONE target.
+route_map_section() {
+    local id="$1"
+    [ -f "$ROUTE_MAP" ] || return 0
+    awk -v want="$id" '
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        t=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", t)
+        sub(/[[:space:]]*===.*$/, "", t)
+        gsub(/[^a-zA-Z0-9_-]/, "", t)
+        inblk = (t == want) ? 1 : 0
+        next
+    }
+    {
+        if (!inblk) next
+        line=$0
+        sub(/\/\/.*/, "", line); sub(/#.*/, "", line); gsub(/\r/, "", line)
+        gsub(/^[ \t]+|[ \t]+$/, "", line)
+        if (line == "") next
+        if (line ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print line; next }
+        if (line ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print line; next }
+    }' "$ROUTE_MAP"
+}
+
+# Emit "N id port ipset conf" for every committed per-target instance, i.e. each
+# route target that has a generated /etc/sing-box/config-<id>.json. Port is read
+# from that config (the CGI is the sole port assigner), ipset is index-derived
+# (singbox_tN — kept short to respect the 31-char ipset name limit).
+multi_instances() {
+    [ -f "$ROUTE_MAP" ] || return 0
+    local n=0 id conf port
+    for id in $(route_map_targets); do
+        conf="$CONFIG_DIR/config-$id.json"
+        [ -f "$conf" ] || continue
+        port=$(sed -n 's/.*"listen_port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$conf" | head -1)
+        [ -n "$port" ] || continue
+        n=$((n + 1))
+        echo "$n $id $port singbox_t$n $conf"
+    done
+}
+
+start_service() {
+    # Disable broken MPTCP (QSDK kernel + some MediaTek kernels)
+    sysctl -w net.mptcp.enabled=0 >/dev/null 2>&1
+
+    # The sing-box binary ships in the separate `detour-bins` package. If
+    # it's absent (panel installed but bins not yet fetched), bail BEFORE any
+    # ipset/iptables setup — otherwise LAN TCP would be REDIRECTed to a dead
+    # :12345 and break the internet. With no rules, traffic just flows direct.
+    if [ ! -x "$PROG" ]; then
+        echo "sing-box binary missing ($PROG) — install detour-bins (panel: «Обновить бинарники»)" >&2
+        logger -t sing-box "binary missing ($PROG); not starting — traffic stays direct"
+        return 1
+    fi
+
+    local MODE=$(get_singbox_mode)
+    local ROUTING_MODE=$(get_routing_mode)
+    local SB_POS=1 ZL
+    local INST_TMP=/tmp/singbox-instances.start.$$
+
+    # Create ipset(s) — hash:net supports both IPs and CIDRs
+    ipset create $IPSET_NAME hash:net -exist
+    mkdir -p /tmp/dnsmasq.d
+
+    # Flattened route-map (all targets) — used to warm DNS and (single mode) to
+    # add per-profile-routed hosts into the 12345 redirect set.
+    rm -f /tmp/routemap-all.list
+    if [ -f "$ROUTE_MAP" ]; then
+        route_map_targets | while IFS= read -r rid; do
+            route_map_section "$rid"
+        done > /tmp/routemap-all.list 2>/dev/null
+    fi
+
+    # ---- default-instance (port 12345) ipset + dnsmasq population ----
+    if [ "$ROUTING_MODE" = "all-except" ]; then
+        ipset create $IPSET_WL hash:net maxelem 131072 -exist
+        setup_domains_file "$WHITELIST_FILE" "$IPSET_WL" "/tmp/dnsmasq.d/singbox-whitelist.conf"
+        setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
+    else
+        setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
+        # SINGLE mode: per-profile-routed hosts must also reach 12345 — the one
+        # sing-box splits them across outbounds via route.rules.
+        if [ "$MODE" != "multi" ] && [ -s /tmp/routemap-all.list ]; then
+            setup_domains_file /tmp/routemap-all.list "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-routemap.conf"
+        fi
+    fi
+
+    # ---- MULTI: per-target ipsets + dnsmasq (one set/port per route target) ----
+    if [ "$MODE" = "multi" ]; then
+        multi_instances > "$INST_TMP"
+        while read -r n id port ipset conf; do
+            ipset create "$ipset" hash:net -exist
+            route_map_section "$id" > "/tmp/routemap-$ipset.list"
+            setup_domains_file "/tmp/routemap-$ipset.list" "$ipset" "/tmp/dnsmasq.d/singbox-$ipset.conf"
+            rm -f "/tmp/routemap-$ipset.list"
+        done < "$INST_TMP"
+    fi
+
+    /etc/init.d/dnsmasq restart
+    sleep 1
+    resolve_domains "$DOMAINS_FILE"
+    [ "$ROUTING_MODE" = "all-except" ] && resolve_domains "$WHITELIST_FILE"
+    [ -s /tmp/routemap-all.list ] && resolve_domains /tmp/routemap-all.list
+    sleep 1
+    rm -f /tmp/routemap-all.list
+
+    open_port_lan 12345
+
+    # ---- default-instance iptables (capture SB_POS for per-target rules) ----
+    if [ "$ROUTING_MODE" = "all-except" ]; then
+        # Mode: proxy ALL traffic EXCEPT whitelist
+        local PROXY_IPS=$(get_upstream_ips)
+        local ip OLD_IFS
+        iptables -t nat -N SINGBOX_ALL 2>/dev/null
+        iptables -t nat -F SINGBOX_ALL
+        iptables -t nat -A SINGBOX_ALL -d 10.0.0.0/8 -j RETURN
+        iptables -t nat -A SINGBOX_ALL -d 172.16.0.0/12 -j RETURN
+        iptables -t nat -A SINGBOX_ALL -d 192.168.0.0/16 -j RETURN
+        iptables -t nat -A SINGBOX_ALL -d 127.0.0.0/8 -j RETURN
+        if [ -n "$PROXY_IPS" ]; then
+            OLD_IFS="$IFS"
+            IFS=','
+            set -- $PROXY_IPS
+            IFS="$OLD_IFS"
+            for ip in "$@"; do
+                [ -n "$ip" ] && iptables -t nat -A SINGBOX_ALL -d "$ip" -j RETURN
+            done
+        fi
+        iptables -t nat -A SINGBOX_ALL -p tcp -m set --match-set $IPSET_WL dst -j RETURN
+        iptables -t nat -A SINGBOX_ALL -p tcp -j REDIRECT --to-ports 12345
+        iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_ALL 2>/dev/null
+        # Insert AFTER zapret-tpws's ZAPRET_REDIRECT if present (zapret must run first)
+        ZL=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | awk '/ZAPRET_REDIRECT/ {print $1; exit}')
+        [ -n "$ZL" ] && SB_POS=$((ZL + 1))
+        iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -j SINGBOX_ALL
+
+        # GL.iNet policy routing has rule 9920 (br-lan -> blackhole) for unmarked LAN
+        # packets. Whitelist hits RETURN from SINGBOX_ALL but stays unmarked, so RU
+        # sites get blackholed before main table. Mark them with 0x8000 (= main table).
+        iptables -t mangle -D PREROUTING -i br-lan -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000 2>/dev/null
+        iptables -t mangle -I PREROUTING 1 -i br-lan -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000
+    else
+        # Mode: proxy ONLY listed domains/IPs (default)
+        iptables -t nat -D PREROUTING -i br-lan -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345 2>/dev/null
+        ZL=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | awk '/ZAPRET_REDIRECT/ {print $1; exit}')
+        [ -n "$ZL" ] && SB_POS=$((ZL + 1))
+        iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345
+    fi
+
+    # ---- MULTI: per-target ports + REDIRECTs inserted ABOVE the default catch-all.
+    # REDIRECT delivers locally, so per-target traffic is not blackholed by rule 9920.
+    if [ "$MODE" = "multi" ] && [ -s "$INST_TMP" ]; then
+        while read -r n id port ipset conf; do
+            open_port_lan "$port"
+            iptables -t nat -D PREROUTING -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port" 2>/dev/null
+            iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
+        done < "$INST_TMP"
+    fi
+
+    # Clear log
+    > $LOG
+
+    # Start sing-box via procd — default instance always, plus one per target.
+    procd_open_instance
+    procd_set_param command $PROG run -c $CONF
+    procd_set_param stdout 0
+    procd_set_param stderr 0
+    procd_set_param respawn
+    procd_close_instance
+
+    if [ "$MODE" = "multi" ] && [ -s "$INST_TMP" ]; then
+        while read -r n id port ipset conf; do
+            [ -f "$conf" ] || continue
+            procd_open_instance "t$n"
+            procd_set_param command $PROG run -c "$conf"
+            procd_set_param stdout 0
+            procd_set_param stderr 0
+            procd_set_param respawn
+            procd_close_instance
+        done < "$INST_TMP"
+    fi
+    rm -f "$INST_TMP"
+}
+
+stop_service() {
+    # Remove killswitch if active
+    iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_KS 2>/dev/null
+    iptables -t nat -F SINGBOX_KS 2>/dev/null
+    iptables -t nat -X SINGBOX_KS 2>/dev/null
+
+    # Remove SINGBOX_ALL chain (all-except mode)
+    iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_ALL 2>/dev/null
+    iptables -t nat -F SINGBOX_ALL 2>/dev/null
+    iptables -t nat -X SINGBOX_ALL 2>/dev/null
+
+    # Remove proxy-list iptables rules
+    iptables -t nat -D PREROUTING -i br-lan -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345 2>/dev/null
+
+    # Remove all-except mangle MARK rule for whitelist
+    iptables -t mangle -D PREROUTING -i br-lan -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000 2>/dev/null
+
+    # MULTI: remove EVERY per-target REDIRECT (match-set singbox_t*), independent
+    # of the current route-map, BEFORE destroying the sets they reference.
+    if command -v iptables-save >/dev/null 2>&1; then
+        iptables-save -t nat 2>/dev/null | grep -- '--match-set singbox_t' | sed 's/^-A/-D/' | while IFS= read -r rule; do
+            [ -n "$rule" ] && iptables -t nat $rule 2>/dev/null
+        done
+    fi
+
+    close_port_lan
+
+    # Remove dnsmasq configs (default, route-map, all per-target sets)
+    rm -f /tmp/dnsmasq.d/singbox-domains.conf
+    rm -f /tmp/dnsmasq.d/singbox-whitelist.conf
+    rm -f /tmp/dnsmasq.d/singbox-routemap.conf
+    rm -f /tmp/dnsmasq.d/singbox-singbox_t*.conf
+    /etc/init.d/dnsmasq restart
+
+    # Flush and destroy ipsets
+    sleep 1
+    ipset flush $IPSET_NAME 2>/dev/null
+    ipset destroy $IPSET_NAME 2>/dev/null
+    ipset flush $IPSET_WL 2>/dev/null
+    ipset destroy $IPSET_WL 2>/dev/null
+    for s in $(ipset list -n 2>/dev/null | grep '^singbox_t'); do
+        ipset flush "$s" 2>/dev/null
+        ipset destroy "$s" 2>/dev/null
+    done
+}
+
+reload_service() {
+    local MODE=$(get_singbox_mode)
+    local ROUTING_MODE=$(get_routing_mode)
+
+    # Re-read domains and update ipset/dnsmasq
+    ipset flush $IPSET_NAME 2>/dev/null
+    setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
+
+    if [ "$ROUTING_MODE" = "all-except" ]; then
+        ipset flush $IPSET_WL 2>/dev/null
+        setup_domains_file "$WHITELIST_FILE" "$IPSET_WL" "/tmp/dnsmasq.d/singbox-whitelist.conf"
+    fi
+
+    rm -f /tmp/routemap-all.list
+    if [ -f "$ROUTE_MAP" ]; then
+        route_map_targets | while IFS= read -r rid; do route_map_section "$rid"; done > /tmp/routemap-all.list 2>/dev/null
+    fi
+    if [ "$MODE" != "multi" ] && [ "$ROUTING_MODE" != "all-except" ] && [ -s /tmp/routemap-all.list ]; then
+        setup_domains_file /tmp/routemap-all.list "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-routemap.conf"
+    fi
+    if [ "$MODE" = "multi" ]; then
+        multi_instances | while read -r n id port ipset conf; do
+            ipset create "$ipset" hash:net -exist
+            ipset flush "$ipset" 2>/dev/null
+            route_map_section "$id" > "/tmp/routemap-$ipset.list"
+            setup_domains_file "/tmp/routemap-$ipset.list" "$ipset" "/tmp/dnsmasq.d/singbox-$ipset.conf"
+            rm -f "/tmp/routemap-$ipset.list"
+        done
+    fi
+
+    /etc/init.d/dnsmasq restart
+    sleep 1
+    resolve_domains "$DOMAINS_FILE"
+    [ "$ROUTING_MODE" = "all-except" ] && resolve_domains "$WHITELIST_FILE"
+    [ -s /tmp/routemap-all.list ] && resolve_domains /tmp/routemap-all.list
+    sleep 1
+    rm -f /tmp/routemap-all.list
+
+    procd_send_signal sing-box
+}

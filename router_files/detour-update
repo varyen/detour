@@ -1,0 +1,426 @@
+#!/bin/sh
+# detour-update — fetch + verify + install signed .ipk releases.
+#
+# Each release on GitHub is a usign-signed .ipk file plus its detached
+# signature. The flow is:
+#   1. Query GH API for the latest tag and asset URLs.
+#   2. Download .ipk + .ipk.sig into /tmp.
+#   3. usign -V the .ipk against the pinned public key.
+#   4. opkg install /tmp/<file>.ipk.
+# opkg owns the file install, version registry, and dependency check;
+# postinst in the package handles service restart and first-install seeding.
+#
+# A release carries TWO .ipk assets: the panel (detour_<ver>_all.ipk) and
+# the binaries (detour-bins_<binsver>_<arch>.ipk). They version & update
+# independently. The `bins-*` subcommands manage the binaries package.
+#
+# Subcommands:
+#   check                  — query GH for latest PANEL tag; write state file
+#   apply                  — download + verify + install latest panel release
+#   apply-local <ipk>      — install a panel .ipk already on disk (verifies sig)
+#   bins-check             — query GH for latest BINS version; write bins state
+#   bins-apply             — download + verify + install latest binaries package
+#   bins-apply-local <ipk> — install a bins .ipk already on disk (verifies sig)
+#   bins-status            — print the bins state file
+#   rollback               — re-install the previous panel .ipk from backup
+#   status                 — print panel state file
+#   selftest               — usign / opkg / pinned-key sanity check
+#
+# Config (/etc/detour/update.conf):
+#   GH_OWNER=user
+#   GH_REPO=repo
+#   GH_TOKEN=ghp_...   (PAT with Contents: Read on the repo)
+
+set -u
+
+CONFIG=/etc/detour/update.conf
+PUBLIC_KEY=/etc/detour/release.usign.pub
+OPKG_KEYRING=/etc/opkg/keys
+VERSION_FILE=/etc/detour/version
+STATE_FILE=/var/state/detour-update.json
+BACKUP_DIR=/var/detour-backup
+LOCKFILE=/tmp/detour-update.lock
+LOG_TAG=detour-update
+PACKAGE_NAME=detour
+BINS_PKG_NAME=detour-bins
+BINS_VERSION_FILE=/etc/detour/bins-version
+BINS_STATE_FILE=/var/state/detour-bins.json
+# Packages are published as `Architecture: all` (portable aarch64 payload), so
+# this is only the local temp-download filename — opkg reads the real arch from
+# the package's control file. A release now carries TWO .ipk assets (panel +
+# bins); selection is by asset NAME (detour_… vs detour-bins_…).
+ARCH=all
+
+GH_OWNER=""
+GH_REPO=""
+GH_TOKEN=""
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null; echo "[$LOG_TAG] $*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+current_version() {
+    if [ -f "$VERSION_FILE" ]; then cat "$VERSION_FILE"
+    else opkg list-installed "$PACKAGE_NAME" 2>/dev/null | awk '{print $3}' | head -1
+         [ -z "$(opkg list-installed "$PACKAGE_NAME" 2>/dev/null)" ] && echo "0.0.0"
+    fi
+}
+
+# version_gt A B → exit 0 if A > B (semver X.Y.Z numeric)
+version_gt() {
+    awk -v a="$1" -v b="$2" 'BEGIN {
+        split(a, A, "."); split(b, B, ".")
+        for (i = 1; i <= 3; i++) {
+            ai = A[i]+0; bi = B[i]+0
+            if (ai > bi) exit 0
+            if (ai < bi) exit 1
+        }
+        exit 1
+    }'
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r//g' | tr '\n' ' '
+}
+
+write_state() {
+    local status="$1" message="$2" available="$3"
+    local cur now
+    cur=$(current_version)
+    now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+    mkdir -p "$(dirname "$STATE_FILE")"
+    cat > "$STATE_FILE" <<EOF
+{
+  "current_version": "$cur",
+  "available_version": "$(json_escape "$available")",
+  "last_check": "$now",
+  "status": "$(json_escape "$status")",
+  "message": "$(json_escape "$message")"
+}
+EOF
+}
+
+# Pull the latest release metadata from GitHub. Outputs (on stdout):
+#   line 1     : <tag_name>
+#   lines 2..N : <asset_name>\t<download_url>   (one per release asset)
+# A release carries two .ipk assets now (panel + bins); callers select by name.
+gh_assets() {
+    [ -n "$GH_OWNER" ] && [ -n "$GH_REPO" ] && [ -n "$GH_TOKEN" ] || \
+        die "GH_OWNER/GH_REPO/GH_TOKEN missing in $CONFIG"
+    local url tmp
+    url="https://api.github.com/repos/$GH_OWNER/$GH_REPO/releases/latest"
+    tmp=$(mktemp)
+    curl -fsSL \
+        -H "Authorization: Bearer $GH_TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        --max-time 30 \
+        -o "$tmp" "$url" || { rm -f "$tmp"; die "GH API request failed"; }
+    # Tiny Lua JSON parser (lua-cjson is a hard dep).
+    lua - <<'LUA' "$tmp"
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); if not f then os.exit(1) end
+local raw = f:read("*a"); f:close()
+local doc = cjson.decode(raw); if not doc then os.exit(1) end
+print(doc.tag_name or "")
+for _, a in ipairs(doc.assets or {}) do
+    if a.name and a.browser_download_url then
+        print(a.name .. "\t" .. a.browser_download_url)
+    end
+end
+LUA
+    local rc=$?
+    rm -f "$tmp"
+    [ "$rc" = "0" ] || die "failed to parse GH API response"
+}
+
+# select_url "<assets>" "<name-regex>" → URL of first asset whose name matches.
+select_url()  { printf '%s\n' "$1" | awk -F '\t' -v re="$2" 'NR>1 && $1 ~ re { print $2; exit }'; }
+select_name() { printf '%s\n' "$1" | awk -F '\t' -v re="$2" 'NR>1 && $1 ~ re { print $1; exit }'; }
+
+# Most-specific opkg arch of this device (highest priority, skipping all/noarch),
+# falling back to uname -m. Picks the right bins asset when bins go per-arch.
+device_arch() {
+    local a
+    a=$(opkg print-architecture 2>/dev/null | awk '$1=="arch" && $2!="all" && $2!="noarch" { if ($3+0 >= max+0) { max=$3; arch=$2 } } END { print arch }')
+    [ -n "$a" ] && { printf '%s' "$a"; return; }
+    uname -m 2>/dev/null
+}
+
+cmd_check() {
+    log "checking GitHub for latest release..."
+    local assets tag ipk_url cur newver
+    assets=$(gh_assets) || exit 1
+    tag=$(printf '%s\n' "$assets" | sed -n 1p)
+    ipk_url=$(select_url "$assets" '^detour_.*\.ipk$')
+    [ -n "$tag" ] || die "no tag_name in GH response"
+    [ -n "$ipk_url" ] || die "no panel .ipk asset on release $tag"
+    newver="${tag#v}"
+    cur=$(current_version)
+    if version_gt "$newver" "$cur"; then
+        log "update available: $cur -> $newver"
+        write_state "update_available" "v$cur -> v$newver" "$newver"
+    else
+        log "up to date (current=$cur, latest=$newver)"
+        write_state "up_to_date" "v$cur is the latest" "$newver"
+    fi
+}
+
+# verify_and_install <ipk> <sig> <backup_basename> <stash_path> <opkg_flags>
+#   backup_basename — filename under $BACKUP_DIR for the rollback copy ("" skips)
+#   stash_path      — where to stash the installed .ipk (+.sig) for sysupgrade
+#                     restore ("" skips)
+#   opkg_flags      — extra opkg flags (bins uses --force-overwrite to take the
+#                     binary files over from the old monolithic package)
+verify_and_install() {
+    local ipk="$1" sig="$2" backup_base="$3" stash="$4" opkg_flags="$5"
+    [ -f "$ipk" ] || die "ipk missing: $ipk"
+    [ -f "$sig" ] || die "ipk.sig missing: $sig"
+    # Verify against pinned key. -P scans the keyring dir for any matching keynum.
+    if [ -d "$OPKG_KEYRING" ] && ls "$OPKG_KEYRING"/* >/dev/null 2>&1; then
+        usign -V -m "$ipk" -P "$OPKG_KEYRING" -x "$sig" \
+            || die "usign verification failed (keyring=$OPKG_KEYRING)"
+    elif [ -f "$PUBLIC_KEY" ]; then
+        usign -V -m "$ipk" -p "$PUBLIC_KEY" -x "$sig" \
+            || die "usign verification failed (key=$PUBLIC_KEY)"
+    else
+        die "no public key on this router — refusing to install unsigned"
+    fi
+    log "usign verification OK"
+    # Keep a copy of this exact .ipk before installing — used by rollback.
+    mkdir -p "$BACKUP_DIR"
+    [ -n "$backup_base" ] && cp -a "$ipk" "$BACKUP_DIR/$backup_base" 2>/dev/null
+    # Cap each package's backup count at 3.
+    ls -1t "$BACKUP_DIR"/${PACKAGE_NAME}_*.ipk 2>/dev/null | tail -n +4 | xargs -r rm -f
+    ls -1t "$BACKUP_DIR"/${BINS_PKG_NAME}_*.ipk 2>/dev/null | tail -n +4 | xargs -r rm -f
+    # opkg handles file replacement, dep resolution, postinst, etc.
+    # shellcheck disable=SC2086
+    opkg install $opkg_flags "$ipk" || die "opkg install failed"
+    # Stash the just-installed package + its signature so the uci-defaults
+    # restore script can re-install it after a router firmware sysupgrade
+    # (sysupgrade preserves /etc/detour/ via /etc/sysupgrade.conf).
+    if [ -n "$stash" ]; then
+        mkdir -p /etc/detour
+        cp -a "$ipk" "$stash" 2>/dev/null
+        cp -a "$sig" "$stash.sig" 2>/dev/null
+    fi
+}
+
+# Back-compat wrapper for the single-package (panel) callers.
+verify_and_install_ipk() {
+    verify_and_install "$1" "$2" "${PACKAGE_NAME}_$(current_version).ipk" \
+        /etc/detour/installed.ipk ""
+}
+
+# ---- binaries (detour-bins) helpers ----
+bins_current_version() {
+    [ -f "$BINS_VERSION_FILE" ] && cat "$BINS_VERSION_FILE" || echo "0.0.0"
+}
+
+# Choose the bins asset for THIS device: prefer an arch-tagged asset, then _all,
+# then any. Prints "name<TAB>url" (empty if no bins asset on the release).
+bins_select() {
+    local arch name url
+    arch=$(device_arch)
+    name=$(select_name "$1" "^${BINS_PKG_NAME}_.*_${arch}\\.ipk\$")
+    url=$(select_url   "$1" "^${BINS_PKG_NAME}_.*_${arch}\\.ipk\$")
+    if [ -z "$url" ]; then
+        name=$(select_name "$1" "^${BINS_PKG_NAME}_.*_all\\.ipk\$")
+        url=$(select_url   "$1" "^${BINS_PKG_NAME}_.*_all\\.ipk\$")
+    fi
+    if [ -z "$url" ]; then
+        name=$(select_name "$1" "^${BINS_PKG_NAME}_.*\\.ipk\$")
+        url=$(select_url   "$1" "^${BINS_PKG_NAME}_.*\\.ipk\$")
+    fi
+    [ -n "$url" ] && printf '%s\t%s\n' "$name" "$url"
+}
+
+# detour-bins_<ver>_<arch>.ipk → <ver>
+bins_ver_from_name() { printf '%s' "$1" | sed -n "s/^${BINS_PKG_NAME}_\\([0-9.]*\\)_.*/\\1/p"; }
+
+cmd_bins_check() {
+    log "checking GitHub for latest binaries..."
+    local assets sel name ver cur now
+    assets=$(gh_assets) || exit 1
+    sel=$(bins_select "$assets")
+    cur=$(bins_current_version)
+    if [ -z "$sel" ]; then
+        log "no bins asset on the latest release"
+        ver="$cur"
+    else
+        name=$(printf '%s' "$sel" | cut -f1)
+        ver=$(bins_ver_from_name "$name")
+    fi
+    now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+    mkdir -p "$(dirname "$BINS_STATE_FILE")"
+    cat > "$BINS_STATE_FILE" <<EOF
+{"current":"$cur","available":"$ver","asset":"${name:-}","last_check":"$now"}
+EOF
+    if version_gt "$ver" "$cur"; then
+        log "bins update available: $cur -> $ver"
+    else
+        log "bins up to date (current=$cur, latest=$ver)"
+    fi
+}
+
+cmd_bins_apply() {
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    local assets sel name url sig_url ver cur tmp ipk sig
+    log "fetching latest release info..."
+    assets=$(gh_assets) || exit 1
+    sel=$(bins_select "$assets")
+    [ -n "$sel" ] || die "no bins asset on the latest release"
+    name=$(printf '%s' "$sel" | cut -f1)
+    url=$(printf '%s' "$sel" | cut -f2)
+    sig_url=$(select_url "$assets" "^${BINS_PKG_NAME}_.*\\.ipk\\.sig\$")
+    [ -n "$sig_url" ] || die "no bins .ipk.sig on the release"
+    ver=$(bins_ver_from_name "$name"); cur=$(bins_current_version)
+    log "bins current=$cur target=$ver ($name)"
+    tmp=$(mktemp -d); ipk="$tmp/$name"; sig="$ipk.sig"
+    log "downloading $name ..."
+    curl -fsSL --max-time 600 -H "Authorization: Bearer $GH_TOKEN" \
+        -H "Accept: application/octet-stream" -o "$ipk" "$url" \
+        || { rm -rf "$tmp"; die "bins download failed"; }
+    curl -fsSL --max-time 60 -H "Authorization: Bearer $GH_TOKEN" \
+        -H "Accept: application/octet-stream" -o "$sig" "$sig_url" \
+        || { rm -rf "$tmp"; die "bins sig download failed"; }
+    verify_and_install "$ipk" "$sig" "${BINS_PKG_NAME}_${cur}.ipk" \
+        /etc/detour/installed-bins.ipk "--force-overwrite"
+    rm -rf "$tmp"
+    cmd_bins_check >/dev/null 2>&1 || true
+    log "installed bins v$ver successfully"
+}
+
+cmd_bins_apply_local() {
+    local ipk="$1"
+    [ -n "$ipk" ] || die "usage: bins-apply-local <ipk-file>"
+    verify_and_install "$ipk" "$ipk.sig" \
+        "${BINS_PKG_NAME}_$(bins_current_version).ipk" \
+        /etc/detour/installed-bins.ipk "--force-overwrite"
+    cmd_bins_check >/dev/null 2>&1 || true
+}
+
+cmd_apply() {
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+
+    local assets tag ipk_url sig_url newver cur
+    log "fetching latest release info..."
+    assets=$(gh_assets) || exit 1
+    tag=$(printf '%s\n' "$assets" | sed -n 1p)
+    ipk_url=$(select_url "$assets" '^detour_.*\.ipk$')
+    sig_url=$(select_url "$assets" '^detour_.*\.ipk\.sig$')
+    [ -n "$ipk_url" ] || { rm -f "$LOCKFILE"; die "no panel .ipk asset on $tag"; }
+    [ -n "$sig_url" ] || { rm -f "$LOCKFILE"; die "no panel .ipk.sig asset on $tag"; }
+    newver="${tag#v}"
+    cur=$(current_version)
+    log "current=$cur target=$newver"
+
+    if ! version_gt "$newver" "$cur" && [ "$newver" = "$cur" ]; then
+        log "already on $cur — refusing downgrade/same install"
+        write_state "up_to_date" "v$cur is already installed" "$newver"
+        return 0
+    fi
+
+    local tmp ipk sig
+    tmp=$(mktemp -d)
+    ipk="$tmp/${PACKAGE_NAME}_${newver}_${ARCH}.ipk"
+    sig="$ipk.sig"
+    log "downloading $ipk_url ..."
+    curl -fsSL --max-time 600 \
+        -H "Authorization: Bearer $GH_TOKEN" \
+        -H "Accept: application/octet-stream" \
+        -o "$ipk" "$ipk_url" || { rm -rf "$tmp"; die "ipk download failed"; }
+    curl -fsSL --max-time 60 \
+        -H "Authorization: Bearer $GH_TOKEN" \
+        -H "Accept: application/octet-stream" \
+        -o "$sig" "$sig_url" || { rm -rf "$tmp"; die "sig download failed"; }
+
+    if ! verify_and_install_ipk "$ipk" "$sig"; then
+        rm -rf "$tmp"
+        write_state "error" "install failed for v$newver" "$newver"
+        exit 1
+    fi
+    rm -rf "$tmp"
+    write_state "applied" "installed v$newver via opkg" "$newver"
+    log "installed v$newver successfully"
+}
+
+cmd_apply_local() {
+    local ipk="$1"
+    [ -n "$ipk" ] || die "usage: apply-local <ipk-file>"
+    local sig="$ipk.sig"
+    verify_and_install_ipk "$ipk" "$sig"
+    local cur
+    cur=$(current_version)
+    write_state "applied" "installed v$cur via local ipk" "$cur"
+}
+
+cmd_rollback() {
+    [ -d "$BACKUP_DIR" ] || die "no backups in $BACKUP_DIR"
+    # Pick the most recent backup that is NOT the currently-installed version.
+    local cur best
+    cur=$(current_version)
+    best=$(ls -1t "$BACKUP_DIR"/${PACKAGE_NAME}_*.ipk 2>/dev/null \
+        | grep -v "_${cur}\.ipk$" | head -1)
+    [ -n "$best" ] || die "no rollback candidate (only $cur is backed up)"
+    log "rolling back to: $best"
+    # Backups don't have sig files alongside — TOFU the install (we already
+    # verified them at the time they were stored).
+    opkg install --force-reinstall "$best" || die "opkg install failed"
+    local newver
+    newver=$(echo "$best" | sed -n "s|.*${PACKAGE_NAME}_\(.*\)\.ipk|\1|p")
+    log "rolled back to $newver"
+    write_state "rolled_back" "rolled back to v$newver" "$newver"
+}
+
+cmd_status() {
+    if [ -f "$STATE_FILE" ]; then cat "$STATE_FILE"
+    else echo '{"status":"unknown","message":"no state file yet"}'
+    fi
+}
+
+cmd_selftest() {
+    local ok=1
+    if ! command -v usign >/dev/null 2>&1; then echo "MISSING: usign"; ok=0; fi
+    if ! command -v opkg >/dev/null 2>&1; then echo "MISSING: opkg"; ok=0; fi
+    if ! command -v curl >/dev/null 2>&1; then echo "MISSING: curl"; ok=0; fi
+    if ! command -v lua  >/dev/null 2>&1; then echo "MISSING: lua";  ok=0; fi
+    if ! lua -e 'require("cjson.safe")' 2>/dev/null; then
+        echo "MISSING: lua-cjson"; ok=0
+    fi
+    if [ -d "$OPKG_KEYRING" ] && ls -1 "$OPKG_KEYRING" 2>/dev/null | head -1 >/dev/null; then
+        echo "OK: keyring $OPKG_KEYRING populated"
+    elif [ -f "$PUBLIC_KEY" ]; then
+        echo "OK: pinned key at $PUBLIC_KEY"
+    else
+        echo "MISSING: no public key for verification"; ok=0
+    fi
+    [ -f "$CONFIG" ] || { echo "MISSING: $CONFIG"; ok=0; }
+    [ "$ok" = "1" ] && { echo "selftest: OK"; return 0; }
+    echo "selftest: FAILED"
+    return 1
+}
+
+ACTION="${1:-help}"
+case "$ACTION" in
+    check)             cmd_check ;;
+    apply)             cmd_apply ;;
+    apply-local)       cmd_apply_local "${2:-}" ;;
+    bins-check)        cmd_bins_check ;;
+    bins-apply)        cmd_bins_apply ;;
+    bins-apply-local)  cmd_bins_apply_local "${2:-}" ;;
+    bins-status)       cat "$BINS_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
+    rollback)          cmd_rollback ;;
+    status)            cmd_status ;;
+    selftest)          cmd_selftest ;;
+    help|--help|-h)
+        sed -n '2,24p' "$0"
+        ;;
+    *) echo "unknown subcommand: $ACTION" >&2
+       echo "try: $0 help" >&2
+       exit 2 ;;
+esac

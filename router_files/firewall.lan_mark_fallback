@@ -1,0 +1,23 @@
+#!/bin/sh
+# Reinstall lan_mark_fallback rule after firewall reload, hotplug, etc.
+# Marks all unmarked LAN packets with 0x8000 so they survive GL.iNet's
+# rule 9920 (iif br-lan blackhole) when no proxy is active.
+#
+# Picks nft (fw4) or iptables (fw3) automatically.
+
+if command -v nft >/dev/null 2>&1; then
+    nft -f - <<'EOF'
+table inet lan_mark_fallback
+delete table inet lan_mark_fallback
+table inet lan_mark_fallback {
+    chain prerouting {
+        type filter hook prerouting priority mangle + 1; policy accept;
+        iifname "br-lan" meta mark & 0x0000f000 == 0x00000000 ct mark & 0x0000f000 == 0x00000000 ct mark set ct mark or 0x00008000 meta mark set meta mark or 0x00008000 comment "fallback: mark unmarked LAN traffic 0x8000 so it survives without proxies"
+    }
+}
+EOF
+else
+    # iptables fallback for fw3-only routers (no nft).
+    iptables -t mangle -D PREROUTING -i br-lan -m mark --mark 0/0xf000 -j MARK --set-xmark 0x8000/0xf000 2>/dev/null
+    iptables -t mangle -I PREROUTING 1 -i br-lan -m mark --mark 0/0xf000 -j MARK --set-xmark 0x8000/0xf000
+fi

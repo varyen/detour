@@ -1,0 +1,117 @@
+#!/bin/sh
+# vpn-keepalive — probe the active sing-box VPN endpoint and record its health.
+#
+# Run from cron (e.g. */5 * * * *). RECORD ONLY: it never restarts sing-box and
+# never fails over to another profile — it just writes a status file the panel
+# reads. The probe is a TCP connect to the active profile's server:server_port
+# (the truest cheap signal that the endpoint is accepting connections), plus an
+# ICMP ping as a secondary signal. WireGuard profiles are UDP, so for those the
+# ICMP ping is the only signal.
+#
+# The connect originates from the router itself (OUTPUT path), not from br-lan,
+# so it is never caught by the sing-box REDIRECT rules — it genuinely tests
+# reachability of the upstream over the WAN.
+
+SETTINGS=/etc/sing-box/settings.json
+PROFILES=/etc/sing-box/profiles
+STATE=/var/state/vpn-keepalive.json
+
+mkdir -p /var/state
+
+now=$(date +%s 2>/dev/null)
+[ -z "$now" ] && now=0
+
+jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
+jnum() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -1; }
+
+# Carry forward last_ok / last_fail timestamps from the previous run.
+prev_last_ok=0
+prev_last_fail=0
+if [ -f "$STATE" ]; then
+    prev_last_ok=$(jnum last_ok "$STATE")
+    prev_last_fail=$(jnum last_fail "$STATE")
+fi
+[ -z "$prev_last_ok" ] && prev_last_ok=0
+[ -z "$prev_last_fail" ] && prev_last_fail=0
+
+profile=$(jstr active_profile "$SETTINGS")
+[ -z "$profile" ] && profile=$(jstr active_chain "$SETTINGS")
+pfile="$PROFILES/$profile.json"
+
+server=""
+port=""
+ptype=""
+if [ -f "$pfile" ]; then
+    server=$(jstr server "$pfile")
+    port=$(jnum server_port "$pfile")
+    ptype=$(jstr type "$pfile")
+fi
+
+ok=0
+ping_ok=0
+method=""
+
+if [ -z "$server" ]; then
+    method="no server in active profile"
+else
+    # ICMP signal (informational; may be filtered by the server).
+    ping -c1 -W2 "$server" >/dev/null 2>&1 && ping_ok=1
+
+    case "$ptype" in
+        wireguard)
+            # UDP endpoint — a TCP connect is meaningless; use ICMP only.
+            [ "$ping_ok" = "1" ] && ok=1
+            method="icmp (wireguard)"
+            ;;
+        *)
+            if [ -n "$port" ] && [ "$port" != "0" ]; then
+                # NOTE: BusyBox nc on these routers is "nc [IPADDR PORT]" only —
+                # it does NOT accept -w (the -w arg gets misparsed and the connect
+                # always fails, falsely reporting the VPN as down). Bound the
+                # connect with the outer `timeout` instead. </dev/null gives nc an
+                # immediate stdin EOF so it returns as soon as the TCP handshake
+                # completes rather than blocking on the (silent) TLS server.
+                if command -v timeout >/dev/null 2>&1; then
+                    timeout 5 nc "$server" "$port" </dev/null >/dev/null 2>&1 && ok=1
+                else
+                    nc "$server" "$port" </dev/null >/dev/null 2>&1 && ok=1
+                fi
+                method="tcp-connect"
+            else
+                [ "$ping_ok" = "1" ] && ok=1
+                method="icmp (no port)"
+            fi
+            ;;
+    esac
+fi
+
+last_ok=$prev_last_ok
+last_fail=$prev_last_fail
+if [ "$ok" = "1" ]; then
+    last_ok=$now
+else
+    last_fail=$now
+fi
+
+ok_json=false; [ "$ok" = "1" ] && ok_json=true
+ping_json=false; [ "$ping_ok" = "1" ] && ping_json=true
+[ -z "$port" ] && port=0
+
+tmp="$STATE.tmp.$$"
+cat > "$tmp" <<EOF
+{
+  "ok": $ok_json,
+  "last_checked": $now,
+  "last_ok": $last_ok,
+  "last_fail": $last_fail,
+  "profile": "$profile",
+  "server": "$server",
+  "port": $port,
+  "ping_ok": $ping_json,
+  "method": "$method"
+}
+EOF
+mv "$tmp" "$STATE"
+
+[ "$ok" = "1" ] && exit 0
+exit 1
