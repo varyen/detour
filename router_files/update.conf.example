@@ -1,0 +1,10 @@
+# /etc/detour/update.conf — credentials for the auto-updater.
+# Owned by root, mode 0600. Sourced by /usr/sbin/detour-update.
+
+# GitHub repo to pull releases from.
+GH_OWNER=admin
+GH_REPO=detour
+
+# Personal Access Token with `repo:read` (fine-grained, read-only on this repo).
+# Generate at https://github.com/settings/tokens?type=beta
+GH_TOKEN=

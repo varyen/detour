@@ -1,0 +1,37 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.vscode/
+
+# Local router credentials — copy routers.example.json -> routers.local.json
+routers.local.json
+routers.json
+
+# Live snapshot of the router (configs, VPN profiles, binaries) — holds real
+# secrets, repopulated locally by update_backups.py. Never commit.
+router-backup/
+
+# Release signing
+keys/release.key
+keys/*.key
+keys/*.sec
+releases/
+
+# Temporary diagnostic / one-off scripts (underscore prefix convention)
+_*.py
+_*.txt
+
+# Local UI screenshots / Playwright session artifacts captured during the
+# panel redesign work. Root-only patterns so docs/*.png stays committable.
+/*.png
+/.playwright-mcp/
+
+# AI-assistant / editor tooling — kept locally, never committed.
+.claude/
+CLAUDE.md

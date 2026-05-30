@@ -1,0 +1,795 @@
+#!/usr/bin/lua
+-- subscription-refresh: re-fetch every configured subscription URL,
+-- re-import its profiles into /etc/sing-box/profiles/<id>.json under the
+-- chosen group, and remove stale profiles that previously belonged to the
+-- same group but no longer appear in the upstream feed.
+--
+-- Multi-subscription mode (v2): reads /etc/detour/subscriptions/*.json
+-- (one JSON object per subscription). Falls back to the single-file legacy
+-- format /etc/detour/subscription.json when no v2 files exist.
+--
+-- CLI:
+--   subscription-refresh                — process every subscription that is
+--                                          due based on its `interval_hours`.
+--   subscription-refresh --all          — process every subscription regardless
+--                                          of interval (still honours
+--                                          autoupdate=false unless --force).
+--   subscription-refresh --force        — ignore both interval AND autoupdate.
+--   subscription-refresh --id=<sub-id>  — process just one (always forced).
+--
+-- Per-subscription supported body formats:
+--   1. JSON: v2ray-core config array OR sing-box outbound JSON.
+--   2. Base64-wrapped link list (vless://, trojan://, vmess://, ss:// per line).
+--   3. Plain link list.
+--
+-- Exit codes: 0 ok (something processed), 1 fetch/parse error, 2 nothing to do.
+
+local cjson      = require("cjson.safe")
+local SUBS_DIR   = "/etc/detour/subscriptions"
+local LEGACY_CFG = "/etc/detour/subscription.json"
+local PROFILES   = "/etc/sing-box/profiles"
+local WHITELIST  = "/etc/sing-box/whitelist-domains.list"
+local STATE_DIR  = "/var/state"
+local STATE_FILE = STATE_DIR .. "/subscription-refresh.json"
+
+-- ===== CLI argument parsing =====
+local CLI = { force = false, all = false, id = nil }
+for _, a in ipairs(arg or {}) do
+    if a == "--force" then CLI.force = true
+    elseif a == "--all" then CLI.all = true
+    else
+        local id = a:match("^%-%-id=(.+)$")
+        if id then CLI.id = id; CLI.force = true end
+    end
+end
+
+-- ===== filesystem helpers =====
+local function read_all(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local s = f:read("*a"); f:close(); return s
+end
+
+local function write_atomic(path, content, mode)
+    local tmp = path .. ".tmp." .. tostring(os.time())
+    local f = assert(io.open(tmp, "wb"))
+    f:write(content); f:close()
+    if mode then os.execute("chmod " .. mode .. " " .. tmp) end
+    os.rename(tmp, path)
+end
+
+local function write_state(tbl)
+    os.execute("mkdir -p " .. STATE_DIR)
+    write_atomic(STATE_FILE, cjson.encode(tbl) or "{}", "0644")
+end
+
+local function shell_quote(s) return "'" .. string.gsub(s or "", "'", [['\'']]) .. "'" end
+
+local function log(msg) io.stdout:write("subscription-refresh: " .. msg .. "\n") end
+local function warn(msg) io.stderr:write("subscription-refresh: " .. msg .. "\n") end
+
+-- ===== transliteration + makeProfileId (mirror of index.html) =====
+local TRANSLIT = {
+    ["а"]="a", ["б"]="b", ["в"]="v", ["г"]="g", ["д"]="d", ["е"]="e",
+    ["ё"]="e", ["ж"]="zh", ["з"]="z", ["и"]="i", ["й"]="y", ["к"]="k",
+    ["л"]="l", ["м"]="m", ["н"]="n", ["о"]="o", ["п"]="p", ["р"]="r",
+    ["с"]="s", ["т"]="t", ["у"]="u", ["ф"]="f", ["х"]="h", ["ц"]="ts",
+    ["ч"]="ch", ["ш"]="sh", ["щ"]="sch", ["ъ"]="", ["ы"]="y", ["ь"]="",
+    ["э"]="e", ["ю"]="yu", ["я"]="ya",
+    ["А"]="a", ["Б"]="b", ["В"]="v", ["Г"]="g", ["Д"]="d", ["Е"]="e",
+    ["Ё"]="e", ["Ж"]="zh", ["З"]="z", ["И"]="i", ["Й"]="y", ["К"]="k",
+    ["Л"]="l", ["М"]="m", ["Н"]="n", ["О"]="o", ["П"]="p", ["Р"]="r",
+    ["С"]="s", ["Т"]="t", ["У"]="u", ["Ф"]="f", ["Х"]="h", ["Ц"]="ts",
+    ["Ч"]="ch", ["Ш"]="sh", ["Щ"]="sch", ["Ъ"]="", ["Ы"]="y", ["Ь"]="",
+    ["Э"]="e", ["Ю"]="yu", ["Я"]="ya",
+}
+
+local function translit(s)
+    if not s then return "" end
+    s = s:gsub("[\208\209][\128-\191]", function(ch) return TRANSLIT[ch] or "" end)
+    return s:lower()
+end
+
+local function make_profile_id(name)
+    local id = translit(name or "")
+    id = id:gsub("[^a-z0-9_-]", "_")
+    id = id:gsub("_+", "_"):gsub("^_+", ""):gsub("_+$", "")
+    if #id > 64 then id = id:sub(1, 64) end
+    if id == "" then id = "profile_" .. tostring(os.time()) end
+    return id
+end
+
+-- ===== URL-decoding =====
+local function url_decode(s)
+    s = (s or ""):gsub("+", " ")
+    s = s:gsub("%%(%x%x)", function (h) return string.char(tonumber(h, 16)) end)
+    return s
+end
+
+-- ===== base64 (via openssl on the router; pure Lua would be too slow) =====
+local function b64_decode(s)
+    if not s or s == "" then return nil end
+    -- Normalise URL-safe → standard alphabet AND pad to multiples of 4.
+    local fixed = s:gsub("-", "+"):gsub("_", "/")
+    while (#fixed % 4) ~= 0 do fixed = fixed .. "=" end
+    local tmp_in  = "/tmp/sub-b64-in-" .. tostring(os.time()) .. "-" .. math.random(99999)
+    local tmp_out = tmp_in .. ".out"
+    local f = io.open(tmp_in, "wb"); if not f then return nil end
+    f:write(fixed); f:close()
+    -- `openssl base64 -d -A` accepts unwrapped input.
+    os.execute("openssl base64 -d -A -in " .. tmp_in .. " -out " .. tmp_out .. " 2>/dev/null")
+    local out = read_all(tmp_out)
+    os.remove(tmp_in); os.remove(tmp_out)
+    return out
+end
+
+local function try_decode_base64_blob(text)
+    if not text then return nil end
+    local raw = text:gsub("%s+", "")
+    if #raw < 16 then return nil end
+    if raw:find("[^A-Za-z0-9+/_=-]") then return nil end
+    local dec = b64_decode(raw)
+    if not dec then return nil end
+    -- Sanity-check: only accept if it now looks like links / JSON.
+    if dec:find("://", 1, true) or dec:sub(1, 1) == "{" or dec:sub(1, 1) == "["
+        or dec:find("[Interface]", 1, true) then
+        return dec
+    end
+    return nil
+end
+
+-- ===== querystring helper =====
+local function parse_qs(qs)
+    local out = {}
+    for kv in (qs or ""):gmatch("[^&]+") do
+        local k, v = kv:match("^([^=]*)=?(.*)$")
+        if k and k ~= "" then out[url_decode(k)] = url_decode(v) end
+    end
+    return out
+end
+
+-- ===== URI parsers (ported from index.html JS) =====
+
+-- Splits `host:port` honouring IPv6 brackets and ignoring an optional path/qs/hash tail.
+local function split_host_port(hostport)
+    if not hostport or hostport == "" then return nil, nil end
+    local s = hostport
+    local colon = s:match(".*():")
+    if not colon then return s, nil end
+    local host = s:sub(1, colon - 1)
+    local port = tonumber(s:sub(colon + 1))
+    return host, port
+end
+
+local function take_hash_name(noscheme)
+    local idx = noscheme:reverse():find("#")
+    if not idx then return noscheme, "" end
+    idx = #noscheme - idx + 1
+    return noscheme:sub(1, idx - 1), url_decode(noscheme:sub(idx + 1))
+end
+
+local function take_query(noscheme)
+    local q = noscheme:find("?", 1, true)
+    if not q then return noscheme, {} end
+    return noscheme:sub(1, q - 1), parse_qs(noscheme:sub(q + 1))
+end
+
+local function parse_vless_uri(uri)
+    local noscheme = uri:sub(9)
+    local name; noscheme, name = take_hash_name(noscheme)
+    local params; noscheme, params = take_query(noscheme)
+    local at = noscheme:find("@", 1, true)
+    if not at then return nil, "vless: missing @" end
+    local uuid = noscheme:sub(1, at - 1)
+    local server, port = split_host_port(noscheme:sub(at + 1))
+    if not server or not port then return nil, "vless: bad host:port" end
+    local out = { type = "vless", tag = "proxy", server = server, server_port = port, uuid = uuid }
+    if params.flow and params.flow ~= "" then out.flow = params.flow end
+    local sec = params.security or "none"
+    if sec == "tls" then
+        out.tls = { enabled = true }
+        if params.sni and params.sni ~= "" then out.tls.server_name = params.sni end
+        if params.fp and params.fp ~= "" then out.tls.utls = { enabled = true, fingerprint = params.fp } end
+        if params.alpn and params.alpn ~= "" then
+            local alpn = {}
+            for s in (params.alpn .. ","):gmatch("([^,]+),") do alpn[#alpn + 1] = s end
+            out.tls.alpn = alpn
+        end
+    elseif sec == "reality" then
+        out.tls = {
+            enabled = true,
+            server_name = params.sni or "",
+            reality = { enabled = true, public_key = params.pbk or "", short_id = params.sid or "" },
+        }
+        if params.fp and params.fp ~= "" then out.tls.utls = { enabled = true, fingerprint = params.fp } end
+    end
+    local transport = params.type or "tcp"
+    if transport == "ws" then
+        out.transport = { type = "ws" }
+        if params.path and params.path ~= "" then out.transport.path = params.path end
+        if params.host and params.host ~= "" then out.transport.headers = { Host = params.host } end
+    elseif transport == "grpc" then
+        out.transport = { type = "grpc" }
+        if params.serviceName and params.serviceName ~= "" then out.transport.service_name = params.serviceName end
+    elseif transport == "h2" or transport == "http" then
+        out.transport = { type = "http" }
+        if params.path and params.path ~= "" then out.transport.path = params.path end
+        if params.host and params.host ~= "" then out.transport.host = { params.host } end
+    end
+    return { outbound = out, name = name }
+end
+
+local function parse_trojan_uri(uri)
+    local noscheme = uri:sub(10)
+    local name; noscheme, name = take_hash_name(noscheme)
+    local params; noscheme, params = take_query(noscheme)
+    local at = noscheme:find("@", 1, true)
+    if not at then return nil, "trojan: missing @" end
+    local password = url_decode(noscheme:sub(1, at - 1))
+    local server, port = split_host_port(noscheme:sub(at + 1))
+    if not server or not port then return nil, "trojan: bad host:port" end
+    local out = {
+        type = "trojan", tag = "proxy",
+        server = server, server_port = port, password = password,
+        tls = { enabled = true },
+    }
+    if params.sni and params.sni ~= "" then out.tls.server_name = params.sni end
+    if params.fp and params.fp ~= "" then out.tls.utls = { enabled = true, fingerprint = params.fp } end
+    if params.alpn and params.alpn ~= "" then
+        local alpn = {}
+        for s in (params.alpn .. ","):gmatch("([^,]+),") do alpn[#alpn + 1] = s end
+        out.tls.alpn = alpn
+    end
+    if params.security == "reality" then
+        out.tls.reality = { enabled = true, public_key = params.pbk or "", short_id = params.sid or "" }
+    end
+    local transport = params.type or "tcp"
+    if transport == "ws" then
+        out.transport = { type = "ws" }
+        if params.path and params.path ~= "" then out.transport.path = params.path end
+        if params.host and params.host ~= "" then out.transport.headers = { Host = params.host } end
+    elseif transport == "grpc" then
+        out.transport = { type = "grpc" }
+        if params.serviceName and params.serviceName ~= "" then out.transport.service_name = params.serviceName end
+    end
+    return { outbound = out, name = name }
+end
+
+local function parse_vmess_uri(uri)
+    local b64 = uri:sub(9)
+    local dec = b64_decode(b64) or ""
+    local json = cjson.decode(dec)
+    if not json then return nil, "vmess: bad base64/JSON" end
+    local out = {
+        type = "vmess", tag = "proxy",
+        server = json.add or json.address or "",
+        server_port = tonumber(json.port) or 443,
+        uuid = json.id or "",
+        security = json.scy or "auto",
+        alter_id = tonumber(json.aid) or 0,
+    }
+    if (json.tls or ""):lower() == "tls" then
+        out.tls = { enabled = true }
+        if json.sni and json.sni ~= "" then out.tls.server_name = json.sni end
+        if json.fp and json.fp ~= "" then out.tls.utls = { enabled = true, fingerprint = json.fp } end
+        if json.alpn and json.alpn ~= "" then
+            local alpn = {}
+            for s in (json.alpn .. ","):gmatch("([^,]+),") do alpn[#alpn + 1] = s end
+            out.tls.alpn = alpn
+        end
+    end
+    local net = json.net or json.network or "tcp"
+    if net == "ws" then
+        out.transport = { type = "ws" }
+        if json.path and json.path ~= "" then out.transport.path = json.path end
+        if json.host and json.host ~= "" then out.transport.headers = { Host = json.host } end
+    elseif net == "grpc" then
+        out.transport = { type = "grpc" }
+        if json.path and json.path ~= "" then out.transport.service_name = json.path end
+    elseif net == "h2" or net == "http" then
+        out.transport = { type = "http" }
+        if json.path and json.path ~= "" then out.transport.path = json.path end
+        if json.host and json.host ~= "" then out.transport.host = { json.host } end
+    end
+    return { outbound = out, name = json.ps or json.name or "" }
+end
+
+local function parse_ss_uri(uri)
+    local noscheme = uri:sub(6)
+    local name; noscheme, name = take_hash_name(noscheme)
+    local out = { type = "shadowsocks", tag = "proxy" }
+    if noscheme:find("@", 1, true) then
+        -- SIP002: ss://base64(method:password)@host:port
+        local at = noscheme:find("@", 1, true)
+        local userinfo = noscheme:sub(1, at - 1)
+        local hostport = noscheme:sub(at + 1)
+        local q = hostport:find("?", 1, true)
+        if q then hostport = hostport:sub(1, q - 1) end
+        local server, port = split_host_port(hostport)
+        if not server or not port then return nil, "ss: bad host:port" end
+        out.server = server; out.server_port = port
+        local dec = b64_decode(userinfo) or userinfo
+        local colon = dec:find(":", 1, true)
+        if not colon then return nil, "ss: missing method:password" end
+        out.method = dec:sub(1, colon - 1)
+        out.password = dec:sub(colon + 1)
+    else
+        -- Legacy: ss://base64(method:password@host:port)
+        local dec = b64_decode(noscheme) or ""
+        local at = dec:find("@", 1, true)
+        if not at then return nil, "ss: legacy parse failed" end
+        local methpass = dec:sub(1, at - 1)
+        local hostport = dec:sub(at + 1)
+        local colon = methpass:find(":", 1, true)
+        if not colon then return nil, "ss: missing method:password" end
+        out.method = methpass:sub(1, colon - 1)
+        out.password = methpass:sub(colon + 1)
+        local server, port = split_host_port(hostport)
+        if not server or not port then return nil, "ss: bad legacy host:port" end
+        out.server = server; out.server_port = port
+    end
+    return { outbound = out, name = name }
+end
+
+local function parse_uri(line)
+    if line:sub(1, 8) == "vless://" then return parse_vless_uri(line) end
+    if line:sub(1, 9) == "trojan://" then return parse_trojan_uri(line) end
+    if line:sub(1, 8) == "vmess://" then return parse_vmess_uri(line) end
+    if line:sub(1, 5) == "ss://" then return parse_ss_uri(line) end
+    return nil, "unknown scheme: " .. line:sub(1, 16)
+end
+
+local function infer_type(ob)
+    if not ob or not ob.type then return "unknown" end
+    if ob.type == "http" then
+        return (ob.tls and ob.tls.enabled) and "https-proxy" or "http-proxy"
+    end
+    if ob.type == "socks" then return "socks" .. (ob.version or "5") end
+    return ob.type
+end
+
+-- ===== v2ray outbound → sing-box outbound (unchanged from v1) =====
+local SKIP_PROTOS = { freedom = true, blackhole = true, dns = true,
+                      loopback = true, balancer = true, chain = true }
+
+local function tls_from_stream(stream)
+    local sec = stream.security
+    if not sec or sec == "none" then return nil end
+    local out = { enabled = true }
+    if sec == "reality" then
+        local r = stream.realitySettings or {}
+        if r.serverName then out.server_name = r.serverName end
+        if r.fingerprint then out.utls = { enabled = true, fingerprint = r.fingerprint } end
+        out.reality = { enabled = true }
+        if r.publicKey then out.reality.public_key = r.publicKey end
+        if r.shortId ~= nil then out.reality.short_id = r.shortId end
+    elseif sec == "tls" or sec == "xtls" then
+        local t = stream.tlsSettings or stream.xtlsSettings or {}
+        if t.serverName then out.server_name = t.serverName end
+        if t.allowInsecure then out.insecure = true end
+        if type(t.alpn) == "table" and #t.alpn > 0 then
+            local cp = {}; for i,v in ipairs(t.alpn) do cp[i] = v end; out.alpn = cp
+        end
+        if t.fingerprint then out.utls = { enabled = true, fingerprint = t.fingerprint } end
+    end
+    return out
+end
+
+local function transport_from_stream(stream)
+    local net = stream.network or "tcp"
+    if net == "tcp" or net == "raw" then return nil end
+    if net == "ws" then
+        local ws = stream.wsSettings or {}
+        local tw = { type = "ws" }
+        if ws.path then tw.path = ws.path end
+        if ws.headers and next(ws.headers) then tw.headers = ws.headers
+        elseif ws.host then tw.headers = { Host = ws.host } end
+        return tw
+    end
+    if net == "grpc" then
+        local g = stream.grpcSettings or {}
+        local tg = { type = "grpc" }
+        if g.serviceName then tg.service_name = g.serviceName end
+        return tg
+    end
+    if net == "h2" or net == "http" then
+        local h = stream.httpSettings or stream.h2Settings or {}
+        local th = { type = "http" }
+        if h.path then th.path = h.path end
+        if h.host then th.host = (type(h.host) == "table") and h.host or { h.host } end
+        return th
+    end
+    if net == "quic" then return { type = "quic" } end
+    return { type = net }
+end
+
+local function v2ray_to_singbox(ob)
+    if not ob or type(ob) ~= "table" then return nil end
+    if ob.type and not ob.protocol then return nil end
+    local proto = ob.protocol
+    if not proto or SKIP_PROTOS[proto] then return nil end
+    local settings = ob.settings or {}
+    local stream = ob.streamSettings or {}
+    local tag = ob.tag or "proxy"
+
+    if proto == "vless" then
+        local vnext = (settings.vnext or {})[1] or {}
+        local user = (vnext.users or {})[1] or {}
+        local o = { type = "vless", tag = tag, server = vnext.address,
+                    server_port = tonumber(vnext.port), uuid = user.id }
+        if user.flow then o.flow = user.flow end
+        if user.encryption and user.encryption ~= "none" then o.encryption = user.encryption end
+        local tls = tls_from_stream(stream); if tls then o.tls = tls end
+        local tr  = transport_from_stream(stream); if tr  then o.transport = tr end
+        return o
+    end
+    if proto == "vmess" then
+        local vnext = (settings.vnext or {})[1] or {}
+        local user = (vnext.users or {})[1] or {}
+        local o = { type = "vmess", tag = tag, server = vnext.address,
+                    server_port = tonumber(vnext.port), uuid = user.id,
+                    security = user.security or "auto", alter_id = user.alterId or 0 }
+        local tls = tls_from_stream(stream); if tls then o.tls = tls end
+        local tr  = transport_from_stream(stream); if tr  then o.transport = tr end
+        return o
+    end
+    if proto == "trojan" then
+        local srv = (settings.servers or {})[1] or {}
+        local o = { type = "trojan", tag = tag, server = srv.address,
+                    server_port = tonumber(srv.port), password = srv.password }
+        local tls = tls_from_stream(stream); if tls then o.tls = tls end
+        local tr  = transport_from_stream(stream); if tr  then o.transport = tr end
+        return o
+    end
+    if proto == "shadowsocks" then
+        local srv = (settings.servers or {})[1] or {}
+        return { type = "shadowsocks", tag = tag, server = srv.address,
+                 server_port = tonumber(srv.port), method = srv.method, password = srv.password }
+    end
+    if proto == "hysteria" or proto == "hysteria2" then
+        local hs = stream.hysteriaSettings or {}
+        local ver = tonumber(settings.version or hs.version or (proto == "hysteria2" and 2 or 1))
+        local tls = tls_from_stream(stream)
+        if ver == 2 then
+            local o = { type = "hysteria2", tag = tag,
+                        server = settings.address or settings.server,
+                        server_port = tonumber(settings.port or settings.server_port) }
+            if hs.auth then o.password = hs.auth end
+            if tls then o.tls = tls end
+            return o
+        end
+        local o = { type = "hysteria", tag = tag,
+                    server = settings.address or settings.server,
+                    server_port = tonumber(settings.port or settings.server_port) }
+        if hs.auth_str or hs.auth then o.auth_str = hs.auth_str or hs.auth end
+        if settings.obfs then o.obfs = settings.obfs end
+        if settings.up_mbps then o.up_mbps = tonumber(settings.up_mbps) end
+        if settings.down_mbps then o.down_mbps = tonumber(settings.down_mbps) end
+        if tls then o.tls = tls end
+        return o
+    end
+    return nil
+end
+
+local function pick_proxy_outbound(doc)
+    local outs = doc.outbounds or {}
+    for _, o in ipairs(outs) do
+        if o.tag == "proxy" and o.protocol and not SKIP_PROTOS[o.protocol] then return o end
+    end
+    for _, o in ipairs(outs) do
+        if o.protocol and not SKIP_PROTOS[o.protocol] then return o end
+    end
+    return nil
+end
+
+-- ===== bypass domain list (apply_routing=true) =====
+local function rewrite_section(group_label, lines)
+    local existing = read_all(WHITELIST) or ""
+    local marker_begin = "// === subscription:" .. group_label .. " ==="
+    local marker_end   = "// === end subscription:" .. group_label .. " ==="
+    local out = {}
+    local inside = false
+    for line in (existing .. "\n"):gmatch("([^\n]*)\n") do
+        if line == marker_begin then inside = true
+        elseif line == marker_end then inside = false
+        elseif not inside then out[#out + 1] = line end
+    end
+    while #out > 0 and out[#out]:match("^%s*$") do out[#out] = nil end
+    out[#out + 1] = ""
+    out[#out + 1] = marker_begin
+    for _, d in ipairs(lines) do out[#out + 1] = d end
+    out[#out + 1] = marker_end
+    out[#out + 1] = ""
+    write_atomic(WHITELIST, table.concat(out, "\n"), "0644")
+end
+
+-- ===== convert raw body → list of converted profiles + bypass domains =====
+-- Returns: profiles (array of {id,name,type,uri,group,outbound,routing_mode?}),
+--          bypass_domains (array of strings),
+--          skipped (count of unsupported entries),
+--          source_kind ("json" / "uri-list" / "uri-list-b64")
+local function parse_body_into_profiles(body, sub)
+    local group = sub.group or sub.title or ""
+    local apply_routing = sub.apply_routing and true or false
+
+    local profiles = {}
+    local seen_ids = {}
+    local skipped = 0
+    local bypass_domains = {}
+    local bypass_seen = {}
+
+    local function add_bypass(d)
+        if type(d) ~= "string" or d == "" then return end
+        local cleaned = d:gsub("^domain:", ""):gsub("^domainSuffix:", "")
+        if cleaned:match("^geosite:") or cleaned:match("^regexp:") or cleaned:match("^full:") then return end
+        cleaned = cleaned:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+        if cleaned == "" or bypass_seen[cleaned] then return end
+        bypass_seen[cleaned] = true
+        bypass_domains[#bypass_domains + 1] = cleaned
+    end
+
+    local function push_profile(outbound, name)
+        if not outbound or not outbound.server or not outbound.server_port then
+            skipped = skipped + 1; return
+        end
+        outbound.tag = outbound.tag or "proxy"
+        local label = name
+        if not label or label == "" then label = outbound.server end
+        local base = make_profile_id(label)
+        local id = base
+        local suf = 2
+        while seen_ids[id] do
+            id = base:sub(1, 60) .. "_" .. suf
+            suf = suf + 1
+        end
+        seen_ids[id] = true
+        local prof = {
+            id = id, name = label, type = infer_type(outbound),
+            uri = "", group = group, outbound = outbound,
+        }
+        if apply_routing then prof.routing_mode = "all-except" end
+        profiles[#profiles + 1] = prof
+    end
+
+    -- Step 1: try JSON
+    local docs = cjson.decode(body)
+    local source_kind
+    if docs then
+        if type(docs) == "table" and docs.outbounds then docs = { docs } end
+        if type(docs) == "table" and #docs > 0 then
+            source_kind = "json"
+            for _, doc in ipairs(docs) do
+                if apply_routing and doc.routing and type(doc.routing.rules) == "table" then
+                    for _, rule in ipairs(doc.routing.rules) do
+                        if rule.outboundTag == "direct" and type(rule.domain) == "table" then
+                            for _, d in ipairs(rule.domain) do add_bypass(d) end
+                        end
+                    end
+                end
+                local proxy = pick_proxy_outbound(doc)
+                if proxy then
+                    local converted = v2ray_to_singbox(proxy)
+                    if converted then
+                        local name = doc.remarks or doc.name or proxy.tag or ""
+                        push_profile(converted, name)
+                    else skipped = skipped + 1 end
+                elseif doc.type then  -- sing-box-shape outbound
+                    push_profile(doc, doc.tag or doc.name or "")
+                else skipped = skipped + 1 end
+            end
+        end
+    end
+
+    -- Step 2: try base64-wrapped URI list
+    if #profiles == 0 then
+        local decoded = try_decode_base64_blob(body)
+        if decoded then
+            source_kind = "uri-list-b64"
+            body = decoded
+        end
+    end
+
+    -- Step 3: line-by-line URI list (used both for base64 and plain text)
+    if #profiles == 0 then
+        source_kind = source_kind or "uri-list"
+        for raw_line in (body .. "\n"):gmatch("([^\n]*)\n") do
+            local line = raw_line:gsub("\r", ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if line ~= "" and not line:match("^//") and not line:match("^#") then
+                local ok, result_or_err = pcall(parse_uri, line)
+                local result = ok and result_or_err or nil
+                if result then
+                    push_profile(result.outbound, result.name)
+                else
+                    skipped = skipped + 1
+                end
+            end
+        end
+    end
+
+    return profiles, bypass_domains, skipped, source_kind
+end
+
+-- ===== refresh ONE subscription =====
+local function refresh_subscription(sub)
+    if not sub.url or sub.url == "" then return false, "no url" end
+    local ua = sub.user_agent
+    if not ua or ua == "" then ua = "sing-box/1.13.2" end
+
+    local cmd = string.format(
+        "curl -sS -L --max-time 30 -A %s -H 'Accept: */*' %s 2>/dev/null",
+        shell_quote(ua), shell_quote(sub.url))
+    local h = io.popen(cmd, "r")
+    if not h then return false, "popen failed" end
+    local body = h:read("*a"); h:close()
+    if not body or body == "" then return false, "empty response" end
+
+    local profiles, bypass_domains, skipped, source_kind = parse_body_into_profiles(body, sub)
+    if #profiles == 0 then
+        return false, "no profiles parsed (skipped=" .. tostring(skipped) .. ", kind=" .. tostring(source_kind) .. ")"
+    end
+
+    -- Apply bypass list if requested
+    local bypass_written = 0
+    if sub.apply_routing and #bypass_domains > 0 and (sub.group or "") ~= "" then
+        rewrite_section(sub.group, bypass_domains)
+        bypass_written = #bypass_domains
+    end
+
+    -- Compute seen_ids set for stale-detection
+    local seen_ids = {}
+    for _, p in ipairs(profiles) do seen_ids[p.id] = true end
+
+    -- Delete profiles in the same group that no longer appear
+    local removed = 0
+    local group = sub.group or ""
+    if group ~= "" then
+        local p = io.popen("ls " .. PROFILES .. "/*.json 2>/dev/null")
+        if p then
+            for path in p:lines() do
+                local raw = read_all(path)
+                local prev = raw and cjson.decode(raw)
+                if prev and prev.group == group then
+                    local pid = prev.id
+                    if pid and not seen_ids[pid] then
+                        os.remove(path); removed = removed + 1
+                    end
+                end
+            end
+            p:close()
+        end
+    end
+
+    -- Save new profiles
+    os.execute("mkdir -p " .. PROFILES)
+    local saved = 0
+    for _, prof in ipairs(profiles) do
+        write_atomic(PROFILES .. "/" .. prof.id .. ".json", cjson.encode(prof), "0644")
+        saved = saved + 1
+    end
+
+    return true, {
+        saved = saved, removed = removed, skipped = skipped,
+        bypass_written = bypass_written, source_kind = source_kind,
+        fetched_bytes = #body,
+    }
+end
+
+-- ===== persist refresh outcome onto the subscription file =====
+local function persist_outcome(sub, ok, payload)
+    sub.last_refresh = os.time()
+    if ok then
+        sub.last_status = "ok"
+        sub.last_error = nil
+        sub.last_saved = payload.saved or 0
+        sub.last_removed = payload.removed or 0
+        sub.last_skipped = payload.skipped or 0
+        sub.last_bypass_written = payload.bypass_written or 0
+        sub.last_source_kind = payload.source_kind or ""
+        sub.last_fetched_bytes = payload.fetched_bytes or 0
+    else
+        sub.last_status = "error"
+        sub.last_error = tostring(payload or "")
+    end
+    local path = sub._path
+    local saveable = {}
+    for k, v in pairs(sub) do
+        if k:sub(1, 1) ~= "_" then saveable[k] = v end
+    end
+    write_atomic(path, cjson.encode(saveable), "0600")
+end
+
+-- ===== collect subscriptions to process =====
+local function load_subscriptions()
+    local list = {}
+    local p = io.popen("ls " .. SUBS_DIR .. "/*.json 2>/dev/null")
+    if p then
+        for path in p:lines() do
+            local raw = read_all(path)
+            local sub = raw and cjson.decode(raw)
+            if sub and type(sub) == "table" and sub.url and sub.id then
+                sub._path = path
+                list[#list + 1] = sub
+            end
+        end
+        p:close()
+    end
+    if #list > 0 then return list end
+    -- Legacy fallback
+    local raw = read_all(LEGACY_CFG)
+    local sub = raw and cjson.decode(raw)
+    if sub and type(sub) == "table" and sub.url then
+        sub.id = sub.id or "legacy"
+        sub._path = LEGACY_CFG
+        list[#list + 1] = sub
+    end
+    return list
+end
+
+local function due_for_refresh(sub, now)
+    if CLI.force then return true end
+    if CLI.id and CLI.id == sub.id then return true end
+    if not sub.autoupdate then return false end
+    local last = tonumber(sub.last_refresh) or 0
+    local interval = (tonumber(sub.interval_hours) or 24) * 3600
+    return (now - last) >= interval
+end
+
+-- ===== MAIN =====
+local now = os.time()
+local subs = load_subscriptions()
+if #subs == 0 then
+    log("no subscriptions configured")
+    write_state({ ok = true, skipped = "no subscriptions", ts = now })
+    os.exit(2)
+end
+
+if CLI.id then
+    local found = nil
+    for _, s in ipairs(subs) do if s.id == CLI.id then found = s; break end end
+    if not found then
+        warn("subscription not found: " .. CLI.id)
+        os.exit(1)
+    end
+    subs = { found }
+elseif CLI.all then
+    -- process every subscription regardless of due-status, but still honour autoupdate
+    -- unless --force was passed (handled by due_for_refresh)
+    for _, s in ipairs(subs) do
+        if not CLI.force and not s.autoupdate then
+            log("skip " .. s.id .. " (autoupdate disabled)")
+        end
+    end
+end
+
+local processed = 0
+local errored = 0
+local last_state = { ok = true, ts = now, runs = {} }
+for _, sub in ipairs(subs) do
+    if due_for_refresh(sub, now) then
+        log(string.format("refreshing %s (group=%q, url=%s)",
+            sub.id, sub.group or "", sub.url))
+        local ok, payload = refresh_subscription(sub)
+        persist_outcome(sub, ok, payload)
+        processed = processed + 1
+        if not ok then
+            errored = errored + 1
+            warn(string.format("FAIL %s: %s", sub.id, tostring(payload)))
+            last_state.runs[#last_state.runs + 1] = { id = sub.id, ok = false, error = tostring(payload) }
+        else
+            log(string.format("OK %s: saved=%d removed=%d skipped=%d kind=%s bypass=%d",
+                sub.id, payload.saved, payload.removed, payload.skipped,
+                payload.source_kind or "?", payload.bypass_written or 0))
+            last_state.runs[#last_state.runs + 1] = { id = sub.id, ok = true,
+                saved = payload.saved, removed = payload.removed,
+                skipped = payload.skipped, source_kind = payload.source_kind }
+        end
+    end
+end
+
+last_state.processed = processed
+last_state.errored = errored
+write_state(last_state)
+
+if processed == 0 then os.exit(2) end
+if errored > 0 then os.exit(1) end
+os.exit(0)

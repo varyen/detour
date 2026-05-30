@@ -1,0 +1,1717 @@
+#!/bin/sh
+# Detour API - CGI script for uhttpd (with session auth)
+
+# ==================== CONFIG ====================
+SINGBOX_CONFIG_DIR="/etc/sing-box"
+SINGBOX_DOMAINS="/etc/sing-box/proxy-domains.list"
+SINGBOX_CONFIG="/etc/sing-box/config.json"
+SINGBOX_ROUTEMAP="/etc/sing-box/route-map.list"
+SINGBOX_LOG="/var/log/sing-box.log"
+SINGBOX_INITD="/etc/init.d/sing-box"
+SINGBOX_SETTINGS="/etc/sing-box/settings.json"
+SINGBOX_PROFILES_DIR="/etc/sing-box/profiles"
+SINGBOX_WHITELIST="/etc/sing-box/whitelist-domains.list"
+ZAPRET_INITD="/etc/init.d/zapret-tpws"
+ZAPRET_CONF="/etc/zapret-tpws.conf"
+ZAPRET_DOMAINS="/etc/zapret-tpws/domains.list"
+
+KEEPALIVE_STATE="/var/state/vpn-keepalive.json"
+KEEPALIVE_BIN="/usr/sbin/vpn-keepalive"
+UPDATE_BIN="/usr/sbin/detour-update"
+VERSION_FILE="/etc/detour/version"
+UPDATE_STATE="/var/state/detour-update.json"
+BINS_VERSION_FILE="/etc/detour/bins-version"
+BINS_MANIFEST="/etc/detour/bins-manifest.json"
+BINS_STATE="/var/state/detour-bins.json"
+BINS_UPLOAD="/tmp/detour-bins-upload.ipk"
+
+AUTH_FILE="/etc/detour.auth"
+SESSION_DIR="/tmp/detour-sessions"
+# =================================================
+
+mkdir -p "$SESSION_DIR"
+mkdir -p "$SINGBOX_PROFILES_DIR"
+
+# ==================== HELPERS ====================
+json_ok() { echo '{"ok":true}'; }
+json_escape() {
+    awk 'BEGIN { first = 1 }
+    {
+        gsub(/\033\[[0-9;]*m/, "")
+        gsub(/\\/, "\\\\")
+        gsub(/"/, "\\\"")
+        gsub(/\t/, "\\t")
+        gsub(/\r/, "\\r")
+        if (!first) printf "\\n"
+        printf "%s", $0
+        first = 0
+    }'
+}
+json_err() { printf '{"ok":false,"error":"%s"}' "$(printf '%s' "$1" | json_escape)"; }
+reply_json() {
+    echo "Content-Type: application/json"
+    echo "Cache-Control: no-cache"
+}
+
+# Sanitize profile name: only a-zA-Z0-9_- allowed, no path traversal
+sanitize_name() {
+    echo "$1" | tr -cd 'a-zA-Z0-9_-' | head -c 64
+}
+
+# Read a JSON string value by key (simple sed parser for flat JSON)
+json_val() {
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1
+}
+
+get_settings_val() {
+    local key="$1"
+    [ -f "$SINGBOX_SETTINGS" ] && json_val "$key" "$SINGBOX_SETTINGS"
+}
+
+normalize_profile_list() {
+    local raw="$1"
+    local result=""
+    local item
+    echo "$raw" | tr ',' '\n' | while IFS= read -r item; do
+        item=$(sanitize_name "$item")
+        [ -n "$item" ] || continue
+        printf '%s\n' "$item"
+    done | awk '!seen[$0]++ { if (out) out = out "," $0; else out = $0 } END { print out }'
+}
+
+get_last_csv_item() {
+    local csv="$1"
+    local last=""
+    local old_ifs="$IFS"
+    IFS=','
+    set -- $csv
+    IFS="$old_ifs"
+    for last in "$@"; do :; done
+    printf '%s' "$last"
+}
+
+print_csv_json_array() {
+    local csv="$1"
+    local item
+    local first=1
+    local old_ifs="$IFS"
+    printf '['
+    if [ -n "$csv" ]; then
+        IFS=','
+        set -- $csv
+        IFS="$old_ifs"
+        for item in "$@"; do
+            [ -n "$item" ] || continue
+            if [ "$first" = "1" ]; then
+                first=0
+            else
+                printf ','
+            fi
+            printf '"%s"' "$item"
+        done
+    fi
+    printf ']'
+}
+
+csv_contains() {
+    local csv="$1"
+    local needle="$2"
+    echo ",$csv," | grep -q ",${needle},"
+}
+
+extract_profile_outbound() {
+    local profile_file="$1"
+    awk '
+    BEGIN { depth=0; capture=0; buf="" }
+    {
+        for(i=1;i<=length($0);i++) {
+            c=substr($0,i,1)
+            if(capture) {
+                buf = buf c
+                if(c=="{") depth++
+                if(c=="}") { depth--; if(depth==0) { print buf; exit } }
+            }
+            if(!capture && substr($0,i,10) == "\"outbound\"") {
+                j=i+10
+                while(j<=length($0) && substr($0,j,1)!="{") j++
+                if(j<=length($0)) {
+                    capture=1; depth=1; buf="{"; i=j
+                }
+            }
+        }
+    }' "$profile_file"
+}
+
+translate_wireguard_profile() {
+    local endpoint_json="$1"
+    local line
+
+    line=$(printf '%s' "$endpoint_json" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')
+    line=$(printf '%s' "$line" | sed 's/"local_address"[[:space:]]*:/"address":/g')
+    line=$(printf '%s' "$line" | sed 's/"server"[[:space:]]*:/"address":/g')
+    line=$(printf '%s' "$line" | sed 's/"server_port"[[:space:]]*:/"port":/g')
+    line=$(printf '%s' "$line" | sed 's/,"network"[[:space:]]*:[[:space:]]*"[^"]*"//g; s/"network"[[:space:]]*:[[:space:]]*"[^"]*",//g')
+    printf '%s' "$line"
+}
+
+set_outbound_chain_fields() {
+    local outbound_json="$1"
+    local tag="$2"
+    local detour="$3"
+    local line
+
+    line=$(printf '%s' "$outbound_json" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')
+    if echo "$line" | grep -q '"tag"[[:space:]]*:'; then
+        line=$(printf '%s' "$line" | sed 's/"tag"[[:space:]]*:[[:space:]]*"[^"]*"/"tag":"'"$tag"'"/')
+    else
+        line=$(printf '%s' "$line" | sed 's/^{/{"tag":"'"$tag"'",/')
+    fi
+
+    if [ -n "$detour" ]; then
+        if echo "$line" | grep -q '"detour"[[:space:]]*:'; then
+            line=$(printf '%s' "$line" | sed 's/"detour"[[:space:]]*:[[:space:]]*"[^"]*"/"detour":"'"$detour"'"/')
+        else
+            line=$(printf '%s' "$line" | sed 's/^{/{"detour":"'"$detour"'",/')
+        fi
+    else
+        line=$(printf '%s' "$line" | sed 's/,"detour"[[:space:]]*:[[:space:]]*"[^"]*"//; s/"detour"[[:space:]]*:[[:space:]]*"[^"]*",//')
+    fi
+
+    printf '%s' "$line"
+}
+
+collect_upstream_ips() {
+    {
+        sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SINGBOX_CONFIG" 2>/dev/null
+        for cf in "$SINGBOX_CONFIG_DIR"/config-*.json; do
+            [ -f "$cf" ] && sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cf" 2>/dev/null
+        done
+    } | \
+    while IFS= read -r host; do
+        [ -n "$host" ] || continue
+        if echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            printf '%s\n' "$host"
+        else
+            nslookup "$host" 127.0.0.1 2>/dev/null | \
+                awk '/^Address [0-9]+: /{print $3} /^Address: /{print $2}' | \
+                grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true
+        fi
+    done | awk '!seen[$0]++ { if (out) out = out "," $0; else out = $0 } END { print out }'
+}
+
+write_settings() {
+    local active_chain="$1"
+    local routing_mode="$2"
+    local upstream_ips="$3"
+    local singbox_mode="$4"
+    local active_profile
+
+    active_chain=$(normalize_profile_list "$active_chain")
+    [ -z "$active_chain" ] && active_chain="default"
+    active_profile=$(get_last_csv_item "$active_chain")
+    case "$singbox_mode" in single|multi) ;; *) singbox_mode="single" ;; esac
+
+    cat > "$SINGBOX_SETTINGS" <<EOF
+{
+  "active_profile": "$active_profile",
+  "active_chain": "$active_chain",
+  "routing_mode": "$routing_mode",
+  "upstream_ips": "$upstream_ips",
+  "singbox_mode": "$singbox_mode"
+}
+EOF
+}
+
+# Per-profile routing_mode override: if a profile.json has a non-empty
+# "routing_mode" field, that mode wins over the global one when the profile
+# is activated. Lets a subscription drop in profiles that auto-switch to
+# "all-except" (bypass-list) on activation while user-created profiles
+# leave the system-wide mode untouched.
+get_profile_routing_mode() {
+    local pname="$1"
+    local pfile="$SINGBOX_PROFILES_DIR/$pname.json"
+    [ -f "$pfile" ] || return 0
+    local mode
+    mode=$(json_val "routing_mode" "$pfile")
+    case "$mode" in
+        proxy-list|all-except) printf '%s' "$mode" ;;
+        *) ;;
+    esac
+}
+
+# Routing mode used by chain_activate: per-profile override (taken from the
+# LAST profile in the chain, since that's what handles egress) → fall back
+# to the existing global setting.
+resolve_routing_mode_for_chain() {
+    local chain_csv="$1"
+    local last
+    last=$(get_last_csv_item "$chain_csv")
+    local override
+    override=$(get_profile_routing_mode "$last")
+    if [ -n "$override" ]; then
+        printf '%s' "$override"
+    else
+        get_routing_mode
+    fi
+}
+
+get_singbox_mode() {
+    local m=$(get_settings_val "singbox_mode")
+    case "$m" in
+        single|multi) printf '%s' "$m" ;;
+        *) printf 'single' ;;
+    esac
+}
+
+# Numeric JSON value reader (json_val only matches quoted string values).
+numeric_json_val() {
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -1
+}
+
+# Emit unique route-map target profile ids, in file order. Section headers:
+#   // === route:PROFILEID ===
+route_map_targets() {
+    [ -f "$SINGBOX_ROUTEMAP" ] || return 0
+    awk '
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        line=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", line)
+        sub(/[[:space:]]*===.*$/, "", line)
+        gsub(/[^a-zA-Z0-9_-]/, "", line)
+        if (line != "" && !seen[line]++) print line
+    }' "$SINGBOX_ROUTEMAP"
+}
+
+# Emit classified entries ("D domain" / "I ipcidr") belonging to ONE target.
+route_map_section() {
+    local id="$1"
+    [ -f "$SINGBOX_ROUTEMAP" ] || return 0
+    awk -v want="$id" '
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        t=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", t)
+        sub(/[[:space:]]*===.*$/, "", t)
+        gsub(/[^a-zA-Z0-9_-]/, "", t)
+        inblk = (t == want) ? 1 : 0
+        next
+    }
+    {
+        if (!inblk) next
+        line=$0
+        sub(/\/\/.*/, "", line); sub(/#.*/, "", line); gsub(/\r/, "", line)
+        gsub(/^[ \t]+|[ \t]+$/, "", line)
+        if (line == "") next
+        if (line ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print "I " line; next }
+        if (line ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print "D " line; next }
+    }' "$SINGBOX_ROUTEMAP"
+}
+
+# Resolve the outbound tag a route target should use. If the target id is a
+# member of the active chain, reuse that chain tag (no duplicate outbound).
+# Otherwise the target gets a dedicated "out_<id>" outbound.
+route_tag_for() {
+    local id="$1" chain="$2" i total item old_ifs
+    old_ifs="$IFS"; IFS=','; set -- $chain; IFS="$old_ifs"
+    total=$#; i=0
+    for item in "$@"; do
+        i=$((i + 1))
+        if [ "$item" = "$id" ]; then
+            if [ "$i" -eq "$total" ]; then printf 'proxy'; else printf 'chain_%s' "$i"; fi
+            return 0
+        fi
+    done
+    printf 'out_%s' "$id"
+}
+
+# Single-instance mode: compute the extra outbounds/endpoints and route.rules
+# fragment from the route map. Sets globals RX_OB, RX_EP, RX_RULES.
+compute_route_extras() {
+    local chain="$1"
+    local target tag payload ptype dom_arr ip_arr robj rule_objs
+    RX_OB=""; RX_EP=""; RX_RULES=""
+    rule_objs=""
+    for target in $(route_map_targets); do
+        [ -f "$SINGBOX_PROFILES_DIR/$target.json" ] || continue
+        dom_arr=$(route_map_section "$target" | awk '$1=="D"{ if(n++)printf","; printf "\"%s\"",$2 }')
+        ip_arr=$(route_map_section "$target" | awk '$1=="I"{ if(n++)printf","; printf "\"%s\"",$2 }')
+        [ -z "$dom_arr" ] && [ -z "$ip_arr" ] && continue
+        tag=$(route_tag_for "$target" "$chain")
+        if [ "$tag" = "out_$target" ]; then
+            payload=$(extract_profile_outbound "$SINGBOX_PROFILES_DIR/$target.json")
+            [ -n "$payload" ] || continue
+            payload=$(set_outbound_chain_fields "$payload" "$tag" "")
+            ptype=$(json_val "type" "$SINGBOX_PROFILES_DIR/$target.json")
+            if [ "$ptype" = "wireguard" ]; then
+                payload=$(translate_wireguard_profile "$payload")
+                RX_EP="$RX_EP,
+    $payload"
+            else
+                RX_OB="$RX_OB,
+    $payload"
+            fi
+        fi
+        if [ -n "$dom_arr" ]; then
+            robj="{\"action\":\"route\",\"domain_suffix\":[$dom_arr],\"outbound\":\"$tag\"}"
+            if [ -n "$rule_objs" ]; then rule_objs="$rule_objs,$robj"; else rule_objs="$robj"; fi
+        fi
+        if [ -n "$ip_arr" ]; then
+            robj="{\"action\":\"route\",\"ip_cidr\":[$ip_arr],\"outbound\":\"$tag\"}"
+            if [ -n "$rule_objs" ]; then rule_objs="$rule_objs,$robj"; else rule_objs="$robj"; fi
+        fi
+    done
+    if [ -n "$rule_objs" ]; then
+        # sing-box >=1.11 ignores the inbound-level "sniff" option: it no longer
+        # populates the connection's domain, so domain_suffix rules would never
+        # match and every connection would fall through to route.final. An
+        # explicit {"action":"sniff"} rule (evaluated first) sniffs the SNI/Host
+        # so the per-target domain rules below can match. Only emitted when there
+        # are route rules, so an empty route-map still yields the old config
+        # byte-for-byte.
+        RX_RULES="    \"rules\": [{\"action\":\"sniff\"},$rule_objs],
+"
+    fi
+}
+
+# Render a sing-box config JSON to STDOUT.
+#   $1 chain CSV
+#   $2 extra outbounds JSON (comma-prefixed, e.g. ',\n    {...}') or empty
+#   $3 extra endpoints JSON (comma-prefixed) or empty
+#   $4 route rules fragment ('    "rules": [...],\n') or empty
+#   $5 listen_port (default 12345)
+# Returns 1 if the chain is invalid.
+render_chain_config() {
+    local chain_csv="$1"
+    local extra_outbounds="$2"
+    local extra_endpoints="$3"
+    local route_rules="$4"
+    local listen_port="${5:-12345}"
+    local normalized old_ifs total idx pname pfile ptype payload tag detour
+    local outbounds_json endpoints_json outbounds_block
+
+    normalized=$(normalize_profile_list "$chain_csv")
+    [ -z "$normalized" ] && return 1
+
+    old_ifs="$IFS"
+    IFS=','
+    set -- $normalized
+    IFS="$old_ifs"
+    total=$#
+    idx=0
+    detour=""
+    outbounds_json=""
+    endpoints_json=""
+
+    for pname in "$@"; do
+        idx=$((idx + 1))
+        pfile="$SINGBOX_PROFILES_DIR/$pname.json"
+        [ -f "$pfile" ] || return 1
+        payload=$(extract_profile_outbound "$pfile")
+        [ -n "$payload" ] || return 1
+        ptype=$(json_val "type" "$pfile")
+
+        if [ "$idx" -lt "$total" ]; then
+            tag="chain_$idx"
+        else
+            tag="proxy"
+        fi
+
+        payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
+
+        if [ "$ptype" = "wireguard" ]; then
+            payload=$(translate_wireguard_profile "$payload")
+            if [ -z "$endpoints_json" ]; then
+                endpoints_json="    $payload"
+            else
+                endpoints_json="$endpoints_json,
+    $payload"
+            fi
+        else
+            if [ -z "$outbounds_json" ]; then
+                outbounds_json="    $payload"
+            else
+                outbounds_json="$outbounds_json,
+    $payload"
+            fi
+        fi
+        detour="$tag"
+    done
+
+    # extra_* fragments are comma-prefixed (",\n    {obj}"). When the chain
+    # contributed no entries of that kind, drop the leading comma-only line so
+    # we don't emit an array that starts with a comma.
+    if [ -n "$extra_endpoints" ]; then
+        if [ -z "$endpoints_json" ]; then
+            endpoints_json=$(printf '%s' "$extra_endpoints" | sed '1{/^,$/d;}')
+        else
+            endpoints_json="$endpoints_json$extra_endpoints"
+        fi
+    fi
+
+    if [ -n "$outbounds_json" ]; then
+        outbounds_block="$outbounds_json$extra_outbounds,
+        {
+            \"type\": \"direct\",
+            \"tag\": \"direct\"
+        }"
+    elif [ -n "$extra_outbounds" ]; then
+        outbounds_block="$(printf '%s' "$extra_outbounds" | sed '1{/^,$/d;}'),
+        {
+            \"type\": \"direct\",
+            \"tag\": \"direct\"
+        }"
+    else
+        outbounds_block="    {
+            \"type\": \"direct\",
+            \"tag\": \"direct\"
+        }"
+    fi
+
+    cat <<EOF
+{
+  "log": {
+    "level": "info",
+    "output": "/var/log/sing-box.log",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "redirect",
+      "tag": "redirect-in",
+      "listen": "::",
+      "listen_port": $listen_port,
+      "sniff": true,
+      "sniff_override_destination": true
+    }
+  ],
+$(if [ -n "$endpoints_json" ]; then cat <<EOEP
+    "endpoints": [
+$endpoints_json
+    ],
+EOEP
+fi)
+  "outbounds": [
+$outbounds_block
+  ],
+  "route": {
+$route_rules    "final": "proxy"
+  }
+}
+EOF
+    return 0
+}
+
+# Build all sing-box config(s) for the given mode + chain. Writes to temp files,
+# validates EVERY config with `sing-box check`, then commits atomically. On any
+# failure prints a reason to stdout, returns 1, and leaves live configs intact.
+build_config() {
+    local mode="$1"
+    local chain="$2"
+    local tmp_default="${SINGBOX_CONFIG}.tmp.$$"
+    local err rc target tmp_t port idx pair src dst base tid
+    local commit_list keep_targets
+
+    commit_list=""
+    keep_targets=""
+
+    if [ "$mode" = "multi" ]; then
+        # Default instance: active chain only, route rules suppressed.
+        if ! render_chain_config "$chain" "" "" "" 12345 > "$tmp_default"; then
+            rm -f "$tmp_default"; echo "failed to render default config (bad chain?)"; return 1
+        fi
+        err=$(/usr/bin/sing-box check -c "$tmp_default" 2>&1)
+        if [ $? -ne 0 ]; then
+            rm -f "$tmp_default"; echo "default config invalid: $err"; return 1
+        fi
+        commit_list="$tmp_default:$SINGBOX_CONFIG"
+
+        idx=0
+        for target in $(route_map_targets); do
+            [ -f "$SINGBOX_PROFILES_DIR/$target.json" ] || continue
+            route_map_section "$target" | grep -q . || continue
+            idx=$((idx + 1))
+            port=$((12345 + idx))
+            tmp_t="${SINGBOX_CONFIG_DIR}/config-$target.json.tmp.$$"
+            if ! render_chain_config "$target" "" "" "" "$port" > "$tmp_t"; then
+                for pair in $commit_list; do rm -f "${pair%%:*}"; done
+                rm -f "$tmp_t"
+                echo "failed to render config for target $target"; return 1
+            fi
+            err=$(/usr/bin/sing-box check -c "$tmp_t" 2>&1)
+            if [ $? -ne 0 ]; then
+                for pair in $commit_list; do rm -f "${pair%%:*}"; done
+                rm -f "$tmp_t"
+                echo "config for target $target invalid: $err"; return 1
+            fi
+            commit_list="$commit_list ${tmp_t}:${SINGBOX_CONFIG_DIR}/config-$target.json"
+            keep_targets="$keep_targets $target"
+        done
+    else
+        # single mode: one config with route.rules + extra outbounds.
+        compute_route_extras "$chain"
+        if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$RX_RULES" 12345 > "$tmp_default"; then
+            rm -f "$tmp_default"; echo "failed to render config (bad chain?)"; return 1
+        fi
+        err=$(/usr/bin/sing-box check -c "$tmp_default" 2>&1)
+        if [ $? -ne 0 ]; then
+            rm -f "$tmp_default"; echo "config invalid: $err"; return 1
+        fi
+        commit_list="$tmp_default:$SINGBOX_CONFIG"
+    fi
+
+    # COMMIT — move temps into place.
+    for pair in $commit_list; do
+        src="${pair%%:*}"; dst="${pair#*:}"
+        mv "$src" "$dst"
+    done
+    # Drop per-target configs no longer referenced.
+    for tmp_t in "$SINGBOX_CONFIG_DIR"/config-*.json; do
+        [ -f "$tmp_t" ] || continue
+        base=$(basename "$tmp_t" .json); tid=${base#config-}
+        case " $keep_targets " in
+            *" $tid "*) ;;
+            *) rm -f "$tmp_t" ;;
+        esac
+    done
+    return 0
+}
+
+# Back-compat shim: callers that pre-date multi-instance still call this.
+build_config_for_chain() {
+    build_config "$(get_singbox_mode)" "$1"
+}
+
+get_active_profile() {
+    local p=$(get_last_csv_item "$(get_active_chain)")
+    [ -z "$p" ] && p="default"
+    echo "$p"
+}
+
+get_active_chain() {
+    local c=$(get_settings_val "active_chain")
+    [ -z "$c" ] && c=$(get_settings_val "active_profile")
+    [ -z "$c" ] && c="default"
+    echo "$c"
+}
+
+get_routing_mode() {
+    local m=$(get_settings_val "routing_mode")
+    [ -z "$m" ] && m="proxy-list"
+    echo "$m"
+}
+
+get_upstream_ips() {
+    get_settings_val "upstream_ips"
+}
+
+# ==================== AUTH ====================
+get_session_token() {
+    echo "$HTTP_COOKIE" | tr ';' '\n' | sed 's/^ *//' | \
+        grep '^proxy_session=' | head -1 | cut -d'=' -f2
+}
+
+check_auth() {
+    local token=$(get_session_token)
+    [ -z "$token" ] && return 1
+    echo "$token" | grep -qE '^[a-f0-9]{64}$' || return 1
+    [ -f "$SESSION_DIR/$token" ] || return 1
+    touch "$SESSION_DIR/$token"
+    return 0
+}
+
+verify_password() {
+    [ ! -f "$AUTH_FILE" ] && return 1
+    local stored_line=$(grep "^${1}:" "$AUTH_FILE" | head -1)
+    [ -z "$stored_line" ] && return 1
+    local stored_hash=$(echo "$stored_line" | cut -d':' -f2-)
+    local salt=$(echo "$stored_hash" | cut -d'$' -f3)
+    local computed=$(printf '%s' "$2" | openssl passwd -6 -salt "$salt" -stdin 2>/dev/null)
+    [ "$computed" = "$stored_hash" ]
+}
+
+gen_token() {
+    local a=$(cat /proc/sys/kernel/random/uuid | tr -d '-')
+    local b=$(cat /proc/sys/kernel/random/uuid | tr -d '-')
+    printf '%s%s' "$a" "$b"
+}
+# =================================================
+
+# Read POST data
+POST_DATA=""
+ACTION=$(echo "$QUERY_STRING" | sed -n 's/.*action=\([^&]*\).*/\1/p')
+if [ "$REQUEST_METHOD" = "POST" ] && [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ] 2>/dev/null; then
+    # Large binary .ipk uploads stream straight to disk instead of buffering the
+    # whole package in a shell variable.
+    case "$ACTION" in
+        panel_update_local) head -c "$CONTENT_LENGTH" > /tmp/detour-upload.ipk ;;
+        bins_update_local)  head -c "$CONTENT_LENGTH" > "$BINS_UPLOAD" ;;
+        *) POST_DATA=$(head -c "$CONTENT_LENGTH") ;;
+    esac
+fi
+
+# Clean expired sessions (>7 days)
+find "$SESSION_DIR" -type f -mmin +10080 -delete 2>/dev/null
+
+# ==================== SETUP STATUS (no auth) ====================
+# UI loads this once on the login page. If auth is unconfigured the UI shows
+# the "set username + password" form instead of the login form.
+if [ "$ACTION" = "panel_setup_status" ]; then
+    reply_json
+    echo ""
+    if [ -s "$AUTH_FILE" ]; then
+        printf '{"setup_required":false}'
+    else
+        printf '{"setup_required":true}'
+    fi
+    exit 0
+fi
+
+# ==================== FIRST-INSTALL SETUP (no auth) ====================
+# One-shot endpoint: writes the auth file with the operator-chosen credentials.
+# Refuses if the auth file is already populated, so it can't be used to reset
+# an existing install — that's what panel_change_password is for.
+if [ "$ACTION" = "panel_first_setup" ]; then
+    reply_json
+    if [ "$REQUEST_METHOD" != "POST" ]; then
+        echo ""; json_err "POST required"; exit 0
+    fi
+    if [ -s "$AUTH_FILE" ]; then
+        sleep 1
+        echo ""; json_err "panel already configured — use change-password instead"
+        exit 0
+    fi
+    SETUP_USER=$(printf '%s' "$POST_DATA" | sed -n 's/.*"user"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    SETUP_PASS=$(printf '%s' "$POST_DATA" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    # Username allowed chars: a-zA-Z0-9._- ; 2..32 chars (keeps auth-file format intact).
+    case "$SETUP_USER" in
+        ""|*[!a-zA-Z0-9._-]*) echo ""; json_err "invalid username (allowed: a-zA-Z0-9._-)"; exit 0 ;;
+    esac
+    if [ "${#SETUP_USER}" -lt 2 ] || [ "${#SETUP_USER}" -gt 32 ]; then
+        echo ""; json_err "username must be 2..32 chars"; exit 0
+    fi
+    if [ -z "$SETUP_PASS" ] || [ "${#SETUP_PASS}" -lt 8 ]; then
+        echo ""; json_err "password must be at least 8 chars"; exit 0
+    fi
+    NEW_HASH=$(printf '%s' "$SETUP_PASS" | openssl passwd -6 -stdin 2>/dev/null)
+    if [ -z "$NEW_HASH" ]; then echo ""; json_err "openssl hash failed"; exit 0; fi
+    TMP_AUTH=$(mktemp)
+    printf '%s:%s\n' "$SETUP_USER" "$NEW_HASH" > "$TMP_AUTH"
+    chmod 0600 "$TMP_AUTH"
+    mv "$TMP_AUTH" "$AUTH_FILE"
+    # Auto-login: hand the operator a session cookie so they don't have to
+    # re-enter the credentials they literally just typed.
+    TOKEN=$(gen_token)
+    echo "$SETUP_USER" > "$SESSION_DIR/$TOKEN"
+    echo "Set-Cookie: proxy_session=$TOKEN; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
+    echo ""
+    json_ok
+    exit 0
+fi
+
+# ==================== LOGIN (no auth) ====================
+if [ "$ACTION" = "login" ]; then
+    reply_json
+    if [ "$REQUEST_METHOD" != "POST" ]; then
+        echo ""
+        json_err "POST required"
+        exit 0
+    fi
+    DECODED=$(printf '%s' "$POST_DATA" | base64 -d 2>/dev/null)
+    LOGIN_USER=$(printf '%s' "$DECODED" | head -1)
+    LOGIN_PASS=$(printf '%s' "$DECODED" | tail -n +2)
+    if verify_password "$LOGIN_USER" "$LOGIN_PASS"; then
+        TOKEN=$(gen_token)
+        echo "$LOGIN_USER" > "$SESSION_DIR/$TOKEN"
+        echo "Set-Cookie: proxy_session=$TOKEN; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
+        echo ""
+        json_ok
+    else
+        sleep 2
+        echo ""
+        json_err "Invalid credentials"
+    fi
+    exit 0
+fi
+
+# ==================== LOGOUT (no auth) ====================
+if [ "$ACTION" = "logout" ]; then
+    reply_json
+    echo "Set-Cookie: proxy_session=deleted; Path=/; HttpOnly; Max-Age=0"
+    TOKEN=$(get_session_token)
+    [ -n "$TOKEN" ] && rm -f "$SESSION_DIR/$TOKEN" 2>/dev/null
+    echo ""
+    json_ok
+    exit 0
+fi
+
+# ==================== OPTIONS (CORS, no auth) ====================
+if [ "$REQUEST_METHOD" = "OPTIONS" ]; then
+    echo "Content-Type: application/json"
+    echo "Cache-Control: no-cache"
+    echo "Access-Control-Allow-Origin: *"
+    echo "Access-Control-Allow-Methods: GET, POST, OPTIONS"
+    echo "Access-Control-Allow-Headers: Content-Type"
+    echo ""
+    echo '{}'
+    exit 0
+fi
+
+# ==================== AUTH CHECK ====================
+if ! check_auth; then
+    echo "Status: 401 Unauthorized"
+    reply_json
+    echo ""
+    printf '{"ok":false,"error":"auth"}'
+    exit 0
+fi
+
+# ==================== AUTHENTICATED HEADERS ====================
+reply_json
+echo ""
+
+# ==================== MAIN API ====================
+case "$ACTION" in
+
+check_auth)
+    # Reply with the active username so the panel can prefill the change-account form.
+    TOKEN=$(get_session_token); SESSION_USER=""
+    [ -n "$TOKEN" ] && [ -f "$SESSION_DIR/$TOKEN" ] && SESSION_USER=$(cat "$SESSION_DIR/$TOKEN")
+    printf '{"ok":true,"user":"%s"}' "$SESSION_USER"
+    ;;
+
+status)
+    SB_PID=$(pgrep -f '/usr/bin/sing-box' 2>/dev/null | head -1)
+    SB_RUNNING="false"
+    SB_PORT=""
+    SB_ENABLED="false"
+    if [ -n "$SB_PID" ]; then
+        SB_RUNNING="true"
+        SB_PORT=$(netstat -tlnp 2>/dev/null | grep "$SB_PID/sing-box" | awk '{print $4}' | sed 's/.*://' | head -1)
+    fi
+    [ -L /etc/rc.d/S99sing-box ] 2>/dev/null && SB_ENABLED="true"
+
+    KS_ACTIVE="false"
+    iptables -t nat -C PREROUTING -i br-lan -j SINGBOX_KS 2>/dev/null && KS_ACTIVE="true"
+
+    IPSET_COUNT=$(ipset list singbox_domains 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | grep -c '.' || true)
+    IPSET_MEMBERS=$(ipset list singbox_domains 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | sed 's/ timeout.*//' | tr '\n' ',' | sed 's/,$//')
+
+    DOMAIN_COUNT=0
+    IP_COUNT=0
+    if [ -f "$SINGBOX_DOMAINS" ]; then
+        DOMAIN_COUNT=$(sed 's|//.*||; s|#.*||' "$SINGBOX_DOMAINS" | tr -d '\r' | grep -cE '^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}\s*$' || true)
+        IP_COUNT=$(sed 's|//.*||; s|#.*||' "$SINGBOX_DOMAINS" | tr -d '\r' | grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?\s*$' || true)
+    fi
+    ENTRY_TOTAL=$((DOMAIN_COUNT + IP_COUNT))
+
+    ZP_PID=$(pgrep -f '/usr/bin/tpws-zapret' 2>/dev/null | head -1)
+    ZP_RUNNING="false"
+    ZP_PORT=""
+    ZP_ENABLED="false"
+    if [ -n "$ZP_PID" ]; then
+        ZP_RUNNING="true"
+        ZP_PORT=$(netstat -tlnp 2>/dev/null | grep "$ZP_PID/tpws-zapret" | awk '{print $4}' | sed 's/.*://' | head -1)
+    fi
+    [ -L /etc/rc.d/S98zapret-tpws ] 2>/dev/null && ZP_ENABLED="true"
+    ZP_ARGS=""
+    [ -f "$ZAPRET_CONF" ] && ZP_ARGS=$(head -1 "$ZAPRET_CONF")
+    ZP_DOMAINS=0
+    ZP_IPS=0
+    if [ -f "$ZAPRET_DOMAINS" ]; then
+        ZP_DOMAINS=$(sed 's|//.*||; s|#.*||' "$ZAPRET_DOMAINS" | tr -d '\r' | grep -cE '^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}\s*$' || true)
+        ZP_IPS=$(sed 's|//.*||; s|#.*||' "$ZAPRET_DOMAINS" | tr -d '\r' | grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?\s*$' || true)
+    fi
+    ZP_IPSET_COUNT=$(ipset list zapret_domains 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | grep -c '.' || true)
+
+    MPTCP=$(sysctl -n net.mptcp.enabled 2>/dev/null || echo "unknown")
+    UPTIME=$(cat /proc/uptime | awk '{printf "%dd %dh %dm", $1/86400, ($1%86400)/3600, ($1%3600)/60}')
+    MEM_FREE=$(free | awk '/Mem:/{printf "%dMB/%dMB", ($3)/1024, ($2)/1024}')
+    DISK_FREE=$(df /overlay 2>/dev/null | awk 'NR==2{print $4}')
+
+    SB_PROFILE=$(get_active_profile)
+    SB_CHAIN=$(get_active_chain)
+    SB_ROUTING=$(get_routing_mode)
+    SB_MODE=$(get_singbox_mode)
+    SB_ROUTE_TARGETS=$(route_map_targets | grep -c . 2>/dev/null)
+    [ -z "$SB_ROUTE_TARGETS" ] && SB_ROUTE_TARGETS=0
+    PA_VERSION=$(cat "$VERSION_FILE" 2>/dev/null | head -1)
+    [ -z "$PA_VERSION" ] && PA_VERSION="?"
+
+    # Binaries (detour-bins package) — versions read from the cheap manifest
+    # the bins postinst writes, so status never spawns the 60 MB sing-box binary.
+    BINS_VERSION=$(json_val "bins_version" "$BINS_MANIFEST")
+    [ -z "$BINS_VERSION" ] && BINS_VERSION=$(cat "$BINS_VERSION_FILE" 2>/dev/null | head -1)
+    [ -z "$BINS_VERSION" ] && BINS_VERSION="?"
+    SB_BIN_VER=$(json_val "singbox" "$BINS_MANIFEST")
+    [ -z "$SB_BIN_VER" ] && SB_BIN_VER="?"
+    SB_BIN_PRESENT=false; [ -x /usr/bin/sing-box ] && SB_BIN_PRESENT=true
+    TPWS_BIN_PRESENT=false; [ -x /usr/bin/tpws-zapret ] && TPWS_BIN_PRESENT=true
+
+    cat <<EOF
+{
+  "version": "$PA_VERSION",
+  "binaries": {
+    "bins_version": "$BINS_VERSION",
+    "singbox_version": "$SB_BIN_VER",
+    "singbox_present": $SB_BIN_PRESENT,
+    "tpws_present": $TPWS_BIN_PRESENT
+  },
+  "singbox": {
+    "running": $SB_RUNNING,
+    "pid": "${SB_PID:-null}",
+    "port": "${SB_PORT:-null}",
+    "enabled": $SB_ENABLED,
+    "killswitch": $KS_ACTIVE,
+    "domains": $DOMAIN_COUNT,
+    "ips": $IP_COUNT,
+    "entries": $ENTRY_TOTAL,
+    "ipset_count": $IPSET_COUNT,
+    "ipset_members": "$IPSET_MEMBERS",
+    "active_profile": "$SB_PROFILE",
+        "active_chain": $(print_csv_json_array "$SB_CHAIN"),
+    "routing_mode": "$SB_ROUTING",
+    "singbox_mode": "$SB_MODE",
+    "route_targets": $SB_ROUTE_TARGETS
+  },
+  "zapret": {
+    "running": $ZP_RUNNING,
+    "pid": "${ZP_PID:-null}",
+    "port": "${ZP_PORT:-null}",
+    "enabled": $ZP_ENABLED,
+    "domains": $ZP_DOMAINS,
+    "ips": $ZP_IPS,
+    "ipset_count": $ZP_IPSET_COUNT,
+    "args": "$(echo "$ZP_ARGS" | json_escape)"
+  },
+  "system": {
+    "mptcp": "$MPTCP",
+    "uptime": "$UPTIME",
+    "memory": "$MEM_FREE",
+    "disk_free": "${DISK_FREE}KB"
+  }
+}
+EOF
+    ;;
+
+domains)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        echo "$POST_DATA" > "$SINGBOX_DOMAINS"
+        json_ok
+    else
+        if [ -f "$SINGBOX_DOMAINS" ]; then
+            CONTENT=$(cat "$SINGBOX_DOMAINS" | json_escape)
+            printf '{"domains":"%s"}' "$CONTENT"
+        else
+            echo '{"domains":""}'
+        fi
+    fi
+    ;;
+
+domains_save_restart)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        echo "$POST_DATA" > "$SINGBOX_DOMAINS"
+        $SINGBOX_INITD restart >/dev/null 2>&1
+        sleep 2
+        json_ok
+    else
+        json_err "POST required"
+    fi
+    ;;
+
+# ==================== PER-PROFILE ROUTING ====================
+# route-map.list: sectioned text "// === route:PROFILEID ===" + host/IP/CIDR.
+route_map)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        echo "$POST_DATA" > "$SINGBOX_ROUTEMAP"
+        SBMODE=$(get_singbox_mode)
+        ACHAIN=$(get_active_chain)
+        BUILD_ERR=$(build_config "$SBMODE" "$ACHAIN")
+        if [ $? -ne 0 ]; then
+            json_err "config build failed: $(printf '%s' "$BUILD_ERR" | json_escape)"
+            exit 0
+        fi
+        UPSTREAM_IPS=$(collect_upstream_ips)
+        write_settings "$ACHAIN" "$(get_routing_mode)" "$UPSTREAM_IPS" "$SBMODE"
+        $SINGBOX_INITD restart >/dev/null 2>&1
+        sleep 3
+        json_ok
+    else
+        if [ -f "$SINGBOX_ROUTEMAP" ]; then
+            CONTENT=$(cat "$SINGBOX_ROUTEMAP" | json_escape)
+            printf '{"routemap":"%s"}' "$CONTENT"
+        else
+            echo '{"routemap":""}'
+        fi
+    fi
+    ;;
+
+# ==================== VPN KEEP-ALIVE ====================
+keepalive_status)
+    if [ -f "$KEEPALIVE_STATE" ]; then
+        cat "$KEEPALIVE_STATE"
+    else
+        echo '{"ok":null,"last_checked":0,"last_ok":0,"last_fail":0,"server":"","port":0,"profile":""}'
+    fi
+    ;;
+
+keepalive_check)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$KEEPALIVE_BIN" ] && "$KEEPALIVE_BIN" >/dev/null 2>&1
+    if [ -f "$KEEPALIVE_STATE" ]; then
+        cat "$KEEPALIVE_STATE"
+    else
+        json_err "keepalive helper not installed"
+    fi
+    ;;
+
+# ==================== PANEL SELF-UPDATE ====================
+panel_update_status)
+    if [ -f "$UPDATE_STATE" ]; then
+        cat "$UPDATE_STATE"
+    else
+        echo '{"status":"unknown","message":"no state yet"}'
+    fi
+    ;;
+
+panel_update_check)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    OUT=$("$UPDATE_BIN" check 2>&1)
+    if [ -f "$UPDATE_STATE" ]; then
+        cat "$UPDATE_STATE"
+    else
+        printf '{"status":"error","message":"%s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"
+    fi
+    ;;
+
+panel_update_apply)
+    # Install the latest signed release straight from GitHub via opkg. The
+    # running CGI keeps its already-loaded copy, so this request still finishes.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    OUT=$("$UPDATE_BIN" apply 2>&1)
+    if [ $? -eq 0 ]; then
+        json_ok
+    else
+        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+    fi
+    ;;
+
+panel_update_sig)
+    # Step 1 of a local .ipk install: store the (small, text) usign signature.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    printf '%s' "$POST_DATA" > /tmp/detour-upload.ipk.sig
+    json_ok
+    ;;
+
+panel_update_local)
+    # Step 2: install the streamed .ipk (body already written to /tmp by the
+    # POST reader above). apply-local verifies the usign signature next to it.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    IPK=/tmp/detour-upload.ipk
+    SIG=/tmp/detour-upload.ipk.sig
+    if [ ! -s "$IPK" ]; then json_err "no .ipk uploaded"; exit 0; fi
+    if [ ! -s "$SIG" ]; then json_err "missing .ipk.sig — upload the signature first"; exit 0; fi
+    OUT=$("$UPDATE_BIN" apply-local "$IPK" 2>&1)
+    RC=$?
+    rm -f "$IPK" "$SIG"
+    if [ "$RC" -eq 0 ]; then
+        json_ok
+    else
+        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+    fi
+    ;;
+
+# ==================== BINARIES (detour-bins) UPDATE ====================
+# sing-box + tpws-zapret ship as a separate, independently-versioned package.
+bins_update_status)
+    if [ -f "$BINS_STATE" ]; then
+        cat "$BINS_STATE"
+    else
+        echo '{"status":"unknown","message":"no bins state yet"}'
+    fi
+    ;;
+
+bins_update_check)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    OUT=$("$UPDATE_BIN" bins-check 2>&1)
+    if [ -f "$BINS_STATE" ]; then
+        cat "$BINS_STATE"
+    else
+        printf '{"status":"error","message":"%s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"
+    fi
+    ;;
+
+bins_update_apply)
+    # Download + verify + install the latest binaries package from GitHub.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    OUT=$("$UPDATE_BIN" bins-apply 2>&1)
+    if [ $? -eq 0 ]; then
+        json_ok
+    else
+        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+    fi
+    ;;
+
+bins_update_sig)
+    # Step 1 of a local bins .ipk install: store the (small, text) signature.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    printf '%s' "$POST_DATA" > "$BINS_UPLOAD.sig"
+    json_ok
+    ;;
+
+bins_update_local)
+    # Step 2: install the streamed bins .ipk (body already written to disk by
+    # the POST reader). bins-apply-local verifies the usign signature beside it.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    if [ ! -s "$BINS_UPLOAD" ]; then json_err "no .ipk uploaded"; exit 0; fi
+    if [ ! -s "$BINS_UPLOAD.sig" ]; then json_err "missing .ipk.sig — upload the signature first"; exit 0; fi
+    OUT=$("$UPDATE_BIN" bins-apply-local "$BINS_UPLOAD" 2>&1)
+    RC=$?
+    rm -f "$BINS_UPLOAD" "$BINS_UPLOAD.sig"
+    if [ "$RC" -eq 0 ]; then
+        json_ok
+    else
+        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+    fi
+    ;;
+
+singbox_config)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        echo "$POST_DATA" > "$SINGBOX_CONFIG"
+        RESULT=$(/usr/bin/sing-box check -c "$SINGBOX_CONFIG" 2>&1)
+        if [ $? -eq 0 ]; then
+            json_ok
+        else
+            ERRMSG=$(echo "$RESULT" | json_escape)
+            json_err "$ERRMSG"
+        fi
+    else
+        cat "$SINGBOX_CONFIG"
+    fi
+    ;;
+
+singbox_start)  $SINGBOX_INITD start >/dev/null 2>&1; sleep 2; json_ok ;;
+singbox_stop)   $SINGBOX_INITD stop >/dev/null 2>&1; sleep 1; json_ok ;;
+singbox_restart) $SINGBOX_INITD restart >/dev/null 2>&1; sleep 3; json_ok ;;
+singbox_enable) $SINGBOX_INITD enable >/dev/null 2>&1; json_ok ;;
+singbox_disable) $SINGBOX_INITD disable >/dev/null 2>&1; json_ok ;;
+
+singbox_log)
+    if [ -f "$SINGBOX_LOG" ]; then
+        LOG=$(tail -100 "$SINGBOX_LOG" | json_escape)
+        printf '{"log":"%s"}' "$LOG"
+    else
+        echo '{"log":"(no log file)"}'
+    fi
+    ;;
+
+singbox_log_clear) > "$SINGBOX_LOG" 2>/dev/null; json_ok ;;
+
+# ==================== ZAPRET-TPWS ====================
+zapret_start)   $ZAPRET_INITD start >/dev/null 2>&1; sleep 2; json_ok ;;
+zapret_stop)    $ZAPRET_INITD stop >/dev/null 2>&1; sleep 1; json_ok ;;
+zapret_restart) $ZAPRET_INITD stop >/dev/null 2>&1; sleep 1; $ZAPRET_INITD start >/dev/null 2>&1; sleep 2; json_ok ;;
+zapret_enable)  $ZAPRET_INITD enable >/dev/null 2>&1; json_ok ;;
+zapret_disable) $ZAPRET_INITD disable >/dev/null 2>&1; json_ok ;;
+
+zapret_config)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        echo "$POST_DATA" > "$ZAPRET_CONF"
+        json_ok
+    else
+        ZP_ARGS=""
+        [ -f "$ZAPRET_CONF" ] && ZP_ARGS=$(head -1 "$ZAPRET_CONF")
+        printf '{"args":"%s"}' "$(echo "$ZP_ARGS" | json_escape)"
+    fi
+    ;;
+
+zapret_domains)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        mkdir -p /etc/zapret-tpws
+        echo "$POST_DATA" > "$ZAPRET_DOMAINS"
+        json_ok
+    else
+        if [ -f "$ZAPRET_DOMAINS" ]; then
+            CONTENT=$(cat "$ZAPRET_DOMAINS" | json_escape)
+            printf '{"domains":"%s"}' "$CONTENT"
+        else
+            echo '{"domains":""}'
+        fi
+    fi
+    ;;
+
+zapret_domains_save_restart)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        mkdir -p /etc/zapret-tpws
+        echo "$POST_DATA" > "$ZAPRET_DOMAINS"
+        $ZAPRET_INITD reload >/dev/null 2>&1
+        sleep 2
+        json_ok
+    else
+        json_err "POST required"
+    fi
+    ;;
+
+iptables)
+    NAT=$(iptables -t nat -L PREROUTING -v -n 2>/dev/null | json_escape)
+    NFT=$(nft list chain inet fw4 input_lan 2>/dev/null | json_escape)
+    printf '{"nat":"%s","nft":"%s"}' "$NAT" "$NFT"
+    ;;
+
+conntrack)
+    CT=$(cat /proc/net/nf_conntrack 2>/dev/null | grep '45.88.174' | head -10 | json_escape)
+    printf '{"conntrack":"%s"}' "$CT"
+    ;;
+
+killswitch_on)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    SB_PID=$(pgrep -f '/usr/bin/sing-box' 2>/dev/null | head -1)
+    if [ -z "$SB_PID" ]; then json_err "sing-box is not running"; exit 0; fi
+    UPSTREAM_IPS=$(get_upstream_ips)
+    iptables -t nat -N SINGBOX_KS 2>/dev/null
+    iptables -t nat -F SINGBOX_KS
+    iptables -t nat -A SINGBOX_KS -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A SINGBOX_KS -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A SINGBOX_KS -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A SINGBOX_KS -d 127.0.0.0/8 -j RETURN
+    if [ -n "$UPSTREAM_IPS" ]; then
+        OLD_IFS="$IFS"
+        IFS=','
+        set -- $UPSTREAM_IPS
+        IFS="$OLD_IFS"
+        for ip in "$@"; do
+            [ -n "$ip" ] && iptables -t nat -A SINGBOX_KS -d "$ip" -j RETURN
+        done
+    fi
+    iptables -t nat -A SINGBOX_KS -p tcp -j REDIRECT --to-ports 12345
+    iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_KS 2>/dev/null
+    iptables -t nat -I PREROUTING 1 -i br-lan -j SINGBOX_KS
+    json_ok
+    ;;
+
+killswitch_off)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_KS 2>/dev/null
+    iptables -t nat -F SINGBOX_KS 2>/dev/null
+    iptables -t nat -X SINGBOX_KS 2>/dev/null
+    json_ok
+    ;;
+
+# ==================== PROFILES ====================
+profiles_list)
+    printf '{"profiles":['
+    FIRST=1
+    for f in "$SINGBOX_PROFILES_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        PNAME=$(basename "$f" .json)
+        PTYPE=$(json_val "type" "$f")
+        PDESC=$(json_val "name" "$f")
+        PGROUP=$(json_val "group" "$f")
+        PRMODE=$(json_val "routing_mode" "$f")
+        if [ "$FIRST" = "1" ]; then FIRST=0; else printf ','; fi
+        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s"}' \
+            "$PNAME" "$PTYPE" \
+            "$(echo "$PDESC" | json_escape)" \
+            "$(echo "$PGROUP" | json_escape)" \
+            "$PRMODE"
+    done
+    printf '],"active":"%s","active_chain":' "$(get_active_profile)"
+    print_csv_json_array "$(get_active_chain)"
+    printf '}'
+    ;;
+
+profile_get)
+    PNAME=$(echo "$QUERY_STRING" | sed -n 's/.*name=\([^&]*\).*/\1/p')
+    PNAME=$(sanitize_name "$PNAME")
+    if [ -z "$PNAME" ]; then json_err "name required"; exit 0; fi
+    PFILE="$SINGBOX_PROFILES_DIR/$PNAME.json"
+    if [ ! -f "$PFILE" ]; then json_err "profile not found"; exit 0; fi
+    cat "$PFILE"
+    ;;
+
+profiles_export)
+    # Bulk-export every profile JSON, concatenated into one array.
+    # Each on-disk profile is already a valid JSON object, so concat with commas
+    # yields a valid array without needing jq.
+    printf '{"version":1,"exported_at":"%s","profiles":[' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    FIRST=1
+    for f in "$SINGBOX_PROFILES_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        if [ "$FIRST" = "1" ]; then FIRST=0; else printf ','; fi
+        cat "$f"
+    done
+    printf ']}'
+    ;;
+
+profile_save)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    # POST body is the full profile JSON {name, type, uri, outbound}
+    # Extract the "id" field for filename, or use sanitized "name"
+    P_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    [ -z "$P_ID" ] && P_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    P_ID=$(sanitize_name "$P_ID")
+    if [ -z "$P_ID" ]; then json_err "profile id/name required"; exit 0; fi
+    echo "$POST_DATA" > "$SINGBOX_PROFILES_DIR/$P_ID.json"
+    json_ok
+    ;;
+
+profile_delete)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    PNAME=$(echo "$QUERY_STRING" | sed -n 's/.*name=\([^&]*\).*/\1/p')
+    PNAME=$(sanitize_name "$PNAME")
+    if [ -z "$PNAME" ]; then json_err "name required"; exit 0; fi
+        ACTIVE_CHAIN=$(get_active_chain)
+        if csv_contains "$ACTIVE_CHAIN" "$PNAME"; then json_err "cannot delete active chain profile"; exit 0; fi
+    PFILE="$SINGBOX_PROFILES_DIR/$PNAME.json"
+    if [ ! -f "$PFILE" ]; then json_err "profile not found"; exit 0; fi
+    rm -f "$PFILE"
+    json_ok
+    ;;
+
+chain_activate)
+        if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+        CHAIN=$(normalize_profile_list "$POST_DATA")
+        if [ -z "$CHAIN" ]; then json_err "chain required"; exit 0; fi
+
+        SBMODE=$(get_singbox_mode)
+        BUILD_ERR=$(build_config "$SBMODE" "$CHAIN")
+        if [ $? -ne 0 ]; then
+                json_err "config build failed: $(printf '%s' "$BUILD_ERR" | json_escape)"
+                exit 0
+        fi
+
+        RMODE=$(resolve_routing_mode_for_chain "$CHAIN")
+        UPSTREAM_IPS=$(collect_upstream_ips)
+        write_settings "$CHAIN" "$RMODE" "$UPSTREAM_IPS" "$SBMODE"
+
+        $SINGBOX_INITD restart >/dev/null 2>&1
+        sleep 3
+        json_ok
+        ;;
+
+profile_activate)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    PNAME=$(echo "$QUERY_STRING" | sed -n 's/.*name=\([^&]*\).*/\1/p')
+    PNAME=$(sanitize_name "$PNAME")
+    if [ -z "$PNAME" ]; then json_err "name required"; exit 0; fi
+    PFILE="$SINGBOX_PROFILES_DIR/$PNAME.json"
+    if [ ! -f "$PFILE" ]; then json_err "profile not found"; exit 0; fi
+        SBMODE=$(get_singbox_mode)
+        BUILD_ERR=$(build_config "$SBMODE" "$PNAME")
+        if [ $? -ne 0 ]; then
+                json_err "config build failed: $(printf '%s' "$BUILD_ERR" | json_escape)"
+                exit 0
+        fi
+
+        RMODE=$(resolve_routing_mode_for_chain "$PNAME")
+        UPSTREAM_IPS=$(collect_upstream_ips)
+        write_settings "$PNAME" "$RMODE" "$UPSTREAM_IPS" "$SBMODE"
+
+        $SINGBOX_INITD restart >/dev/null 2>&1
+        sleep 3
+        json_ok
+    ;;
+
+# ==================== SETTINGS ====================
+settings)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        # POST body may set "routing_mode" (proxy-list|all-except) and/or
+        # "singbox_mode" (single|multi). Missing keys keep their current value.
+        NEW_RMODE=$(printf '%s' "$POST_DATA" | sed -n 's/.*"routing_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        NEW_SBMODE=$(printf '%s' "$POST_DATA" | sed -n 's/.*"singbox_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        [ -z "$NEW_RMODE" ] && NEW_RMODE=$(get_routing_mode)
+        [ -z "$NEW_SBMODE" ] && NEW_SBMODE=$(get_singbox_mode)
+        case "$NEW_RMODE" in
+            proxy-list|all-except) ;;
+            *) json_err "invalid routing_mode"; exit 0 ;;
+        esac
+        case "$NEW_SBMODE" in
+            single|multi) ;;
+            *) json_err "invalid singbox_mode"; exit 0 ;;
+        esac
+        ACHAIN=$(get_active_chain)
+        # Rebuild config(s) for the resolved instance mode (single<->multi
+        # generate different files). Validated before any restart.
+        BUILD_ERR=$(build_config "$NEW_SBMODE" "$ACHAIN")
+        if [ $? -ne 0 ]; then
+            json_err "config build failed: $(printf '%s' "$BUILD_ERR" | json_escape)"
+            exit 0
+        fi
+        UPSTREAM_IPS=$(collect_upstream_ips)
+        write_settings "$ACHAIN" "$NEW_RMODE" "$UPSTREAM_IPS" "$NEW_SBMODE"
+        $SINGBOX_INITD restart >/dev/null 2>&1
+        sleep 3
+        json_ok
+    else
+        if [ -f "$SINGBOX_SETTINGS" ]; then
+            cat "$SINGBOX_SETTINGS"
+        else
+            echo '{"active_profile":"default","active_chain":"default","routing_mode":"proxy-list","upstream_ips":"","singbox_mode":"single"}'
+        fi
+    fi
+    ;;
+
+# ==================== WHITELIST ====================
+whitelist)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        echo "$POST_DATA" > "$SINGBOX_WHITELIST"
+        json_ok
+    else
+        if [ -f "$SINGBOX_WHITELIST" ]; then
+            CONTENT=$(cat "$SINGBOX_WHITELIST" | json_escape)
+            printf '{"whitelist":"%s"}' "$CONTENT"
+        else
+            echo '{"whitelist":""}'
+        fi
+    fi
+    ;;
+
+whitelist_save_restart)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        echo "$POST_DATA" > "$SINGBOX_WHITELIST"
+        $SINGBOX_INITD restart >/dev/null 2>&1
+        sleep 2
+        json_ok
+    else
+        json_err "POST required"
+    fi
+    ;;
+
+subscription_fetch)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    # POST body: {"url":"https://...","user_agent":"..."}  (UA optional)
+    SUB_URL=$(printf '%s' "$POST_DATA" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    SUB_UA=$(printf '%s' "$POST_DATA" | sed -n 's/.*"user_agent"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    [ -z "$SUB_UA" ] && SUB_UA="sing-box/1.13.2"
+    if [ -z "$SUB_URL" ]; then json_err "url required"; exit 0; fi
+    case "$SUB_URL" in
+        http://*|https://*) ;;
+        *) json_err "url must start with http:// or https://"; exit 0 ;;
+    esac
+    SUB_TMP=$(mktemp -d 2>/dev/null || echo "/tmp/sub_fetch.$$")
+    mkdir -p "$SUB_TMP"
+    # curl has -D (dump headers) and -A (UA); BusyBox wget on OpenWrt lacks both.
+    if ! curl -sS -L -D "$SUB_TMP/hdrs" -o "$SUB_TMP/body" \
+            --max-time 20 \
+            -A "$SUB_UA" \
+            -H "Accept: */*" \
+            "$SUB_URL" 2>"$SUB_TMP/err"; then
+        SUB_ERR=$(head -3 "$SUB_TMP/err" 2>/dev/null | json_escape)
+        rm -rf "$SUB_TMP"
+        json_err "fetch failed: $SUB_ERR"
+        exit 0
+    fi
+    # Parse selected response headers (case-insensitive, last value across redirects wins).
+    SUB_HDR_TITLE=$(grep -i '^profile-title:' "$SUB_TMP/hdrs" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tail -1)
+    SUB_HDR_INTERVAL=$(grep -i '^profile-update-interval:' "$SUB_TMP/hdrs" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tail -1)
+    SUB_HDR_USERINFO=$(grep -i '^subscription-userinfo:' "$SUB_TMP/hdrs" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tail -1)
+    SUB_HDR_SUPPORT=$(grep -i '^support-url:' "$SUB_TMP/hdrs" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tail -1)
+    SUB_HDR_CTYPE=$(grep -i '^content-type:' "$SUB_TMP/hdrs" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tail -1)
+    SUB_BODY_ESC=$(json_escape < "$SUB_TMP/body")
+    rm -rf "$SUB_TMP"
+    printf '{"ok":true,"body":"%s","headers":{"profile-title":"%s","profile-update-interval":"%s","subscription-userinfo":"%s","support-url":"%s","content-type":"%s"}}' \
+        "$SUB_BODY_ESC" \
+        "$(printf '%s' "$SUB_HDR_TITLE" | json_escape)" \
+        "$(printf '%s' "$SUB_HDR_INTERVAL" | json_escape)" \
+        "$(printf '%s' "$SUB_HDR_USERINFO" | json_escape)" \
+        "$(printf '%s' "$SUB_HDR_SUPPORT" | json_escape)" \
+        "$(printf '%s' "$SUB_HDR_CTYPE" | json_escape)"
+    ;;
+
+subscription_save)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    mkdir -p /etc/detour
+    # Validate URL exists and looks remote
+    SUB_URL=$(printf '%s' "$POST_DATA" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    if [ -z "$SUB_URL" ]; then json_err "url required"; exit 0; fi
+    case "$SUB_URL" in
+        http://*|https://*) ;;
+        *) json_err "url must start with http:// or https://"; exit 0 ;;
+    esac
+    # Persist as-is — client controls schema.
+    printf '%s' "$POST_DATA" > /etc/detour/subscription.json
+    chmod 600 /etc/detour/subscription.json
+    json_ok
+    ;;
+
+subscription_get)
+    if [ -f /etc/detour/subscription.json ]; then
+        cat /etc/detour/subscription.json
+    else
+        echo '{}'
+    fi
+    ;;
+
+subscription_refresh)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    if [ ! -x /usr/sbin/subscription-refresh ]; then
+        json_err "subscription-refresh helper missing"
+        exit 0
+    fi
+    if /usr/sbin/subscription-refresh 2>/dev/null; then
+        json_ok
+    else
+        json_err "refresh failed"
+    fi
+    ;;
+
+# ===== Multi-subscription management (v2) =====
+# Stored as one JSON object per file under /etc/detour/subscriptions/<id>.json
+# Schema: {id, group, url, user_agent, user_agent_preset, interval_hours, autoupdate,
+#          apply_routing, title, last_refresh, last_status, last_saved, last_removed}
+
+subscriptions_list)
+    SUBS_DIR="/etc/detour/subscriptions"
+    mkdir -p "$SUBS_DIR" 2>/dev/null
+    printf '{"ok":true,"subscriptions":['
+    first=1
+    for f in "$SUBS_DIR"/*.json; do
+        [ -e "$f" ] || continue
+        if [ "$first" = "1" ]; then first=0; else printf ','; fi
+        cat "$f"
+    done
+    printf ']}'
+    ;;
+
+subscription_save_one)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    SUBS_DIR="/etc/detour/subscriptions"
+    mkdir -p "$SUBS_DIR"
+    SUB_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    SUB_URL=$(printf '%s' "$POST_DATA" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    if [ -z "$SUB_ID" ]; then json_err "id required"; exit 0; fi
+    case "$SUB_ID" in
+        *[!a-zA-Z0-9._-]*) json_err "id: only a-z A-Z 0-9 ._- allowed"; exit 0 ;;
+    esac
+    if [ -z "$SUB_URL" ]; then json_err "url required"; exit 0; fi
+    case "$SUB_URL" in
+        http://*|https://*) ;;
+        *) json_err "url must start with http:// or https://"; exit 0 ;;
+    esac
+    printf '%s' "$POST_DATA" > "$SUBS_DIR/$SUB_ID.json.tmp"
+    chmod 600 "$SUBS_DIR/$SUB_ID.json.tmp"
+    mv "$SUBS_DIR/$SUB_ID.json.tmp" "$SUBS_DIR/$SUB_ID.json"
+    json_ok
+    ;;
+
+subscription_delete_one)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    SUBS_DIR="/etc/detour/subscriptions"
+    SUB_ID=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]id=\([^&]*\).*/\1/p' | head -1)
+    if [ -z "$SUB_ID" ]; then json_err "id required"; exit 0; fi
+    case "$SUB_ID" in
+        *[!a-zA-Z0-9._-]*) json_err "id invalid"; exit 0 ;;
+    esac
+    rm -f "$SUBS_DIR/$SUB_ID.json"
+    json_ok
+    ;;
+
+subscription_refresh_one)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    SUB_ID=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]id=\([^&]*\).*/\1/p' | head -1)
+    if [ -z "$SUB_ID" ]; then json_err "id required"; exit 0; fi
+    case "$SUB_ID" in
+        *[!a-zA-Z0-9._-]*) json_err "id invalid"; exit 0 ;;
+    esac
+    if [ ! -x /usr/sbin/subscription-refresh ]; then
+        json_err "subscription-refresh helper missing"; exit 0
+    fi
+    OUT=$(/usr/sbin/subscription-refresh --id="$SUB_ID" --force 2>&1)
+    EC=$?
+    OUT_ESC=$(printf '%s' "$OUT" | json_escape)
+    if [ $EC -eq 0 ]; then
+        printf '{"ok":true,"output":"%s"}' "$OUT_ESC"
+    else
+        printf '{"ok":false,"error":"refresh failed (exit %d)","output":"%s"}' "$EC" "$OUT_ESC"
+    fi
+    ;;
+
+subscription_refresh_all)
+    # Iterate over every saved subscription and run a forced refresh.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    if [ ! -x /usr/sbin/subscription-refresh ]; then
+        json_err "subscription-refresh helper missing"; exit 0
+    fi
+    OUT=$(/usr/sbin/subscription-refresh --all --force 2>&1)
+    EC=$?
+    OUT_ESC=$(printf '%s' "$OUT" | json_escape)
+    if [ $EC -eq 0 ]; then
+        printf '{"ok":true,"output":"%s"}' "$OUT_ESC"
+    else
+        printf '{"ok":false,"error":"refresh failed (exit %d)","output":"%s"}' "$EC" "$OUT_ESC"
+    fi
+    ;;
+
+panel_export_config)
+    # Bundle global panel state into one JSON envelope so the operator can
+    # back it up before reflashing or migrate to a new router. VPN profiles
+    # are NOT included here — they have their own profiles_export action.
+    # Sensitive credentials (panel auth, GH token) are also excluded.
+    NOW=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+    PA_VER=$(cat /etc/detour/version 2>/dev/null)
+    printf '{"version":1,"exported_at":"%s","router_version":"%s","settings":' \
+        "$NOW" "$(printf '%s' "$PA_VER" | json_escape)"
+    if [ -f /etc/sing-box/settings.json ]; then cat /etc/sing-box/settings.json
+    else printf '{}'; fi
+    printf ',"subscription":'
+    if [ -f /etc/detour/subscription.json ]; then cat /etc/detour/subscription.json
+    else printf '{}'; fi
+    printf ',"proxy_domains":"'
+    [ -f /etc/sing-box/proxy-domains.list ] && cat /etc/sing-box/proxy-domains.list | json_escape
+    printf '","whitelist_domains":"'
+    [ -f /etc/sing-box/whitelist-domains.list ] && cat /etc/sing-box/whitelist-domains.list | json_escape
+    printf '","zapret_conf":"'
+    [ -f /etc/zapret-tpws.conf ] && cat /etc/zapret-tpws.conf | json_escape
+    printf '","zapret_domains":"'
+    [ -f /etc/zapret-tpws/domains.list ] && cat /etc/zapret-tpws/domains.list | json_escape
+    printf '"}'
+    ;;
+
+panel_import_config)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    # Use Lua + cjson to safely parse and write each section. Plain sed can't
+    # handle nested JSON or multi-MB domain lists reliably.
+    IMPORT_TMP=$(mktemp)
+    printf '%s' "$POST_DATA" > "$IMPORT_TMP"
+    if ! lua - "$IMPORT_TMP" <<'LUA'
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); if not f then os.exit(1) end
+local raw = f:read("*a"); f:close()
+local doc = cjson.decode(raw)
+if not doc or type(doc) ~= "table" then os.exit(2) end
+
+-- Hard rejection list. These keys ARE NOT processed by this endpoint and
+-- MUST NEVER be — they would let a forged config file overwrite panel auth
+-- or the GitHub token. Use panel_change_password / deploy_router.py instead.
+local FORBIDDEN = {
+    auth=true, password=true, passwd=true, panel_user=true, panel_password=true,
+    update_conf=true, gh_token=true, gh_owner=true, gh_repo=true,
+}
+for k in pairs(doc) do
+    if FORBIDDEN[k] then
+        io.stderr:write("FORBIDDEN_KEY:" .. k .. "\n")
+        os.exit(3)
+    end
+end
+
+local function atomic_write(path, body, mode)
+    if body == nil then return end
+    local tmp = path .. ".import.tmp"
+    local w = io.open(tmp, "w"); if not w then return end
+    w:write(body); w:close()
+    if mode then os.execute("chmod " .. mode .. " " .. tmp) end
+    os.rename(tmp, path)
+end
+
+if type(doc.settings) == "table" then
+    atomic_write("/etc/sing-box/settings.json", cjson.encode(doc.settings), "0644")
+end
+if type(doc.subscription) == "table" and next(doc.subscription) then
+    os.execute("mkdir -p /etc/detour")
+    atomic_write("/etc/detour/subscription.json", cjson.encode(doc.subscription), "0600")
+end
+if type(doc.proxy_domains) == "string" and #doc.proxy_domains > 0 then
+    atomic_write("/etc/sing-box/proxy-domains.list", doc.proxy_domains, "0644")
+end
+if type(doc.whitelist_domains) == "string" and #doc.whitelist_domains > 0 then
+    atomic_write("/etc/sing-box/whitelist-domains.list", doc.whitelist_domains, "0644")
+end
+if type(doc.zapret_conf) == "string" and #doc.zapret_conf > 0 then
+    atomic_write("/etc/zapret-tpws.conf", doc.zapret_conf, "0644")
+end
+if type(doc.zapret_domains) == "string" and #doc.zapret_domains > 0 then
+    os.execute("mkdir -p /etc/zapret-tpws")
+    atomic_write("/etc/zapret-tpws/domains.list", doc.zapret_domains, "0644")
+end
+os.exit(0)
+LUA
+    then
+        # Lua exit codes:  3 = forbidden key seen, 2 = invalid JSON, 1 = io error.
+        IMPORT_EC=$?
+        IMPORT_BAD_KEY=$(lua - "$IMPORT_TMP" 2>&1 >/dev/null <<'LUA' || true
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); if not f then os.exit() end
+local doc = cjson.decode(f:read("*a")) or {}
+local FORBIDDEN = {
+    auth=true, password=true, passwd=true, panel_user=true, panel_password=true,
+    update_conf=true, gh_token=true, gh_owner=true, gh_repo=true,
+}
+if type(doc) == "table" then
+    for k in pairs(doc) do if FORBIDDEN[k] then io.stderr:write(k); break end end
+end
+LUA
+)
+        rm -f "$IMPORT_TMP"
+        if [ -n "$IMPORT_BAD_KEY" ]; then
+            json_err "forbidden key in config: $IMPORT_BAD_KEY (panel auth / GH token cannot be set via this endpoint — use the Change-password modal or deploy_router.py)"
+        elif [ "$IMPORT_EC" = "2" ]; then
+            json_err "config is not a valid JSON object"
+        else
+            json_err "config import failed (exit $IMPORT_EC)"
+        fi
+        exit 0
+    fi
+    rm -f "$IMPORT_TMP"
+    # Restart services so the new domain lists + settings take effect.
+    $SINGBOX_INITD restart >/dev/null 2>&1 &
+    json_ok
+    ;;
+
+panel_change_password)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    # Body: {"old_password":"...","new_password":"...","new_user":"..."}
+    # new_user is optional — when present, renames the panel account.
+    OLD_PW=$(printf '%s' "$POST_DATA" | sed -n 's/.*"old_password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    NEW_PW=$(printf '%s' "$POST_DATA" | sed -n 's/.*"new_password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    NEW_USER=$(printf '%s' "$POST_DATA" | sed -n 's/.*"new_user"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    if [ -z "$NEW_PW" ]; then json_err "new_password required"; exit 0; fi
+    if [ "${#NEW_PW}" -lt 8 ]; then json_err "password must be at least 8 chars"; exit 0; fi
+    # Identify current user from the active session cookie.
+    SESSION_USER=""
+    TOKEN=$(get_session_token)
+    [ -n "$TOKEN" ] && [ -f "$SESSION_DIR/$TOKEN" ] && SESSION_USER=$(cat "$SESSION_DIR/$TOKEN")
+    if [ -z "$SESSION_USER" ]; then json_err "no active session"; exit 0; fi
+    if ! verify_password "$SESSION_USER" "$OLD_PW"; then
+        sleep 1
+        json_err "old password is incorrect"
+        exit 0
+    fi
+    # Validate optional new username (same rules as first-install setup).
+    EFFECTIVE_USER="$SESSION_USER"
+    if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "$SESSION_USER" ]; then
+        case "$NEW_USER" in
+            *[!a-zA-Z0-9._-]*) json_err "username: only a-z, A-Z, 0-9, ._- allowed"; exit 0 ;;
+        esac
+        if [ "${#NEW_USER}" -lt 2 ] || [ "${#NEW_USER}" -gt 32 ]; then
+            json_err "username must be 2..32 chars"; exit 0
+        fi
+        EFFECTIVE_USER="$NEW_USER"
+    fi
+    NEW_HASH=$(printf '%s' "$NEW_PW" | openssl passwd -6 -stdin 2>/dev/null)
+    if [ -z "$NEW_HASH" ]; then json_err "openssl hash failed"; exit 0; fi
+    # Atomic replacement to avoid windowed half-write on the auth file.
+    TMP_AUTH=$(mktemp)
+    printf '%s:%s\n' "$EFFECTIVE_USER" "$NEW_HASH" > "$TMP_AUTH"
+    chmod 0600 "$TMP_AUTH"
+    mv "$TMP_AUTH" "$AUTH_FILE"
+    # If username changed, drop ALL sessions (including current) — operator
+    # must log in with the new credentials. Otherwise just invalidate peers.
+    if [ "$EFFECTIVE_USER" != "$SESSION_USER" ]; then
+        rm -f "$SESSION_DIR"/* 2>/dev/null
+        printf '{"ok":true,"user_changed":true}'
+    else
+        for sess in "$SESSION_DIR"/*; do
+            [ "$sess" = "$SESSION_DIR/$TOKEN" ] && continue
+            rm -f "$sess" 2>/dev/null
+        done
+        json_ok
+    fi
+    ;;
+
+*) json_err "unknown action: $ACTION" ;;
+
+esac

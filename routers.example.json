@@ -1,0 +1,42 @@
+{
+  "_comment": "Copy this file to routers.local.json (gitignored) and fill in real credentials.",
+  "default": "home",
+  "github": {
+    "owner": "varyen",
+    "repo": "detour",
+    "_comment_token": "PAT with 'Contents: Read-only' — deployed to /etc/detour/update.conf on every router for auto-update checks",
+    "token": "CHANGE_ME_GH_PAT_read_only",
+    "_comment_publish_token": "PAT with 'Contents: Read and write' — only used by build_release.py --publish on the dev machine, never deployed",
+    "publish_token": "CHANGE_ME_GH_PAT_with_write_access"
+  },
+  "routers": {
+    "home": {
+      "host": "192.168.8.1",
+      "port": 22,
+      "user": "root",
+      "password": "CHANGE_ME_SSH_PASSWORD",
+      "label": "GL-BE9300 (OpenWrt 23.05, fw4/nftables)",
+      "lan_iface": "br-lan",
+      "wan_iface": "eth0",
+      "has_nft": true,
+      "public_domain": "router.example.com",
+      "panel_user": "admin",
+      "panel_password": "CHANGE_ME_PANEL_PASSWORD",
+      "lan_proxy_api_token": "CHANGE_ME_LAN_PROXY_API_TOKEN",
+      "ollama_auth_token": "CHANGE_ME_OLLAMA_AUTH_TOKEN"
+    },
+    "router2": {
+      "host": "192.168.9.1",
+      "port": 22,
+      "user": "root",
+      "password": "CHANGE_ME_SSH_PASSWORD",
+      "label": "GL-MT6000 (OpenWrt 21.02, fw3/iptables only)",
+      "lan_iface": "br-lan",
+      "wan_iface": "eth1",
+      "has_nft": false,
+      "public_domain": null,
+      "panel_user": "router2",
+      "panel_password": "CHANGE_ME_PANEL_PASSWORD"
+    }
+  }
+}
