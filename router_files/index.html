@@ -159,7 +159,7 @@
         width: 30px;
         height: 30px;
         border-radius: 8px;
-        background: linear-gradient(135deg, #4f8ff7 0%, #6ed4ff 100%);
+        background: transparent;
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -1030,7 +1030,18 @@
       <div class="header">
         <div class="brand">
           <span class="brand-mark">
-            <svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            <svg width="30" height="30" viewBox="0 0 32 32" role="img" aria-label="Detour">
+              <defs>
+                <linearGradient id="detour-logo-g" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#1f6feb"/>
+                  <stop offset="1" stop-color="#2ea043"/>
+                </linearGradient>
+              </defs>
+              <rect width="32" height="32" rx="7" fill="url(#detour-logo-g)"/>
+              <path d="M4.5 21 H10 C14 21 14 9 16.5 9 C19 9 19 21 23 21 H25" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M22 17.8 L26.2 21 L22 24.2" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="16.5" cy="21" r="2.7" fill="#f85149" stroke="#0f1419" stroke-width="1"/>
+            </svg>
           </span>
           <span>Detour</span>
           <span id="panel-version" title="Версия панели — нажмите, чтобы обновить" style="font-size:11px;font-weight:600;color:var(--text-muted);border:1px solid var(--border);padding:1px 7px;border-radius:10px;margin-left:8px;cursor:pointer;" onclick="showUpdateModal()"></span>
@@ -1154,10 +1165,11 @@
           </div>
 
           <div class="editor-section">
-            <h4 style="margin:0 0 8px">Из файла (.ipk + .ipk.sig)</h4>
+            <h4 style="margin:0 0 8px">Из файла (.ipk)</h4>
             <p class="helper-text-block">
-              Загрузите оба файла релиза — пакет <code>.ipk</code> и его подпись
-              <code>.ipk.sig</code>. Без подписи установка отклоняется.
+              Загрузите пакет <code>.ipk</code>. Подпись <code>.ipk.sig</code>
+              <strong>опциональна</strong>: если приложить — пакет проверяется и
+              ставится с бэкапом; без неё — ставится напрямую через opkg, без проверки.
             </p>
             <div class="form-grid">
               <div class="full">
@@ -1165,7 +1177,7 @@
                 <input type="file" id="upd-ipk-file" accept=".ipk" />
               </div>
               <div class="full">
-                <label>Подпись .ipk.sig</label>
+                <label>Подпись .ipk.sig (опционально)</label>
                 <input type="file" id="upd-sig-file" accept=".sig" />
               </div>
             </div>
@@ -1196,6 +1208,18 @@
             usign-подписи перед установкой.
           </p>
 
+          <div class="editor-section" id="bins-opkg-section" style="display:none;margin-bottom:14px">
+            <h4 style="margin:0 0 8px">Из пакетов OPKG (Entware)</h4>
+            <p class="helper-text-block">
+              sing-box установлен из фида Entware (<code>sing-box-go</code>).
+              Обновить до последней версии из репозитория по запросу.
+            </p>
+            <div class="flex-gap">
+              <button class="btn primary" id="bins-opkg-btn" onclick="singboxOpkgUpgrade()">⬇ Обновить sing-box из OPKG</button>
+            </div>
+            <div id="bins-opkg-status" style="font-size:12px;color:var(--text-dim);margin-top:8px;min-height:16px"></div>
+          </div>
+
           <div class="editor-section" style="margin-bottom: 14px">
             <h4 style="margin:0 0 8px">С GitHub</h4>
             <div class="flex-gap">
@@ -1206,10 +1230,11 @@
           </div>
 
           <div class="editor-section">
-            <h4 style="margin:0 0 8px">Из файла (detour-bins .ipk + .ipk.sig)</h4>
+            <h4 style="margin:0 0 8px">Из файла (detour-bins .ipk)</h4>
             <p class="helper-text-block">
-              Загрузите пакет бинарников <code>detour-bins_*.ipk</code> и его
-              подпись <code>.ipk.sig</code>. Без подписи установка отклоняется.
+              Загрузите пакет бинарников <code>detour-bins_*.ipk</code>. Подпись
+              <code>.ipk.sig</code> <strong>опциональна</strong>: с ней — проверка
+              + бэкап, без неё — установка напрямую через opkg, без проверки.
             </p>
             <div class="form-grid">
               <div class="full">
@@ -1217,7 +1242,7 @@
                 <input type="file" id="bins-ipk-file" accept=".ipk" />
               </div>
               <div class="full">
-                <label>Подпись .ipk.sig</label>
+                <label>Подпись .ipk.sig (опционально)</label>
                 <input type="file" id="bins-sig-file" accept=".sig" />
               </div>
             </div>
@@ -1290,13 +1315,12 @@
                 <input type="checkbox" id="sb-killswitch" onchange="toggleKillswitch(this.checked)" />
                 <span class="ks-slider"></span>
               </label>
-              <span class="ks-label">Kill Switch</span>
-              <span class="ks-hint">весь TCP через VPN</span>
+              <span class="ks-label">Все через VPN</span>
+              <span class="ks-hint">форсировать весь TCP в туннель</span>
             </div>
 
             <div class="card-actions">
-              <button class="btn primary" onclick="sbAction('singbox_start')">▶ Старт</button>
-              <button class="btn danger" onclick="sbAction('singbox_stop')">⏹ Стоп</button>
+              <button class="btn primary" id="sb-toggle-btn" onclick="sbAction('singbox_start')">▶ Старт</button>
               <button class="btn" onclick="sbAction('singbox_restart')">↻ Рестарт</button>
               <button class="btn" onclick="sbAction('singbox_enable')" id="sb-enable-btn">Автозапуск ✓</button>
             </div>
@@ -1323,8 +1347,7 @@
               <span class="label">Аргументы</span><span class="value" id="zp-args-short">—</span>
             </div>
             <div class="card-actions">
-              <button class="btn primary" onclick="zpAction('zapret_start')">▶ Старт</button>
-              <button class="btn danger" onclick="zpAction('zapret_stop')">⏹ Стоп</button>
+              <button class="btn primary" id="zp-toggle-btn" onclick="zpAction('zapret_start')">▶ Старт</button>
               <button class="btn" onclick="zpAction('zapret_restart')">↻ Рестарт</button>
               <button class="btn" onclick="zpAction('zapret_enable')" id="zp-enable-btn">Автозапуск ✓</button>
             </div>
@@ -2563,6 +2586,7 @@
       async function loadStatus() {
         try {
           var d = await api("status");
+          currentPlatform = d.platform || "openwrt";
 
           var sbDot = document.getElementById("sb-dot");
           sbDot.className =
@@ -2628,6 +2652,19 @@
             };
           }
 
+          var sbToggle = document.getElementById("sb-toggle-btn");
+          if (sbToggle) {
+            if (d.singbox.running) {
+              sbToggle.textContent = "⏹ Стоп";
+              sbToggle.className = "btn danger";
+              sbToggle.onclick = function () { sbAction("singbox_stop"); };
+            } else {
+              sbToggle.textContent = "▶ Старт";
+              sbToggle.className = "btn primary";
+              sbToggle.onclick = function () { sbAction("singbox_start"); };
+            }
+          }
+
           if (d.zapret) {
             var zpDot = document.getElementById("zp-dot");
             zpDot.className =
@@ -2661,6 +2698,19 @@
               zpEnBtn.onclick = function () {
                 zpAction("zapret_enable");
               };
+            }
+
+            var zpToggle = document.getElementById("zp-toggle-btn");
+            if (zpToggle) {
+              if (d.zapret.running) {
+                zpToggle.textContent = "⏹ Стоп";
+                zpToggle.className = "btn danger";
+                zpToggle.onclick = function () { zpAction("zapret_stop"); };
+              } else {
+                zpToggle.textContent = "▶ Старт";
+                zpToggle.className = "btn primary";
+                zpToggle.onclick = function () { zpAction("zapret_start"); };
+              }
             }
           }
 
@@ -5440,15 +5490,17 @@
         var ipkInput = document.getElementById("upd-ipk-file");
         var sigInput = document.getElementById("upd-sig-file");
         var el = document.getElementById("upd-local-status");
-        if (!ipkInput.files.length || !sigInput.files.length) {
-          el.textContent = "Выберите и .ipk, и .ipk.sig";
+        if (!ipkInput.files.length) {
+          el.textContent = "Выберите .ipk";
           return;
         }
         var btn = document.getElementById("upd-local-btn");
         btn.disabled = true;
-        el.textContent = "Загрузка подписи…";
         try {
-          var sigText = await sigInput.files[0].text();
+          // Signature is optional: upload it if given, else send empty to clear
+          // any stale signature so the backend installs unsigned (via opkg).
+          var sigText = sigInput.files.length ? await sigInput.files[0].text() : "";
+          el.textContent = sigText ? "Загрузка подписи…" : "Без подписи (opkg)…";
           var s = await api("panel_update_sig", "POST", sigText);
           if (!s.ok) {
             el.textContent = "Ошибка подписи: " + s.error;
@@ -5481,6 +5533,7 @@
 
       // ===== BINARIES (sing-box + tpws-zapret) UPDATE =====
       var lastBinaries = null;
+      var currentPlatform = "openwrt"; // "keenetic" → sing-box comes from opkg
       function renderBinariesChip(b) {
         lastBinaries = b || null;
         var el = document.getElementById("bins-version");
@@ -5510,6 +5563,42 @@
           "v" + (b.bins_version || "?");
         document.getElementById("bins-github-status").textContent = "";
         document.getElementById("bins-local-status").textContent = "";
+        var opkgSec = document.getElementById("bins-opkg-section");
+        if (opkgSec)
+          opkgSec.style.display =
+            currentPlatform === "keenetic" ? "block" : "none";
+        var os = document.getElementById("bins-opkg-status");
+        if (os) os.textContent = "";
+      }
+      async function singboxOpkgUpgrade() {
+        if (
+          !confirm(
+            "Обновить sing-box из OPKG?\n\nopkg update + upgrade sing-box-go, затем перезапуск sing-box (кратковременный обрыв).",
+          )
+        )
+          return;
+        var el = document.getElementById("bins-opkg-status");
+        var btn = document.getElementById("bins-opkg-btn");
+        btn.disabled = true;
+        el.textContent = "opkg update + upgrade… (может занять минуту)";
+        try {
+          var d = await api("singbox_opkg_upgrade", "POST", "");
+          if (d.ok) {
+            el.textContent = (d.output || "Готово.")
+              .split("\n")
+              .filter(Boolean)
+              .slice(-3)
+              .join(" · ");
+            toast("sing-box обновлён из OPKG", "success");
+            loadStatus();
+          } else {
+            el.textContent = "Ошибка: " + (d.error || "");
+          }
+        } catch (e) {
+          el.textContent = "Ошибка: " + e.message;
+        } finally {
+          btn.disabled = false;
+        }
       }
       function closeBinsModal() {
         document.getElementById("bins-modal").style.display = "none";
@@ -5559,15 +5648,16 @@
         var ipkInput = document.getElementById("bins-ipk-file");
         var sigInput = document.getElementById("bins-sig-file");
         var el = document.getElementById("bins-local-status");
-        if (!ipkInput.files.length || !sigInput.files.length) {
-          el.textContent = "Выберите и .ipk, и .ipk.sig";
+        if (!ipkInput.files.length) {
+          el.textContent = "Выберите .ipk";
           return;
         }
         var btn = document.getElementById("bins-local-btn");
         btn.disabled = true;
-        el.textContent = "Загрузка подписи…";
         try {
-          var sigText = await sigInput.files[0].text();
+          // Signature optional: send it if given, else empty to clear any stale one.
+          var sigText = sigInput.files.length ? await sigInput.files[0].text() : "";
+          el.textContent = sigText ? "Загрузка подписи…" : "Без подписи (opkg)…";
           var s = await api("bins_update_sig", "POST", sigText);
           if (!s.ok) {
             el.textContent = "Ошибка подписи: " + s.error;

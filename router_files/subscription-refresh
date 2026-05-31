@@ -24,12 +24,21 @@
 --
 -- Exit codes: 0 ok (something processed), 1 fetch/parse error, 2 nothing to do.
 
+-- Entware/Keenetic: the whole stack lives under /opt, and the C lua-cjson pkg is
+-- unavailable there — a bundled pure-Lua cjson.safe ships in /opt/share/lua/5.1/.
+-- Detect via the platform marker; OPT="" on OpenWrt keeps the original /etc paths.
+local OPT = ""
+do local f = io.open("/opt/etc/detour/platform"); if f then f:close(); OPT = "/opt" end end
+if OPT ~= "" then
+    package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
+end
+
 local cjson      = require("cjson.safe")
-local SUBS_DIR   = "/etc/detour/subscriptions"
-local LEGACY_CFG = "/etc/detour/subscription.json"
-local PROFILES   = "/etc/sing-box/profiles"
-local WHITELIST  = "/etc/sing-box/whitelist-domains.list"
-local STATE_DIR  = "/var/state"
+local SUBS_DIR   = OPT .. "/etc/detour/subscriptions"
+local LEGACY_CFG = OPT .. "/etc/detour/subscription.json"
+local PROFILES   = OPT .. "/etc/sing-box/profiles"
+local WHITELIST  = OPT .. "/etc/sing-box/whitelist-domains.list"
+local STATE_DIR  = OPT .. "/var/state"
 local STATE_FILE = STATE_DIR .. "/subscription-refresh.json"
 
 -- ===== CLI argument parsing =====

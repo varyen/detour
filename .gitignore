@@ -17,6 +17,10 @@ routers.json
 # secrets, repopulated locally by update_backups.py. Never commit.
 router-backup/
 
+# Fetched mipsel binaries for the Keenetic port (sing-box ~76 MB) — re-fetch
+# with keenetic/fetch-bins.py; never commit the blobs.
+keenetic/bins/
+
 # Release signing
 keys/release.key
 keys/*.key
