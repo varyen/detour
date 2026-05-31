@@ -5,6 +5,24 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.2.1] — 2026-06-01
+
+### Исправлено
+
+- **Релизный пакет панели теперь содержит актуальный UI.** `build_release.py`
+  собирал `index.html` и `detour-api` из устаревшего снапшота `router-backup/`,
+  а не из `router_files/`, поэтому панель 1.2.0 ставилась со старым интерфейсом
+  (без единой кнопки Старт/Стоп, логотипа и т.д.). Теперь сборка читает единый
+  источник `router_files/`.
+
+### Изменено
+
+- **Единый релиз для всех платформ.** `build_release.py --version X --publish`
+  собирает, подписывает (usign) и публикует **оба** пакета в один GitHub-релиз:
+  `detour_*.ipk` (OpenWrt/GL.iNet/Flint) и `detour-keenetic_*.ipk`
+  (Keenetic/Entware). Один источник `router_files/` — UI правится один раз.
+  `keenetic/build-ipk.py` тоже подписывает свой `.ipk`.
+
 ## [1.2.0] — 2026-06-01
 
 ### Порт на Keenetic / Entware (KeeneticOS, mipsel)
@@ -88,6 +106,7 @@
   (`net.mptcp.enabled=0`), открытие портов через nftables `fw4`, hotplug-guard
   для восстановления правил после смены интерфейсов.
 
+[1.2.1]: https://github.com/varyen/detour/releases/tag/v1.2.1
 [1.2.0]: https://github.com/varyen/detour/releases/tag/v1.2.0
 [1.1.0]: https://github.com/varyen/detour/releases/tag/v1.1.0
 [1.0.0]: https://github.com/varyen/detour/releases/tag/v1.0.0
