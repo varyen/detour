@@ -185,6 +185,19 @@ def main():
         add_bytes(tar, "./data.tar.gz", data_tgz, 0o644)
     print(f"built {ipk_path}")
     print(f"  on-disk {os.path.getsize(ipk_path):,} B | installed {installed:,} B | arch {ARCH} | v{version}")
+
+    # usign-sign the .ipk (same detached-signature scheme as the panel build), so
+    # operators can verify it before install. The panel makes the sig optional, but
+    # we still ship one for the release.
+    key_sec = os.path.join(ROOT, "keys", "release.usign.sec")
+    if os.path.isfile(key_sec):
+        sys.path.insert(0, ROOT)
+        from usign_compat import sign_file
+        sign_file(ipk_path, key_sec, ipk_path + ".sig")
+        print(f"  signed: {os.path.basename(ipk_path)}.sig")
+    else:
+        print(f"  (UNSIGNED — usign secret key not found at {key_sec})")
+
     print("  install: opkg update && opkg install ./" + os.path.basename(ipk_path))
 
 
