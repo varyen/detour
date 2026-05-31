@@ -16,6 +16,7 @@
       "user": "root",
       "password": "CHANGE_ME_SSH_PASSWORD",
       "label": "GL-BE9300 (OpenWrt 23.05, fw4/nftables)",
+      "platform": "openwrt",
       "lan_iface": "br-lan",
       "wan_iface": "eth0",
       "has_nft": true,
@@ -31,11 +32,26 @@
       "user": "root",
       "password": "CHANGE_ME_SSH_PASSWORD",
       "label": "GL-MT6000 (OpenWrt 21.02, fw3/iptables only)",
+      "platform": "openwrt",
       "lan_iface": "br-lan",
       "wan_iface": "eth1",
       "has_nft": false,
       "public_domain": null,
       "panel_user": "router2",
+      "panel_password": "CHANGE_ME_PANEL_PASSWORD"
+    },
+    "keenetic": {
+      "_comment": "Keenetic KN-1810 (MT7621, mipsel) — stock KeeneticOS + Entware. See keenetic/README.md. Port is WIP / not yet hardware-validated.",
+      "host": "192.168.1.1",
+      "port": 22,
+      "user": "root",
+      "password": "CHANGE_ME_SSH_PASSWORD",
+      "label": "Keenetic KN-1810 (KeeneticOS + Entware, mipsel)",
+      "platform": "keenetic",
+      "lan_iface": "br0",
+      "has_nft": false,
+      "opt_root": "/opt",
+      "panel_user": "admin",
       "panel_password": "CHANGE_ME_PANEL_PASSWORD"
     }
   }

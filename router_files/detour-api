@@ -27,7 +27,53 @@ BINS_UPLOAD="/tmp/detour-bins-upload.ipk"
 
 AUTH_FILE="/etc/detour.auth"
 SESSION_DIR="/tmp/detour-sessions"
+SINGBOX_BIN="/usr/bin/sing-box"
+TPWS_BIN="/usr/bin/tpws-zapret"
+SUBREFRESH_BIN="/usr/sbin/subscription-refresh"
+LAN_IF="br-lan"
+DETOUR_DIR="/etc/detour"
 # =================================================
+# ============ PLATFORM SHIM (OpenWrt | Keenetic/Entware) ============
+# On KeeneticOS the whole stack lives under /opt (Entware) and the firewall is
+# iptables re-applied via /opt/etc/ndm/netfilter.d/. Detect Entware and remap.
+# Inert on OpenWrt. ⚠ VALIDATE on device (paths, LAN_IF, killswitch persistence).
+PLATFORM="openwrt"
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM="keenetic"; OPT=/opt
+    # lighttpd hands CGIs a minimal PATH; Entware tools (sed/grep/openssl/base64/
+    # mkdir/find…) live in /opt/bin:/opt/sbin. Without this every external command
+    # silently fails → e.g. the QUERY_STRING `sed` returns empty → false 401s.
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    SINGBOX_CONFIG_DIR="$OPT/etc/sing-box"
+    SINGBOX_DOMAINS="$OPT/etc/sing-box/proxy-domains.list"
+    SINGBOX_CONFIG="$OPT/etc/sing-box/config.json"
+    SINGBOX_ROUTEMAP="$OPT/etc/sing-box/route-map.list"
+    SINGBOX_LOG="$OPT/var/log/sing-box.log"
+    SINGBOX_INITD="$OPT/etc/init.d/S52detour-singbox"
+    SINGBOX_SETTINGS="$OPT/etc/sing-box/settings.json"
+    SINGBOX_PROFILES_DIR="$OPT/etc/sing-box/profiles"
+    SINGBOX_WHITELIST="$OPT/etc/sing-box/whitelist-domains.list"
+    ZAPRET_INITD="$OPT/etc/init.d/S53detour-zapret"
+    ZAPRET_CONF="$OPT/etc/zapret-tpws.conf"
+    ZAPRET_DOMAINS="$OPT/etc/zapret-tpws/domains.list"
+    KEEPALIVE_STATE="$OPT/var/state/vpn-keepalive.json"
+    KEEPALIVE_BIN="$OPT/sbin/vpn-keepalive"
+    UPDATE_BIN="$OPT/sbin/detour-update"
+    VERSION_FILE="$OPT/etc/detour/version"
+    UPDATE_STATE="$OPT/var/state/detour-update.json"
+    BINS_VERSION_FILE="$OPT/etc/detour/bins-version"
+    BINS_MANIFEST="$OPT/etc/detour/bins-manifest.json"
+    BINS_STATE="$OPT/var/state/detour-bins.json"
+    AUTH_FILE="$OPT/etc/detour.auth"
+    DETOUR_DIR="$OPT/etc/detour"
+    SINGBOX_BIN="$OPT/bin/sing-box"   # Entware sing-box-go installs to /opt/bin
+    TPWS_BIN="$OPT/sbin/tpws-zapret"
+    SUBREFRESH_BIN="$OPT/sbin/subscription-refresh"
+    # LAN bridge from detour.conf (assumed br0); killswitch uses iptables (no nft fw4).
+    LAN_IF="br0"
+    [ -f "$OPT/etc/detour/detour.conf" ] && . "$OPT/etc/detour/detour.conf" 2>/dev/null
+    mkdir -p "$OPT/var/state" "$OPT/var/log"
+fi
 
 mkdir -p "$SESSION_DIR"
 mkdir -p "$SINGBOX_PROFILES_DIR"
@@ -518,7 +564,7 @@ build_config() {
         if ! render_chain_config "$chain" "" "" "" 12345 > "$tmp_default"; then
             rm -f "$tmp_default"; echo "failed to render default config (bad chain?)"; return 1
         fi
-        err=$(/usr/bin/sing-box check -c "$tmp_default" 2>&1)
+        err=$($SINGBOX_BIN check -c "$tmp_default" 2>&1)
         if [ $? -ne 0 ]; then
             rm -f "$tmp_default"; echo "default config invalid: $err"; return 1
         fi
@@ -536,7 +582,7 @@ build_config() {
                 rm -f "$tmp_t"
                 echo "failed to render config for target $target"; return 1
             fi
-            err=$(/usr/bin/sing-box check -c "$tmp_t" 2>&1)
+            err=$($SINGBOX_BIN check -c "$tmp_t" 2>&1)
             if [ $? -ne 0 ]; then
                 for pair in $commit_list; do rm -f "${pair%%:*}"; done
                 rm -f "$tmp_t"
@@ -551,7 +597,7 @@ build_config() {
         if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$RX_RULES" 12345 > "$tmp_default"; then
             rm -f "$tmp_default"; echo "failed to render config (bad chain?)"; return 1
         fi
-        err=$(/usr/bin/sing-box check -c "$tmp_default" 2>&1)
+        err=$($SINGBOX_BIN check -c "$tmp_default" 2>&1)
         if [ $? -ne 0 ]; then
             rm -f "$tmp_default"; echo "config invalid: $err"; return 1
         fi
@@ -779,7 +825,7 @@ check_auth)
     ;;
 
 status)
-    SB_PID=$(pgrep -f '/usr/bin/sing-box' 2>/dev/null | head -1)
+    SB_PID=$(pgrep -f "$SINGBOX_BIN" 2>/dev/null | head -1)
     SB_RUNNING="false"
     SB_PORT=""
     SB_ENABLED="false"
@@ -790,7 +836,7 @@ status)
     [ -L /etc/rc.d/S99sing-box ] 2>/dev/null && SB_ENABLED="true"
 
     KS_ACTIVE="false"
-    iptables -t nat -C PREROUTING -i br-lan -j SINGBOX_KS 2>/dev/null && KS_ACTIVE="true"
+    iptables -t nat -C PREROUTING -i $LAN_IF -j SINGBOX_KS 2>/dev/null && KS_ACTIVE="true"
 
     IPSET_COUNT=$(ipset list singbox_domains 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | grep -c '.' || true)
     IPSET_MEMBERS=$(ipset list singbox_domains 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | sed 's/ timeout.*//' | tr '\n' ',' | sed 's/,$//')
@@ -803,7 +849,7 @@ status)
     fi
     ENTRY_TOTAL=$((DOMAIN_COUNT + IP_COUNT))
 
-    ZP_PID=$(pgrep -f '/usr/bin/tpws-zapret' 2>/dev/null | head -1)
+    ZP_PID=$(pgrep -f "$TPWS_BIN" 2>/dev/null | head -1)
     ZP_RUNNING="false"
     ZP_PORT=""
     ZP_ENABLED="false"
@@ -843,11 +889,12 @@ status)
     [ -z "$BINS_VERSION" ] && BINS_VERSION="?"
     SB_BIN_VER=$(json_val "singbox" "$BINS_MANIFEST")
     [ -z "$SB_BIN_VER" ] && SB_BIN_VER="?"
-    SB_BIN_PRESENT=false; [ -x /usr/bin/sing-box ] && SB_BIN_PRESENT=true
-    TPWS_BIN_PRESENT=false; [ -x /usr/bin/tpws-zapret ] && TPWS_BIN_PRESENT=true
+    SB_BIN_PRESENT=false; [ -x $SINGBOX_BIN ] && SB_BIN_PRESENT=true
+    TPWS_BIN_PRESENT=false; [ -x $TPWS_BIN ] && TPWS_BIN_PRESENT=true
 
     cat <<EOF
 {
+  "platform": "$PLATFORM",
   "version": "$PA_VERSION",
   "binaries": {
     "bins_version": "$BINS_VERSION",
@@ -1007,13 +1054,19 @@ panel_update_local)
     # Step 2: install the streamed .ipk (body already written to /tmp by the
     # POST reader above). apply-local verifies the usign signature next to it.
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
     IPK=/tmp/detour-upload.ipk
     SIG=/tmp/detour-upload.ipk.sig
     if [ ! -s "$IPK" ]; then json_err "no .ipk uploaded"; exit 0; fi
-    if [ ! -s "$SIG" ]; then json_err "missing .ipk.sig — upload the signature first"; exit 0; fi
-    OUT=$("$UPDATE_BIN" apply-local "$IPK" 2>&1)
-    RC=$?
+    if [ -x "$UPDATE_BIN" ] && [ -s "$SIG" ]; then
+        # Signed install: usign-verify + backup/rollback via the updater.
+        OUT=$("$UPDATE_BIN" apply-local "$IPK" 2>&1)
+        RC=$?
+    else
+        # No signature (or no updater, e.g. Keenetic) — install directly via opkg,
+        # without verification. The operator explicitly opted out of the signature.
+        OUT=$(opkg install --force-reinstall "$IPK" 2>&1)
+        RC=$?
+    fi
     rm -f "$IPK" "$SIG"
     if [ "$RC" -eq 0 ]; then
         json_ok
@@ -1066,11 +1119,16 @@ bins_update_local)
     # Step 2: install the streamed bins .ipk (body already written to disk by
     # the POST reader). bins-apply-local verifies the usign signature beside it.
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
     if [ ! -s "$BINS_UPLOAD" ]; then json_err "no .ipk uploaded"; exit 0; fi
-    if [ ! -s "$BINS_UPLOAD.sig" ]; then json_err "missing .ipk.sig — upload the signature first"; exit 0; fi
-    OUT=$("$UPDATE_BIN" bins-apply-local "$BINS_UPLOAD" 2>&1)
-    RC=$?
+    if [ -x "$UPDATE_BIN" ] && [ -s "$BINS_UPLOAD.sig" ]; then
+        # Signed install: usign-verify + backup/rollback via the updater.
+        OUT=$("$UPDATE_BIN" bins-apply-local "$BINS_UPLOAD" 2>&1)
+        RC=$?
+    else
+        # No signature (or no updater) — install directly via opkg, no verification.
+        OUT=$(opkg install --force-reinstall "$BINS_UPLOAD" 2>&1)
+        RC=$?
+    fi
     rm -f "$BINS_UPLOAD" "$BINS_UPLOAD.sig"
     if [ "$RC" -eq 0 ]; then
         json_ok
@@ -1079,10 +1137,30 @@ bins_update_local)
     fi
     ;;
 
+singbox_opkg_upgrade)
+    # Keenetic/Entware: pull the latest sing-box from the opkg feed (sing-box-go),
+    # re-disable the package's own auto-start, then restart our service.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    command -v opkg >/dev/null 2>&1 || { json_err "opkg not available"; exit 0; }
+    OUT=$(opkg update 2>&1; echo '---'; opkg upgrade sing-box-go 2>&1)
+    RC=$?
+    if [ -f /opt/etc/init.d/S99sing-box ]; then
+        /opt/etc/init.d/S99sing-box stop 2>/dev/null
+        chmod 0644 /opt/etc/init.d/S99sing-box 2>/dev/null
+    fi
+    $SINGBOX_INITD restart >/dev/null 2>&1
+    sleep 2
+    if [ "$RC" -eq 0 ]; then
+        printf '{"ok":true,"output":"%s"}' "$(printf '%s' "$OUT" | tail -12 | json_escape)"
+    else
+        json_err "$(printf '%s' "$OUT" | tail -12 | json_escape)"
+    fi
+    ;;
+
 singbox_config)
     if [ "$REQUEST_METHOD" = "POST" ]; then
         echo "$POST_DATA" > "$SINGBOX_CONFIG"
-        RESULT=$(/usr/bin/sing-box check -c "$SINGBOX_CONFIG" 2>&1)
+        RESULT=$($SINGBOX_BIN check -c "$SINGBOX_CONFIG" 2>&1)
         if [ $? -eq 0 ]; then
             json_ok
         else
@@ -1169,7 +1247,7 @@ conntrack)
 
 killswitch_on)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    SB_PID=$(pgrep -f '/usr/bin/sing-box' 2>/dev/null | head -1)
+    SB_PID=$(pgrep -f "$SINGBOX_BIN" 2>/dev/null | head -1)
     if [ -z "$SB_PID" ]; then json_err "sing-box is not running"; exit 0; fi
     UPSTREAM_IPS=$(get_upstream_ips)
     iptables -t nat -N SINGBOX_KS 2>/dev/null
@@ -1188,14 +1266,14 @@ killswitch_on)
         done
     fi
     iptables -t nat -A SINGBOX_KS -p tcp -j REDIRECT --to-ports 12345
-    iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_KS 2>/dev/null
-    iptables -t nat -I PREROUTING 1 -i br-lan -j SINGBOX_KS
+    iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_KS 2>/dev/null
+    iptables -t nat -I PREROUTING 1 -i $LAN_IF -j SINGBOX_KS
     json_ok
     ;;
 
 killswitch_off)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_KS 2>/dev/null
+    iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_KS 2>/dev/null
     iptables -t nat -F SINGBOX_KS 2>/dev/null
     iptables -t nat -X SINGBOX_KS 2>/dev/null
     json_ok
@@ -1448,11 +1526,11 @@ subscription_get)
 
 subscription_refresh)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    if [ ! -x /usr/sbin/subscription-refresh ]; then
+    if [ ! -x $SUBREFRESH_BIN ]; then
         json_err "subscription-refresh helper missing"
         exit 0
     fi
-    if /usr/sbin/subscription-refresh 2>/dev/null; then
+    if $SUBREFRESH_BIN 2>/dev/null; then
         json_ok
     else
         json_err "refresh failed"
@@ -1465,7 +1543,7 @@ subscription_refresh)
 #          apply_routing, title, last_refresh, last_status, last_saved, last_removed}
 
 subscriptions_list)
-    SUBS_DIR="/etc/detour/subscriptions"
+    SUBS_DIR="$DETOUR_DIR/subscriptions"
     mkdir -p "$SUBS_DIR" 2>/dev/null
     printf '{"ok":true,"subscriptions":['
     first=1
@@ -1479,7 +1557,7 @@ subscriptions_list)
 
 subscription_save_one)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    SUBS_DIR="/etc/detour/subscriptions"
+    SUBS_DIR="$DETOUR_DIR/subscriptions"
     mkdir -p "$SUBS_DIR"
     SUB_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     SUB_URL=$(printf '%s' "$POST_DATA" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
@@ -1500,7 +1578,7 @@ subscription_save_one)
 
 subscription_delete_one)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    SUBS_DIR="/etc/detour/subscriptions"
+    SUBS_DIR="$DETOUR_DIR/subscriptions"
     SUB_ID=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]id=\([^&]*\).*/\1/p' | head -1)
     if [ -z "$SUB_ID" ]; then json_err "id required"; exit 0; fi
     case "$SUB_ID" in
@@ -1517,10 +1595,10 @@ subscription_refresh_one)
     case "$SUB_ID" in
         *[!a-zA-Z0-9._-]*) json_err "id invalid"; exit 0 ;;
     esac
-    if [ ! -x /usr/sbin/subscription-refresh ]; then
+    if [ ! -x $SUBREFRESH_BIN ]; then
         json_err "subscription-refresh helper missing"; exit 0
     fi
-    OUT=$(/usr/sbin/subscription-refresh --id="$SUB_ID" --force 2>&1)
+    OUT=$($SUBREFRESH_BIN --id="$SUB_ID" --force 2>&1)
     EC=$?
     OUT_ESC=$(printf '%s' "$OUT" | json_escape)
     if [ $EC -eq 0 ]; then
@@ -1533,10 +1611,10 @@ subscription_refresh_one)
 subscription_refresh_all)
     # Iterate over every saved subscription and run a forced refresh.
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    if [ ! -x /usr/sbin/subscription-refresh ]; then
+    if [ ! -x $SUBREFRESH_BIN ]; then
         json_err "subscription-refresh helper missing"; exit 0
     fi
-    OUT=$(/usr/sbin/subscription-refresh --all --force 2>&1)
+    OUT=$($SUBREFRESH_BIN --all --force 2>&1)
     EC=$?
     OUT_ESC=$(printf '%s' "$OUT" | json_escape)
     if [ $EC -eq 0 ]; then

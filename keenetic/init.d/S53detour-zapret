@@ -1,0 +1,53 @@
+#!/opt/bin/sh
+# Detour / Keenetic — zapret tpws (DPI-bypass transparent proxy) Entware service.
+# tpws reads its CLI args from /opt/etc/zapret-tpws.conf (one shell var: ARGS=...).
+# ⚠ VALIDATE the conf format matches the OpenWrt one and tpws binds 0.0.0.0:$ZAPRET_PORT.
+
+export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"  # Entware tools live in /opt
+. /opt/etc/detour/detour.conf 2>/dev/null
+
+PIDF="/opt/var/run/detour-zapret.pid"
+MARK="/opt/etc/detour/zapret.enabled"
+HOOK="/opt/etc/ndm/netfilter.d/50-detour.sh"
+NAME="tpws-zapret"
+
+apply_fw() { [ -x "$HOOK" ] && "$HOOK" iptables nat >/dev/null 2>&1; }
+
+start() {
+    [ -x "$TPWS_BIN" ] || { echo "$NAME: missing $TPWS_BIN"; exit 1; }
+    # shellcheck disable=SC1090
+    ARGS=""
+    [ -f "$TPWS_CONF" ] && . "$TPWS_CONF" 2>/dev/null
+    mkdir -p /opt/var/run
+    touch "$MARK"
+    echo "Starting $NAME ..."
+    # tpws runs transparent on $ZAPRET_PORT; --user nobody to drop privileges.
+    start-stop-daemon -S -q -b -m -p "$PIDF" \
+        -x "$TPWS_BIN" -- --bind-addr=0.0.0.0 --port="$ZAPRET_PORT" --user=nobody $ARGS
+    sleep 1
+    apply_fw
+}
+
+stop() {
+    echo "Stopping $NAME ..."
+    rm -f "$MARK"
+    start-stop-daemon -K -q -p "$PIDF" 2>/dev/null
+    rm -f "$PIDF"
+    apply_fw
+}
+
+status() {
+    if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+        echo "$NAME running (pid $(cat "$PIDF"))"
+    else
+        echo "$NAME stopped"
+    fi
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    status) status ;;
+    *) echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

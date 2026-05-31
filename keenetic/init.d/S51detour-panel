@@ -1,0 +1,33 @@
+#!/opt/bin/sh
+# Detour / Keenetic — panel web server (Entware lighttpd, dedicated instance).
+# Starts BEFORE the proxies (S51 < S52/S53) so the UI is up to control them.
+
+CONF="/opt/etc/lighttpd/detour.conf"
+PIDF="/opt/var/run/detour-lighttpd.pid"
+BIN="/opt/sbin/lighttpd"
+[ -x "$BIN" ] || BIN="/opt/bin/lighttpd"   # Entware ships lighttpd in /opt/sbin or /opt/bin
+
+start() {
+    [ -x "$BIN" ] || { echo "panel: lighttpd not installed (run entware-bootstrap.sh)"; exit 1; }
+    [ -f "$CONF" ] || { echo "panel: missing $CONF"; exit 1; }
+    mkdir -p /opt/var/run /opt/var/log
+    echo "Starting detour panel (lighttpd :8080) ..."
+    "$BIN" -f "$CONF"
+}
+
+stop() {
+    echo "Stopping detour panel ..."
+    [ -f "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null
+    rm -f "$PIDF"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    status)
+        if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
+            echo "panel running (pid $(cat "$PIDF"))"
+        else echo "panel stopped"; fi ;;
+    *) echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
