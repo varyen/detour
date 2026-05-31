@@ -759,6 +759,8 @@ def main():
                     help="Skip build — only upload existing releases/v<version>/ artefacts")
     ap.add_argument("--allow-existing", action="store_true",
                     help="Don't fail if releases/v<version>/ already exists — overwrite it")
+    ap.add_argument("--no-keenetic", action="store_true",
+                    help="Skip the Keenetic/Entware .ipk (built into the same release by default)")
     args = ap.parse_args()
 
     version = parse_version(args.version)
@@ -803,6 +805,21 @@ def main():
     print(f"  signed: {panel_sig}")
     built.append(("panel", panel_ipk, panel_sig))
 
+    # --- Keenetic/Entware .ipk (same release, same source: router_files/) ---
+    keenetic_ipk = None
+    if not args.no_keenetic:
+        print("\n[keenetic] Assembling Entware .ipk ...")
+        import importlib.util
+        _ks = importlib.util.spec_from_file_location(
+            "keenetic_build_ipk", os.path.join(HERE, "keenetic", "build-ipk.py"))
+        _km = importlib.util.module_from_spec(_ks)
+        _ks.loader.exec_module(_km)
+        keenetic_ipk, keenetic_sig, keenetic_size = _km.build(version, out_dir)
+        print(f"  {keenetic_ipk}  ({os.path.getsize(keenetic_ipk):,} B on disk, "
+              f"installed {keenetic_size:,} B)")
+        print(f"  signed: {keenetic_sig}" if keenetic_sig else "  (UNSIGNED)")
+        built.append(("keenetic", keenetic_ipk, keenetic_sig))
+
     bins_ipk = bins_sig = None
     if bins_version:
         # --- binaries ---
@@ -829,7 +846,9 @@ def main():
                 + (f" (bins v{bins_version})" if bins_version else "") + "\n\n")
         f.write(notes or "(no notes)")
         f.write("\n\n## Packages\n\n")
-        f.write(f"- `{os.path.basename(panel_ipk)}` — panel (scripts/UI). Small, frequent updates.\n")
+        f.write(f"- `{os.path.basename(panel_ipk)}` — panel for OpenWrt/GL.iNet (scripts/UI).\n")
+        if keenetic_ipk:
+            f.write(f"- `{os.path.basename(keenetic_ipk)}` — Keenetic/Entware (mipsel) package.\n")
         if bins_version:
             f.write(f"- `{os.path.basename(bins_ipk)}` — sing-box + tpws-zapret binaries.\n")
             f.write(f"- `detour-full-v{version}.tar.gz` — both .ipk + `install.sh` "

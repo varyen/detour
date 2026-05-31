@@ -173,31 +173,40 @@ exit 0
     return buf.getvalue()
 
 
-def main():
-    version = open(os.path.join(ROOT, "VERSION")).read().strip()
-    os.makedirs(OUT_DIR, exist_ok=True)
+def build(version=None, out_dir=None):
+    """Build (and usign-sign) the Keenetic .ipk. Returns (ipk_path, sig_path,
+    installed_size). Importable so `build_release.py` can drop the Keenetic
+    package into the same release dir — one release, one source (router_files/)."""
+    if version is None:
+        version = open(os.path.join(ROOT, "VERSION")).read().strip()
+    if out_dir is None:
+        out_dir = OUT_DIR
+    os.makedirs(out_dir, exist_ok=True)
     data_tgz, installed = build_data()
     control_tgz = build_control(version, installed)
-    ipk_path = os.path.join(OUT_DIR, f"{PKG}_{version}_{ARCH}.ipk")
+    ipk_path = os.path.join(out_dir, f"{PKG}_{version}_{ARCH}.ipk")
     with tarfile.open(ipk_path, "w:gz", format=tarfile.USTAR_FORMAT) as tar:
         add_bytes(tar, "./debian-binary", b"2.0\n", 0o644)
         add_bytes(tar, "./control.tar.gz", control_tgz, 0o644)
         add_bytes(tar, "./data.tar.gz", data_tgz, 0o644)
-    print(f"built {ipk_path}")
-    print(f"  on-disk {os.path.getsize(ipk_path):,} B | installed {installed:,} B | arch {ARCH} | v{version}")
-
-    # usign-sign the .ipk (same detached-signature scheme as the panel build), so
-    # operators can verify it before install. The panel makes the sig optional, but
-    # we still ship one for the release.
+    # usign-sign with the same key/scheme as the panel build.
+    sig_path = None
     key_sec = os.path.join(ROOT, "keys", "release.usign.sec")
     if os.path.isfile(key_sec):
         sys.path.insert(0, ROOT)
         from usign_compat import sign_file
         sign_file(ipk_path, key_sec, ipk_path + ".sig")
-        print(f"  signed: {os.path.basename(ipk_path)}.sig")
-    else:
-        print(f"  (UNSIGNED — usign secret key not found at {key_sec})")
+        sig_path = ipk_path + ".sig"
+    return ipk_path, sig_path, installed
 
+
+def main():
+    version = open(os.path.join(ROOT, "VERSION")).read().strip()
+    ipk_path, sig_path, installed = build(version)
+    print(f"built {ipk_path}")
+    print(f"  on-disk {os.path.getsize(ipk_path):,} B | installed {installed:,} B | arch {ARCH} | v{version}")
+    print("  " + (f"signed: {os.path.basename(sig_path)}" if sig_path
+                  else "(UNSIGNED — usign secret key not found)"))
     print("  install: opkg update && opkg install ./" + os.path.basename(ipk_path))
 
 
