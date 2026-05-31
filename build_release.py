@@ -120,8 +120,8 @@ PANEL_FILES = [
     (("router_files", "detour-update"), "usr/sbin/detour-update", 0o755),
     (("router_files", "subscription-refresh"), "usr/sbin/subscription-refresh", 0o755),
     (("router_files", "vpn-keepalive"), "usr/sbin/vpn-keepalive", 0o755),
-    (("router-backup", "www", "cgi-bin", "detour-api"), "www/cgi-bin/detour-api", 0o755),
-    (("router-backup", "www", "detour", "index.html"), "www/detour/index.html", 0o644),
+    (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
+    (("router_files", "index.html"), "www/detour/index.html", 0o644),
     # Pin our public key in two places: opkg's standard keyring (so future opkg
     # ecosystem tooling sees it) AND a stable path the updater knows about.
     (("keys", "release.usign.pub"), "etc/detour/release.usign.pub", 0o644),
