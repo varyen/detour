@@ -20,10 +20,7 @@ KEEPALIVE_BIN="/usr/sbin/vpn-keepalive"
 UPDATE_BIN="/usr/sbin/detour-update"
 VERSION_FILE="/etc/detour/version"
 UPDATE_STATE="/var/state/detour-update.json"
-BINS_VERSION_FILE="/etc/detour/bins-version"
-BINS_MANIFEST="/etc/detour/bins-manifest.json"
-BINS_STATE="/var/state/detour-bins.json"
-BINS_UPLOAD="/tmp/detour-bins-upload.ipk"
+BINS_STATE="/var/state/detour-bins.json"   # sing-box update state (written by detour-update bins-check)
 
 AUTH_FILE="/etc/detour.auth"
 SESSION_DIR="/tmp/detour-sessions"
@@ -61,8 +58,6 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     UPDATE_BIN="$OPT/sbin/detour-update"
     VERSION_FILE="$OPT/etc/detour/version"
     UPDATE_STATE="$OPT/var/state/detour-update.json"
-    BINS_VERSION_FILE="$OPT/etc/detour/bins-version"
-    BINS_MANIFEST="$OPT/etc/detour/bins-manifest.json"
     BINS_STATE="$OPT/var/state/detour-bins.json"
     AUTH_FILE="$OPT/etc/detour.auth"
     DETOUR_DIR="$OPT/etc/detour"
@@ -689,7 +684,6 @@ if [ "$REQUEST_METHOD" = "POST" ] && [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LEN
     # whole package in a shell variable.
     case "$ACTION" in
         panel_update_local) head -c "$CONTENT_LENGTH" > /tmp/detour-upload.ipk ;;
-        bins_update_local)  head -c "$CONTENT_LENGTH" > "$BINS_UPLOAD" ;;
         *) POST_DATA=$(head -c "$CONTENT_LENGTH") ;;
     esac
 fi
@@ -882,13 +876,13 @@ status)
     PA_VERSION=$(cat "$VERSION_FILE" 2>/dev/null | head -1)
     [ -z "$PA_VERSION" ] && PA_VERSION="?"
 
-    # Binaries (detour-bins package) — versions read from the cheap manifest
-    # the bins postinst writes, so status never spawns the 60 MB sing-box binary.
-    BINS_VERSION=$(json_val "bins_version" "$BINS_MANIFEST")
-    [ -z "$BINS_VERSION" ] && BINS_VERSION=$(cat "$BINS_VERSION_FILE" 2>/dev/null | head -1)
-    [ -z "$BINS_VERSION" ] && BINS_VERSION="?"
-    SB_BIN_VER=$(json_val "singbox" "$BINS_MANIFEST")
+    # sing-box now comes from opkg (our feed on OpenWrt; Entware sing-box-go on
+    # Keenetic). Read the version from the opkg status db — cheap (a file read),
+    # so status never spawns the 60 MB binary. Fall back to `sing-box version`.
+    SB_BIN_VER=$(opkg list-installed 2>/dev/null | awk '$1=="sing-box"||$1=="sing-box-go"{print $3; exit}')
+    [ -z "$SB_BIN_VER" ] && SB_BIN_VER=$("$SINGBOX_BIN" version 2>/dev/null | awk 'NR==1{print $NF}')
     [ -z "$SB_BIN_VER" ] && SB_BIN_VER="?"
+    BINS_VERSION="$SB_BIN_VER"   # legacy field name kept for the panel UI
     SB_BIN_PRESENT=false; [ -x $SINGBOX_BIN ] && SB_BIN_PRESENT=true
     TPWS_BIN_PRESENT=false; [ -x $TPWS_BIN ] && TPWS_BIN_PRESENT=true
 
@@ -1075,8 +1069,9 @@ panel_update_local)
     fi
     ;;
 
-# ==================== BINARIES (detour-bins) UPDATE ====================
-# sing-box + tpws-zapret ship as a separate, independently-versioned package.
+# ==================== sing-box UPDATE (opkg feed) ====================
+# sing-box is pulled from our opkg feed (OpenWrt) via detour-update bins-*; the
+# state file keeps the legacy {current,available} keys so the UI is unchanged.
 bins_update_status)
     if [ -f "$BINS_STATE" ]; then
         cat "$BINS_STATE"
@@ -1097,40 +1092,11 @@ bins_update_check)
     ;;
 
 bins_update_apply)
-    # Download + verify + install the latest binaries package from GitHub.
+    # opkg update + upgrade sing-box from our feed (via the updater).
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
     OUT=$("$UPDATE_BIN" bins-apply 2>&1)
     if [ $? -eq 0 ]; then
-        json_ok
-    else
-        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
-    fi
-    ;;
-
-bins_update_sig)
-    # Step 1 of a local bins .ipk install: store the (small, text) signature.
-    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    printf '%s' "$POST_DATA" > "$BINS_UPLOAD.sig"
-    json_ok
-    ;;
-
-bins_update_local)
-    # Step 2: install the streamed bins .ipk (body already written to disk by
-    # the POST reader). bins-apply-local verifies the usign signature beside it.
-    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    if [ ! -s "$BINS_UPLOAD" ]; then json_err "no .ipk uploaded"; exit 0; fi
-    if [ -x "$UPDATE_BIN" ] && [ -s "$BINS_UPLOAD.sig" ]; then
-        # Signed install: usign-verify + backup/rollback via the updater.
-        OUT=$("$UPDATE_BIN" bins-apply-local "$BINS_UPLOAD" 2>&1)
-        RC=$?
-    else
-        # No signature (or no updater) — install directly via opkg, no verification.
-        OUT=$(opkg install --force-reinstall "$BINS_UPLOAD" 2>&1)
-        RC=$?
-    fi
-    rm -f "$BINS_UPLOAD" "$BINS_UPLOAD.sig"
-    if [ "$RC" -eq 0 ]; then
         json_ok
     else
         json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"

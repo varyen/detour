@@ -7,9 +7,13 @@ Usage:
     python3 build_release.py --version 1.0.11 --publish-existing
 
 Output:
-    releases/v<version>/detour_<version>_aarch64_cortex-a53.ipk
-    releases/v<version>/detour_<version>_aarch64_cortex-a53.ipk.sig
+    releases/v<version>/detour_<version>_all.ipk            (+ .ipk.sig)
+    releases/v<version>/detour-keenetic_<version>_all.ipk   (+ .ipk.sig)
     releases/v<version>/RELEASE_NOTES.md
+
+sing-box is NOT bundled here — the panel `Depends: sing-box`, served by our own
+opkg feed (see build_feed.py). The distro feed is stuck on sing-box 1.8.10, which
+would break the panel's 1.13.x config schema.
 
 `.ipk` is the standard OpenWrt package format: a gzipped tar containing
 `debian-binary`, `control.tar.gz`, and `data.tar.gz`. The `.ipk.sig` file is
@@ -58,11 +62,23 @@ PACKAGE_NAME = "detour"
 PACKAGE_ARCH = os.environ.get("DETOUR_ARCH", "all")
 
 # Runtime dependencies declared in `control`. opkg refuses to install if any
-# is missing. `dnsmasq-full` is needed for ipset= entries.
-DEPENDS = "lua, lua-cjson, curl, openssl-util, dnsmasq-full, kmod-ipt-ipset, ipset"
+# is missing. `dnsmasq-full` is needed for ipset= entries. `sing-box` is pulled
+# from our self-hosted feed (build_feed.py → varyen/detour@feed): the GL.iNet
+# distro feed is stuck on sing-box 1.8.10 (pre-1.11 schema break), so the feed
+# MUST be configured before installing this package (deploy_router.py /
+# detour-update do that). The init.d tolerates a missing binary, so a router
+# without the feed still installs and routes directly — it just can't proxy
+# until sing-box arrives.
+DEPENDS = "lua, lua-cjson, curl, openssl-util, dnsmasq-full, kmod-ipt-ipset, ipset, sing-box"
 
 MAINTAINER = "Maintainer <you@example.com>"
 DESCRIPTION = "Sing-box + zapret-tpws management panel for OpenWrt routers."
+
+# Self-hosted opkg feed serving sing-box (build_feed.py → varyen/detour@feed).
+# Keep in sync with build_feed.py and deploy_router.py / detour-update.
+FEED_NAME = "detour"
+FEED_URL = "https://raw.githubusercontent.com/varyen/detour/feed/aarch64"
+FEED_LINE = f"src/gz {FEED_NAME} {FEED_URL}"
 
 # Paths that hold USER state on the router — VPN profiles, panel auth,
 # subscription config, generated configs. The package never ships anything
@@ -97,15 +113,12 @@ def _is_protected(path):
 # (source_parts, archive_relative_path, mode) — archive_relative_path is what
 # ends up at the corresponding location on the router after `opkg install`.
 #
-# The release is split into TWO packages:
-#   PANEL_FILES → detour        (scripts/html/lua/init.d, ~0.35 MB)
-#   BIN_FILES   → detour-bins   (sing-box + tpws-zapret, ~60 MB)
-# Binaries live in their own package so panel updates stay tiny AND a slim-panel
-# upgrade never deletes /usr/bin/sing-box (opkg removes files the old package
-# owned but the new one doesn't). The two are versioned independently; the
-# updater manages them separately (`apply` vs `bins-apply`). A combined
-# `detour-full-v<ver>.tar.gz` (both .ipk + install.sh) covers offline/first
-# install in one shot.
+# The release ships ONE OpenWrt package: `detour` (PANEL_FILES). sing-box is no
+# longer bundled — the panel `Depends: sing-box`, pulled from our self-hosted
+# opkg feed (build_feed.py), so panel updates stay tiny AND a panel upgrade never
+# touches the opkg-owned /usr/bin/sing-box. tpws-zapret IS bundled here (~110 KB,
+# musl-static) because zapret is in no opkg feed on any platform; keeping it in
+# the panel means DPI bypass works even if the feed is unreachable.
 PANEL_FILES = [
     (("router_files", "sing-box.initd"), "etc/init.d/sing-box", 0o755),
     (("router_files", "zapret-tpws.initd"), "etc/init.d/zapret-tpws", 0o755),
@@ -122,28 +135,15 @@ PANEL_FILES = [
     (("router_files", "vpn-keepalive"), "usr/sbin/vpn-keepalive", 0o755),
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
     (("router_files", "index.html"), "www/detour/index.html", 0o644),
+    # tpws-zapret (DPI bypass) is bundled — it's in no opkg feed. ~110 KB.
+    (("router-backup", "usr", "bin", "tpws-zapret"), "usr/bin/tpws-zapret", 0o755),
     # Pin our public key in two places: opkg's standard keyring (so future opkg
     # ecosystem tooling sees it) AND a stable path the updater knows about.
     (("keys", "release.usign.pub"), "etc/detour/release.usign.pub", 0o644),
 ]
 
-# Heavy binaries — shipped as the separate `detour-bins` package.
-BIN_FILES = [
-    (("router-backup", "usr", "bin", "sing-box"), "usr/bin/sing-box", 0o755),
-    (("router-backup", "usr", "bin", "tpws-zapret"), "usr/bin/tpws-zapret", 0o755),
-]
-
-# Back-compat alias: the protected-path sanity check scans the full set.
-FILES_IN_PACKAGE = PANEL_FILES + BIN_FILES
-
-BINS_PKG_NAME = "detour-bins"
-# detour-bins has no runtime deps of its own (it only drops binaries).
-# Built as arch `all` for the same reason the panel is — the fleet is uniformly
-# aarch64 but reports differing opkg arch strings, and the static Go/musl
-# binaries are portable across them. For a non-aarch64 device, set
-# DETOUR_ARCH and publish one bins asset per arch (the updater picks by the
-# arch tag in the asset filename).
-BINS_DEPENDS = ""
+# The protected-path sanity check scans the package's full file set.
+FILES_IN_PACKAGE = PANEL_FILES
 
 # The opkg-keyring path uses the key fingerprint as the filename. Read it
 # from the actual key at build time so the two never drift.
@@ -282,18 +282,21 @@ mv "$SYSUP.new" "$SYSUP"
 mkdir -p /etc/uci-defaults
 cat > /etc/uci-defaults/99-detour-restore <<'UCID'
 #!/bin/sh
-# Auto-re-install detour (panel + binaries) after a router firmware
-# sysupgrade. Binaries live in the separate detour-bins package, stashed
-# alongside the panel .ipk — install bins first so the panel's services start.
+# Auto-re-install detour after a router firmware sysupgrade. A fresh firmware
+# wipes /etc/opkg/customfeeds.conf and the opkg status db, so we re-add the
+# sing-box feed, refresh the index, then install the stashed panel .ipk - its
+# Depends:sing-box then pulls sing-box from the feed automatically.
 STASH=/etc/detour/installed.ipk
-BSTASH=/etc/detour/installed-bins.ipk
 [ -f "$STASH" ] || exit 0
 if opkg list-installed detour 2>/dev/null | grep -q '^detour '; then
     exit 0   # already installed (regular boot, not a sysupgrade restore)
 fi
-logger -t detour "post-sysupgrade restore: opkg install bins + panel"
-[ -f "$BSTASH" ] && opkg install "$BSTASH" >/var/log/detour-restore.log 2>&1
-opkg install "$STASH" >>/var/log/detour-restore.log 2>&1
+logger -t detour "post-sysupgrade restore: re-add feed + opkg install panel"
+LOG=/var/log/detour-restore.log
+grep -qs '^src/gz {FEED_NAME} ' /etc/opkg/customfeeds.conf 2>/dev/null \\
+    || echo "{FEED_LINE}" >> /etc/opkg/customfeeds.conf
+opkg update >"$LOG" 2>&1
+opkg install "$STASH" >>"$LOG" 2>&1
 UCID
 chmod 0755 /etc/uci-defaults/99-detour-restore
 
@@ -389,76 +392,6 @@ exit 0
     return buf.getvalue()
 
 
-def build_bins_control_tar_gz(bins_version, installed_size):
-    """control.tar.gz for the detour-bins package (sing-box + tpws only).
-
-    Deliberately minimal: it owns ONLY the two binaries. It records the bins
-    version (the panel reads it), chmods + restarts the services so a new binary
-    takes effect, and on removal nothing of the panel's state is touched."""
-    control = (
-        f"Package: {BINS_PKG_NAME}\n"
-        f"Version: {bins_version}\n"
-        + (f"Depends: {BINS_DEPENDS}\n" if BINS_DEPENDS else "")
-        + f"Source: https://github.com/varyen/detour\n"
-        f"License: MIT\n"
-        f"Section: net\n"
-        f"Priority: optional\n"
-        f"Maintainer: {MAINTAINER}\n"
-        f"Architecture: {PACKAGE_ARCH}\n"
-        f"Installed-Size: {installed_size}\n"
-        f"Description: sing-box + tpws-zapret binaries for detour.\n"
-    )
-
-    postinst = f"""#!/bin/sh
-# detour-bins postinst — installs the sing-box + tpws-zapret binaries.
-set +e
-mkdir -p /etc/detour
-echo "{bins_version}" > /etc/detour/bins-version
-chmod 0755 /usr/bin/sing-box /usr/bin/tpws-zapret 2>/dev/null
-# Record a manifest the panel reads (cheap) instead of spawning the 60 MB
-# sing-box binary on every status poll just to learn its version.
-SBVER=$(/usr/bin/sing-box version 2>/dev/null | sed -n 's/.*version[[:space:]]*\\([0-9][0-9.]*\\).*/\\1/p' | head -1)
-[ -z "$SBVER" ] && SBVER="{bins_version}"
-cat > /etc/detour/bins-manifest.json <<MAN
-{{"bins_version":"{bins_version}","singbox":"$SBVER","tpws":"{bins_version}"}}
-MAN
-# Restart so the freshly-installed binaries take effect. Non-fatal: on a fresh
-# router sing-box may not be configured yet (the panel handles that).
-/etc/init.d/sing-box restart >/dev/null 2>&1
-/etc/init.d/zapret-tpws restart >/dev/null 2>&1
-echo "detour-bins {bins_version} installed."
-exit 0
-"""
-
-    prerm = """#!/bin/sh
-# detour-bins prerm — stop the services so the busy binaries can be
-# replaced (opkg can't overwrite a running executable cleanly otherwise).
-set +e
-/etc/init.d/sing-box stop >/dev/null 2>&1
-/etc/init.d/zapret-tpws stop >/dev/null 2>&1
-exit 0
-"""
-
-    postrm = """#!/bin/sh
-# detour-bins postrm — clears the bins markers on full removal.
-set +e
-case "$1" in
-    remove|abort-install|disappear)
-        rm -f /etc/detour/bins-version /etc/detour/bins-manifest.json
-        ;;
-esac
-exit 0
-"""
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.USTAR_FORMAT) as tar:
-        _add_bytes_to_tar(tar, "./control", control.encode("utf-8"), 0o644)
-        _add_bytes_to_tar(tar, "./postinst", postinst.encode("utf-8"), 0o755)
-        _add_bytes_to_tar(tar, "./prerm", prerm.encode("utf-8"), 0o755)
-        _add_bytes_to_tar(tar, "./postrm", postrm.encode("utf-8"), 0o755)
-    return buf.getvalue()
-
-
 def _add_dir_to_tar(tar, archive_path, mode=0o755):
     info = tarfile.TarInfo(name=archive_path)
     info.type = tarfile.DIRTYPE
@@ -491,9 +424,8 @@ def build_data_tar_gz(file_entries):
     return buf.getvalue()
 
 
-def build_ipk(pkg_name, version, file_entries, out_dir, *, kind, inject_keyring):
-    """Build one .ipk. `kind` ∈ {"panel","bins"} selects the maintainer scripts.
-    Returns (ipk_path, installed_size_bytes)."""
+def build_ipk(pkg_name, version, file_entries, out_dir, *, inject_keyring):
+    """Build the panel .ipk. Returns (ipk_path, installed_size_bytes)."""
     # 0. Sanity: no protected path (user state) may sneak into the payload.
     bad = [d for _, d, _ in file_entries if _is_protected(d)]
     if bad:
@@ -510,10 +442,7 @@ def build_ipk(pkg_name, version, file_entries, out_dir, *, kind, inject_keyring)
     installed_size = sum(os.path.getsize(resolve_source(p)) for p, _, _ in file_entries)
 
     # 3. Assemble control.tar.gz and data.tar.gz.
-    if kind == "bins":
-        control_tgz = build_bins_control_tar_gz(version, installed_size)
-    else:
-        control_tgz = build_control_tar_gz(version, installed_size)
+    control_tgz = build_control_tar_gz(version, installed_size)
     data_tgz = build_data_tar_gz(file_entries)
     debian_binary = b"2.0\n"
 
@@ -526,77 +455,6 @@ def build_ipk(pkg_name, version, file_entries, out_dir, *, kind, inject_keyring)
         _add_bytes_to_tar(tar, "./data.tar.gz", data_tgz, 0o644)
 
     return ipk_path, installed_size
-
-
-# ============ full-bundle (offline one-shot installer) ============
-
-def _full_bundle_install_sh(panel_ipk, panel_sig, bins_ipk, bins_sig):
-    """install.sh shipped inside detour-full-v<ver>.tar.gz. Verifies both
-    .ipk against the pinned/TOFU usign key, then installs bins THEN panel."""
-    return f"""#!/bin/sh
-# detour full offline installer. Run from the extracted bundle dir:
-#   tar -xzf detour-full-v<ver>.tar.gz && sh detour-full-v<ver>/install.sh
-# Installs the binaries package first, then the panel. Pass --skip-verify only
-# if you really must bypass the usign signature check.
-set -e
-cd "$(dirname "$0")"
-
-PANEL_IPK="{panel_ipk}"
-PANEL_SIG="{panel_sig}"
-BINS_IPK="{bins_ipk}"
-BINS_SIG="{bins_sig}"
-PUBKEY=etc/detour/release.usign.pub   # TOFU copy shipped in the bundle
-
-verify() {{
-    ipk="$1"; sig="$2"
-    [ "${{1:-}}" = "--skip-verify" ] && return 0
-    case " $* " in *" --skip-verify "*) return 0 ;; esac
-    if command -v usign >/dev/null 2>&1; then
-        if [ -d /etc/opkg/keys ] && ls /etc/opkg/keys/* >/dev/null 2>&1; then
-            usign -V -m "$ipk" -P /etc/opkg/keys -x "$sig" && return 0
-        fi
-        if [ -f /etc/detour/release.usign.pub ]; then
-            usign -V -m "$ipk" -p /etc/detour/release.usign.pub -x "$sig" && return 0
-        fi
-        usign -V -m "$ipk" -p "$PUBKEY" -x "$sig" && return 0   # TOFU bootstrap
-        echo "usign verification FAILED for $ipk" >&2; exit 1
-    fi
-    echo "usign not found — re-run with --skip-verify to bypass" >&2; exit 1
-}}
-
-verify "$BINS_IPK" "$BINS_SIG" "$@"
-verify "$PANEL_IPK" "$PANEL_SIG" "$@"
-
-echo "Installing binaries package ..."
-opkg install --force-overwrite "$BINS_IPK"
-echo "Installing panel package ..."
-opkg install --force-overwrite "$PANEL_IPK"
-echo "Done. detour installed (panel + binaries)."
-"""
-
-
-def build_full_bundle(version, bins_version, panel_ipk, panel_sig, bins_ipk, bins_sig, out_dir):
-    """Bundle both .ipk + .sig + a TOFU pubkey + install.sh into one tarball that
-    installs the whole thing offline in a single step. Returns the tarball path."""
-    base = f"detour-full-v{version}"
-    tgz_path = os.path.join(out_dir, base + ".tar.gz")
-    names = {
-        "panel_ipk": os.path.basename(panel_ipk), "panel_sig": os.path.basename(panel_sig),
-        "bins_ipk": os.path.basename(bins_ipk), "bins_sig": os.path.basename(bins_sig),
-    }
-    install_sh = _full_bundle_install_sh(
-        names["panel_ipk"], names["panel_sig"], names["bins_ipk"], names["bins_sig"])
-    with tarfile.open(tgz_path, "w:gz", format=tarfile.USTAR_FORMAT) as tar:
-        _add_dir_to_tar(tar, f"./{base}/")
-        _add_dir_to_tar(tar, f"./{base}/etc/")
-        _add_dir_to_tar(tar, f"./{base}/etc/detour/")
-        for p in (panel_ipk, panel_sig, bins_ipk, bins_sig):
-            _add_file_to_tar(tar, p, f"./{base}/{os.path.basename(p)}", 0o644)
-        # TOFU copy of the pubkey so install.sh can verify on a key-less router.
-        _add_file_to_tar(tar, resolve_source(("keys", "release.usign.pub")),
-                         f"./{base}/etc/detour/release.usign.pub", 0o644)
-        _add_bytes_to_tar(tar, f"./{base}/install.sh", install_sh.encode("utf-8"), 0o755)
-    return tgz_path
 
 
 def sign_ipk(ipk_path):
@@ -706,19 +564,20 @@ def publish_to_github(version, out_dir):
     upload_url = release["upload_url"].split("{", 1)[0]
     existing = {a["name"]: a["id"] for a in (release.get("assets") or [])}
 
-    # Upload every release artefact present in out_dir: panel .ipk+.sig,
-    # bins .ipk+.sig (when built) and the full-bundle tarball.
+    # Upload every .ipk (+ .sig) in out_dir: the panel and the Keenetic package.
+    # sing-box ships via the opkg feed (build_feed.py), not as a release asset.
     assets_to_upload = sorted(
         os.path.join(out_dir, n) for n in os.listdir(out_dir)
         if n.endswith(".ipk") or n.endswith(".ipk.sig")
-        or (n.startswith("detour-full-v") and n.endswith(".tar.gz"))
     )
     if not assets_to_upload:
         die(f"no .ipk artefacts in {out_dir} — build first")
     upload_names = {os.path.basename(p) for p in assets_to_upload}
-    # Wipe any legacy schema-v2 artefacts left over from earlier releases.
+    # Wipe legacy artefacts left over from earlier release schemes (tarball+manifest
+    # and the detour-bins / detour-full split).
     legacy_names = {
         f"detour-v{version}.tar.gz", "manifest.json", "manifest.json.sig",
+        f"detour-full-v{version}.tar.gz",
     }
     for name, aid in existing.items():
         if name in legacy_names or name in upload_names:
@@ -747,9 +606,6 @@ def publish_to_github(version, out_dir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--version", required=True, help="Panel release version, e.g. 1.3.0")
-    ap.add_argument("--bins-version", default=None,
-                    help="Also build detour-bins (+full bundle) at this version, "
-                         "e.g. the sing-box version 1.13.2. Omit for a panel-only release.")
     ap.add_argument("--notes", default=None, help="Release notes (plain text)")
     ap.add_argument("--from-git", action="store_true",
                     help="Derive notes from git log since previous tag")
@@ -764,7 +620,6 @@ def main():
     args = ap.parse_args()
 
     version = parse_version(args.version)
-    bins_version = parse_version(args.bins_version) if args.bins_version else None
     out_dir = os.path.join(RELEASES_DIR, f"v{version}")
 
     if args.publish_existing:
@@ -791,14 +646,13 @@ def main():
         notes = read_git_log_for_notes(version)
 
     built = []  # (label, ipk_path, sig_path)
-    print(f"=== Building detour v{version}"
-          + (f" + bins v{bins_version}" if bins_version else " (panel only)") + " ===")
+    print(f"=== Building detour v{version} ===")
     print(f"Output: {out_dir}")
 
-    # --- panel (slim) ---
+    # --- panel (slim; sing-box comes from the opkg feed, tpws is bundled) ---
     print("\n[panel] Assembling .ipk ...")
     panel_ipk, panel_size = build_ipk(PACKAGE_NAME, version, PANEL_FILES, out_dir,
-                                      kind="panel", inject_keyring=True)
+                                      inject_keyring=True)
     print(f"  {panel_ipk}  ({os.path.getsize(panel_ipk):,} B on disk, "
           f"installed {panel_size:,} B, sha256 {sha256_file(panel_ipk)[:16]}...)")
     panel_sig = sign_ipk(panel_ipk)
@@ -820,58 +674,36 @@ def main():
         print(f"  signed: {keenetic_sig}" if keenetic_sig else "  (UNSIGNED)")
         built.append(("keenetic", keenetic_ipk, keenetic_sig))
 
-    bins_ipk = bins_sig = None
-    if bins_version:
-        # --- binaries ---
-        print("\n[bins] Assembling .ipk ...")
-        bins_ipk, bins_size = build_ipk(BINS_PKG_NAME, bins_version, BIN_FILES, out_dir,
-                                        kind="bins", inject_keyring=False)
-        print(f"  {bins_ipk}  ({os.path.getsize(bins_ipk):,} B on disk, "
-              f"installed {bins_size:,} B, sha256 {sha256_file(bins_ipk)[:16]}...)")
-        bins_sig = sign_ipk(bins_ipk)
-        print(f"  signed: {bins_sig}")
-        built.append(("bins", bins_ipk, bins_sig))
-
-        # --- full offline bundle ---
-        print("\n[full] Building offline one-shot bundle ...")
-        full_tgz = build_full_bundle(version, bins_version, panel_ipk, panel_sig,
-                                     bins_ipk, bins_sig, out_dir)
-        print(f"  {full_tgz}  ({os.path.getsize(full_tgz):,} B)")
-
     # --- release notes ---
     print("\n[notes] Writing release notes ...")
     notes_path = os.path.join(out_dir, "RELEASE_NOTES.md")
     with open(notes_path, "w", encoding="utf-8") as f:
-        f.write(f"# detour v{version}"
-                + (f" (bins v{bins_version})" if bins_version else "") + "\n\n")
+        f.write(f"# detour v{version}\n\n")
         f.write(notes or "(no notes)")
         f.write("\n\n## Packages\n\n")
-        f.write(f"- `{os.path.basename(panel_ipk)}` — panel for OpenWrt/GL.iNet (scripts/UI).\n")
+        f.write(f"- `{os.path.basename(panel_ipk)}` — panel for OpenWrt/GL.iNet "
+                "(scripts/UI + tpws). sing-box is pulled from the opkg feed.\n")
         if keenetic_ipk:
             f.write(f"- `{os.path.basename(keenetic_ipk)}` — Keenetic/Entware (mipsel) package.\n")
-        if bins_version:
-            f.write(f"- `{os.path.basename(bins_ipk)}` — sing-box + tpws-zapret binaries.\n")
-            f.write(f"- `detour-full-v{version}.tar.gz` — both .ipk + `install.sh` "
-                    "for a one-shot offline install.\n")
-        f.write("\n## Install\n\n")
-        if bins_version:
-            f.write(
-                "### Fresh / offline (one shot, SSH)\n\n"
-                f"```\nscp detour-full-v{version}.tar.gz root@<router>:/tmp/\n"
-                f"ssh root@<router> 'cd /tmp && tar -xzf detour-full-v{version}.tar.gz "
-                f"&& sh detour-full-v{version}/install.sh'\n```\n\n"
-                "### Fresh via LuCI\n\n"
-                f"Upload **both** `{os.path.basename(bins_ipk)}` and "
-                f"`{os.path.basename(panel_ipk)}` (bins first).\n\n"
-            )
+        f.write("\n## sing-box\n\n")
         f.write(
+            "sing-box is **not** bundled — the panel `Depends: sing-box`, served by "
+            f"our feed (`{FEED_LINE}`). The feed must be configured before install "
+            "(`deploy_router.py` and `detour-update` do this automatically). Build/"
+            "publish the feed with `python3 build_feed.py --version <sb-ver> --publish`.\n"
+        )
+        f.write("\n## Install\n\n")
+        f.write(
+            "### Fresh (SSH)\n\n"
+            f"```\nopkg update && opkg install sing-box   # from the detour feed\n"
+            f"opkg install /tmp/{os.path.basename(panel_ipk)}\n```\n\n"
             "### Panel update (existing install)\n\n"
             f"LuCI → Software → Upload `{os.path.basename(panel_ipk)}`, or the panel's "
-            "self-update, or `detour-update apply`.\n"
+            "self-update, or `detour-update apply`.\n\n"
+            "### sing-box update\n\n"
+            "Panel → «Обновить бинарники», or `detour-update bins-apply` "
+            "(`opkg update && opkg upgrade sing-box`).\n"
         )
-        if bins_version:
-            f.write("\n### Binaries update\n\n"
-                    "Panel → «Обновить бинарники», or `detour-update bins-apply`.\n")
     print(f"  {notes_path}")
 
     if args.publish:
