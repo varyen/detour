@@ -471,15 +471,18 @@ def sign_ipk(ipk_path):
 
 def read_git_log_for_notes(version):
     try:
+        # encoding=utf-8: git emits UTF-8; without this, text=True decodes with the
+        # Windows ANSI codepage (cp1251) and Cyrillic / em-dash commit subjects
+        # turn into mojibake in the release notes.
         prev = subprocess.run(
             ["git", "describe", "--tags", "--abbrev=0", "--match", "v*"],
-            capture_output=True, text=True, cwd=HERE,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=HERE,
         )
         prev_tag = prev.stdout.strip() if prev.returncode == 0 else None
         rng = f"{prev_tag}..HEAD" if prev_tag else "HEAD"
         log = subprocess.run(
             ["git", "log", "--no-merges", "--pretty=format:- %s", rng],
-            capture_output=True, text=True, cwd=HERE,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=HERE,
         )
         return log.stdout.strip()
     except Exception:
@@ -548,9 +551,12 @@ def publish_to_github(version, out_dir):
 
     status, release = _gh_request("GET", f"{api}/releases/tags/{tag}", token,
                                   expected_status={200, 404})
+    # RELEASE_NOTES.md is UTF-8 (Russian) — MUST read it as utf-8, otherwise on a
+    # Windows build host Python decodes it with the ANSI codepage (cp1251) and the
+    # GitHub release body comes out as mojibake ("Р±РѕР»СЊС€Рµ").
+    notes_path = os.path.join(out_dir, "RELEASE_NOTES.md")
+    body = open(notes_path, encoding="utf-8").read() if os.path.isfile(notes_path) else ""
     if status == 404:
-        notes_path = os.path.join(out_dir, "RELEASE_NOTES.md")
-        body = open(notes_path).read() if os.path.isfile(notes_path) else ""
         payload = {
             "tag_name": tag, "name": tag, "body": body,
             "draft": False, "prerelease": False, "generate_release_notes": False,
@@ -560,6 +566,11 @@ def publish_to_github(version, out_dir):
         print(f"[publish] created release {tag}")
     else:
         print(f"[publish] reusing existing release {tag} (id={release['id']})")
+        # Refresh the body so re-publishing fixes/updates the description.
+        if body:
+            _gh_request("PATCH", f"{api}/releases/{release['id']}", token,
+                        data={"body": body}, expected_status={200})
+            print(f"[publish] updated release notes for {tag}")
 
     upload_url = release["upload_url"].split("{", 1)[0]
     existing = {a["name"]: a["id"] for a in (release.get("assets") or [])}
