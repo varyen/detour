@@ -27,6 +27,7 @@ SESSION_DIR="/tmp/detour-sessions"
 SINGBOX_BIN="/usr/bin/sing-box"
 TPWS_BIN="/usr/bin/tpws-zapret"
 SUBREFRESH_BIN="/usr/sbin/subscription-refresh"
+HOSTS_BIN="/usr/sbin/detour-hosts"
 LAN_IF="br-lan"
 DETOUR_DIR="/etc/detour"
 # =================================================
@@ -64,6 +65,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_BIN="$OPT/bin/sing-box"   # Entware sing-box-go installs to /opt/bin
     TPWS_BIN="$OPT/sbin/tpws-zapret"
     SUBREFRESH_BIN="$OPT/sbin/subscription-refresh"
+    HOSTS_BIN="$OPT/sbin/detour-hosts"
     # LAN bridge from detour.conf (assumed br0); killswitch uses iptables (no nft fw4).
     LAN_IF="br0"
     [ -f "$OPT/etc/detour/detour.conf" ] && . "$OPT/etc/detour/detour.conf" 2>/dev/null
@@ -684,6 +686,8 @@ if [ "$REQUEST_METHOD" = "POST" ] && [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LEN
     # whole package in a shell variable.
     case "$ACTION" in
         panel_update_local) head -c "$CONTENT_LENGTH" > /tmp/detour-upload.ipk ;;
+        hosts_upload) head -c "$CONTENT_LENGTH" > /tmp/detour-hosts-upload ;;
+        hosts_custom_save) head -c "$CONTENT_LENGTH" > /tmp/detour-hosts-custom ;;
         *) POST_DATA=$(head -c "$CONTENT_LENGTH") ;;
     esac
 fi
@@ -1449,6 +1453,103 @@ whitelist_save_restart)
     else
         json_err "POST required"
     fi
+    ;;
+
+# ==================== HOSTS-DNS (priority hosts file via dnsmasq addn-hosts) ====================
+# A "hosts override" (e.g. GeoHide DNS) pins domains to fixed IPs that dnsmasq
+# serves with priority over upstream. This is a PARALLEL bypass — pinned domains
+# go directly to the pinned IP, not through sing-box/zapret. All logic lives in
+# /usr/sbin/detour-hosts; these handlers are thin wrappers relaying its JSON.
+hosts_status)
+    if [ -x "$HOSTS_BIN" ]; then
+        "$HOSTS_BIN" status 2>/dev/null
+    else
+        printf '{"supported":false,"enabled":false,"error":"detour-hosts not installed"}'
+    fi
+    ;;
+
+hosts_set)
+    # POST {"url":"https://...","enabled":true|false}
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$HOSTS_BIN" ] || { json_err "detour-hosts not installed"; exit 0; }
+    HD_URL=$(printf '%s' "$POST_DATA" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    if [ -n "$HD_URL" ]; then
+        "$HOSTS_BIN" seturl "$HD_URL" >/dev/null 2>&1 || { json_err "invalid url"; exit 0; }
+    fi
+    case "$POST_DATA" in
+        *'"enabled":true'*|*'"enabled": true'*)   "$HOSTS_BIN" on  2>/dev/null ;;
+        *'"enabled":false'*|*'"enabled": false'*) "$HOSTS_BIN" off 2>/dev/null ;;
+        *) "$HOSTS_BIN" status 2>/dev/null ;;
+    esac
+    ;;
+
+hosts_refresh)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$HOSTS_BIN" ] || { json_err "detour-hosts not installed"; exit 0; }
+    "$HOSTS_BIN" refresh 2>/dev/null
+    ;;
+
+hosts_exclude)
+    # POST {"enabled":true|false} — toggle exclusion of already-proxied domains.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$HOSTS_BIN" ] || { json_err "detour-hosts not installed"; exit 0; }
+    case "$POST_DATA" in
+        *'"enabled":true'*|*'"enabled": true'*)   "$HOSTS_BIN" exclude 1 2>/dev/null ;;
+        *'"enabled":false'*|*'"enabled": false'*) "$HOSTS_BIN" exclude 0 2>/dev/null ;;
+        *) json_err "enabled bool required" ;;
+    esac
+    ;;
+
+hosts_get)
+    # Filtered list content — fetched on demand only (can be large).
+    if [ -f "$DETOUR_DIR/hosts-override.list" ]; then
+        CONTENT=$(cat "$DETOUR_DIR/hosts-override.list" | json_escape)
+        printf '{"hosts":"%s"}' "$CONTENT"
+    else
+        echo '{"hosts":""}'
+    fi
+    ;;
+
+hosts_upload)
+    # Raw body streamed to /tmp/detour-hosts-upload by the POST reader above.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$HOSTS_BIN" ] || { json_err "detour-hosts not installed"; exit 0; }
+    if [ ! -s /tmp/detour-hosts-upload ]; then json_err "no file uploaded"; exit 0; fi
+    "$HOSTS_BIN" upload /tmp/detour-hosts-upload 2>/dev/null
+    rm -f /tmp/detour-hosts-upload
+    ;;
+
+hosts_custom_get)
+    # The user's own entries (separate from the source — survive refresh).
+    if [ -f "$DETOUR_DIR/hosts-custom.list" ]; then
+        CONTENT=$(cat "$DETOUR_DIR/hosts-custom.list" | json_escape)
+        printf '{"custom":"%s"}' "$CONTENT"
+    else
+        echo '{"custom":""}'
+    fi
+    ;;
+
+hosts_custom_save)
+    # Raw body streamed to /tmp/detour-hosts-custom by the POST reader above.
+    # An empty body (cleared textarea) yields no file → seed an empty one so the
+    # worker clears the custom list. The worker rebuilds the served file = source
+    # + custom and re-applies, so refreshing the source never wipes these.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$HOSTS_BIN" ] || { json_err "detour-hosts not installed"; exit 0; }
+    [ -f /tmp/detour-hosts-custom ] || : > /tmp/detour-hosts-custom
+    "$HOSTS_BIN" custom-save /tmp/detour-hosts-custom 2>/dev/null
+    rm -f /tmp/detour-hosts-custom
+    ;;
+
+hosts_custom_toggle)
+    # POST {"enabled":true|false} — apply/suspend the custom block without losing it.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$HOSTS_BIN" ] || { json_err "detour-hosts not installed"; exit 0; }
+    case "$POST_DATA" in
+        *'"enabled":true'*|*'"enabled": true'*)   "$HOSTS_BIN" custom-enable 1 2>/dev/null ;;
+        *'"enabled":false'*|*'"enabled": false'*) "$HOSTS_BIN" custom-enable 0 2>/dev/null ;;
+        *) json_err "enabled bool required" ;;
+    esac
     ;;
 
 subscription_fetch)

@@ -560,7 +560,7 @@
       .chain-arrow { color: var(--text-dim); font-size: 13px; }
       .chain-hint { margin-top: 6px; font-size: 11px; color: var(--text-muted); }
 
-      /* ===== KILLSWITCH ===== */
+      /* ===== ВСЕ ЧЕРЕЗ VPN ===== */
       .killswitch-row {
         display: flex;
         align-items: center;
@@ -1354,6 +1354,7 @@
           <button class="tab" data-tab="singbox-cfg">⚙ Конфиг sing-box</button>
           <button class="tab" data-tab="zapret-domains">🎯 Домены zapret</button>
           <button class="tab" data-tab="zapret-cfg">⚙ Настройки zapret</button>
+          <button class="tab" data-tab="hosts-dns">🧩 Hosts-DNS</button>
           <button class="tab" data-tab="firewall">🛡 Файрвол</button>
         </div>
 
@@ -1510,6 +1511,79 @@
             </p>
             <textarea id="zapret-args-editor" spellcheck="false" style="min-height: 96px; font-size: 12.5px"
               placeholder="--filter-tcp=80 --methodeol --new --filter-tcp=443 --split-pos=1,midsld --disorder"></textarea>
+          </div>
+        </div>
+
+        <!-- Tab: Hosts-DNS (priority hosts file via dnsmasq addn-hosts) -->
+        <div class="tab-content" id="tab-hosts-dns">
+          <div class="editor-section">
+            <div class="editor-header">
+              <h3>Приоритетный hosts-файл (DNS-обход)</h3>
+              <div class="flex-gap">
+                <button class="btn" onclick="refreshHostsDns()">↻ Обновить сейчас</button>
+                <button class="btn primary" onclick="saveHostsDns()">💾 Сохранить</button>
+              </div>
+            </div>
+            <p class="helper-text-block">
+              Подключает внешний <code>hosts</code>-файл (например GeoHide DNS) к
+              внутреннему резолверу роутера (dnsmasq, <code>addn-hosts</code>) —
+              записи получают приоритет над upstream-DNS.<br />
+              <b>Это параллельный обход:</b> трафик к таким доменам идёт НАПРЯМУЮ
+              на IP из файла, минуя ваш sing-box / zapret. Домены из ваших списков
+              sing-box (<code>proxy-domains.list</code>, а в режиме
+              <code>all-except</code> — <code>whitelist-domains.list</code>) по
+              умолчанию исключаются, чтобы не переопределять вашу маршрутизацию.
+            </p>
+
+            <div id="hosts-dns-unsupported" class="helper-text-block" style="display: none; color: var(--red)">
+              ⚠ На этой платформе нет dnsmasq — функция недоступна.
+            </div>
+
+            <div class="form-grid" style="margin-bottom: 12px">
+              <div class="full">
+                <label>URL источника (hosts-формат)</label>
+                <input type="text" id="hosts-dns-url" spellcheck="false"
+                  placeholder="https://raw.githubusercontent.com/Internet-Helper/GeoHideDNS/refs/heads/main/hosts/hosts" />
+              </div>
+            </div>
+
+            <label style="display: flex; align-items: center; gap: 8px; margin: 8px 0; cursor: pointer">
+              <input type="checkbox" id="hosts-dns-enabled" onchange="toggleHostsEnabled()" />
+              <span>Включить приоритетный hosts-файл</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; margin: 8px 0; cursor: pointer">
+              <input type="checkbox" id="hosts-dns-exclude" checked onchange="toggleHostsExclude()" />
+              <span>Не переопределять домены из ваших списков sing-box (рекомендуется)</span>
+            </label>
+
+            <div id="hosts-dns-stats" style="font-size: 12px; color: var(--text-dim); margin-top: 10px">—</div>
+            <div id="hosts-dns-error" style="font-size: 12px; color: var(--red); margin-top: 6px"></div>
+
+            <div class="editor-header" style="margin-top: 16px">
+              <h4 class="firewall-section-title" style="margin: 0">Свои записи (дописываются к источнику, не теряются при обновлении)</h4>
+              <button class="btn primary" onclick="saveHostsCustom()">💾 Сохранить свои записи</button>
+            </div>
+            <p class="helper-text-block">
+              Формат hosts: <code>IP&nbsp;домен</code>, по одной записи в строке;
+              строки с <code>#</code> — комментарии. Добавляются к загруженному из
+              источника; «Обновить» их не затирает.
+            </p>
+            <label style="display: flex; align-items: center; gap: 8px; margin: 8px 0; cursor: pointer">
+              <input type="checkbox" id="hosts-dns-custom-enabled" checked onchange="toggleHostsCustomEnabled()" />
+              <span>Применять свои записи (выкл — записи сохраняются, но не отдаются резолверу)</span>
+            </label>
+            <textarea class="domains" id="hosts-dns-custom" spellcheck="false"
+              placeholder="# свои записи&#10;1.2.3.4 example.com&#10;5.6.7.8 sub.example.org"></textarea>
+
+            <div class="editor-header" style="margin-top: 16px">
+              <h4 class="firewall-section-title" style="margin: 0">Итоговый файл (источник + свои записи)</h4>
+              <div class="flex-gap">
+                <button class="btn" onclick="viewHostsDns()">👁 Показать</button>
+                <button class="btn" onclick="document.getElementById('hosts-dns-file').click()">⬆ Загрузить источник файлом</button>
+                <input type="file" id="hosts-dns-file" accept=".txt,.list,.hosts,text/plain" style="display: none" onchange="uploadHostsDns(this)" />
+              </div>
+            </div>
+            <div class="log-view" id="hosts-dns-view" style="min-height: 60px; max-height: 320px; display: none">Загрузка...</div>
           </div>
         </div>
 
@@ -2648,7 +2722,7 @@
           updateSingboxModeUI(currentSingboxMode);
           loadKeepalive();
 
-          // Kill Switch
+          // Все через VPN
           updateKillswitchUI(d.singbox.killswitch);
 
           var sbEnBtn = document.getElementById("sb-enable-btn");
@@ -2771,7 +2845,7 @@
         serviceAction(action, event.target);
       }
 
-      // Kill Switch
+      // Все через VPN
       function updateKillswitchUI(active) {
         var row = document.getElementById("sb-killswitch-row");
         var cb = document.getElementById("sb-killswitch");
@@ -2783,7 +2857,7 @@
         if (
           on &&
           !confirm(
-            "Включить Kill Switch?\n\nВесь TCP-трафик пойдёт через VPN.",
+            "Включить «Все через VPN»?\n\nВесь TCP-трафик пойдёт через VPN.",
           )
         ) {
           document.getElementById("sb-killswitch").checked = false;
@@ -2796,8 +2870,8 @@
           if (d.ok) {
             toast(
               on
-                ? "Kill Switch включён — весь TCP через VPN"
-                : "Kill Switch выключен",
+                ? "«Все через VPN» включено — весь TCP через VPN"
+                : "«Все через VPN» выключено",
               on ? "info" : "success",
             );
             updateKillswitchUI(on);
@@ -5634,6 +5708,183 @@
         }
       }
 
+      // ===== Hosts-DNS (priority hosts file via dnsmasq addn-hosts) =====
+      function fmtHostsBytes(n) {
+        n = Number(n) || 0;
+        if (n < 1024) return n + " Б";
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " КБ";
+        return (n / 1024 / 1024).toFixed(1) + " МБ";
+      }
+      function renderHostsDns(d) {
+        d = d || {};
+        var unsupported = d.supported === false;
+        document.getElementById("hosts-dns-unsupported").style.display =
+          unsupported ? "block" : "none";
+        var en = document.getElementById("hosts-dns-enabled");
+        var ex = document.getElementById("hosts-dns-exclude");
+        var url = document.getElementById("hosts-dns-url");
+        en.checked = d.enabled === true;
+        ex.checked = d.exclude_proxied !== false;
+        if (d.url && document.activeElement !== url) url.value = d.url;
+        en.disabled = ex.disabled = unsupported;
+        var cen = document.getElementById("hosts-dns-custom-enabled");
+        if (cen) {
+          cen.checked = d.custom_enabled !== false;
+          cen.disabled = unsupported;
+        }
+        var stats = document.getElementById("hosts-dns-stats");
+        var err = document.getElementById("hosts-dns-error");
+        err.textContent = d.error ? "Ошибка: " + d.error : "";
+        if (unsupported) {
+          stats.textContent = "";
+          return;
+        }
+        var parts = [];
+        parts.push(d.applied ? "✅ применён" : d.enabled ? "⏳ включён" : "⛔ выключен");
+        parts.push((Number(d.count) || 0) + " записей");
+        parts.push(fmtHostsBytes(d.bytes));
+        if (Number(d.excluded) > 0)
+          parts.push("исключено пересечений: " + d.excluded);
+        parts.push(
+          Number(d.updated) > 0
+            ? "обновлён " + new Date(Number(d.updated) * 1000).toLocaleString()
+            : "ещё не загружался",
+        );
+        stats.textContent = parts.join(" · ");
+      }
+      async function loadHostsDns() {
+        try {
+          renderHostsDns(await api("hosts_status"));
+          loadHostsCustom();
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast("Ошибка загрузки Hosts-DNS", "error");
+        }
+      }
+      async function loadHostsCustom() {
+        try {
+          var d = await api("hosts_custom_get");
+          var ta = document.getElementById("hosts-dns-custom");
+          if (document.activeElement !== ta) ta.value = d.custom || "";
+        } catch (e) {}
+      }
+      async function saveHostsCustom() {
+        var text = document.getElementById("hosts-dns-custom").value;
+        try {
+          // api() treats "" as no-body (GET); send "\n" so an empty save still
+          // POSTs and clears the custom list (worker ignores whitespace-only).
+          var d = await api("hosts_custom_save", "POST", text === "" ? "\n" : text);
+          renderHostsDns(d);
+          if (d && d.error) toast("Ошибка: " + d.error, "error");
+          else toast("Свои записи сохранены", "success");
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast("Ошибка: " + e.message, "error");
+        }
+      }
+      async function toggleHostsCustomEnabled() {
+        var enabled = document.getElementById("hosts-dns-custom-enabled").checked;
+        try {
+          var d = await api(
+            "hosts_custom_toggle",
+            "POST",
+            JSON.stringify({ enabled: enabled }),
+          );
+          renderHostsDns(d);
+          toast(enabled ? "Свои записи включены" : "Свои записи отключены", "success");
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast("Ошибка: " + e.message, "error");
+        }
+      }
+      async function saveHostsDns() {
+        var url = document.getElementById("hosts-dns-url").value.trim();
+        var enabled = document.getElementById("hosts-dns-enabled").checked;
+        try {
+          var d = await api(
+            "hosts_set",
+            "POST",
+            JSON.stringify({ url: url, enabled: enabled }),
+          );
+          renderHostsDns(d);
+          if (d && d.error && !d.url) toast("Ошибка: " + d.error, "error");
+          else toast(enabled ? "Сохранено и применено" : "Сохранено", "success");
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast("Ошибка: " + e.message, "error");
+        }
+      }
+      // Enabling/disabling persists the current URL alongside the new state.
+      function toggleHostsEnabled() {
+        saveHostsDns();
+      }
+      async function toggleHostsExclude() {
+        var enabled = document.getElementById("hosts-dns-exclude").checked;
+        try {
+          var d = await api(
+            "hosts_exclude",
+            "POST",
+            JSON.stringify({ enabled: enabled }),
+          );
+          renderHostsDns(d);
+          toast("Фильтр пересечений обновлён", "success");
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast("Ошибка: " + e.message, "error");
+        }
+      }
+      async function refreshHostsDns() {
+        var url = document.getElementById("hosts-dns-url").value.trim();
+        var enabled = document.getElementById("hosts-dns-enabled").checked;
+        toast("Загрузка hosts-файла…", "info");
+        try {
+          // Persist the URL shown in the field, then fetch from it.
+          await api(
+            "hosts_set",
+            "POST",
+            JSON.stringify({ url: url, enabled: enabled }),
+          );
+          var d = await api("hosts_refresh", "POST", "{}");
+          renderHostsDns(d);
+          if (d && d.error) toast("Ошибка: " + d.error, "error");
+          else toast("Обновлено: " + (Number(d.count) || 0) + " записей", "success");
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast("Ошибка: " + e.message, "error");
+        }
+      }
+      async function viewHostsDns() {
+        var box = document.getElementById("hosts-dns-view");
+        if (box.style.display === "none") {
+          box.style.display = "block";
+          box.textContent = "Загрузка…";
+          try {
+            var d = await api("hosts_get");
+            box.textContent = d.hosts || "(пусто — файл ещё не загружен)";
+          } catch (e) {
+            box.textContent = "Ошибка: " + e.message;
+          }
+        } else {
+          box.style.display = "none";
+        }
+      }
+      async function uploadHostsDns(input) {
+        var file = input.files && input.files[0];
+        if (!file) return;
+        try {
+          var text = await file.text();
+          var d = await api("hosts_upload", "POST", text);
+          renderHostsDns(d);
+          if (d && d.error) toast("Ошибка: " + d.error, "error");
+          else
+            toast("Загружено: " + (Number(d.count) || 0) + " записей", "success");
+        } catch (e) {
+          toast("Ошибка загрузки файла: " + e.message, "error");
+        } finally {
+          input.value = "";
+        }
+      }
+
       // Firewall
       async function loadFirewall() {
         try {
@@ -6093,6 +6344,7 @@
           if (tab.dataset.tab === "singbox-cfg") loadSingboxConfig();
           if (tab.dataset.tab === "zapret-domains") loadZapretDomains();
           if (tab.dataset.tab === "zapret-cfg") loadZapretConfig();
+          if (tab.dataset.tab === "hosts-dns") loadHostsDns();
           if (tab.dataset.tab === "firewall") loadFirewall();
         });
       });

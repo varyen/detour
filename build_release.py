@@ -133,6 +133,8 @@ PANEL_FILES = [
     (("router_files", "detour-update"), "usr/sbin/detour-update", 0o755),
     (("router_files", "subscription-refresh"), "usr/sbin/subscription-refresh", 0o755),
     (("router_files", "vpn-keepalive"), "usr/sbin/vpn-keepalive", 0o755),
+    (("router_files", "detour-hosts"), "usr/sbin/detour-hosts", 0o755),
+    (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
     (("router_files", "index.html"), "www/detour/index.html", 0o644),
     # tpws-zapret (DPI bypass) is bundled — it's in no opkg feed. ~110 KB.
@@ -316,7 +318,7 @@ fi
 chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /etc/firewall.lan_mark_fallback /etc/hotplug.d/iface/99-proxy-guard \\
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
-    /usr/sbin/vpn-keepalive \\
+    /usr/sbin/vpn-keepalive /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /www/cgi-bin/detour-api 2>/dev/null
 
 # 3) Enable + restart services. Errors here are non-fatal: a fresh OpenWrt
@@ -325,6 +327,11 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
 /etc/init.d/zapret-tpws enable >/dev/null 2>&1
 /etc/init.d/sing-box restart >/dev/null 2>&1
 /etc/init.d/zapret-tpws restart >/dev/null 2>&1
+# detour-hosts: boot hook that re-applies the dnsmasq addn-hosts snippet (tmpfs
+# is wiped on reboot). `start` is a no-op when the feature is disabled and only
+# touches dnsmasq when its config (preserved in /etc/detour) was left enabled.
+/etc/init.d/detour-hosts enable >/dev/null 2>&1
+/etc/init.d/detour-hosts start >/dev/null 2>&1
 
 # 4) Install/refresh cron entries for self-update + subscription-refresh.
 # subscription-refresh ticks hourly; the script itself decides which subscriptions
@@ -335,10 +342,11 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
 # the operator enabled it (AUTO_CHECK=1 in update.conf). This preserves the
 # toggle across upgrades — prerm strips it, and we re-add only if it was on.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-hosts'
   [ "$AUTO_CHECK" = "1" ] && echo "0 */6 * * * /usr/sbin/detour-update check >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
+  echo "23 */12 * * * /usr/sbin/detour-hosts refresh-cron >/var/log/detour-hosts.log 2>&1"
 ) | crontab -
 /etc/init.d/cron enable >/dev/null 2>&1
 /etc/init.d/cron restart >/dev/null 2>&1
@@ -360,12 +368,16 @@ set +e
 # Stop services so opkg can replace the binaries cleanly.
 /etc/init.d/sing-box stop >/dev/null 2>&1
 /etc/init.d/zapret-tpws stop >/dev/null 2>&1
+# Drop the dnsmasq addn-hosts snippet (on a full removal it must not linger; on
+# upgrade the new postinst's `start` re-applies it from the preserved config).
+/etc/init.d/detour-hosts stop >/dev/null 2>&1
 
 # Strip our cron entries (the postinst of the new version will re-add them
 # during upgrade; on a full removal they're correctly gone).
 crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'subscription-refresh' \\
                       | grep -v 'vpn-keepalive' \\
+                      | grep -v 'detour-hosts' \\
                       | crontab - 2>/dev/null
 exit 0
 """

@@ -307,6 +307,35 @@ def step_panel(ssh):
     print(f"  /www/detour/index.html: {n} bytes")
 
 
+def step_hosts(ssh):
+    """Hosts-DNS: priority hosts file fed to dnsmasq via addn-hosts.
+
+    Ships /usr/sbin/detour-hosts (worker) + /etc/init.d/detour-hosts (boot hook
+    that re-applies the /tmp/dnsmasq.d snippet after reboot). The feature is
+    disabled by default; `start` is a no-op and does not touch dnsmasq until the
+    operator enables it from the panel. The 12h refresh cron self-gates on the
+    enabled flag, so installing it always is harmless.
+    """
+    step("Deploying Hosts-DNS (priority hosts file via dnsmasq)")
+    with open(os.path.join(ROUTER_FILES, "detour-hosts"), "rb") as f:
+        n = upload(ssh, f.read(), "/usr/sbin/detour-hosts", "0755")
+    print(f"  /usr/sbin/detour-hosts: {n} bytes")
+    with open(os.path.join(ROUTER_FILES, "detour-hosts.initd"), "rb") as f:
+        n = upload(ssh, f.read(), "/etc/init.d/detour-hosts", "0755")
+    print(f"  /etc/init.d/detour-hosts: {n} bytes")
+    exec_cmd(ssh, "/etc/init.d/detour-hosts enable >/dev/null 2>&1")
+    exec_cmd(ssh, "/etc/init.d/detour-hosts start >/dev/null 2>&1")
+    cron_line = "23 */12 * * * /usr/sbin/detour-hosts refresh-cron >/var/log/detour-hosts.log 2>&1"
+    exec_cmd(
+        ssh,
+        "( crontab -l 2>/dev/null | grep -v 'detour-hosts' ; "
+        f"echo '{cron_line}' ) | crontab -",
+    )
+    exec_cmd(ssh, "/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1")
+    out, _, _ = exec_cmd(ssh, "/usr/sbin/detour-hosts selftest 2>&1")
+    print("  selftest:\n    " + "\n    ".join(l for l in out.splitlines() if l.strip()))
+
+
 def step_auth(ssh, cfg, reset=False):
     step("Setting up panel auth")
     panel_user = cfg.get("panel_user", DEFAULT_PANEL_USER)
@@ -551,6 +580,7 @@ def main():
     step_singbox_configs(ssh, force=args.full)
     step_zapret_configs(ssh, force=args.full)
     step_panel(ssh)
+    step_hosts(ssh)
     step_auth(ssh, cfg, reset=args.reset_panel_auth)
     step_updater(ssh, cfg, global_cfg, enable_autocheck=args.enable_autocheck)
     step_hotplug_guard(ssh)
