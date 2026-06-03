@@ -1162,6 +1162,16 @@
               <button class="btn primary" onclick="applyUpdateGithub()">⬇ Установить последнюю</button>
             </div>
             <div id="upd-github-status" style="font-size:12px;color:var(--text-dim);margin-top:8px;min-height:16px"></div>
+            <label class="check-row" style="margin-top:12px; cursor:pointer;">
+              <input type="checkbox" id="upd-autocheck" onchange="setAutoCheck(this.checked)" />
+              Автопроверка обновлений (раз в 6 ч)
+            </label>
+            <div class="helper-text" style="margin-top:2px">
+              По умолчанию выключено: панель не ходит в GitHub в фоне. Включите, чтобы
+              раз в 6 ч проверять наличие новой версии и показывать плашку — установка
+              всё равно остаётся ручной.
+            </div>
+            <div id="upd-autocheck-status" style="font-size:11px;color:var(--text-muted);margin-top:4px;min-height:14px"></div>
           </div>
 
           <div class="editor-section">
@@ -5829,6 +5839,42 @@
         document.getElementById("upd-current-version").textContent = v || "?";
         document.getElementById("upd-github-status").textContent = "";
         document.getElementById("upd-local-status").textContent = "";
+        document.getElementById("upd-autocheck-status").textContent = "";
+        loadAutoCheckStatus();
+      }
+
+      async function loadAutoCheckStatus() {
+        var cb = document.getElementById("upd-autocheck");
+        var st = document.getElementById("upd-autocheck-status");
+        try {
+          var d = await api("autocheck_status");
+          cb.checked = !!(d && d.enabled);
+          st.textContent = "";
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            st.textContent = "не удалось получить статус автопроверки";
+        }
+      }
+
+      async function setAutoCheck(enabled) {
+        var st = document.getElementById("upd-autocheck-status");
+        st.textContent = enabled ? "Включаю…" : "Выключаю…";
+        try {
+          var d = await api("autocheck_set", "POST", JSON.stringify({ enabled: !!enabled }));
+          if (d && typeof d.enabled !== "undefined") {
+            document.getElementById("upd-autocheck").checked = !!d.enabled;
+            st.textContent = d.enabled
+              ? "✓ автопроверка включена (раз в 6 ч)"
+              : "✓ автопроверка выключена";
+            toast(d.enabled ? "Автопроверка включена" : "Автопроверка выключена", "success");
+          } else {
+            st.textContent = "Ошибка: " + ((d && d.error) || "?");
+            await loadAutoCheckStatus();
+          }
+        } catch (e) {
+          if (e.message !== "Not authenticated") st.textContent = "Ошибка: " + e.message;
+          await loadAutoCheckStatus();
+        }
       }
       function closeUpdateModal() {
         document.getElementById("update-modal").style.display = "none";

@@ -1037,6 +1037,32 @@ panel_update_apply)
     fi
     ;;
 
+autocheck_status)
+    # Read-only: is the unattended 6h auto-check cron installed? (default: no)
+    if [ -x "$UPDATE_BIN" ]; then
+        "$UPDATE_BIN" autocheck status 2>/dev/null || printf '{"enabled":false}'
+    else
+        printf '{"enabled":false}'
+    fi
+    ;;
+
+autocheck_set)
+    # Toggle the unattended 6h auto-check cron. Body: {"enabled":true|false}.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    case "$POST_DATA" in
+        *'"enabled":true'*|*'"enabled": true'*)   AC_MODE=on ;;
+        *'"enabled":false'*|*'"enabled": false'*) AC_MODE=off ;;
+        *) json_err "enabled bool required"; exit 0 ;;
+    esac
+    OUT=$("$UPDATE_BIN" autocheck "$AC_MODE" 2>&1)
+    if [ $? -eq 0 ]; then
+        "$UPDATE_BIN" autocheck status 2>/dev/null
+    else
+        json_err "$(printf '%s' "$OUT" | tail -5 | json_escape)"
+    fi
+    ;;
+
 panel_update_sig)
     # Step 1 of a local .ipk install: store the (small, text) usign signature.
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi

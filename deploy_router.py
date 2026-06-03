@@ -344,15 +344,19 @@ def step_auth(ssh, cfg, reset=False):
     print(f"  auth set: user={panel_user}, pass={panel_pass}")
 
 
-def step_updater(ssh, cfg, global_cfg):
+def step_updater(ssh, cfg, global_cfg, enable_autocheck=False):
     """Install the self-update infrastructure on the router.
 
     Components:
         /usr/sbin/detour-update           — the updater script
         /etc/detour/release.usign.pub     — pinned usign public key
-        /etc/detour/update.conf           — GH owner/repo/token
+        /etc/detour/update.conf           — GH owner/repo/token + AUTO_CHECK flag
         /etc/detour/version               — current version marker
-        /etc/crontabs/root entry               — auto-check every 6 hours
+        /etc/crontabs/root entry               — 6h auto-check (OPT-IN, default off)
+
+    The unattended 6h auto-check cron is only installed when enable_autocheck is
+    True (--enable-autocheck). By default it's off and AUTO_CHECK=0 is recorded so
+    the panel toggle and the .ipk postinst agree on the state.
     """
     step("Installing self-update infrastructure")
 
@@ -398,6 +402,8 @@ def step_updater(ssh, cfg, global_cfg):
         f"GH_OWNER={gh_owner}",
         f"GH_REPO={gh_repo}",
         f"GH_TOKEN={gh_token}",
+        # Unattended 6h auto-check cron: opt-in (default off). Panel toggles this.
+        f"AUTO_CHECK={'1' if enable_autocheck else '0'}",
         "",
     ]
     upload(ssh, "\n".join(conf_lines), "/etc/detour/update.conf", "0600")
@@ -417,17 +423,20 @@ def step_updater(ssh, cfg, global_cfg):
         out, _, _ = exec_cmd(ssh, "cat /etc/detour/version")
         print(f"  /etc/detour/version: {out.strip()} (kept)")
 
-    # 5. Cron: check every 6h
+    # 5. Cron: 6h auto-check — OPT-IN (default off). Strip any stale entry first,
+    #    then re-add only when explicitly enabled (panel toggle does the same).
     cron_line = "0 */6 * * * /usr/sbin/detour-update check >/var/log/detour-update.log 2>&1"
-    exec_cmd(
-        ssh,
-        # Idempotently install one cron line for the updater check.
-        "( crontab -l 2>/dev/null | grep -v 'detour-update' ; "
-        f"echo '{cron_line}' ) | crontab -",
-    )
+    if enable_autocheck:
+        exec_cmd(
+            ssh,
+            "( crontab -l 2>/dev/null | grep -v 'detour-update' ; "
+            f"echo '{cron_line}' ) | crontab -",
+        )
+    else:
+        exec_cmd(ssh, "crontab -l 2>/dev/null | grep -v 'detour-update' | crontab - 2>/dev/null")
     exec_cmd(ssh, "/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1")
     out, _, _ = exec_cmd(ssh, "crontab -l 2>/dev/null | grep detour-update")
-    print(f"  cron: {out.strip() or 'NOT INSTALLED'}")
+    print(f"  cron auto-check: {out.strip() or 'disabled (opt-in: --enable-autocheck / panel toggle)'}")
 
     # 6. Subscription auto-refresh helper (Lua) + multi-subscription storage dir.
     sub_refresh_local = os.path.join(ROUTER_FILES, "subscription-refresh")
@@ -521,6 +530,9 @@ def main():
                     help="overwrite all configs (default: keep existing configs)")
     ap.add_argument("--skip-binaries", action="store_true")
     ap.add_argument("--reset-panel-auth", action="store_true")
+    ap.add_argument("--enable-autocheck", action="store_true",
+                    help="enable the unattended 6h self-update auto-check cron "
+                         "(default: off — only manual 'Проверить' in the panel)")
     args = ap.parse_args()
 
     cfg = load_router(args.router)
@@ -540,7 +552,7 @@ def main():
     step_zapret_configs(ssh, force=args.full)
     step_panel(ssh)
     step_auth(ssh, cfg, reset=args.reset_panel_auth)
-    step_updater(ssh, cfg, global_cfg)
+    step_updater(ssh, cfg, global_cfg, enable_autocheck=args.enable_autocheck)
     step_hotplug_guard(ssh)
     step_enable_services(ssh)
     step_verify(ssh, cfg["host"])
