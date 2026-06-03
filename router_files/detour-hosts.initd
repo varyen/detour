@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+# detour-hosts — regenerate the dnsmasq addn-hosts include at boot.
+#
+# /tmp/dnsmasq.d is tmpfs and is wiped on reboot, so the `addn-hosts=` snippet
+# must be rewritten after boot (this mirrors how sing-box / zapret-tpws
+# repopulate their own /tmp/dnsmasq.d snippets on start). `apply` is a no-op
+# when the feature is disabled, and only restarts dnsmasq when the snippet
+# actually changes — so a fresh/off install costs nothing at boot.
+
+START=99
+STOP=10
+
+HOSTS_BIN=/usr/sbin/detour-hosts
+
+boot() { start; }
+
+start() {
+    [ -x "$HOSTS_BIN" ] && "$HOSTS_BIN" apply >/dev/null 2>&1
+    return 0
+}
+
+stop() {
+    [ -x "$HOSTS_BIN" ] && "$HOSTS_BIN" remove >/dev/null 2>&1
+    return 0
+}

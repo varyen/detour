@@ -1,0 +1,309 @@
+#!/bin/sh
+# detour-hosts — manage a priority hosts file consumed by dnsmasq (addn-hosts).
+#
+# A "hosts override" file (e.g. GeoHide DNS) pins selected domains to specific
+# IPs. dnsmasq serves these locally and they take PRIORITY over upstream DNS.
+#
+# IMPORTANT — this is a *parallel* bypass mechanism, not part of the sing-box /
+# zapret redirect path: traffic to a pinned domain goes DIRECTLY to the pinned
+# IP, it is NOT redirected through :12345 / :1081 (dnsmasq answers locally, so
+# the ipset is never populated for that name). To avoid silently breaking the
+# panel's own proxy routing, domains already covered by proxy-domains.list are
+# excluded from the served file by default (toggle: exclude_proxied).
+#
+# Subcommands:
+#   status            — print JSON state (used by the panel)
+#   seturl <url>      — store the source URL (http/https)
+#   on | off          — enable/disable + (re)apply to dnsmasq
+#   exclude <0|1>     — toggle "exclude already-proxied domains" + re-filter
+#   refresh           — fetch URL, validate, filter, write list, apply
+#   refresh-cron      — like refresh, but a no-op unless enabled (cron entry)
+#   upload <file>     — use <file> as the raw source, filter, write, apply
+#   apply             — (re)generate the dnsmasq include from the list (boot hook)
+#   remove            — drop the dnsmasq include (keeps files/config)
+#   selftest          — environment checks (curl/awk/dnsmasq)
+
+# ==================== PATHS ====================
+DETOUR_DIR="/etc/detour"
+SINGBOX_DOMAINS="/etc/sing-box/proxy-domains.list"
+SINGBOX_WHITELIST="/etc/sing-box/whitelist-domains.list"
+SINGBOX_SETTINGS="/etc/sing-box/settings.json"
+DNSMASQ_DIR="/tmp/dnsmasq.d"
+DNSMASQ_INITD="/etc/init.d/dnsmasq"
+
+# Platform shim (mirrors detour-api): on KeeneticOS/Entware everything is under
+# /opt. The feature stays inert there — `supported()` is false without dnsmasq.
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DETOUR_DIR="/opt/etc/detour"
+    SINGBOX_DOMAINS="/opt/etc/sing-box/proxy-domains.list"
+    SINGBOX_WHITELIST="/opt/etc/sing-box/whitelist-domains.list"
+    SINGBOX_SETTINGS="/opt/etc/sing-box/settings.json"
+    DNSMASQ_DIR="/opt/etc/dnsmasq.d"
+    DNSMASQ_INITD="/opt/etc/init.d/dnsmasq"
+fi
+
+CONF="$DETOUR_DIR/hosts.json"
+LIST="$DETOUR_DIR/hosts-override.list"     # served file = filter(RAW) + CUSTOM (master copy)
+RAW="$DETOUR_DIR/hosts-override.raw"        # last fetched/uploaded source (unfiltered)
+CUSTOM="$DETOUR_DIR/hosts-custom.list"      # user's own entries — preserved across refresh
+# OpenWrt runs dnsmasq inside a ujail that bind-mounts only an allow-list of
+# paths; /etc/detour is NOT visible from inside it. dnsmasq's config ships
+# `addn-hosts=/tmp/hosts` (a hosts DIRECTORY it reads entirely) and /tmp/hosts IS
+# jail-mounted, so we serve the file from there. /tmp is tmpfs → the init.d boot
+# hook re-copies it from $LIST after reboot.
+SERVED="/tmp/hosts/detour-hosts"
+STALE_INCLUDE="$DNSMASQ_DIR/detour-hosts.conf"  # legacy snippet (pre-jail-fix) — cleaned up on apply
+DEFAULT_URL="https://raw.githubusercontent.com/Internet-Helper/GeoHideDNS/refs/heads/main/hosts/hosts"
+
+# ==================== HELPERS ====================
+now() { date +%s 2>/dev/null || echo 0; }
+
+json_escape() { sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\r\n'; }
+
+# Flat-JSON readers over $CONF.
+jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONF" 2>/dev/null | head -1; }
+jraw() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([^,}\"]*\).*/\1/p" "$CONF" 2>/dev/null | head -1 | tr -d ' '; }
+
+supported() { [ -x "$DNSMASQ_INITD" ]; }
+
+dnsmasq_reload() { [ -x "$DNSMASQ_INITD" ] && "$DNSMASQ_INITD" restart >/dev/null 2>&1; }
+
+routing_mode() {
+    sed -n 's/.*"routing_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SINGBOX_SETTINGS" 2>/dev/null | head -1
+}
+
+# Which of the operator's own sing-box domain lists must NOT be overridden by the
+# hosts file. Depends on the live routing mode:
+#   proxy-list  → proxy-domains.list   (the explicitly-PROXIED set)
+#   all-except  → whitelist-domains.list (the explicitly-DIRECT set)
+# Either way these are deliberate per-domain choices; pinning them to a hosts IP
+# would silently bypass that choice, so they are excluded by default.
+protected_file() {
+    case "$(routing_mode)" in
+        all-except) printf '%s' "$SINGBOX_WHITELIST" ;;
+        *)          printf '%s' "$SINGBOX_DOMAINS" ;;
+    esac
+}
+
+load_conf() {
+    URL=""; ENABLED=""; EXCLUDE=""; CUSTOM_ENABLED=""; COUNT=""; BYTES=""; EXCLUDED=""; UPDATED=""; LAST_ERR=""
+    if [ -f "$CONF" ]; then
+        URL=$(jstr url)
+        ENABLED=$(jraw enabled)
+        EXCLUDE=$(jraw exclude_proxied)
+        CUSTOM_ENABLED=$(jraw custom_enabled)
+        COUNT=$(jraw count)
+        BYTES=$(jraw bytes)
+        EXCLUDED=$(jraw excluded)
+        UPDATED=$(jraw updated)
+        LAST_ERR=$(jstr error)
+    fi
+    [ -n "$URL" ] || URL="$DEFAULT_URL"
+    [ "$ENABLED" = "true" ] || ENABLED=false
+    if [ "$EXCLUDE" = "false" ]; then EXCLUDE=false; else EXCLUDE=true; fi
+    if [ "$CUSTOM_ENABLED" = "false" ]; then CUSTOM_ENABLED=false; else CUSTOM_ENABLED=true; fi
+    [ -n "$COUNT" ] || COUNT=0
+    [ -n "$BYTES" ] || BYTES=0
+    [ -n "$EXCLUDED" ] || EXCLUDED=0
+    [ -n "$UPDATED" ] || UPDATED=0
+}
+
+write_conf() {
+    mkdir -p "$DETOUR_DIR"
+    printf '{"url":"%s","enabled":%s,"exclude_proxied":%s,"custom_enabled":%s,"count":%s,"bytes":%s,"excluded":%s,"updated":%s,"error":"%s"}\n' \
+        "$(printf '%s' "$URL" | json_escape)" "$ENABLED" "$EXCLUDE" "$CUSTOM_ENABLED" \
+        "$COUNT" "$BYTES" "$EXCLUDED" "$UPDATED" \
+        "$(printf '%s' "$LAST_ERR" | json_escape)" > "$CONF.tmp" 2>/dev/null \
+        && mv "$CONF.tmp" "$CONF"
+    chmod 600 "$CONF" 2>/dev/null
+}
+
+print_status() {
+    applied=false; [ -f "$SERVED" ] && applied=true
+    sup=false; supported && sup=true
+    printf '{"url":"%s","enabled":%s,"exclude_proxied":%s,"custom_enabled":%s,"count":%s,"bytes":%s,"excluded":%s,"updated":%s,"applied":%s,"supported":%s,"error":"%s"}\n' \
+        "$(printf '%s' "$URL" | json_escape)" "$ENABLED" "$EXCLUDE" "$CUSTOM_ENABLED" \
+        "$COUNT" "$BYTES" "$EXCLUDED" "$UPDATED" "$applied" "$sup" \
+        "$(printf '%s' "$LAST_ERR" | json_escape)"
+}
+
+# Does the downloaded blob look like a hosts file (and not an HTML error page)?
+validate_hosts() {
+    f="$1"
+    [ -s "$f" ] || return 1
+    head -c 32 "$f" | grep -qi '<!doctype\|<html\|<head\|<body' && return 1
+    n=$(grep -cE '^[[:space:]]*[0-9A-Fa-f:.]+[[:space:]]+[A-Za-z0-9._-]+' "$f" 2>/dev/null)
+    [ -n "$n" ] && [ "$n" -ge 1 ]
+}
+
+# Produce $LIST from $RAW. When exclude_proxied is on, drop any hosts line whose
+# hostname is, or is a subdomain of, a domain already in proxy-domains.list
+# (those are handled by the sing-box/zapret redirect path and must not be pinned).
+do_filter() {
+    if [ ! -s "$RAW" ] && [ ! -s "$CUSTOM" ]; then : > "$LIST"; COUNT=0; BYTES=0; EXCLUDED=0; return 0; fi
+    tmp="$LIST.tmp"
+    src="$LIST.src"
+    pf=$(protected_file)
+    if [ -s "$RAW" ] && [ "$EXCLUDE" = "true" ] && [ -f "$pf" ]; then
+        awk '
+            function is_proxied(h) {
+                if (h in prox) return 1
+                while (index(h, ".") > 0) {
+                    h = substr(h, index(h, ".") + 1)
+                    if (h in prox) return 1
+                }
+                return 0
+            }
+            NR==FNR {
+                l=$0; sub(/\/\/.*/,"",l); sub(/#.*/,"",l)
+                gsub(/^[ \t]+|[ \t]+$/,"",l)
+                if (l=="") next
+                if (l ~ /[A-Za-z]/ && l ~ /\./ && l !~ /[ \t]/) prox[tolower(l)]=1
+                next
+            }
+            {
+                if ($0 ~ /^[ \t]*#/ || $0 ~ /^[ \t]*$/) { print; next }
+                n=split($0, f, /[ \t]+/); start=1; if (f[1]=="") start=2
+                drop=0; i=start+1
+                while (i<=n) { h=tolower(f[i]); if (h!="" && is_proxied(h)) { drop=1; break } i++ }
+                if (drop) next
+                print
+            }
+        ' "$pf" "$RAW" > "$src" 2>/dev/null || cp "$RAW" "$src"
+    elif [ -s "$RAW" ]; then
+        cp "$RAW" "$src"
+    else
+        : > "$src"
+    fi
+    # excluded = source host-lines dropped by the filter (custom never counts here)
+    rawn=$(grep -cE '^[[:space:]]*[0-9A-Fa-f:.]+[[:space:]]+[A-Za-z0-9]' "$RAW" 2>/dev/null); [ -n "$rawn" ] || rawn=0
+    srcn=$(grep -cE '^[[:space:]]*[0-9A-Fa-f:.]+[[:space:]]+[A-Za-z0-9]' "$src" 2>/dev/null); [ -n "$srcn" ] || srcn=0
+    EXCLUDED=$((rawn - srcn))
+    [ "$EXCLUDED" -ge 0 ] || EXCLUDED=0
+    # served file = filtered source + the user's own entries (appended verbatim;
+    # NOT subject to exclude_proxied — the operator added them deliberately).
+    cp "$src" "$tmp"
+    if [ "$CUSTOM_ENABLED" = "true" ] && [ -s "$CUSTOM" ] && grep -q '[^[:space:]]' "$CUSTOM" 2>/dev/null; then
+        printf '\n# ---- custom entries (detour panel) ----\n' >> "$tmp"
+        cat "$CUSTOM" >> "$tmp"
+    fi
+    mv "$tmp" "$LIST"; rm -f "$src"
+    COUNT=$(grep -cE '^[[:space:]]*[0-9A-Fa-f:.]+[[:space:]]+[A-Za-z0-9]' "$LIST" 2>/dev/null); [ -n "$COUNT" ] || COUNT=0
+    BYTES=$(wc -c < "$LIST" 2>/dev/null | tr -d ' '); [ -n "$BYTES" ] || BYTES=0
+}
+
+# Sync the jail-visible /tmp/hosts copy to match the desired state, restarting
+# dnsmasq only when something actually changed.
+do_apply() {
+    want=0
+    [ "$ENABLED" = "true" ] && [ -s "$LIST" ] && supported && want=1
+    changed=0
+    # Drop the legacy /tmp/dnsmasq.d snippet (it pointed at /etc/detour, outside
+    # the dnsmasq ujail, and silently failed to load — superseded by $SERVED).
+    [ -f "$STALE_INCLUDE" ] && { rm -f "$STALE_INCLUDE"; changed=1; }
+    if [ "$want" = "1" ]; then
+        mkdir -p "$(dirname "$SERVED")"
+        if ! cmp -s "$LIST" "$SERVED" 2>/dev/null; then
+            cp "$LIST" "$SERVED" 2>/dev/null && changed=1
+        fi
+    else
+        [ -f "$SERVED" ] && { rm -f "$SERVED"; changed=1; }
+    fi
+    [ "$changed" = "1" ] && dnsmasq_reload
+    return 0
+}
+
+do_remove() { rm -f "$SERVED" "$STALE_INCLUDE"; dnsmasq_reload; }
+
+# Fetch $URL → validate → $RAW → filter → $LIST. Sets LAST_ERR on failure.
+# Does NOT touch dnsmasq (the caller runs do_apply afterwards).
+do_refresh() {
+    if ! supported; then LAST_ERR="dnsmasq отсутствует — платформа не поддерживается"; return 1; fi
+    case "$URL" in http://*|https://*) ;; *) LAST_ERR="нет корректного URL"; return 1 ;; esac
+    tmp="/tmp/detour-hosts.$$"
+    if ! curl -sS -L --max-time 30 -A "detour-hosts" -H "Accept: */*" -o "$tmp" "$URL" 2>"$tmp.err"; then
+        LAST_ERR="ошибка загрузки: $(head -1 "$tmp.err" 2>/dev/null)"
+        rm -f "$tmp" "$tmp.err"; return 1
+    fi
+    if ! validate_hosts "$tmp"; then
+        LAST_ERR="скачанный файл не похож на hosts-файл"
+        rm -f "$tmp" "$tmp.err"; return 1
+    fi
+    mkdir -p "$DETOUR_DIR"
+    mv "$tmp" "$RAW"; rm -f "$tmp.err"
+    UPDATED=$(now); LAST_ERR=""
+    do_filter
+    return 0
+}
+
+do_selftest() {
+    echo "platform-supported: $(supported && echo yes || echo 'no (dnsmasq missing)')"
+    echo "curl: $(command -v curl || echo MISSING)"
+    echo "awk:  $(command -v awk || echo MISSING)"
+    echo "routing-mode: $(routing_mode 2>/dev/null || echo unknown)"
+    pf=$(protected_file)
+    echo "protected-list: $pf $( [ -f "$pf" ] && echo "($(grep -c . "$pf" 2>/dev/null) lines)" || echo absent)"
+    echo "config: $CONF $( [ -f "$CONF" ] && echo present || echo absent)"
+    echo "custom: $CUSTOM $( [ -s "$CUSTOM" ] && echo "$(grep -c '[^[:space:]]' "$CUSTOM" 2>/dev/null) lines" || echo empty)"
+    echo "list:   $LIST $( [ -f "$LIST" ] && echo "$(wc -c < "$LIST" 2>/dev/null) bytes" || echo absent)"
+    echo "served: $SERVED $( [ -f "$SERVED" ] && echo applied || echo absent)"
+}
+
+# ==================== DISPATCH ====================
+cmd="${1:-status}"
+case "$cmd" in
+    status)
+        load_conf; print_status ;;
+    seturl)
+        load_conf; URL="${2:-}"
+        case "$URL" in http://*|https://*) ;; *) LAST_ERR="URL должен начинаться с http:// или https://"; print_status; exit 1 ;; esac
+        write_conf; print_status ;;
+    on)
+        load_conf; ENABLED=true
+        if [ ! -s "$LIST" ]; then
+            if [ -s "$RAW" ] || [ -s "$CUSTOM" ]; then do_filter
+            elif [ -n "$URL" ] && supported; then do_refresh; fi
+        fi
+        write_conf; do_apply; print_status ;;
+    off)
+        load_conf; ENABLED=false; write_conf; do_apply; print_status ;;
+    exclude)
+        load_conf
+        case "${2:-}" in 1|true) EXCLUDE=true ;; 0|false) EXCLUDE=false ;; *) LAST_ERR="ожидается 0|1"; print_status; exit 1 ;; esac
+        [ -s "$RAW" ] && do_filter
+        write_conf; do_apply; print_status ;;
+    refresh)
+        load_conf
+        if do_refresh; then write_conf; do_apply; else write_conf; fi
+        print_status ;;
+    refresh-cron)
+        load_conf
+        [ "$ENABLED" = "true" ] || exit 0
+        if do_refresh; then write_conf; do_apply; else write_conf; fi
+        exit 0 ;;
+    upload)
+        load_conf; f="${2:-}"
+        if ! validate_hosts "$f"; then LAST_ERR="файл не похож на hosts-файл"; print_status; exit 1; fi
+        mkdir -p "$DETOUR_DIR"; cp "$f" "$RAW"
+        UPDATED=$(now); LAST_ERR=""
+        do_filter; write_conf; do_apply; print_status ;;
+    custom-save)
+        load_conf; f="${2:-}"
+        [ -f "$f" ] || { LAST_ERR="нет файла с записями"; print_status; exit 1; }
+        mkdir -p "$DETOUR_DIR"; cp "$f" "$CUSTOM"
+        do_filter; write_conf; do_apply; print_status ;;
+    custom-enable)
+        load_conf
+        case "${2:-}" in 1|true) CUSTOM_ENABLED=true ;; 0|false) CUSTOM_ENABLED=false ;; *) LAST_ERR="ожидается 0|1"; print_status; exit 1 ;; esac
+        do_filter; write_conf; do_apply; print_status ;;
+    apply)
+        load_conf; do_apply; print_status ;;
+    remove)
+        load_conf; do_remove; print_status ;;
+    selftest)
+        do_selftest ;;
+    *)
+        echo "usage: detour-hosts {status|seturl <url>|on|off|exclude <0|1>|refresh|refresh-cron|upload <file>|apply|remove|selftest}" >&2
+        exit 2 ;;
+esac
