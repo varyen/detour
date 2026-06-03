@@ -13,7 +13,7 @@ What it does (idempotent):
     5. /etc/firewall.lan_mark_fallback + uci firewall include
     6. /etc/sing-box/* (config.json, settings.json, *.list, profiles/) and /etc/zapret-tpws/*
        (only if --full or files absent on target)
-    7. /www/cgi-bin/detour-api, /www/detour/index.html (from router-backup/, always)
+    7. /www/cgi-bin/detour-api, /www/detour/index.html (from router_files/, always)
     8. /etc/detour.auth (only if absent, or --reset-panel-auth)
     9. /etc/hotplug.d/iface/99-proxy-guard
    10. Restart services
@@ -33,7 +33,7 @@ from router_config import load_router, load_global_config, ssh_connect, exec_cmd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROUTER_FILES = os.path.join(HERE, "router_files")
-BACKUP_HOME = os.path.join(HERE, "router-backup")  # canonical source for live configs
+BACKUP_HOME = os.path.join(HERE, "router-backup")  # on-router snapshot: binaries/configs only (NOT panel — that's router_files/)
 
 # Default panel user when routers.local.json entry lacks panel_user.
 # Panel password MUST be set per-router in routers.local.json (panel_password).
@@ -295,8 +295,10 @@ def step_zapret_configs(ssh, force=False):
 def step_panel(ssh):
     step("Deploying panel CGI + HTML")
     exec_cmd(ssh, "mkdir -p /www/cgi-bin /www/detour /tmp/detour-sessions")
-    cgi = os.path.join(BACKUP_HOME, "www", "cgi-bin", "detour-api")
-    html = os.path.join(BACKUP_HOME, "www", "detour", "index.html")
+    # Canonical source is router_files/ (what build_release.py ships); router-backup/
+    # is a stale on-router snapshot and must NOT be the deploy source for the panel.
+    cgi = os.path.join(ROUTER_FILES, "detour-api")
+    html = os.path.join(ROUTER_FILES, "index.html")
     with open(cgi, "rb") as f:
         n = upload(ssh, f.read(), "/www/cgi-bin/detour-api", "0755")
     print(f"  /www/cgi-bin/detour-api: {n} bytes")

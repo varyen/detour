@@ -4,7 +4,7 @@
 > Два движка под одним SPA-интерфейсом — **sing-box** (Trojan/VLESS-прокси) и
 > **zapret-tpws** (DPI-bypass) — с самообновлением по подписанным `.ipk`-релизам.
 
-**Версия:** [`1.0.0`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
+**Версия:** [`1.3.1`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -38,45 +38,45 @@ Detour — самохостируемая система обхода блоки
 
 dnsmasq при резолве доменов из списков складывает IP в соответствующие ipset'ы;
 nat-правила перенаправляют только нужный трафик, остальное идёт без накладных
-расходов. Подробнее — в [`CLAUDE.md`](CLAUDE.md).
+расходов.
 
 ## Целевая платформа
 
-| Параметр | Значение |
-| --- | --- |
-| Референс | GL.iNet GL-BE9300 (Flint 3), SoC IPQ9300 (ipq53xx), Cortex-A53 |
-| Прошивка | GL.iNet 4.8.4 (OpenWrt 23.05-SNAPSHOT) |
-| Arch (opkg) | `aarch64_cortex-a53` |
-| libc | **musl** (не glibc — бинарники должны быть musl) |
-| Shell | BusyBox **ash** (не bash) |
-| Lua | 5.1 |
-| Firewall | **nftables** (`table inet fw4`, `input` policy drop) |
+| Параметр    | Значение                                                       |
+| ----------- | -------------------------------------------------------------- |
+| Референс    | GL.iNet GL-BE9300 (Flint 3), SoC IPQ9300 (ipq53xx), Cortex-A53 |
+| Прошивка    | GL.iNet 4.8.4 (OpenWrt 23.05-SNAPSHOT)                         |
+| Arch (opkg) | `aarch64_cortex-a53`                                           |
+| libc        | **musl** (не glibc — бинарники должны быть musl)               |
+| Shell       | BusyBox **ash** (не bash)                                      |
+| Lua         | 5.1                                                            |
+| Firewall    | **nftables** (`table inet fw4`, `input` policy drop)           |
 
 Парк (настраивается в `routers.local.json`):
 
-| Имя | Хост | Железо | Firewall |
-| --- | --- | --- | --- |
+| Имя              | Хост        | Железо                             | Firewall     |
+| ---------------- | ----------- | ---------------------------------- | ------------ |
 | `home` (default) | 192.168.8.1 | GL-BE9300 (ipq53xx, OpenWrt 23.05) | nftables fw4 |
-| `flint2` | 192.168.9.1 | GL-MT6000 (MT7986, OpenWrt 21.02) | iptables fw3 |
+| `flint2`         | 192.168.9.1 | GL-MT6000 (MT7986, OpenWrt 21.02)  | iptables fw3 |
 
 `deploy_router.py` сам определяет особенности устройства (наличие `nft`,
 busybox-апплетов и т.п.) и подстраивает деплой.
 
 ## Структура репозитория
 
-| Путь | Назначение |
-| --- | --- |
-| `router_files/` | Скрипты, деплоящиеся на роутер: init.d, CGI, updater, shim'ы. |
-| `router-backup/` | Зеркало живого состояния роутера (gitignored). Источник конфигов и бинарников при сборке. |
-| `build_release.py` | Сборка подписанных `.ipk` панели (`detour` + `detour-keenetic`). |
-| `build_feed.py` | Сборка/публикация opkg-фида с `sing-box` (ветка `feed`). |
-| `deploy_router.py` | Унифицированный деплой / синхронизация на роутер по SSH. |
-| `deploy_lan_proxy.py` | Деплой отдельного LAN-прокси-сценария. |
-| `update_backups.py` | Снять текущее состояние роутера в `router-backup/`. |
-| `router_config.py` | Загрузка конфигов роутеров и SSH-хелперы (Paramiko). |
-| `usign_compat.py` | Python-реализация usign-подписи (Ed25519). |
-| `keys/` | Ключи подписи релизов (приватный — gitignored). |
-| `routers.example.json` | Шаблон конфигурации роутеров (копируется в `routers.local.json`). |
+| Путь                   | Назначение                                                                                |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| `router_files/`        | Скрипты, деплоящиеся на роутер: init.d, CGI, updater, shim'ы.                             |
+| `router-backup/`       | Зеркало живого состояния роутера (gitignored). Источник конфигов и бинарников при сборке. |
+| `build_release.py`     | Сборка подписанных `.ipk` панели (`detour` + `detour-keenetic`).                          |
+| `build_feed.py`        | Сборка/публикация opkg-фида с `sing-box` (ветка `feed`).                                  |
+| `deploy_router.py`     | Унифицированный деплой / синхронизация на роутер по SSH.                                  |
+| `deploy_lan_proxy.py`  | Деплой отдельного LAN-прокси-сценария.                                                    |
+| `update_backups.py`    | Снять текущее состояние роутера в `router-backup/`.                                       |
+| `router_config.py`     | Загрузка конфигов роутеров и SSH-хелперы (Paramiko).                                      |
+| `usign_compat.py`      | Python-реализация usign-подписи (Ed25519).                                                |
+| `keys/`                | Ключи подписи релизов (приватный — gitignored).                                           |
+| `routers.example.json` | Шаблон конфигурации роутеров (копируется в `routers.local.json`).                         |
 
 ## Быстрый старт
 

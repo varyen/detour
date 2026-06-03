@@ -1081,7 +1081,7 @@
           Подписки
         </button>
         <span class="tb-divider"></span>
-        <button class="tb-btn" onclick="exportAllProfiles()" title="Скачать JSON со всеми профилями">
+        <button class="tb-btn" onclick="openExportProfilesModal()" title="Экспорт всех профилей: JSON или отдельные ссылки (vless://, trojan://, ss://, socks5://, ...)">
           <svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           Экспорт профилей
         </button>
@@ -1278,6 +1278,7 @@
               <div class="profile-actions">
                 <button class="btn" onclick="showProfileModal()">＋ Добавить</button>
                 <button class="btn" onclick="editSelectedProfile()">✎ Редактировать</button>
+                <button class="btn" onclick="viewSelectedProfileLink()" title="Показать ссылку выбранного профиля (vless://, trojan://, ss://, socks5://, ...)">🔗 Ссылка</button>
                 <button class="btn danger" onclick="deleteSelectedProfile()">✕ Удалить</button>
               </div>
             </div>
@@ -1690,8 +1691,28 @@
           </label>
         </div>
         <div class="modal-footer">
+          <button class="btn" onclick="viewCurrentModalLink()" style="margin-right:auto" title="Показать ссылку (vless://, trojan://, ss://, socks5://, ...) для введённых данных">🔗 Показать ссылку</button>
           <button class="btn" onclick="closeProfileModal()">Отмена</button>
           <button class="btn primary" id="profile-save-btn" onclick="saveProfileFromModal()">💾 Сохранить профиль</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Share / Export Links Modal ===== -->
+    <div class="modal-overlay" id="share-modal" style="display: none" onclick="if (event.target === this) closeShareModal();">
+      <div class="modal" style="max-width: 760px">
+        <h3 id="share-modal-title">🔗 Ссылка профиля</h3>
+        <div class="modal-tabs" id="share-modal-tabs" style="display: none">
+          <button class="modal-tab active" data-fmt="links" onclick="setShareFmt('links')">🔗 Ссылки</button>
+          <button class="modal-tab" data-fmt="json" onclick="setShareFmt('json')">&#123;&#125; JSON</button>
+        </div>
+        <label id="share-modal-label">Ссылки (по одной на строку) — скопируйте или скачайте:</label>
+        <textarea id="share-modal-content" rows="10" readonly spellcheck="false" onclick="this.select()"></textarea>
+        <div id="share-modal-note" style="display: none; font-size: 12px; margin-top: 8px; color: var(--text-muted)"></div>
+        <div class="modal-footer">
+          <button class="btn primary" onclick="shareModalCopy()">📋 Скопировать</button>
+          <button class="btn" onclick="shareModalDownload()">⬇ Скачать файл</button>
+          <button class="btn" onclick="closeShareModal()">Закрыть</button>
         </div>
       </div>
     </div>
@@ -2892,11 +2913,291 @@
         /* placeholder for future use */
       }
 
-      // ===== BULK EXPORT / IMPORT OF VPN PROFILES =====
-      async function exportAllProfiles() {
+      // ===== SHARE-LINK EXPORT (outbound JSON → vless:// / trojan:// / ss:// / proxy URI) =====
+      // Reverse of the parseXxxUri() importers below: turns a sing-box outbound back
+      // into a standard share link so profiles can be copied to phones / other clients.
+      // (utf8ToBase64 — UTF-8 safe base64 — is defined near the top of the script.)
+
+      // Bracket bare IPv6 literals so "host:port" stays unambiguous.
+      function fmtShareHost(server) {
+        server = String(server || "");
+        if (server.indexOf(":") >= 0 && server.indexOf("[") < 0) return "[" + server + "]";
+        return server;
+      }
+
+      // pairs: array of [key, value]; empty/undefined values are dropped.
+      function buildShareQuery(pairs) {
+        var parts = [];
+        pairs.forEach(function (kv) {
+          var v = kv[1];
+          if (v === undefined || v === null || v === "") return;
+          parts.push(encodeURIComponent(kv[0]) + "=" + encodeURIComponent(v));
+        });
+        return parts.join("&");
+      }
+
+      function shareFragment(name) {
+        return name ? "#" + encodeURIComponent(name) : "";
+      }
+
+      // Append sing-box transport (ws/grpc/http) as v2ray-style query params.
+      function pushTransportParams(transport, params) {
+        if (!transport || !transport.type) return;
+        if (transport.type === "ws") {
+          params.push(["type", "ws"]);
+          if (transport.path) params.push(["path", transport.path]);
+          if (transport.headers && transport.headers.Host)
+            params.push(["host", transport.headers.Host]);
+        } else if (transport.type === "grpc") {
+          params.push(["type", "grpc"]);
+          if (transport.service_name) params.push(["serviceName", transport.service_name]);
+        } else if (transport.type === "http") {
+          params.push(["type", "http"]);
+          if (transport.path) params.push(["path", transport.path]);
+          if (transport.host && transport.host.length) params.push(["host", transport.host[0]]);
+        }
+      }
+
+      // Returns a share-link string, or null if the outbound type has no standard URI
+      // (e.g. wireguard). Mirrors the parseXxxUri importers so links round-trip.
+      function outboundToShareLink(ob, name) {
+        if (!ob || !ob.type) return null;
+        var host = fmtShareHost(ob.server);
+        var port = ob.server_port;
+        var frag = shareFragment(name);
+        var tls = ob.tls || {};
+        var params, q;
+
+        if (ob.type === "vless") {
+          params = [["encryption", "none"]];
+          if (ob.flow) params.push(["flow", ob.flow]);
+          if (tls.enabled) {
+            if (tls.reality && tls.reality.enabled) {
+              params.push(["security", "reality"]);
+              if (tls.server_name) params.push(["sni", tls.server_name]);
+              if (tls.reality.public_key) params.push(["pbk", tls.reality.public_key]);
+              if (tls.reality.short_id) params.push(["sid", tls.reality.short_id]);
+              if (tls.utls && tls.utls.fingerprint) params.push(["fp", tls.utls.fingerprint]);
+            } else {
+              params.push(["security", "tls"]);
+              if (tls.server_name) params.push(["sni", tls.server_name]);
+              if (tls.utls && tls.utls.fingerprint) params.push(["fp", tls.utls.fingerprint]);
+              if (tls.alpn && tls.alpn.length) params.push(["alpn", tls.alpn.join(",")]);
+            }
+          }
+          pushTransportParams(ob.transport, params);
+          q = buildShareQuery(params);
+          return "vless://" + ob.uuid + "@" + host + ":" + port + (q ? "?" + q : "") + frag;
+        }
+
+        if (ob.type === "trojan") {
+          params = [];
+          if (tls.reality && tls.reality.enabled) {
+            params.push(["security", "reality"]);
+            if (tls.reality.public_key) params.push(["pbk", tls.reality.public_key]);
+            if (tls.reality.short_id) params.push(["sid", tls.reality.short_id]);
+          }
+          if (tls.server_name) params.push(["sni", tls.server_name]);
+          if (tls.utls && tls.utls.fingerprint) params.push(["fp", tls.utls.fingerprint]);
+          if (tls.alpn && tls.alpn.length) params.push(["alpn", tls.alpn.join(",")]);
+          pushTransportParams(ob.transport, params);
+          q = buildShareQuery(params);
+          return "trojan://" + encodeURIComponent(ob.password || "") + "@" + host + ":" + port +
+                 (q ? "?" + q : "") + frag;
+        }
+
+        if (ob.type === "vmess") {
+          var j = {
+            v: "2", ps: name || "", add: ob.server || "", port: String(port || ""),
+            id: ob.uuid || "", aid: String(ob.alter_id || 0), scy: ob.security || "auto",
+            net: "tcp", type: "none", host: "", path: "", tls: "", sni: "",
+          };
+          if (tls.enabled) {
+            j.tls = "tls";
+            if (tls.server_name) j.sni = tls.server_name;
+            if (tls.utls && tls.utls.fingerprint) j.fp = tls.utls.fingerprint;
+            if (tls.alpn && tls.alpn.length) j.alpn = tls.alpn.join(",");
+          }
+          var t = ob.transport;
+          if (t && t.type === "ws") {
+            j.net = "ws";
+            if (t.path) j.path = t.path;
+            if (t.headers && t.headers.Host) j.host = t.headers.Host;
+          } else if (t && t.type === "grpc") {
+            j.net = "grpc";
+            if (t.service_name) j.path = t.service_name;
+          } else if (t && t.type === "http") {
+            j.net = "http";
+            if (t.path) j.path = t.path;
+            if (t.host && t.host.length) j.host = t.host[0];
+          }
+          return "vmess://" + utf8ToBase64(JSON.stringify(j));
+        }
+
+        if (ob.type === "shadowsocks") {
+          var userinfo = utf8ToBase64((ob.method || "") + ":" + (ob.password || ""));
+          return "ss://" + userinfo + "@" + host + ":" + port + frag;
+        }
+
+        if (ob.type === "http") {
+          var secure = tls.enabled;
+          var auth = "";
+          if (ob.username) {
+            auth = encodeURIComponent(ob.username);
+            if (ob.password) auth += ":" + encodeURIComponent(ob.password);
+            auth += "@";
+          }
+          var hpath = ob.path && ob.path !== "/" ? ob.path : "";
+          return (secure ? "https" : "http") + "://" + auth + host + ":" + port + hpath + frag;
+        }
+
+        if (ob.type === "socks") {
+          var ver = ob.version || "5";
+          var scheme = ver === "4" ? "socks4" : ver === "4a" ? "socks4a" : "socks5";
+          var sauth = "";
+          if (ob.username) {
+            sauth = encodeURIComponent(ob.username);
+            if (ob.password) sauth += ":" + encodeURIComponent(ob.password);
+            sauth += "@";
+          }
+          return scheme + "://" + sauth + host + ":" + port + frag;
+        }
+
+        return null; // wireguard / unknown — no standard single-line URI
+      }
+
+      // Profile (on-disk shape {name,type,uri,outbound}) → share link, or null.
+      function profileToShareLink(profile) {
+        if (!profile) return null;
+        var name = profile.name || profile.id || "";
+        var link = profile.outbound ? outboundToShareLink(profile.outbound, name) : null;
+        if (link) return link;
+        // Fallback: original imported URI, if the type has no JSON→URI builder.
+        if (profile.uri && /:\/\//.test(profile.uri)) return String(profile.uri).trim();
+        return null;
+      }
+
+      // ===== CLIPBOARD (LAN panel runs over plain HTTP → navigator.clipboard is often absent) =====
+      function fallbackCopy(text) {
         try {
-          // The endpoint returns a {version, exported_at, profiles:[...]} envelope.
-          // Stream-fetch via the raw URL — api() only handles JSON-action responses.
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.position = "fixed";
+          ta.style.top = "0";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          var ok = document.execCommand("copy");
+          document.body.removeChild(ta);
+          return ok;
+        } catch (e) {
+          return false;
+        }
+      }
+      function copyText(text) {
+        return new Promise(function (resolve) {
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(
+              function () { resolve(true); },
+              function () { resolve(fallbackCopy(text)); }
+            );
+          } else {
+            resolve(fallbackCopy(text));
+          }
+        });
+      }
+
+      // ===== SHARE / EXPORT-LINKS MODAL =====
+      var shareState = { profiles: [], jsonText: "", filenameBase: "links", fmt: "links" };
+
+      function showShareModal(opts) {
+        shareState.profiles = opts.profiles || [];
+        shareState.jsonText = opts.jsonText || "";
+        shareState.filenameBase = opts.filenameBase || "export";
+        document.getElementById("share-modal-title").textContent = opts.title || "🔗 Ссылки";
+        document.getElementById("share-modal-tabs").style.display = opts.showJsonTab ? "flex" : "none";
+        setShareFmt(opts.defaultFmt || "links");
+        document.getElementById("share-modal").style.display = "flex";
+      }
+
+      function closeShareModal() {
+        document.getElementById("share-modal").style.display = "none";
+      }
+
+      function setShareFmt(fmt) {
+        shareState.fmt = fmt;
+        document.querySelectorAll("#share-modal-tabs .modal-tab").forEach(function (b) {
+          b.classList.toggle("active", b.getAttribute("data-fmt") === fmt);
+        });
+        renderShareContent();
+      }
+
+      function renderShareContent() {
+        var ta = document.getElementById("share-modal-content");
+        var note = document.getElementById("share-modal-note");
+        var label = document.getElementById("share-modal-label");
+        if (shareState.fmt === "json") {
+          ta.value = shareState.jsonText;
+          label.textContent = "JSON со всеми профилями:";
+          note.style.display = "none";
+          note.textContent = "";
+          return;
+        }
+        var links = [];
+        var skipped = [];
+        shareState.profiles.forEach(function (p) {
+          var l = profileToShareLink(p);
+          if (l) links.push(l);
+          else skipped.push((p.name || p.id || "?") + (p.type ? " (" + p.type + ")" : ""));
+        });
+        ta.value = links.join("\n");
+        label.textContent =
+          shareState.profiles.length > 1
+            ? "Ссылки (по одной на строку) — скопируйте или скачайте:"
+            : "Ссылка — скопируйте или скачайте:";
+        if (skipped.length) {
+          note.style.display = "";
+          note.textContent =
+            "Без ссылки (" + skipped.length + "): " + skipped.join(", ") +
+            ". Для WireGuard и неизвестных типов стандартная ссылка не формируется — используйте JSON-экспорт.";
+        } else {
+          note.style.display = "none";
+          note.textContent = "";
+        }
+      }
+
+      function shareModalCopy() {
+        var content = document.getElementById("share-modal-content").value;
+        if (!content) { toast("Нечего копировать", "error"); return; }
+        copyText(content).then(function (ok) {
+          toast(ok ? "Скопировано в буфер обмена" : "Не удалось скопировать — выделите вручную", ok ? "success" : "error");
+        });
+      }
+
+      function shareModalDownload() {
+        var content = document.getElementById("share-modal-content").value;
+        if (!content) { toast("Нечего сохранять", "error"); return; }
+        var isJson = shareState.fmt === "json";
+        var blob = new Blob([content], { type: isJson ? "application/json" : "text/plain;charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = shareState.filenameBase + (isJson ? ".json" : ".txt");
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        toast("Файл сохранён", "success");
+      }
+
+      // ===== BULK EXPORT / IMPORT OF VPN PROFILES =====
+      // Toolbar "Экспорт профилей": fetch all profiles, then let the user choose the
+      // export format (separate links / JSON) inside the share modal.
+      async function openExportProfilesModal() {
+        try {
+          // profiles_export returns a {version, exported_at, profiles:[...]} envelope,
+          // each profile carrying its full outbound — exactly what link-building needs.
           var resp = await fetch("/cgi-bin/detour-api?action=profiles_export", {
             method: "GET",
             credentials: "same-origin",
@@ -2907,20 +3208,116 @@
           var data;
           try { data = JSON.parse(text); }
           catch (e) { toast("Сервер вернул не JSON", "error"); return; }
-          var blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-          var url = URL.createObjectURL(blob);
+          var profiles = data.profiles || [];
+          if (!profiles.length) { toast("Нет профилей для экспорта", "error"); return; }
           var stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-          var a = document.createElement("a");
-          a.href = url;
-          a.download = "vpn-profiles-" + stamp + ".json";
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          toast("Экспортировано профилей: " + (data.profiles || []).length, "success");
+          showShareModal({
+            title: "Экспорт профилей (" + profiles.length + ")",
+            profiles: profiles,
+            jsonText: JSON.stringify(data, null, 2),
+            filenameBase: "vpn-profiles-" + stamp,
+            showJsonTab: true,
+            defaultFmt: "links",
+          });
         } catch (e) {
           toast("Ошибка экспорта: " + e.message, "error");
         }
+      }
+
+      // Profile-actions "🔗 Ссылка": show the share link of the selected profile.
+      async function viewSelectedProfileLink() {
+        var sel = document.getElementById("sb-profile-select");
+        var id = sel ? sel.value : "";
+        if (!id) { toast("Выберите профиль", "error"); return; }
+        try {
+          var profile = await api("profile_get&name=" + encodeURIComponent(id));
+          var link = profileToShareLink(profile);
+          if (!link) {
+            toast("Для типа «" + (profile.type || "?") + "» ссылка не поддерживается", "error");
+            return;
+          }
+          showShareModal({
+            title: "🔗 " + (profile.name || profile.id || "Ссылка"),
+            profiles: [profile],
+            jsonText: "",
+            filenameBase: "profile-" + (profile.id || profile.name || "link"),
+            showJsonTab: false,
+            defaultFmt: "links",
+          });
+        } catch (e) {
+          if (e.message !== "Not authenticated") toast("Ошибка загрузки профиля: " + e.message, "error");
+        }
+      }
+
+      // Edit-modal "🔗 Показать ссылку": build link(s) from the data entered right now
+      // in the active tab (no save). Mirrors saveProfileFromModal's per-tab extraction.
+      function buildModalProfilesForLink() {
+        var active = function (id) {
+          return document.getElementById(id).classList.contains("active");
+        };
+        if (active("modal-uri")) {
+          if (!lastParsedProfiles.length) { toast("Сначала вставьте/разберите URI", "error"); return null; }
+          var uriName = document.getElementById("profile-uri-name").value.trim();
+          return lastParsedProfiles.map(function (p, i) {
+            p = cloneJson(p);
+            if (uriName && lastParsedProfiles.length === 1) p.name = uriName;
+            return ensureProfileShape(p, i, uriName);
+          });
+        }
+        if (active("modal-json")) {
+          var jsonName = document.getElementById("profile-json-name").value.trim();
+          var jsonText = document.getElementById("profile-json-input").value.trim();
+          try {
+            return extractProfilesFromJsonInput(jsonName, jsonText).map(function (p, i) {
+              return ensureProfileShape(p, i, jsonName);
+            });
+          } catch (e) {
+            toast("Невалидный JSON: " + e.message, "error");
+            return null;
+          }
+        }
+        if (active("modal-subscription")) {
+          if (!lastParsedProfiles.length) { toast("Сначала загрузите подписку", "error"); return null; }
+          return lastParsedProfiles.map(function (p, i) {
+            return ensureProfileShape(cloneJson(p), i, p.name);
+          });
+        }
+        if (active("modal-proxy")) {
+          try {
+            var pp = buildProxyProfile();
+            return [{ id: pp.id || makeProfileId(pp.name), name: pp.name, type: pp.type, uri: "", outbound: pp.outbound }];
+          } catch (e) {
+            toast(e.message, "error");
+            return null;
+          }
+        }
+        if (active("modal-wireguard")) {
+          toast("Для WireGuard стандартная ссылка не формируется", "error");
+          return null;
+        }
+        toast("Не удалось определить форму профиля", "error");
+        return null;
+      }
+
+      function viewCurrentModalLink() {
+        var profiles = buildModalProfilesForLink();
+        if (!profiles) return; // toast already shown
+        if (!profiles.length) { toast("Нет данных для ссылки", "error"); return; }
+        var hasLink = profiles.some(function (p) { return !!profileToShareLink(p); });
+        if (!hasLink) {
+          toast("Для введённых данных ссылка не формируется", "error");
+          return;
+        }
+        showShareModal({
+          title: profiles.length === 1
+            ? "🔗 " + (profiles[0].name || "Ссылка")
+            : "🔗 Ссылки (" + profiles.length + ")",
+          profiles: profiles,
+          jsonText: "",
+          filenameBase: "profile-links",
+          showJsonTab: false,
+          defaultFmt: "links",
+        });
       }
 
       // ===== PANEL CONFIG EXPORT / IMPORT (settings + domain lists + subscription) =====
