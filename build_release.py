@@ -330,8 +330,13 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
 # subscription-refresh ticks hourly; the script itself decides which subscriptions
 # are due based on their per-subscription `interval_hours` (default 24h) + the
 # `autoupdate` flag, so running every hour is cheap when nothing is configured.
+#
+# The 6h self-update auto-check is OPT-IN (default off): only (re)installed when
+# the operator enabled it (AUTO_CHECK=1 in update.conf). This preserves the
+# toggle across upgrades — prerm strips it, and we re-add only if it was on.
+AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
 ( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive'
-  echo "0 */6 * * * /usr/sbin/detour-update check >/var/log/detour-update.log 2>&1"
+  [ "$AUTO_CHECK" = "1" ] && echo "0 */6 * * * /usr/sbin/detour-update check >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
 ) | crontab -

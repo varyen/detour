@@ -19,6 +19,7 @@
 #
 # Subcommands:
 #   check                  — query GH for latest PANEL tag; write state file
+#   autocheck on|off|status — toggle the unattended 6h auto-check cron (default off)
 #   apply                  — ensure feed+sing-box, then install latest panel release
 #   apply-local <ipk>      — install a panel .ipk already on disk (verifies sig)
 #   bins-check             — opkg-check whether a newer sing-box is in the feed
@@ -58,7 +59,14 @@ ARCH=all
 GH_OWNER=""
 GH_REPO=""
 GH_TOKEN=""
+AUTO_CHECK=0          # opt-in: 6h cron auto-check (default off). Toggle via `autocheck on|off`.
 [ -f "$CONFIG" ] && . "$CONFIG"
+
+# The 6h self-update auto-check cron is OPT-IN. The manual panel "Проверить"
+# button and `detour-update check` always work regardless of this — only the
+# unattended cron tick is gated.
+CHECK_CRON_LINE="0 */6 * * * /usr/sbin/detour-update check >/var/log/detour-update.log 2>&1"
+CHECK_CRON_MATCH="detour-update check"
 
 log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null; echo "[$LOG_TAG] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -395,9 +403,49 @@ cmd_selftest() {
     return 1
 }
 
+# Persist KEY=VALUE into $CONFIG (create if missing, replace any existing line).
+set_conf_flag() {
+    local key="$1" val="$2" tmp
+    mkdir -p "$(dirname "$CONFIG")"
+    [ -f "$CONFIG" ] || : > "$CONFIG"
+    tmp="$CONFIG.tmp.$$"
+    grep -v "^${key}=" "$CONFIG" > "$tmp" 2>/dev/null
+    echo "${key}=${val}" >> "$tmp"
+    mv "$tmp" "$CONFIG"
+    chmod 0600 "$CONFIG" 2>/dev/null
+}
+
+# The installed cron is the source of truth for "is autocheck on".
+autocheck_enabled() {
+    crontab -l 2>/dev/null | grep -q "$CHECK_CRON_MATCH" && echo 1 || echo 0
+}
+
+# autocheck on|off|status — manage the unattended 6h check cron + persist the flag.
+cmd_autocheck() {
+    case "${1:-status}" in
+        on)
+            set_conf_flag AUTO_CHECK 1
+            ( crontab -l 2>/dev/null | grep -v "$CHECK_CRON_MATCH"; echo "$CHECK_CRON_LINE" ) | crontab -
+            /etc/init.d/cron enable >/dev/null 2>&1
+            /etc/init.d/cron restart >/dev/null 2>&1
+            log "autocheck enabled (6h cron installed)"
+            ;;
+        off)
+            set_conf_flag AUTO_CHECK 0
+            crontab -l 2>/dev/null | grep -v "$CHECK_CRON_MATCH" | crontab - 2>/dev/null
+            /etc/init.d/cron restart >/dev/null 2>&1
+            log "autocheck disabled (6h cron removed)"
+            ;;
+        status) ;;
+        *) die "autocheck: expected on|off|status" ;;
+    esac
+    [ "$(autocheck_enabled)" = "1" ] && printf '{"enabled":true}\n' || printf '{"enabled":false}\n'
+}
+
 ACTION="${1:-help}"
 case "$ACTION" in
     check)             cmd_check ;;
+    autocheck)         cmd_autocheck "${2:-status}" ;;
     apply)             cmd_apply ;;
     apply-local)       cmd_apply_local "${2:-}" ;;
     bins-check)        cmd_bins_check ;;
