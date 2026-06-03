@@ -68,7 +68,8 @@ busybox-апплетов и т.п.) и подстраивает деплой.
 | --- | --- |
 | `router_files/` | Скрипты, деплоящиеся на роутер: init.d, CGI, updater, shim'ы. |
 | `router-backup/` | Зеркало живого состояния роутера (gitignored). Источник конфигов и бинарников при сборке. |
-| `build_release.py` | Сборка подписанных `.ipk` (`detour` + `detour-bins`) и full-бандла. |
+| `build_release.py` | Сборка подписанных `.ipk` панели (`detour` + `detour-keenetic`). |
+| `build_feed.py` | Сборка/публикация opkg-фида с `sing-box` (ветка `feed`). |
 | `deploy_router.py` | Унифицированный деплой / синхронизация на роутер по SSH. |
 | `deploy_lan_proxy.py` | Деплой отдельного LAN-прокси-сценария. |
 | `update_backups.py` | Снять текущее состояние роутера в `router-backup/`. |
@@ -99,45 +100,48 @@ python3 deploy_router.py --router home --full
 
 ## Релизы и самообновление
 
-Релиз разнесён на **два пакета**, чтобы обновление панели не задевало тяжёлые
-бинарники:
+Панель — это slim-`.ipk` (init.d, CGI, HTML, Lua, updater) **+ bundled
+`tpws-zapret`** (~110 КБ; zapret нет ни в одном opkg-фиде). Бинарник **`sing-box`
+не входит в пакет** — панель объявляет `Depends: sing-box`, а сам бинарник
+приходит из **нашего публичного opkg-фида**:
 
-- **`detour`** — slim-панель (init.d, CGI, HTML, Lua-скрипты, updater), ~90 КБ.
-  Обновляется часто. **Бинарников не содержит.**
-- **`detour-bins`** — только `sing-box` + `tpws-zapret` (~22 МБ),
-  версионируется отдельно (`/etc/detour/bins-version`).
-
-Плюс `detour-full-vX.Y.Z.tar.gz` — оффлайн-установщик одним файлом (оба `.ipk`
-с подписями + `install.sh`).
+- **`detour`** — панель для OpenWrt/GL.iNet; **`detour-keenetic`** — для
+  Keenetic/Entware (там sing-box берётся из Entware `sing-box-go`).
+- **opkg-фид** (`build_feed.py` → ветка `feed` репо `varyen/detour`) раздаёт
+  `sing-box` 1.13.x как `Architecture: all`. Дистрибутивный фид GL.iNet застрял
+  на 1.8.10 (ломает схему конфига 1.13.x), поэтому держим свой. Фид по версии
+  бьёт дистрибутивный, так что `opkg install sing-box` ставит именно наш.
 
 ### Сборка
 
 ```bash
-# Только панель (обновление панели):
-python3 build_release.py --version 1.0.0
+# Панель (+ Keenetic) и публикация ассетов в GitHub Release:
+python3 build_release.py --version 1.0.0 --publish
 
-# Панель + bins + full-бандл, с публикацией ассетов в GitHub Release:
-python3 build_release.py --version 1.0.0 --bins-version 1.0.0 --publish
+# Фид sing-box (при бампе версии sing-box):
+python3 build_feed.py --version 1.13.2 --publish
 ```
 
 ### Установка / обновление
 
-- **Из панели:** плашка «Доступно обновление» → «Установить» (скачивает из GH
-  Releases и ставит через opkg). Чип версии bins в шапке → «Обновление
-  бинарников».
+- **Из панели:** плашка «Доступно обновление» → «Установить» (скачивает панель
+  из GH Releases и ставит через opkg). Чип версии в шапке → «Обновление
+  sing-box» (`opkg update && opkg upgrade sing-box`).
 - **По SSH вручную** — командами `detour-update` на роутере:
 
   ```sh
   /usr/sbin/detour-update check          # запросить GH, обновить статус
-  /usr/sbin/detour-update apply          # скачать + проверить + поставить панель
-  /usr/sbin/detour-update bins-apply     # то же для detour-bins
+  /usr/sbin/detour-update apply          # ensure feed+sing-box, поставить панель
+  /usr/sbin/detour-update bins-apply     # opkg update && opkg upgrade sing-box
   /usr/sbin/detour-update rollback       # откат к предыдущей версии
   /usr/sbin/detour-update status         # JSON со статусом
   ```
 
-Подписи проверяются usign против публичного ключа, запиннингованного на роутере
-(`/etc/detour/release.usign.pub`). Приватный ключ (`keys/`) — только на
-build-машине и в репозиторий не попадает.
+Фид прописывается в `/etc/opkg/customfeeds.conf` автоматически (`deploy_router.py`
+и `detour-update`); он должен быть прописан до установки панели, иначе
+`Depends: sing-box` не разрешится. Подписи (usign) проверяются против ключа,
+запиннингованного на роутере (`/etc/detour/release.usign.pub`); приватный ключ
+(`keys/`) — только на build-машине.
 
 ## Критические ограничения
 

@@ -5,6 +5,31 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.3.0] — 2026-06-03
+
+### Изменено — sing-box из собственного opkg-фида (GL.iNet/OpenWrt)
+
+Дистрибутивный фид GL.iNet застрял на **sing-box 1.8.10** (ломает схему конфига
+1.13.x), поэтому раньше бинарник бандлился пакетом `detour-bins` (22 МБ). Теперь
+GL.iNet приходит к той же модели, что и Keenetic: **бинарник из opkg**.
+
+- **`detour-bins` и `detour-full`-бандл удалены.** Панель `detour` теперь
+  slim-`.ipk` (~200 КБ) с `Depends: sing-box` и **bundled `tpws-zapret`**
+  (~110 КБ; zapret нет ни в одном фиде).
+- **Собственный публичный opkg-фид** (`build_feed.py` → ветка `feed` репо
+  `varyen/detour`) раздаёт `sing-box` 1.13.x как `Architecture: all`; по версии
+  бьёт дистрибутивный 1.8.10, поэтому `opkg install sing-box` ставит наш.
+  Раздаётся по HTTPS (`raw.githubusercontent.com/.../feed/aarch64`), `Packages`
+  подписан usign.
+- **`deploy_router.py` / `detour-update`** прописывают фид в
+  `/etc/opkg/customfeeds.conf` и ставят sing-box через opkg
+  (`ensure_feed`/`ensure_singbox`); порядок: фид → sing-box → панель. Восстановление
+  после sysupgrade пере-добавляет фид и переустанавливает панель.
+- **`detour-update bins-*`** теперь работают через opkg (`opkg upgrade sing-box`),
+  а не качают `detour-bins` с GitHub; `bins-apply-local` убран. Панель читает
+  версию из `opkg list-installed sing-box`. Модал «Обновление sing-box» — без
+  загрузки `.ipk` из файла.
+
 ## [1.2.1] — 2026-06-01
 
 ### Исправлено

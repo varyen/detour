@@ -217,12 +217,12 @@ start_service() {
     # Disable broken MPTCP (QSDK kernel + some MediaTek kernels)
     sysctl -w net.mptcp.enabled=0 >/dev/null 2>&1
 
-    # The sing-box binary ships in the separate `detour-bins` package. If
-    # it's absent (panel installed but bins not yet fetched), bail BEFORE any
-    # ipset/iptables setup — otherwise LAN TCP would be REDIRECTed to a dead
-    # :12345 and break the internet. With no rules, traffic just flows direct.
+    # The sing-box binary comes from the opkg feed (`opkg install sing-box`). If
+    # it's absent (panel installed but the feed/sing-box not yet fetched), bail
+    # BEFORE any ipset/iptables setup — otherwise LAN TCP would be REDIRECTed to a
+    # dead :12345 and break the internet. With no rules, traffic just flows direct.
     if [ ! -x "$PROG" ]; then
-        echo "sing-box binary missing ($PROG) — install detour-bins (panel: «Обновить бинарники»)" >&2
+        echo "sing-box binary missing ($PROG) — run: opkg update && opkg install sing-box (panel: «Обновить sing-box»)" >&2
         logger -t sing-box "binary missing ($PROG); not starting — traffic stays direct"
         return 1
     fi

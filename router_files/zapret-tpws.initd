@@ -112,11 +112,11 @@ del_rules() {
 }
 
 start_service() {
-    # The tpws-zapret binary ships in the separate `detour-bins` package.
-    # If absent, bail BEFORE add_rules — otherwise the DPI-bypass REDIRECT would
-    # point at a dead :1081 and break the affected domains. No rules = direct.
+    # The tpws-zapret binary is bundled in the `detour` panel package (zapret is
+    # in no opkg feed). If absent, bail BEFORE add_rules — otherwise the DPI-bypass
+    # REDIRECT would point at a dead :1081 and break the affected domains. No rules = direct.
     if [ ! -x "$PROG" ]; then
-        echo "tpws-zapret binary missing ($PROG) — install detour-bins" >&2
+        echo "tpws-zapret binary missing ($PROG) — reinstall the detour panel package" >&2
         logger -t zapret-tpws "binary missing ($PROG); not starting — traffic stays direct"
         return 1
     fi

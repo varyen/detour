@@ -7,7 +7,8 @@ Usage:
 What it does (idempotent):
     1. sysctl: persist net.mptcp.enabled=0
     2. uhttpd: ensure listen_http binds on 0.0.0.0:8080
-    3. /usr/bin/sing-box, /usr/bin/tpws-zapret: upload if missing (or --full)
+    3. opkg feed: add the `detour` feed (serves sing-box 1.13.x), install sing-box
+       via opkg; push the bundled tpws-zapret directly (it's in no feed)
     4. /etc/init.d/{sing-box,zapret-tpws}: upload from router_files/*.initd, enable
     5. /etc/firewall.lan_mark_fallback + uci firewall include
     6. /etc/sing-box/* (config.json, settings.json, *.list, profiles/) and /etc/zapret-tpws/*
@@ -37,6 +38,11 @@ BACKUP_HOME = os.path.join(HERE, "router-backup")  # canonical source for live c
 # Default panel user when routers.local.json entry lacks panel_user.
 # Panel password MUST be set per-router in routers.local.json (panel_password).
 DEFAULT_PANEL_USER = "admin"
+
+# Self-hosted opkg feed serving sing-box (build_feed.py → varyen/detour@feed).
+# Keep in sync with build_release.py FEED_LINE and router_files/detour-update.
+FEED_NAME = "detour"
+FEED_LINE = "src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/aarch64"
 
 
 def upload(ssh, content, remote, mode="0644"):
@@ -139,45 +145,56 @@ def step_uhttpd(ssh):
     time.sleep(1)
 
 
-def step_binaries(ssh, force=False):
-    step("Uploading binaries")
-    pairs = [
-        ("usr/bin/sing-box", "/usr/bin/sing-box"),
-        ("usr/bin/tpws-zapret", "/usr/bin/tpws-zapret"),
-    ]
-    for local_rel, remote in pairs:
-        local = os.path.join(BACKUP_HOME, local_rel)
-        if not os.path.exists(local):
-            print(f"  SKIP: {local} (not in backup)")
-            continue
-        if not force and remote_exists(ssh, remote):
-            if remote_md5(ssh, remote) == local_md5(local):
-                print(f"  {remote}: unchanged")
-                continue
-        print(f"  uploading {remote} ({os.path.getsize(local)} bytes) ...")
-        got, sz = upload_large(ssh, local, remote)
-        print(f"    -> {got}/{sz} bytes")
-        assert got == sz, f"size mismatch for {remote}"
+def step_feed(ssh):
+    step("Configuring opkg feed (sing-box)")
+    # Add our feed line idempotently, then refresh the package index so
+    # `opkg install sing-box` resolves to our 1.13.x (the distro feed's 1.8.10
+    # loses on version comparison). OpenWrt path is /etc/opkg/customfeeds.conf.
+    exec_cmd(
+        ssh,
+        "touch /etc/opkg/customfeeds.conf; "
+        f"grep -qs '^src/gz {FEED_NAME} ' /etc/opkg/customfeeds.conf || "
+        f"echo '{FEED_LINE}' >> /etc/opkg/customfeeds.conf",
+    )
+    out, _, _ = exec_cmd(ssh, "opkg update 2>&1 | tail -4", timeout=120)
+    print("  opkg update:\n    " + "\n    ".join(l for l in out.splitlines() if l.strip()))
 
-    # Record bins-version + manifest the panel reads — mirrors what the
-    # detour-bins package postinst writes, so a direct deploy and a package
-    # install present identical version info. Version = sing-box's own version.
-    if remote_exists(ssh, "/usr/bin/sing-box"):
-        sbver, _, _ = exec_cmd(
-            ssh,
-            "/usr/bin/sing-box version 2>/dev/null | "
-            "sed -n 's/.*version[[:space:]]*\\([0-9][0-9.]*\\).*/\\1/p' | head -1",
-        )
-        sbver = (sbver or "").strip() or "0.0.0"
-        exec_cmd(ssh, "mkdir -p /etc/detour")
-        upload(ssh, sbver + "\n", "/etc/detour/bins-version", "0644")
-        upload(
-            ssh,
-            '{"bins_version":"%s","singbox":"%s","tpws":"%s"}\n' % (sbver, sbver, sbver),
-            "/etc/detour/bins-manifest.json",
-            "0644",
-        )
-        print(f"  bins-version: {sbver}")
+
+def step_binaries(ssh, force=False):
+    step("Installing sing-box (opkg feed) + tpws-zapret (bundled)")
+    # tpws-zapret is in no opkg feed → push the bundled musl-static binary directly.
+    local = os.path.join(BACKUP_HOME, "usr", "bin", "tpws-zapret")
+    if os.path.exists(local):
+        if not force and remote_exists(ssh, "/usr/bin/tpws-zapret") \
+                and remote_md5(ssh, "/usr/bin/tpws-zapret") == local_md5(local):
+            print("  /usr/bin/tpws-zapret: unchanged")
+        else:
+            print(f"  uploading /usr/bin/tpws-zapret ({os.path.getsize(local)} bytes) ...")
+            got, sz = upload_large(ssh, local, "/usr/bin/tpws-zapret")
+            print(f"    -> {got}/{sz} bytes")
+            assert got == sz, "size mismatch for /usr/bin/tpws-zapret"
+    else:
+        print(f"  SKIP tpws: {local} (not in backup)")
+
+    # sing-box comes from our opkg feed. --force-overwrite takes over any
+    # pre-existing UNOWNED /usr/bin/sing-box (older direct deploys); afterwards
+    # opkg owns it and `opkg upgrade sing-box` is clean.
+    out, _, _ = exec_cmd(ssh, "opkg install --force-overwrite sing-box 2>&1 | tail -5", timeout=240)
+    print("  opkg install sing-box:\n    " + "\n    ".join(l for l in out.splitlines() if l.strip()))
+
+    # Safety net: if the feed was unreachable and we still have the bundled
+    # binary locally, push it directly so the router isn't left without sing-box.
+    if not remote_exists(ssh, "/usr/bin/sing-box"):
+        sb_local = os.path.join(BACKUP_HOME, "usr", "bin", "sing-box")
+        if os.path.exists(sb_local):
+            print("  feed install failed — falling back to direct upload of bundled sing-box")
+            got, sz = upload_large(ssh, sb_local, "/usr/bin/sing-box")
+            print(f"    -> {got}/{sz} bytes")
+        else:
+            print("  WARNING: sing-box not installed and no local fallback binary")
+
+    sbver, _, _ = exec_cmd(ssh, "opkg list-installed sing-box 2>/dev/null | awk '{print $3}' | head -1")
+    print(f"  sing-box: {(sbver or '').strip() or '(not opkg-owned)'}")
 
 
 def step_initd(ssh):
@@ -512,6 +529,7 @@ def main():
     step_mptcp(ssh)
     step_base64_shim(ssh)
     step_uhttpd(ssh)
+    step_feed(ssh)
     if not args.skip_binaries:
         step_binaries(ssh, force=args.full)
     step_initd(ssh)

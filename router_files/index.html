@@ -1193,19 +1193,18 @@
         </div>
       </div>
 
-      <!-- Update binaries modal (sing-box + tpws-zapret, detour-bins package) -->
+      <!-- Update sing-box modal (sing-box from the opkg feed; tpws ships with the panel) -->
       <div class="modal-overlay" id="bins-modal" style="display: none" onclick="if (event.target === this) closeBinsModal();">
         <div class="modal" style="max-width: 540px">
           <h3>
             <svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
-            Обновление бинарников
+            Обновление sing-box
           </h3>
           <p class="helper-text-block">
             <strong>sing-box:</strong> <span id="bins-sb-version">…</span> &nbsp;·&nbsp;
-            <strong>tpws-zapret:</strong> <span id="bins-tpws-version">…</span> &nbsp;·&nbsp;
-            пакет <code>detour-bins</code> <strong id="bins-pkg-version">…</strong>.
-            Бинарники версионируются отдельно от панели; пакет проверяется по
-            usign-подписи перед установкой.
+            <strong>tpws-zapret:</strong> <span id="bins-tpws-version">…</span>.
+            sing-box ставится и обновляется через <code>opkg</code> из фида
+            <code>detour</code>; tpws входит в пакет панели и обновляется вместе с ней.
           </p>
 
           <div class="editor-section" id="bins-opkg-section" style="display:none;margin-bottom:14px">
@@ -1220,36 +1219,18 @@
             <div id="bins-opkg-status" style="font-size:12px;color:var(--text-dim);margin-top:8px;min-height:16px"></div>
           </div>
 
-          <div class="editor-section" style="margin-bottom: 14px">
-            <h4 style="margin:0 0 8px">С GitHub</h4>
+          <div class="editor-section" id="bins-feed-section" style="margin-bottom: 14px">
+            <h4 style="margin:0 0 8px">Из фида opkg</h4>
+            <p class="helper-text-block">
+              sing-box ставится из нашего фида <code>detour</code>
+              (<code>opkg update &amp;&amp; opkg upgrade sing-box</code>) и
+              перезапускается автоматически.
+            </p>
             <div class="flex-gap">
               <button class="btn" onclick="binsCheck()">↻ Проверить</button>
-              <button class="btn primary" onclick="binsApplyGithub()">⬇ Установить последнюю</button>
+              <button class="btn primary" onclick="binsApplyFeed()">⬇ Обновить sing-box</button>
             </div>
             <div id="bins-github-status" style="font-size:12px;color:var(--text-dim);margin-top:8px;min-height:16px"></div>
-          </div>
-
-          <div class="editor-section">
-            <h4 style="margin:0 0 8px">Из файла (detour-bins .ipk)</h4>
-            <p class="helper-text-block">
-              Загрузите пакет бинарников <code>detour-bins_*.ipk</code>. Подпись
-              <code>.ipk.sig</code> <strong>опциональна</strong>: с ней — проверка
-              + бэкап, без неё — установка напрямую через opkg, без проверки.
-            </p>
-            <div class="form-grid">
-              <div class="full">
-                <label>Пакет .ipk</label>
-                <input type="file" id="bins-ipk-file" accept=".ipk" />
-              </div>
-              <div class="full">
-                <label>Подпись .ipk.sig (опционально)</label>
-                <input type="file" id="bins-sig-file" accept=".sig" />
-              </div>
-            </div>
-            <div class="flex-gap" style="margin-top:8px">
-              <button class="btn primary" id="bins-local-btn" onclick="binsApplyLocal()">⬇ Установить из файла</button>
-            </div>
-            <div id="bins-local-status" style="font-size:12px;color:var(--text-dim);margin-top:8px;min-height:16px"></div>
           </div>
 
           <div class="modal-footer">
@@ -5558,15 +5539,14 @@
         document.getElementById("bins-sb-version").textContent =
           b.singbox_present ? b.singbox_version || "?" : "не установлен";
         document.getElementById("bins-tpws-version").textContent =
-          b.tpws_present ? "v" + (b.bins_version || "?") : "не установлен";
-        document.getElementById("bins-pkg-version").textContent =
-          "v" + (b.bins_version || "?");
+          b.tpws_present ? "установлен" : "не установлен";
         document.getElementById("bins-github-status").textContent = "";
-        document.getElementById("bins-local-status").textContent = "";
+        // Keenetic pulls sing-box from the Entware feed; OpenWrt from our opkg feed.
+        var isKeen = currentPlatform === "keenetic";
         var opkgSec = document.getElementById("bins-opkg-section");
-        if (opkgSec)
-          opkgSec.style.display =
-            currentPlatform === "keenetic" ? "block" : "none";
+        if (opkgSec) opkgSec.style.display = isKeen ? "block" : "none";
+        var feedSec = document.getElementById("bins-feed-section");
+        if (feedSec) feedSec.style.display = isKeen ? "none" : "block";
         var os = document.getElementById("bins-opkg-status");
         if (os) os.textContent = "";
       }
@@ -5624,68 +5604,24 @@
           el.textContent = "Ошибка: " + e.message;
         }
       }
-      async function binsApplyGithub() {
+      async function binsApplyFeed() {
         if (
           !confirm(
-            "Установить последние бинарники с GitHub?\n\nopkg заменит sing-box / tpws-zapret и перезапустит сервисы (кратковременный обрыв связи).",
+            "Обновить sing-box из фида opkg?\n\nopkg update + upgrade sing-box, затем перезапуск сервиса (кратковременный обрыв связи).",
           )
         )
           return;
         var el = document.getElementById("bins-github-status");
-        el.textContent = "Загрузка и установка… (может занять несколько минут)";
+        el.textContent = "opkg update + upgrade… (может занять минуту)";
         try {
           var d = await api("bins_update_apply", "POST", "");
           if (d.ok) {
             el.textContent = "Установлено.";
-            toast("Бинарники обновлены", "success");
+            toast("sing-box обновлён", "success");
             loadStatus();
           } else el.textContent = "Ошибка: " + d.error;
         } catch (e) {
           el.textContent = "Ошибка: " + e.message;
-        }
-      }
-      async function binsApplyLocal() {
-        var ipkInput = document.getElementById("bins-ipk-file");
-        var sigInput = document.getElementById("bins-sig-file");
-        var el = document.getElementById("bins-local-status");
-        if (!ipkInput.files.length) {
-          el.textContent = "Выберите .ipk";
-          return;
-        }
-        var btn = document.getElementById("bins-local-btn");
-        btn.disabled = true;
-        try {
-          // Signature optional: send it if given, else empty to clear any stale one.
-          var sigText = sigInput.files.length ? await sigInput.files[0].text() : "";
-          el.textContent = sigText ? "Загрузка подписи…" : "Без подписи (opkg)…";
-          var s = await api("bins_update_sig", "POST", sigText);
-          if (!s.ok) {
-            el.textContent = "Ошибка подписи: " + s.error;
-            return;
-          }
-          el.textContent =
-            "Загрузка .ipk (" +
-            Math.round(ipkInput.files[0].size / 1048576) +
-            " МБ)…";
-          var r = await fetch(API + "?action=bins_update_local", {
-            method: "POST",
-            headers: { "Content-Type": "application/octet-stream" },
-            body: ipkInput.files[0],
-          });
-          if (r.status === 401) {
-            showLogin();
-            return;
-          }
-          var d = await r.json();
-          if (d.ok) {
-            el.textContent = "Установлено.";
-            toast("Бинарники обновлены из файла", "success");
-            loadStatus();
-          } else el.textContent = "Ошибка: " + d.error;
-        } catch (e) {
-          el.textContent = "Ошибка: " + e.message;
-        } finally {
-          btn.disabled = false;
         }
       }
 
