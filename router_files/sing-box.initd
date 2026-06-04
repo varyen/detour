@@ -62,6 +62,17 @@ get_routing_mode() {
     echo "$m"
 }
 
+# Extra input interfaces (besides br-lan) that should receive the same sing-box
+# redirect — e.g. a WireGuard/OpenVPN *server* iface, so VPN road-warriors get
+# the same proxy/routing as LAN clients. Configured in settings.json:
+#   "vpn_redirect_ifaces": "wgserver"   (space- or comma-separated; empty = off)
+# Safe if an iface doesn't exist yet: iptables matches the name at packet time.
+vpn_redirect_ifaces() {
+    [ -f "$SETTINGS_FILE" ] || return 0
+    sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS_FILE" \
+        | head -1 | tr ',' ' '
+}
+
 # Get upstream IPs from settings/config (to avoid routing loops in all-except mode)
 get_upstream_ips() {
     local from_settings=""
@@ -331,6 +342,29 @@ start_service() {
         done < "$INST_TMP"
     fi
 
+    # ---- VPN inbound interfaces: mirror the br-lan redirect for VPN clients ----
+    # Lets WireGuard/OpenVPN road-warriors get the same sing-box routing as LAN.
+    # Shared chains (SINGBOX_ALL) and ipsets are already built above; here we only
+    # add the per-interface PREROUTING jumps.
+    for VIF in $(vpn_redirect_ifaces); do
+        [ -n "$VIF" ] || continue
+        if [ "$ROUTING_MODE" = "all-except" ]; then
+            iptables -t nat -D PREROUTING -i "$VIF" -j SINGBOX_ALL 2>/dev/null
+            iptables -t nat -I PREROUTING -i "$VIF" -j SINGBOX_ALL
+            iptables -t mangle -D PREROUTING -i "$VIF" -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000 2>/dev/null
+            iptables -t mangle -I PREROUTING 1 -i "$VIF" -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000
+        else
+            iptables -t nat -D PREROUTING -i "$VIF" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345 2>/dev/null
+            iptables -t nat -I PREROUTING -i "$VIF" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345
+        fi
+        if [ "$MODE" = "multi" ] && [ -s "$INST_TMP" ]; then
+            while read -r n id port ipset conf; do
+                iptables -t nat -D PREROUTING -i "$VIF" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port" 2>/dev/null
+                iptables -t nat -I PREROUTING -i "$VIF" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
+            done < "$INST_TMP"
+        fi
+    done
+
     # Clear log
     > $LOG
 
@@ -357,10 +391,10 @@ start_service() {
 }
 
 stop_service() {
-    # Remove killswitch if active
-    iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_KS 2>/dev/null
-    iptables -t nat -F SINGBOX_KS 2>/dev/null
-    iptables -t nat -X SINGBOX_KS 2>/dev/null
+    # Remove "Все через VPN" (all-traffic redirect) chain if active
+    iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_ALLVPN 2>/dev/null
+    iptables -t nat -F SINGBOX_ALLVPN 2>/dev/null
+    iptables -t nat -X SINGBOX_ALLVPN 2>/dev/null
 
     # Remove SINGBOX_ALL chain (all-except mode)
     iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_ALL 2>/dev/null
@@ -372,6 +406,15 @@ stop_service() {
 
     # Remove all-except mangle MARK rule for whitelist
     iptables -t mangle -D PREROUTING -i br-lan -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000 2>/dev/null
+
+    # Remove VPN-interface mirror rules (WireGuard/OpenVPN road-warrior redirect).
+    # Per-target singbox_t* rules are cleared iface-agnostically by the grep below.
+    for VIF in $(vpn_redirect_ifaces); do
+        [ -n "$VIF" ] || continue
+        iptables -t nat -D PREROUTING -i "$VIF" -j SINGBOX_ALL 2>/dev/null
+        iptables -t nat -D PREROUTING -i "$VIF" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345 2>/dev/null
+        iptables -t mangle -D PREROUTING -i "$VIF" -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000 2>/dev/null
+    done
 
     # MULTI: remove EVERY per-target REDIRECT (match-set singbox_t*), independent
     # of the current route-map, BEFORE destroying the sets they reference.

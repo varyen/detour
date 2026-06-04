@@ -15,9 +15,19 @@ DOMAINS_FILE=/etc/zapret-tpws/domains.list
 IPSET_NAME=zapret_domains
 PORT=1081
 LOG=/var/log/zapret-tpws.log
+SETTINGS_FILE=/etc/sing-box/settings.json
 
 has_nft() {
     command -v nft >/dev/null 2>&1
+}
+
+# Extra input interfaces (besides br-lan) to also feed through zapret DPI-bypass —
+# e.g. a WireGuard server iface so VPN clients get the same DPI bypass as LAN.
+# Shared with sing-box via settings.json "vpn_redirect_ifaces" (space/comma sep).
+vpn_redirect_ifaces() {
+    [ -f "$SETTINGS_FILE" ] || return 0
+    sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS_FILE" \
+        | head -1 | tr ',' ' '
 }
 
 setup_domains_file() {
@@ -94,10 +104,21 @@ add_rules() {
     # Insert at PREROUTING position 1 — must be BEFORE sing-box's SINGBOX_ALL chain
     iptables -t nat -D PREROUTING -i br-lan -j ZAPRET_REDIRECT 2>/dev/null
     iptables -t nat -I PREROUTING 1 -i br-lan -j ZAPRET_REDIRECT
+
+    # Same DPI-bypass for VPN inbound interfaces (must stay before SINGBOX_ALL too).
+    for VIF in $(vpn_redirect_ifaces); do
+        [ -n "$VIF" ] || continue
+        iptables -t nat -D PREROUTING -i "$VIF" -j ZAPRET_REDIRECT 2>/dev/null
+        iptables -t nat -I PREROUTING 1 -i "$VIF" -j ZAPRET_REDIRECT
+    done
 }
 
 del_rules() {
     iptables -t nat -D PREROUTING -i br-lan -j ZAPRET_REDIRECT 2>/dev/null
+    for VIF in $(vpn_redirect_ifaces); do
+        [ -n "$VIF" ] || continue
+        iptables -t nat -D PREROUTING -i "$VIF" -j ZAPRET_REDIRECT 2>/dev/null
+    done
     iptables -t nat -F ZAPRET_REDIRECT 2>/dev/null
     iptables -t nat -X ZAPRET_REDIRECT 2>/dev/null
 

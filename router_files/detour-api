@@ -34,7 +34,7 @@ DETOUR_DIR="/etc/detour"
 # ============ PLATFORM SHIM (OpenWrt | Keenetic/Entware) ============
 # On KeeneticOS the whole stack lives under /opt (Entware) and the firewall is
 # iptables re-applied via /opt/etc/ndm/netfilter.d/. Detect Entware and remap.
-# Inert on OpenWrt. ⚠ VALIDATE on device (paths, LAN_IF, killswitch persistence).
+# Inert on OpenWrt. ⚠ VALIDATE on device (paths, LAN_IF, allvpn persistence).
 PLATFORM="openwrt"
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PLATFORM="keenetic"; OPT=/opt
@@ -66,7 +66,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     TPWS_BIN="$OPT/sbin/tpws-zapret"
     SUBREFRESH_BIN="$OPT/sbin/subscription-refresh"
     HOSTS_BIN="$OPT/sbin/detour-hosts"
-    # LAN bridge from detour.conf (assumed br0); killswitch uses iptables (no nft fw4).
+    # LAN bridge from detour.conf (assumed br0); "Все через VPN" uses iptables (no nft fw4).
     LAN_IF="br0"
     [ -f "$OPT/etc/detour/detour.conf" ] && . "$OPT/etc/detour/detour.conf" 2>/dev/null
     mkdir -p "$OPT/var/state" "$OPT/var/log"
@@ -109,6 +109,14 @@ json_val() {
 get_settings_val() {
     local key="$1"
     [ -f "$SINGBOX_SETTINGS" ] && json_val "$key" "$SINGBOX_SETTINGS"
+}
+
+# VPN inbound interfaces (besides $LAN_IF) that should ALSO be forced through the
+# proxy when "Все через VPN" (all-traffic redirect) is enabled — e.g. a WireGuard
+# server iface. Shared with the init.d scripts via settings.json
+# "vpn_redirect_ifaces" (space- or comma-separated; empty = none).
+vpn_redirect_ifaces() {
+    get_settings_val "vpn_redirect_ifaces" | tr ',' ' '
 }
 
 normalize_profile_list() {
@@ -254,13 +262,19 @@ write_settings() {
     active_profile=$(get_last_csv_item "$active_chain")
     case "$singbox_mode" in single|multi) ;; *) singbox_mode="single" ;; esac
 
+    # Preserve vpn_redirect_ifaces (VPN road-warrior redirect) across rewrites —
+    # this function emits a fixed key set, so re-read and re-emit it or it's lost.
+    local vpn_ifaces
+    vpn_ifaces=$(get_settings_val "vpn_redirect_ifaces")
+
     cat > "$SINGBOX_SETTINGS" <<EOF
 {
   "active_profile": "$active_profile",
   "active_chain": "$active_chain",
   "routing_mode": "$routing_mode",
   "upstream_ips": "$upstream_ips",
-  "singbox_mode": "$singbox_mode"
+  "singbox_mode": "$singbox_mode",
+  "vpn_redirect_ifaces": "$vpn_ifaces"
 }
 EOF
 }
@@ -833,8 +847,8 @@ status)
     fi
     [ -L /etc/rc.d/S99sing-box ] 2>/dev/null && SB_ENABLED="true"
 
-    KS_ACTIVE="false"
-    iptables -t nat -C PREROUTING -i $LAN_IF -j SINGBOX_KS 2>/dev/null && KS_ACTIVE="true"
+    ALLVPN_ACTIVE="false"
+    iptables -t nat -C PREROUTING -i $LAN_IF -j SINGBOX_ALLVPN 2>/dev/null && ALLVPN_ACTIVE="true"
 
     IPSET_COUNT=$(ipset list singbox_domains 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | grep -c '.' || true)
     IPSET_MEMBERS=$(ipset list singbox_domains 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | sed 's/ timeout.*//' | tr '\n' ',' | sed 's/,$//')
@@ -905,7 +919,7 @@ status)
     "pid": "${SB_PID:-null}",
     "port": "${SB_PORT:-null}",
     "enabled": $SB_ENABLED,
-    "killswitch": $KS_ACTIVE,
+    "allvpn": $ALLVPN_ACTIVE,
     "domains": $DOMAIN_COUNT,
     "ips": $IP_COUNT,
     "entries": $ENTRY_TOTAL,
@@ -1241,37 +1255,47 @@ conntrack)
     printf '{"conntrack":"%s"}' "$CT"
     ;;
 
-killswitch_on)
+allvpn_on)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     SB_PID=$(pgrep -f "$SINGBOX_BIN" 2>/dev/null | head -1)
     if [ -z "$SB_PID" ]; then json_err "sing-box is not running"; exit 0; fi
     UPSTREAM_IPS=$(get_upstream_ips)
-    iptables -t nat -N SINGBOX_KS 2>/dev/null
-    iptables -t nat -F SINGBOX_KS
-    iptables -t nat -A SINGBOX_KS -d 10.0.0.0/8 -j RETURN
-    iptables -t nat -A SINGBOX_KS -d 172.16.0.0/12 -j RETURN
-    iptables -t nat -A SINGBOX_KS -d 192.168.0.0/16 -j RETURN
-    iptables -t nat -A SINGBOX_KS -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -N SINGBOX_ALLVPN 2>/dev/null
+    iptables -t nat -F SINGBOX_ALLVPN
+    iptables -t nat -A SINGBOX_ALLVPN -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A SINGBOX_ALLVPN -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A SINGBOX_ALLVPN -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A SINGBOX_ALLVPN -d 127.0.0.0/8 -j RETURN
     if [ -n "$UPSTREAM_IPS" ]; then
         OLD_IFS="$IFS"
         IFS=','
         set -- $UPSTREAM_IPS
         IFS="$OLD_IFS"
         for ip in "$@"; do
-            [ -n "$ip" ] && iptables -t nat -A SINGBOX_KS -d "$ip" -j RETURN
+            [ -n "$ip" ] && iptables -t nat -A SINGBOX_ALLVPN -d "$ip" -j RETURN
         done
     fi
-    iptables -t nat -A SINGBOX_KS -p tcp -j REDIRECT --to-ports 12345
-    iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_KS 2>/dev/null
-    iptables -t nat -I PREROUTING 1 -i $LAN_IF -j SINGBOX_KS
+    iptables -t nat -A SINGBOX_ALLVPN -p tcp -j REDIRECT --to-ports 12345
+    iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_ALLVPN 2>/dev/null
+    iptables -t nat -I PREROUTING 1 -i $LAN_IF -j SINGBOX_ALLVPN
+    # Force VPN road-warrior interfaces through the proxy too (same as LAN).
+    for VIF in $(vpn_redirect_ifaces); do
+        [ -n "$VIF" ] || continue
+        iptables -t nat -D PREROUTING -i "$VIF" -j SINGBOX_ALLVPN 2>/dev/null
+        iptables -t nat -I PREROUTING 1 -i "$VIF" -j SINGBOX_ALLVPN
+    done
     json_ok
     ;;
 
-killswitch_off)
+allvpn_off)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_KS 2>/dev/null
-    iptables -t nat -F SINGBOX_KS 2>/dev/null
-    iptables -t nat -X SINGBOX_KS 2>/dev/null
+    iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_ALLVPN 2>/dev/null
+    for VIF in $(vpn_redirect_ifaces); do
+        [ -n "$VIF" ] || continue
+        iptables -t nat -D PREROUTING -i "$VIF" -j SINGBOX_ALLVPN 2>/dev/null
+    done
+    iptables -t nat -F SINGBOX_ALLVPN 2>/dev/null
+    iptables -t nat -X SINGBOX_ALLVPN 2>/dev/null
     json_ok
     ;;
 
