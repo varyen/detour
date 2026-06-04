@@ -561,7 +561,7 @@
       .chain-hint { margin-top: 6px; font-size: 11px; color: var(--text-muted); }
 
       /* ===== ВСЕ ЧЕРЕЗ VPN ===== */
-      .killswitch-row {
+      .allvpn-row {
         display: flex;
         align-items: center;
         gap: 12px;
@@ -571,13 +571,13 @@
         border-radius: var(--radius);
         transition: background 0.2s, border-color 0.2s;
       }
-      .killswitch-row.active {
+      .allvpn-row.active {
         background: var(--red-soft);
         border-color: var(--red-border);
       }
-      .ks-toggle { position: relative; display: inline-block; width: 38px; height: 22px; flex-shrink: 0; }
-      .ks-toggle input { opacity: 0; width: 0; height: 0; }
-      .ks-slider {
+      .allvpn-toggle { position: relative; display: inline-block; width: 38px; height: 22px; flex-shrink: 0; }
+      .allvpn-toggle input { opacity: 0; width: 0; height: 0; }
+      .allvpn-slider {
         position: absolute;
         cursor: pointer;
         inset: 0;
@@ -586,7 +586,7 @@
         transition: 0.25s;
         border: 1px solid var(--border);
       }
-      .ks-slider::before {
+      .allvpn-slider::before {
         content: "";
         position: absolute;
         height: 16px;
@@ -597,10 +597,10 @@
         border-radius: 50%;
         transition: 0.25s;
       }
-      .ks-toggle input:checked + .ks-slider { background: var(--red); border-color: var(--red); }
-      .ks-toggle input:checked + .ks-slider::before { transform: translateX(15px); background: #fff; }
-      .ks-label { font-size: 13px; font-weight: 600; color: var(--text); }
-      .ks-hint { font-size: 11px; color: var(--text-dim); margin-left: auto; }
+      .allvpn-toggle input:checked + .allvpn-slider { background: var(--red); border-color: var(--red); }
+      .allvpn-toggle input:checked + .allvpn-slider::before { transform: translateX(15px); background: #fff; }
+      .allvpn-label { font-size: 13px; font-weight: 600; color: var(--text); }
+      .allvpn-hint { font-size: 11px; color: var(--text-dim); margin-left: auto; }
 
       /* ===== TABS (pill segmented) ===== */
       .tabs {
@@ -1302,13 +1302,13 @@
               <div class="chain-hint">Порядок: Клиент → VPN1/Proxy1 → VPN2/Proxy2 → Интернет</div>
             </div>
 
-            <div class="killswitch-row" id="sb-killswitch-row">
-              <label class="ks-toggle">
-                <input type="checkbox" id="sb-killswitch" onchange="toggleKillswitch(this.checked)" />
-                <span class="ks-slider"></span>
+            <div class="allvpn-row" id="sb-allvpn-row">
+              <label class="allvpn-toggle">
+                <input type="checkbox" id="sb-allvpn" onchange="toggleAllvpn(this.checked)" />
+                <span class="allvpn-slider"></span>
               </label>
-              <span class="ks-label">Все через VPN</span>
-              <span class="ks-hint">форсировать весь TCP в туннель</span>
+              <span class="allvpn-label">Все через VPN</span>
+              <span class="allvpn-hint">форсировать весь TCP в туннель</span>
             </div>
 
             <div class="card-actions">
@@ -2723,7 +2723,7 @@
           loadKeepalive();
 
           // Все через VPN
-          updateKillswitchUI(d.singbox.killswitch);
+          updateAllvpnUI(d.singbox.allvpn);
 
           var sbEnBtn = document.getElementById("sb-enable-btn");
           if (d.singbox.enabled) {
@@ -2846,27 +2846,27 @@
       }
 
       // Все через VPN
-      function updateKillswitchUI(active) {
-        var row = document.getElementById("sb-killswitch-row");
-        var cb = document.getElementById("sb-killswitch");
+      function updateAllvpnUI(active) {
+        var row = document.getElementById("sb-allvpn-row");
+        var cb = document.getElementById("sb-allvpn");
         cb.checked = !!active;
         if (active) row.classList.add("active");
         else row.classList.remove("active");
       }
-      async function toggleKillswitch(on) {
+      async function toggleAllvpn(on) {
         if (
           on &&
           !confirm(
             "Включить «Все через VPN»?\n\nВесь TCP-трафик пойдёт через VPN.",
           )
         ) {
-          document.getElementById("sb-killswitch").checked = false;
+          document.getElementById("sb-allvpn").checked = false;
           return;
         }
-        var cb = document.getElementById("sb-killswitch");
+        var cb = document.getElementById("sb-allvpn");
         cb.disabled = true;
         try {
-          var d = await api(on ? "killswitch_on" : "killswitch_off", "POST");
+          var d = await api(on ? "allvpn_on" : "allvpn_off", "POST");
           if (d.ok) {
             toast(
               on
@@ -2874,7 +2874,7 @@
                 : "«Все через VPN» выключено",
               on ? "info" : "success",
             );
-            updateKillswitchUI(on);
+            updateAllvpnUI(on);
           } else {
             toast("Ошибка: " + d.error, "error");
             cb.checked = !on;
