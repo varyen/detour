@@ -5,6 +5,40 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.4.0] — 2026-06-04
+
+### Добавлено — VPN-сервер: входящие клиенты через sing-box/zapret
+
+- **Маршрутизация road-warrior VPN-клиентов через обход.** Новая опция
+  `vpn_redirect_ifaces` в `settings.json` (например `"wgserver"`): трафик
+  клиентов, подключённых к WireGuard-серверу роутера, проходит те же правила
+  `sing-box` и `zapret-tpws`, что и LAN — split-routing по `proxy-domains`,
+  DPI-bypass, оба режима (`proxy-list`/`all-except`), multi-instance. Зеркалит
+  nat PREROUTING правила `br-lan` на VPN-интерфейс. **По умолчанию выключено**
+  (пустой ключ) — другие роутеры не затрагиваются.
+- Реализовано в `sing-box.initd`, `zapret-tpws.initd` (start/stop) и
+  `detour-api`; режим «Все через VPN» теперь покрывает и VPN-интерфейсы, а
+  `write_settings` сохраняет ключ при перезаписи settings.json.
+- Живая валидация на home (GL-BE9300, `wgserver` 10.1.0.0/24): WG-клиент
+  получает выход через VPN-сервер и доступ к хостам LAN `192.168.8.x`.
+
+### Добавлено — Hosts-DNS (приоритетный hosts-файл)
+
+- **Вкладка «Hosts-DNS»** в панели: загрузка/редактирование приоритетного
+  hosts-файла через dnsmasq `addn-hosts`, фильтрация пересечений с
+  `proxy-domains.list` / `whitelist-domains.list`, пользовательские записи.
+- `/usr/sbin/detour-hosts` + `/etc/init.d/detour-hosts` (переприменение при
+  загрузке), API-обработчики в `detour-api`, cron обновления раз в 12 ч.
+  Платформы OpenWrt и KeeneticOS/Entware.
+
+### Изменено — «killswitch» → «Все через VPN»
+
+- Внутреннее переименование во всех идентификаторах: chain
+  `SINGBOX_KS` → `SINGBOX_ALLVPN`, эндпоинты `killswitch_on/off` →
+  `allvpn_on/off`, JSON-поле `killswitch` → `allvpn`, CSS/JS
+  (`ks-*`/`toggleKillswitch` → `allvpn-*`/`toggleAllvpn`). Видимая надпись в
+  UI («Все через VPN») не менялась.
+
 ## [1.3.2] — 2026-06-03
 
 ### Изменено — автопроверка обновлений теперь опциональна и выключена по умолчанию
