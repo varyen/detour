@@ -21,6 +21,7 @@ UPDATE_BIN="/usr/sbin/detour-update"
 VERSION_FILE="/etc/detour/version"
 UPDATE_STATE="/var/state/detour-update.json"
 BINS_STATE="/var/state/detour-bins.json"   # sing-box update state (written by detour-update bins-check)
+PING_DB="/tmp/detour-ping.db"               # per-profile latency cache (TSV in tmpfs; cleared on reboot)
 
 AUTH_FILE="/etc/detour.auth"
 SESSION_DIR="/tmp/detour-sessions"
@@ -1017,6 +1018,77 @@ keepalive_check)
     else
         json_err "keepalive helper not installed"
     fi
+    ;;
+
+# ==================== PER-PROFILE PING (latency probe) ====================
+# Lets the panel rank VPNs by ping. The cache is a flat TSV in tmpfs, one line
+# per profile:  <id>\t<rtt_ms>\t<ok>\t<ts>\t<server>
+#   rtt_ms : integer ms from ICMP; -1 when reachable only via TCP (ICMP filtered)
+#            or not yet measured.   ok : 1 reachable / 0 down.
+# The panel calls ping_check for one profile at a time (round-robin, active VPN
+# more often) so the box is never flooded; ping_status just reads the cache.
+ping_status)
+    NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
+    printf '{"now":%s,"results":{' "$NOW"
+    if [ -f "$PING_DB" ]; then
+        # $5 (server) is always a plain host/IP — emitted raw like vpn-keepalive does.
+        awk -F'\t' 'BEGIN{first=1}
+            NF>=4 {
+                if(!first)printf ","; first=0;
+                printf "\"%s\":{\"rtt\":%s,\"ok\":%s,\"ts\":%s,\"server\":\"%s\"}",
+                    $1, ($2==""?-1:$2), ($3=="1"?"true":"false"), ($4==""?0:$4), $5;
+            }' "$PING_DB"
+    fi
+    printf '}}'
+    ;;
+
+ping_check)
+    PID_=$(echo "$QUERY_STRING" | sed -n 's/.*id=\([^&]*\).*/\1/p')
+    PID_=$(sanitize_name "$PID_")
+    if [ -z "$PID_" ]; then json_err "id required"; exit 0; fi
+    PFILE="$SINGBOX_PROFILES_DIR/$PID_.json"
+    if [ ! -f "$PFILE" ]; then json_err "profile not found"; exit 0; fi
+    NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
+    PSRV=$(json_val "server" "$PFILE")
+    PPORT=$(numeric_json_val "server_port" "$PFILE")
+    PTYPE=$(json_val "type" "$PFILE")
+    RTT=-1; OKV=0; METHOD="none"
+    if [ -n "$PSRV" ]; then
+        # ICMP gives latency + reachability in one shot (cheap, ~instant if up).
+        # Retry once on an empty result: a single -c1 packet drops often enough
+        # (loss, or a cold-DNS first lookup overrunning -W) to falsely mark a live
+        # server as down — the retry kills those false negatives.
+        PT=$(ping -c1 -W2 "$PSRV" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -1)
+        [ -z "$PT" ] && PT=$(ping -c1 -W2 "$PSRV" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -1)
+        if [ -n "$PT" ]; then
+            RTT=$(echo "$PT" | awk '{printf "%.0f", $1}')
+            OKV=1; METHOD="icmp"
+        else
+            # ICMP filtered → confirm reachability with a TCP connect (TCP types only).
+            # BusyBox nc has no -w, so bound it with `timeout`; </dev/null returns as
+            # soon as the handshake completes instead of blocking on a silent TLS server.
+            case "$PTYPE" in
+                wireguard|hysteria2|tuic) : ;;
+                *)
+                    if [ -n "$PPORT" ] && [ "$PPORT" != "0" ]; then
+                        if timeout 3 nc "$PSRV" "$PPORT" </dev/null >/dev/null 2>&1; then
+                            OKV=1; RTT=-1; METHOD="tcp"
+                        fi
+                    fi
+                    ;;
+            esac
+        fi
+    fi
+    # Upsert this profile's line into the cache (drop old, append new, atomic mv).
+    TMPDB="$PING_DB.$$"
+    if [ -f "$PING_DB" ]; then
+        awk -F'\t' -v id="$PID_" '$1!=id' "$PING_DB" > "$TMPDB" 2>/dev/null
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$PID_" "$RTT" "$OKV" "$NOW" "$PSRV" >> "$TMPDB"
+    mv "$TMPDB" "$PING_DB" 2>/dev/null
+    OKJSON=false; [ "$OKV" = "1" ] && OKJSON=true
+    printf '{"id":"%s","rtt":%s,"ok":%s,"ts":%s,"server":"%s","method":"%s"}' \
+        "$PID_" "$RTT" "$OKJSON" "$NOW" "$(printf '%s' "$PSRV" | json_escape)" "$METHOD"
     ;;
 
 # ==================== PANEL SELF-UPDATE ====================

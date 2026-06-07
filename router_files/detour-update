@@ -29,10 +29,13 @@
 #   status                 — print panel state file
 #   selftest               — usign / opkg / pinned-key sanity check
 #
-# Config (/etc/detour/update.conf):
-#   GH_OWNER=user
-#   GH_REPO=repo
-#   GH_TOKEN=ghp_...   (PAT with Contents: Read on the repo)
+# Config (/etc/detour/update.conf) — OPTIONAL. Owner/repo default to the public
+# varyen/detour repo, so self-update works with no config file at all. Provide it
+# only to override the source repo or add a token:
+#   GH_OWNER=user      (default: varyen)
+#   GH_REPO=repo       (default: detour)
+#   GH_TOKEN=ghp_...   (optional; repo is public — only raises the API rate limit
+#                       or allows a private fork)
 
 set -u
 
@@ -56,8 +59,11 @@ FEED_CONF=/etc/opkg/customfeeds.conf
 # temp-download filename — opkg reads the real arch from the package control.
 ARCH=all
 
-GH_OWNER=""
-GH_REPO=""
+# Default to the canonical public repo so self-update works even when
+# update.conf is absent (the repo is public → no token required). update.conf,
+# if present, is sourced below and overrides these.
+GH_OWNER=varyen
+GH_REPO=detour
 GH_TOKEN=""
 AUTO_CHECK=0          # opt-in: 6h cron auto-check (default off). Toggle via `autocheck on|off`.
 
@@ -88,8 +94,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     ASSET_RE='^detour-keenetic_.*\.ipk$'
     ASSET_SIG_RE='^detour-keenetic_.*\.ipk\.sig$'
     STASH_IPK=/opt/etc/detour/installed.ipk
-    GH_OWNER=varyen
-    GH_REPO=detour
+    # GH_OWNER/GH_REPO inherit the varyen/detour defaults set above.
 fi
 [ -f "$CONFIG" ] && . "$CONFIG"
 
