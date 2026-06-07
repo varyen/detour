@@ -22,7 +22,18 @@ export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 : "${LAN_IF:=br0}" "${SINGBOX_PORT:=12345}" "${ZAPRET_PORT:=1081}" "${PANEL_PORT:=8080}"
 : "${SINGBOX_IPSET:=singbox_domains}" "${ZAPRET_IPSET:=zapret_domains}"
 SETTINGS="${SINGBOX_SETTINGS:-/opt/etc/sing-box/settings.json}"
-WL_IPSET="singbox_whitelist"
+WL_IPSET="${SINGBOX_WL_IPSET:-singbox_whitelist}"
+DNS_PORT="${DETOUR_DNS_PORT:-5354}"
+ALLVPN_MARK="/opt/etc/detour/allvpn.enabled"   # «Все через VPN» (set by the panel)
+DNS_MARK="/opt/etc/detour/dns.enabled"         # detour dnsmasq up (set by S50detour-dns)
+
+# Extra inbound ifaces (besides LAN_IF) that get the same redirect — VPN
+# road-warriors. From settings.json "vpn_redirect_ifaces" (space/comma list);
+# empty = none. Lets WireGuard/OpenVPN-server clients route like LAN clients.
+vpn_ifaces() {
+    sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$SETTINGS" 2>/dev/null | head -1 | tr ',' ' '
+}
 
 TYPE="${1:-$type}"     # iptables | ip6tables
 # Only touch IPv4. IPv6 transparent-proxy is out of scope for the port.
@@ -48,19 +59,42 @@ del() {
     while iptables -t "$t" -C "$c" "$@" 2>/dev/null; do iptables -t "$t" -D "$c" "$@"; done
 }
 
-# --- nat PREROUTING: zapret domain-set → REDIRECT (zapret first = higher priority) ---
-if [ -f /opt/etc/detour/zapret.enabled ]; then
-    add nat PREROUTING -i "$LAN_IF" -p tcp -m set --match-set "$ZAPRET_IPSET" dst \
-        -j REDIRECT --to-ports "$ZAPRET_PORT"
-else
-    del nat PREROUTING -i "$LAN_IF" -p tcp -m set --match-set "$ZAPRET_IPSET" dst \
-        -j REDIRECT --to-ports "$ZAPRET_PORT"
-fi
+# All inbound interfaces that receive transparent-proxy rules: LAN + opt-in VPN.
+IFACES="$LAN_IF $(vpn_ifaces)"
 
-# --- sing-box: tear down BOTH modes' rules, then apply the active one ---
-del nat PREROUTING -i "$LAN_IF" -p tcp -m set --match-set "$SINGBOX_IPSET" dst \
-    -j REDIRECT --to-ports "$SINGBOX_PORT"
-del nat PREROUTING -i "$LAN_IF" -j SINGBOX_ALL
+# --- transparent DNS: send LAN/VPN :53 to the detour dnsmasq (it tags ipsets) ---
+# Without this the singbox_domains/zapret_domains ipsets never fill on Keenetic
+# (KeeneticOS owns :53). S50detour-dns drops $DNS_MARK while its dnsmasq is up.
+for IF in $IFACES; do
+    [ -n "$IF" ] || continue
+    if [ -f "$DNS_MARK" ]; then
+        add nat PREROUTING -i "$IF" -p udp --dport 53 -j REDIRECT --to-ports "$DNS_PORT"
+        add nat PREROUTING -i "$IF" -p tcp --dport 53 -j REDIRECT --to-ports "$DNS_PORT"
+    else
+        del nat PREROUTING -i "$IF" -p udp --dport 53 -j REDIRECT --to-ports "$DNS_PORT"
+        del nat PREROUTING -i "$IF" -p tcp --dport 53 -j REDIRECT --to-ports "$DNS_PORT"
+    fi
+done
+
+# --- nat PREROUTING: zapret domain-set → REDIRECT (zapret first = higher priority) ---
+for IF in $IFACES; do
+    [ -n "$IF" ] || continue
+    if [ -f /opt/etc/detour/zapret.enabled ]; then
+        add nat PREROUTING -i "$IF" -p tcp -m set --match-set "$ZAPRET_IPSET" dst \
+            -j REDIRECT --to-ports "$ZAPRET_PORT"
+    else
+        del nat PREROUTING -i "$IF" -p tcp -m set --match-set "$ZAPRET_IPSET" dst \
+            -j REDIRECT --to-ports "$ZAPRET_PORT"
+    fi
+done
+
+# --- sing-box: tear down BOTH modes' rules on every iface, then apply active ---
+for IF in $IFACES; do
+    [ -n "$IF" ] || continue
+    del nat PREROUTING -i "$IF" -p tcp -m set --match-set "$SINGBOX_IPSET" dst \
+        -j REDIRECT --to-ports "$SINGBOX_PORT"
+    del nat PREROUTING -i "$IF" -j SINGBOX_ALL
+done
 
 if [ -f /opt/etc/detour/singbox.enabled ]; then
     if [ "$ROUTING_MODE" = "all-except" ]; then
@@ -84,15 +118,54 @@ if [ -f /opt/etc/detour/singbox.enabled ]; then
         # routes whitelist domains direct internally).
         iptables -t nat -A SINGBOX_ALL -p tcp -m set --match-set "$WL_IPSET" dst -j RETURN 2>/dev/null
         iptables -t nat -A SINGBOX_ALL -p tcp -j REDIRECT --to-ports "$SINGBOX_PORT"
-        add nat PREROUTING -i "$LAN_IF" -j SINGBOX_ALL
+        for IF in $IFACES; do
+            [ -n "$IF" ] || continue
+            add nat PREROUTING -i "$IF" -j SINGBOX_ALL
+        done
     else
-        add nat PREROUTING -i "$LAN_IF" -p tcp -m set --match-set "$SINGBOX_IPSET" dst \
-            -j REDIRECT --to-ports "$SINGBOX_PORT"
+        for IF in $IFACES; do
+            [ -n "$IF" ] || continue
+            add nat PREROUTING -i "$IF" -p tcp -m set --match-set "$SINGBOX_IPSET" dst \
+                -j REDIRECT --to-ports "$SINGBOX_PORT"
+        done
     fi
 else
     # sing-box disabled → make sure the all-except chain is gone.
     iptables -t nat -F SINGBOX_ALL 2>/dev/null
     iptables -t nat -X SINGBOX_ALL 2>/dev/null
+fi
+
+# --- «Все через VPN» (force ALL TCP through sing-box) — survives NDM rebuilds ---
+# The panel drops $ALLVPN_MARK; here we (re)assert the chain so it persists. Built
+# at PREROUTING top (before zapret/singbox) so it captures everything.
+for IF in $IFACES; do
+    [ -n "$IF" ] || continue
+    while iptables -t nat -C PREROUTING -i "$IF" -j SINGBOX_ALLVPN 2>/dev/null; do
+        iptables -t nat -D PREROUTING -i "$IF" -j SINGBOX_ALLVPN
+    done
+done
+if [ -f "$ALLVPN_MARK" ] && [ -f /opt/etc/detour/singbox.enabled ]; then
+    iptables -t nat -N SINGBOX_ALLVPN 2>/dev/null
+    iptables -t nat -F SINGBOX_ALLVPN
+    iptables -t nat -A SINGBOX_ALLVPN -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A SINGBOX_ALLVPN -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A SINGBOX_ALLVPN -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A SINGBOX_ALLVPN -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A SINGBOX_ALLVPN -d 100.64.0.0/10 -j RETURN
+    if [ -n "$UPSTREAM_IPS" ]; then
+        OLD_IFS="$IFS"; IFS=','; set -- $UPSTREAM_IPS; IFS="$OLD_IFS"
+        for ip in "$@"; do
+            [ -n "$ip" ] && iptables -t nat -A SINGBOX_ALLVPN -d "$ip" -j RETURN
+        done
+    fi
+    iptables -t nat -A SINGBOX_ALLVPN -p tcp -j REDIRECT --to-ports "$SINGBOX_PORT"
+    for IF in $IFACES; do
+        [ -n "$IF" ] || continue
+        iptables -t nat -I PREROUTING 1 -i "$IF" -j SINGBOX_ALLVPN
+    done
+else
+    iptables -t nat -F SINGBOX_ALLVPN 2>/dev/null
+    iptables -t nat -X SINGBOX_ALLVPN 2>/dev/null
 fi
 
 # --- filter INPUT: let the LAN reach the panel (lighttpd :PANEL_PORT) ---

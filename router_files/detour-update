@@ -60,6 +60,37 @@ GH_OWNER=""
 GH_REPO=""
 GH_TOKEN=""
 AUTO_CHECK=0          # opt-in: 6h cron auto-check (default off). Toggle via `autocheck on|off`.
+
+# GitHub release asset name patterns — OpenWrt panel by default. Keenetic uses the
+# separate detour-keenetic_*.ipk asset (overridden in the platform shim below).
+ASSET_RE="$ASSET_RE"
+ASSET_SIG_RE='^detour_.*\.ipk\.sig$'
+STASH_IPK=/etc/detour/installed.ipk
+
+# --- Keenetic/Entware platform shim (mirrors detour-api / detour-hosts) --------
+# No opkg feed for the panel here and sing-box comes from Entware (sing-box-go),
+# so self-update = pull the detour-keenetic_*.ipk asset and opkg-install it; the
+# feed/sing-box ensure steps are skipped. usign may be absent on Entware → the
+# signature check is skipped if so (the asset still comes straight from GitHub).
+# ⚠ VALIDATE: GH_TOKEN must be set in /opt/etc/detour/update.conf (as on OpenWrt).
+KEENETIC=0
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    KEENETIC=1
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    CONFIG=/opt/etc/detour/update.conf
+    PUBLIC_KEY=/opt/etc/detour/release.usign.pub
+    OPKG_KEYRING=/opt/etc/opkg/keys
+    VERSION_FILE=/opt/etc/detour/version
+    STATE_FILE=/opt/var/state/detour-update.json
+    BACKUP_DIR=/opt/var/detour-backup
+    BINS_STATE_FILE=/opt/var/state/detour-bins.json
+    PACKAGE_NAME=detour-keenetic
+    ASSET_RE='^detour-keenetic_.*\.ipk$'
+    ASSET_SIG_RE='^detour-keenetic_.*\.ipk\.sig$'
+    STASH_IPK=/opt/etc/detour/installed.ipk
+    GH_OWNER=varyen
+    GH_REPO=detour
+fi
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 # The 6h self-update auto-check cron is OPT-IN. The manual panel "Проверить"
@@ -67,6 +98,7 @@ AUTO_CHECK=0          # opt-in: 6h cron auto-check (default off). Toggle via `au
 # unattended cron tick is gated.
 CHECK_CRON_LINE="0 */6 * * * /usr/sbin/detour-update check >/var/log/detour-update.log 2>&1"
 CHECK_CRON_MATCH="detour-update check"
+[ "$KEENETIC" = 1 ] && CHECK_CRON_LINE="0 */6 * * * /opt/sbin/detour-update check >/opt/var/log/detour-update.log 2>&1"
 
 log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null; echo "[$LOG_TAG] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -152,6 +184,7 @@ select_name() { printf '%s\n' "$1" | awk -F '\t' -v re="$2" 'NR>1 && $1 ~ re { p
 
 # Ensure our sing-box feed line is present in opkg's customfeeds.conf.
 ensure_feed() {
+    [ "$KEENETIC" = 1 ] && return 0   # Keenetic: sing-box from Entware, no detour feed
     touch "$FEED_CONF" 2>/dev/null
     grep -qs "^src/gz $FEED_NAME " "$FEED_CONF" 2>/dev/null && return 0
     echo "$FEED_LINE" >> "$FEED_CONF" && log "added opkg feed: $FEED_LINE"
@@ -161,6 +194,9 @@ ensure_feed() {
 # pre-existing UNOWNED binary from older direct deploys. Non-fatal: the init.d
 # tolerates a missing binary (traffic routes directly until sing-box arrives).
 ensure_singbox() {
+    # Keenetic gets sing-box from the Entware `sing-box-go` package, managed
+    # separately (panel's singbox_opkg_upgrade) — nothing to ensure from a feed.
+    [ "$KEENETIC" = 1 ] && return 0
     ensure_feed
     if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG "; then
         return 0
@@ -188,7 +224,7 @@ cmd_check() {
     local assets tag ipk_url cur newver
     assets=$(gh_assets) || exit 1
     tag=$(printf '%s\n' "$assets" | sed -n 1p)
-    ipk_url=$(select_url "$assets" '^detour_.*\.ipk$')
+    ipk_url=$(select_url "$assets" "$ASSET_RE")
     [ -n "$tag" ] || die "no tag_name in GH response"
     [ -n "$ipk_url" ] || die "no panel .ipk asset on release $tag"
     newver="${tag#v}"
@@ -213,7 +249,11 @@ verify_and_install() {
     [ -f "$ipk" ] || die "ipk missing: $ipk"
     [ -f "$sig" ] || die "ipk.sig missing: $sig"
     # Verify against pinned key. -P scans the keyring dir for any matching keynum.
-    if [ -d "$OPKG_KEYRING" ] && ls "$OPKG_KEYRING"/* >/dev/null 2>&1; then
+    if [ "$KEENETIC" = 1 ] && ! command -v usign >/dev/null 2>&1; then
+        # Entware usually has no `usign`. The asset still comes directly from the
+        # project's GitHub release over HTTPS — skip the offline signature check.
+        log "usign not available (Entware) — skipping signature check"
+    elif [ -d "$OPKG_KEYRING" ] && ls "$OPKG_KEYRING"/* >/dev/null 2>&1; then
         usign -V -m "$ipk" -P "$OPKG_KEYRING" -x "$sig" \
             || die "usign verification failed (keyring=$OPKG_KEYRING)"
     elif [ -f "$PUBLIC_KEY" ]; then
@@ -222,7 +262,6 @@ verify_and_install() {
     else
         die "no public key on this router — refusing to install unsigned"
     fi
-    log "usign verification OK"
     # Keep a copy of this exact .ipk before installing — used by rollback.
     mkdir -p "$BACKUP_DIR"
     [ -n "$backup_base" ] && cp -a "$ipk" "$BACKUP_DIR/$backup_base" 2>/dev/null
@@ -235,7 +274,7 @@ verify_and_install() {
     # restore script can re-install it after a router firmware sysupgrade
     # (sysupgrade preserves /etc/detour/ via /etc/sysupgrade.conf).
     if [ -n "$stash" ]; then
-        mkdir -p /etc/detour
+        mkdir -p "$(dirname "$stash")"
         cp -a "$ipk" "$stash" 2>/dev/null
         cp -a "$sig" "$stash.sig" 2>/dev/null
     fi
@@ -244,7 +283,7 @@ verify_and_install() {
 # Back-compat wrapper for the single-package (panel) callers.
 verify_and_install_ipk() {
     verify_and_install "$1" "$2" "${PACKAGE_NAME}_$(current_version).ipk" \
-        /etc/detour/installed.ipk ""
+        "$STASH_IPK" ""
 }
 
 # ---- sing-box (opkg feed) helpers ----
@@ -303,8 +342,8 @@ cmd_apply() {
     log "fetching latest release info..."
     assets=$(gh_assets) || exit 1
     tag=$(printf '%s\n' "$assets" | sed -n 1p)
-    ipk_url=$(select_url "$assets" '^detour_.*\.ipk$')
-    sig_url=$(select_url "$assets" '^detour_.*\.ipk\.sig$')
+    ipk_url=$(select_url "$assets" "$ASSET_RE")
+    sig_url=$(select_url "$assets" "$ASSET_SIG_RE")
     [ -n "$ipk_url" ] || { rm -f "$LOCKFILE"; die "no panel .ipk asset on $tag"; }
     [ -n "$sig_url" ] || { rm -f "$LOCKFILE"; die "no panel .ipk.sig asset on $tag"; }
     newver="${tag#v}"

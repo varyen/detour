@@ -40,7 +40,9 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_WHITELIST="/opt/etc/sing-box/whitelist-domains.list"
     SINGBOX_SETTINGS="/opt/etc/sing-box/settings.json"
     DNSMASQ_DIR="/opt/etc/dnsmasq.d"
-    DNSMASQ_INITD="/opt/etc/init.d/dnsmasq"
+    # Reload the detour dnsmasq (S50detour-dns), NOT the Entware system one — ours
+    # is the instance that serves addn-hosts=/tmp/hosts and tags the proxy ipsets.
+    DNSMASQ_INITD="/opt/etc/init.d/S50detour-dns"
 fi
 
 CONF="$DETOUR_DIR/hosts.json"

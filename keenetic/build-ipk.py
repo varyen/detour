@@ -58,7 +58,19 @@ FILES = [
     # Entware feed has no lua-cjson. fix_shebang rewrites #!/usr/bin/lua → /opt/bin/lua.
     (os.path.join(ROUTER_FILES, "subscription-refresh"), "opt/sbin/subscription-refresh", 0o755, True),
     (os.path.join(HERE, "lua", "cjson", "safe.lua"), "opt/share/lua/5.1/cjson/safe.lua", 0o644, False),
+    # Hosts-DNS manager (shared source, already has a /opt platform shim) — serves
+    # addn-hosts via the detour dnsmasq (S50detour-dns). fix_shebang → /opt/bin/sh.
+    (os.path.join(ROUTER_FILES, "detour-hosts"), "opt/sbin/detour-hosts", 0o755, True),
+    # Self-update (shared source, /opt shim for Keenetic): pulls detour-keenetic_*.ipk.
+    (os.path.join(ROUTER_FILES, "detour-update"), "opt/sbin/detour-update", 0o755, True),
+    # VPN endpoint health probe (shared source, /opt shim). ⚠ cron scheduling on
+    # Entware/KeeneticOS is device-specific — set up a */5 cron manually if wanted.
+    (os.path.join(ROUTER_FILES, "vpn-keepalive"), "opt/sbin/vpn-keepalive", 0o755, True),
+    # Pinned usign public key (used by detour-update if usign is present on Entware).
+    (os.path.join(ROOT, "keys", "release.usign.pub"), "opt/etc/detour/release.usign.pub", 0o644, False),
     (os.path.join(HERE, "init.d", "S51detour-panel"), "opt/etc/init.d/S51detour-panel", 0o755, False),
+    # Domain→ipset DNS (Entware dnsmasq + transparent :53 redirect) — domain routing.
+    (os.path.join(HERE, "init.d", "S50detour-dns"), "opt/etc/init.d/S50detour-dns", 0o755, False),
     (os.path.join(HERE, "init.d", "S52detour-singbox"), "opt/etc/init.d/S52detour-singbox", 0o755, False),
     (os.path.join(HERE, "init.d", "S53detour-zapret"), "opt/etc/init.d/S53detour-zapret", 0o755, False),
     (os.path.join(HERE, "ndm", "netfilter.d", "50-detour.sh"), "opt/etc/ndm/netfilter.d/50-detour.sh", 0o755, False),
@@ -121,12 +133,30 @@ def build_control(version, installed_size):
     postinst = f"""#!/bin/sh
 set +e
 mkdir -p /opt/etc/detour/subscriptions /opt/etc/sing-box/profiles /opt/etc/zapret-tpws \\
-         /opt/var/log /opt/var/run /opt/var/state /tmp/detour-sessions
+         /opt/etc/detour/dnsmasq.d /opt/var/log /opt/var/run /opt/var/state \\
+         /tmp/detour-sessions /tmp/hosts
 echo "{version}" > /opt/etc/detour/version
 touch /opt/etc/detour/platform            # the panel CGI's platform shim keys off this
-chmod 0755 /opt/sbin/tpws-zapret \\
-    /opt/etc/init.d/S51detour-panel /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret \\
+chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
+    /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
+    /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
+# Seed self-update config (public repo; add a GH_TOKEN here to enable update checks).
+if [ ! -f /opt/etc/detour/update.conf ]; then
+    printf 'GH_OWNER=varyen\\nGH_REPO=detour\\nGH_TOKEN=\\nAUTO_CHECK=0\\n' > /opt/etc/detour/update.conf
+    chmod 600 /opt/etc/detour/update.conf
+fi
+# Keep-alive cron (parity with OpenWrt). Entware crond reads /opt/etc/crontabs/root —
+# the dir often doesn't exist yet on KeeneticOS, so create it + add the */5 entry.
+mkdir -p /opt/etc/crontabs
+if ! grep -qs 'vpn-keepalive' /opt/etc/crontabs/root 2>/dev/null; then
+    echo '*/5 * * * * /opt/sbin/vpn-keepalive >/opt/var/log/vpn-keepalive.log 2>&1' >> /opt/etc/crontabs/root
+fi
+# Make sure Entware crond is running so the entry actually fires (no duplicate).
+if ! pgrep crond >/dev/null 2>&1; then
+    if [ -x /opt/etc/init.d/S10cron ]; then /opt/etc/init.d/S10cron start 2>/dev/null
+    else crond -b -c /opt/etc/crontabs 2>/dev/null; fi
+fi
 # sing-box comes from the Entware `sing-box-go` package, which ships its own
 # auto-start /opt/etc/init.d/S99sing-box (with a default config). Disable it so
 # ONLY detour's S52detour-singbox drives the daemon — otherwise two sing-box
