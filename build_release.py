@@ -305,10 +305,14 @@ chmod 0755 /etc/uci-defaults/99-detour-restore
 # 1d) update.conf placeholder (deploy_router.py overwrites with real token).
 if [ ! -f /etc/detour/update.conf ]; then
     cat > /etc/detour/update.conf <<'CONF'
-# Auto-generated placeholder. Populate via deploy_router.py for live updates.
-GH_OWNER=
-GH_REPO=
+# Auto-generated placeholder. Public repo — self-update works as-is.
+# deploy_router.py overwrites this with a GH_TOKEN for private repos / publishing.
+# Owner/repo MUST stay set: an empty GH_OWNER=/GH_REPO= would override the
+# detour-update defaults and break self-update.
+GH_OWNER=varyen
+GH_REPO=detour
 GH_TOKEN=
+AUTO_CHECK=0
 CONF
     chmod 0600 /etc/detour/update.conf
 fi

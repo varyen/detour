@@ -5,6 +5,22 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.7.1] — 2026-06-08
+
+### Исправлено — self-update больше не ломается из-за пустого `update.conf`
+
+- **«Установить» падало с `GH_OWNER/GH_REPO missing in /etc/detour/update.conf`.**
+  Постинсталл OpenWrt-`.ipk` при первой установке создавал
+  `/etc/detour/update.conf` с **пустыми** `GH_OWNER=`/`GH_REPO=`, и эти пустые
+  значения перекрывали встроенные дефолты `varyen`/`detour` в `detour-update`
+  (конфиг читается после них) → самообновление умирало. Исправлено в трёх местах:
+  - `detour-update` повторно выставляет дефолты `varyen`/`detour` **после** чтения
+    `update.conf` — теперь пустой/устаревший конфиг не может сломать self-update;
+  - постинсталл `.ipk` пишет `GH_OWNER=varyen`/`GH_REPO=detour` (а не пустые);
+  - `deploy_router.py` тоже не пишет пустые owner/repo.
+
+  Keenetic-сборка этим багом не была затронута (она и так писала `varyen/detour`).
+
 ## [1.7.0] — 2026-06-07
 
 ### Добавлено — светлая тема
