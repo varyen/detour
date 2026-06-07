@@ -11,8 +11,35 @@
       type="image/svg+xml"
       href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIiByb2xlPSJpbWciIGFyaWEtbGFiZWw9IkRldG91ciI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImQiIHgxPSIwIiB5MT0iMCIgeDI9IjEiIHkyPSIxIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMWY2ZmViIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzJlYTA0MyIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPCEtLSByb3VuZGVkIGJhZGdlIC0tPgogIDxyZWN0IHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgcng9IjciIGZpbGw9InVybCgjZCkiLz4KICA8IS0tIGRldG91ciByb3V0ZTogZW50ZXJzIGxlZnQsIGFyY3MgdXAgYW5kIG92ZXIgdGhlIGJsb2NrZWQgbm9kZSwgZXhpdHMgcmlnaHQgLS0+CiAgPHBhdGggZD0iTTQuNSAyMSBIMTAgQzE0IDIxIDE0IDkgMTYuNSA5IEMxOSA5IDE5IDIxIDIzIDIxIEgyNSIKICAgICAgICBmaWxsPSJub25lIiBzdHJva2U9IiNmZmZmZmYiIHN0cm9rZS13aWR0aD0iMyIKICAgICAgICBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8IS0tIGFycm93aGVhZCAtLT4KICA8cGF0aCBkPSJNMjIgMTcuOCBMMjYuMiAyMSBMMjIgMjQuMiIKICAgICAgICBmaWxsPSJub25lIiBzdHJva2U9IiNmZmZmZmYiIHN0cm9rZS13aWR0aD0iMyIKICAgICAgICBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8IS0tIGJsb2NrZWQgbm9kZSB0aGUgdHJhZmZpYyByZXJvdXRlcyBhcm91bmQgLS0+CiAgPGNpcmNsZSBjeD0iMTYuNSIgY3k9IjIxIiByPSIyLjciIGZpbGw9IiNmODUxNDkiIHN0cm9rZT0iIzBmMTQxOSIgc3Ryb2tlLXdpZHRoPSIxIi8+Cjwvc3ZnPgo="
     />
+    <!-- Theme bootstrap — runs before first paint to avoid a flash of the
+         wrong theme. Saved choice (localStorage) wins; otherwise the browser's
+         prefers-color-scheme decides on first visit. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("detour-theme");
+          if (t !== "light" && t !== "dark") {
+            t =
+              window.matchMedia &&
+              window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          }
+          document.documentElement.setAttribute("data-theme", t);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
     <style>
+      /* ===== THEME TOKENS =====
+         :root holds the DARK theme (default). [data-theme="light"] below
+         overrides only the colour tokens — radii / fonts are theme-agnostic.
+         The active theme is set on <html data-theme="..."> by the inline
+         bootstrap script in <head> (no-flash), defaulting to the browser's
+         prefers-color-scheme on first visit and to the saved choice after. */
       :root {
+        color-scheme: dark;
         --bg: #0b0f17;
         --bg-elev: #11172090;
         --bg-elev-solid: #11161f;
@@ -26,10 +53,12 @@
         --accent: #4f8ff7;
         --accent-2: #6ed4ff;
         --accent-soft: rgba(79, 143, 247, 0.14);
+        --accent-soft-strong: rgba(79, 143, 247, 0.22);
         --accent-border: rgba(79, 143, 247, 0.32);
         --green: #3fb368;
         --green-soft: rgba(63, 179, 104, 0.14);
         --green-border: rgba(63, 179, 104, 0.32);
+        --green-pulse: rgba(63, 179, 104, 0.55);
         --yellow: #e0a740;
         --red: #ef5454;
         --red-soft: rgba(239, 84, 84, 0.12);
@@ -40,14 +69,99 @@
         --btn-primary-hover: #5292f5;
         --btn-danger: #d63a3a;
         --btn-danger-hover: #ef4f4f;
+        --on-accent: #fff;
+        /* surfaces / glows */
+        --header-bg: rgba(17, 22, 31, 0.85);
+        --code-bg: rgba(110, 212, 255, 0.08);
+        --code-fg: #d8dee9;
+        --overlay: rgba(5, 8, 14, 0.72);
+        --login-glow: #14213a;
+        --glow-1: rgba(79, 143, 247, 0.08);
+        --glow-2: rgba(110, 212, 255, 0.05);
+        --brand-glow: rgba(79, 143, 247, 0.4);
+        --toast-success-tint: rgba(63, 179, 104, 0.18);
+        --toast-error-tint: rgba(239, 84, 84, 0.18);
+        --toast-info-tint: rgba(79, 143, 247, 0.18);
+        /* ping latency badges (GitHub-ish status palette) */
+        --ping-good: #3fb950;
+        --ping-ok: #d29922;
+        --ping-bad: #f0883e;
+        --ping-alt: #58a6ff;
+        --ping-dead: #f85149;
         --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
         --shadow-md: 0 6px 22px rgba(0, 0, 0, 0.45);
         --shadow-lg: 0 18px 56px rgba(0, 0, 0, 0.6);
+        --shadow-pop: 0 10px 28px rgba(0, 0, 0, 0.4);
         --radius-sm: 6px;
         --radius: 8px;
         --radius-lg: 12px;
         --mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", Consolas, ui-monospace, monospace;
         --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      }
+
+      /* ===== LIGHT THEME ===== */
+      :root[data-theme="light"] {
+        color-scheme: light;
+        --bg: #f4f6fb;
+        --bg-elev: #ffffffcc;
+        --bg-elev-solid: #ffffff;
+        --surface: #ffffff;
+        --surface-2: #eef1f7;
+        --border: #dde3ec;
+        --border-bright: #c3cdde;
+        --text: #1a2233;
+        --text-dim: #56607a;
+        --text-muted: #8a93a8;
+        --accent: #2563eb;
+        --accent-2: #0b7285;
+        --accent-soft: rgba(37, 99, 235, 0.10);
+        --accent-soft-strong: rgba(37, 99, 235, 0.16);
+        --accent-border: rgba(37, 99, 235, 0.28);
+        --green: #1a8a4f;
+        --green-soft: rgba(26, 138, 79, 0.12);
+        --green-border: rgba(26, 138, 79, 0.30);
+        --green-pulse: rgba(26, 138, 79, 0.45);
+        --yellow: #b7791f;
+        --red: #d62828;
+        --red-soft: rgba(214, 40, 40, 0.10);
+        --red-border: rgba(214, 40, 40, 0.32);
+        --btn: #eef1f7;
+        --btn-hover: #e2e7f0;
+        --btn-primary: #2563eb;
+        --btn-primary-hover: #1d4ed8;
+        --btn-danger: #dc2626;
+        --btn-danger-hover: #b91c1c;
+        --on-accent: #fff;
+        --header-bg: rgba(255, 255, 255, 0.85);
+        --code-bg: rgba(11, 114, 133, 0.10);
+        --code-fg: #1a2233;
+        --overlay: rgba(15, 23, 42, 0.40);
+        --login-glow: #dbe6fb;
+        --glow-1: rgba(37, 99, 235, 0.06);
+        --glow-2: rgba(11, 114, 133, 0.05);
+        --brand-glow: rgba(37, 99, 235, 0.30);
+        --toast-success-tint: rgba(26, 138, 79, 0.14);
+        --toast-error-tint: rgba(214, 40, 40, 0.12);
+        --toast-info-tint: rgba(37, 99, 235, 0.12);
+        --ping-good: #1a7f37;
+        --ping-ok: #9a6700;
+        --ping-bad: #bc4c00;
+        --ping-alt: #0969da;
+        --ping-dead: #cf222e;
+        --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.08);
+        --shadow-md: 0 6px 22px rgba(16, 24, 40, 0.12);
+        --shadow-lg: 0 18px 56px rgba(16, 24, 40, 0.18);
+        --shadow-pop: 0 10px 28px rgba(16, 24, 40, 0.14);
+      }
+
+      /* Smooth cross-fade only while the user flips the theme (class added by
+         toggleTheme() for ~300ms, then removed — no steady-state perf cost). */
+      html.theme-anim,
+      html.theme-anim *,
+      html.theme-anim *::before,
+      html.theme-anim *::after {
+        transition: background-color 0.25s ease, border-color 0.25s ease,
+          color 0.25s ease, box-shadow 0.25s ease, fill 0.25s ease !important;
       }
 
       *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
@@ -65,8 +179,8 @@
         position: fixed;
         inset: 0;
         background:
-          radial-gradient(circle at 0% 0%, rgba(79, 143, 247, 0.08) 0%, transparent 40%),
-          radial-gradient(circle at 100% 0%, rgba(110, 212, 255, 0.05) 0%, transparent 40%);
+          radial-gradient(circle at 0% 0%, var(--glow-1) 0%, transparent 40%),
+          radial-gradient(circle at 100% 0%, var(--glow-2) 0%, transparent 40%);
         pointer-events: none;
         z-index: 0;
       }
@@ -74,7 +188,7 @@
         font-family: var(--mono);
         font-size: 0.92em;
         color: var(--accent-2);
-        background: rgba(110, 212, 255, 0.08);
+        background: var(--code-bg);
         padding: 1px 6px;
         border-radius: 4px;
       }
@@ -84,7 +198,7 @@
       #login-overlay {
         position: fixed;
         inset: 0;
-        background: radial-gradient(ellipse at center, #14213a 0%, var(--bg) 70%);
+        background: radial-gradient(ellipse at center, var(--login-glow) 0%, var(--bg) 70%);
         z-index: 9999;
         display: flex;
         align-items: center;
@@ -132,7 +246,7 @@
 
       /* ===== HEADER ===== */
       .header {
-        background: rgba(17, 22, 31, 0.85);
+        background: var(--header-bg);
         backdrop-filter: saturate(140%) blur(12px);
         -webkit-backdrop-filter: saturate(140%) blur(12px);
         border-bottom: 1px solid var(--border);
@@ -163,8 +277,8 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        color: #fff;
-        box-shadow: 0 4px 14px rgba(79, 143, 247, 0.4);
+        color: var(--on-accent);
+        box-shadow: 0 4px 14px var(--brand-glow);
         flex-shrink: 0;
       }
       .header-right { display: flex; align-items: center; gap: 8px; }
@@ -202,6 +316,12 @@
         gap: 6px;
       }
       .icon-btn:hover { background: var(--btn-hover); color: var(--text); border-color: var(--border-bright); }
+      /* Theme toggle: show the icon for the mode you'd switch TO — sun (→ day)
+         while dark, moon (→ night) while light. */
+      #theme-toggle .theme-icon-sun,
+      #theme-toggle .theme-icon-moon { display: none; }
+      :root[data-theme="dark"] #theme-toggle .theme-icon-sun { display: inline-block; }
+      :root[data-theme="light"] #theme-toggle .theme-icon-moon { display: inline-block; }
       .btn-logout {
         height: 32px;
         padding: 0 12px;
@@ -269,7 +389,7 @@
       }
       .tb-btn:hover { background: var(--btn-hover); color: var(--text); border-color: var(--border-bright); }
       .tb-btn.accent { color: var(--accent); border-color: var(--accent-border); background: var(--accent-soft); }
-      .tb-btn.accent:hover { background: rgba(79, 143, 247, 0.22); }
+      .tb-btn.accent:hover { background: var(--accent-soft-strong); }
 
       /* ===== BULK / GROUP MODAL BITS ===== */
       .row-list {
@@ -382,14 +502,14 @@
       }
       .status-dot.running {
         background: var(--green);
-        box-shadow: 0 0 0 0 rgba(63, 179, 104, 0.55);
+        box-shadow: 0 0 0 0 var(--green-pulse);
         animation: pulse 2s infinite;
       }
       .status-dot.stopped { background: var(--red); }
       @keyframes pulse {
-        0% { box-shadow: 0 0 0 0 rgba(63, 179, 104, 0.55); }
-        70% { box-shadow: 0 0 0 9px rgba(63, 179, 104, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(63, 179, 104, 0); }
+        0% { box-shadow: 0 0 0 0 var(--green-pulse); }
+        70% { box-shadow: 0 0 0 9px transparent; }
+        100% { box-shadow: 0 0 0 0 transparent; }
       }
       .refresh-indicator {
         font-size: 12px;
@@ -455,9 +575,9 @@
       }
       .btn:hover { background: var(--btn-hover); border-color: var(--border-bright); }
       .btn:active { transform: scale(0.97); }
-      .btn.primary { background: var(--btn-primary); border-color: var(--btn-primary); color: #fff; }
+      .btn.primary { background: var(--btn-primary); border-color: var(--btn-primary); color: var(--on-accent); }
       .btn.primary:hover { background: var(--btn-primary-hover); border-color: var(--btn-primary-hover); }
-      .btn.danger { background: var(--btn-danger); border-color: var(--btn-danger); color: #fff; }
+      .btn.danger { background: var(--btn-danger); border-color: var(--btn-danger); color: var(--on-accent); }
       .btn.danger:hover { background: var(--btn-danger-hover); border-color: var(--btn-danger-hover); }
       .btn:disabled { opacity: 0.5; cursor: not-allowed; }
       .btn .spinner {
@@ -550,7 +670,7 @@
         background: var(--bg-elev-solid);
         border: 1px solid var(--border);
         border-radius: var(--radius-sm);
-        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+        box-shadow: var(--shadow-pop);
         padding: 4px;
       }
       .profile-dropdown.open { display: block; }
@@ -598,11 +718,11 @@
         color: var(--text-muted);
         white-space: nowrap;
       }
-      .ping-good { color: #3fb950; }
-      .ping-ok { color: #d29922; }
-      .ping-bad { color: #f0883e; }
-      .ping-alt { color: #58a6ff; }
-      .ping-dead { color: #f85149; }
+      .ping-good { color: var(--ping-good); }
+      .ping-ok { color: var(--ping-ok); }
+      .ping-bad { color: var(--ping-bad); }
+      .ping-alt { color: var(--ping-alt); }
+      .ping-dead { color: var(--ping-dead); }
       .ping-pending { color: var(--text-muted); opacity: 0.5; }
       .profile-dropdown-empty {
         padding: 9px 10px;
@@ -705,7 +825,7 @@
         transition: 0.25s;
       }
       .allvpn-toggle input:checked + .allvpn-slider { background: var(--red); border-color: var(--red); }
-      .allvpn-toggle input:checked + .allvpn-slider::before { transform: translateX(15px); background: #fff; }
+      .allvpn-toggle input:checked + .allvpn-slider::before { transform: translateX(15px); background: var(--on-accent); }
       .allvpn-label { font-size: 13px; font-weight: 600; color: var(--text); }
       .allvpn-hint { font-size: 11px; color: var(--text-dim); margin-left: auto; }
 
@@ -777,7 +897,7 @@
       textarea, .log-view {
         width: 100%;
         background: var(--bg-elev-solid);
-        color: #d8dee9;
+        color: var(--code-fg);
         border: 1px solid var(--border);
         border-radius: var(--radius-sm);
         padding: 12px 14px;
@@ -834,7 +954,7 @@
       .mode-toggle button:hover { color: var(--text); }
       .mode-toggle button.active {
         background: var(--btn-primary);
-        color: #fff;
+        color: var(--on-accent);
         box-shadow: var(--shadow-sm);
       }
 
@@ -842,7 +962,7 @@
       .modal-overlay {
         position: fixed;
         inset: 0;
-        background: rgba(5, 8, 14, 0.72);
+        background: var(--overlay);
         backdrop-filter: blur(4px);
         -webkit-backdrop-filter: blur(4px);
         z-index: 5000;
@@ -1060,9 +1180,9 @@
         background: var(--surface);
         border: 1px solid var(--border);
       }
-      .toast.success { background: linear-gradient(90deg, rgba(63,179,104,0.18), var(--surface) 40%); border-left-color: var(--green); }
-      .toast.error { background: linear-gradient(90deg, rgba(239,84,84,0.18), var(--surface) 40%); border-left-color: var(--red); }
-      .toast.info { background: linear-gradient(90deg, rgba(79,143,247,0.18), var(--surface) 40%); border-left-color: var(--accent); }
+      .toast.success { background: linear-gradient(90deg, var(--toast-success-tint), var(--surface) 40%); border-left-color: var(--green); }
+      .toast.error { background: linear-gradient(90deg, var(--toast-error-tint), var(--surface) 40%); border-left-color: var(--red); }
+      .toast.info { background: linear-gradient(90deg, var(--toast-info-tint), var(--surface) 40%); border-left-color: var(--accent); }
       @keyframes slideIn { from { transform: translateX(110%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
       /* ===== UTILITY ===== */
@@ -1162,6 +1282,10 @@
             <span class="meter" id="sys-mptcp">🔒 MPTCP: ...</span>
             <span class="meter" id="sys-keepalive" title="Keep-alive активного VPN">🛰 VPN: ...</span>
           </div>
+          <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" title="Переключить тему" aria-label="Переключить тему">
+            <svg class="i theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+            <svg class="i theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+          </button>
           <button class="icon-btn" onclick="showChangePasswordModal()" title="Сменить пароль панели" aria-label="Сменить пароль">
             <svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.85 12.15 19 4"/><path d="m18 5 3 3"/><path d="m15 8 3 3"/></svg>
           </button>
@@ -2092,6 +2216,64 @@
       var currentEditingProfileId = "";
       var lastParsedProfiles = [];
       var lastSubscriptionMeta = { url: "", title: "", intervalHours: 0, userInfo: "" };
+
+      // ===== THEME (dark / light) =====
+      // The active theme lives on <html data-theme="...">. It is set before
+      // first paint by the bootstrap script in <head>; here we only react to
+      // user toggles and (when no explicit choice is stored) follow the OS.
+      var THEME_KEY = "detour-theme";
+      function applyTheme(theme) {
+        if (theme !== "light" && theme !== "dark") theme = "dark";
+        document.documentElement.setAttribute("data-theme", theme);
+        var btn = document.getElementById("theme-toggle");
+        if (btn) {
+          var toLight = theme === "dark";
+          var label = toLight
+            ? "Включить светлую тему"
+            : "Включить тёмную тему";
+          btn.title = label;
+          btn.setAttribute("aria-label", label);
+        }
+      }
+      function toggleTheme() {
+        var cur =
+          document.documentElement.getAttribute("data-theme") === "light"
+            ? "light"
+            : "dark";
+        var next = cur === "light" ? "dark" : "light";
+        try {
+          localStorage.setItem(THEME_KEY, next);
+        } catch (e) {}
+        // brief cross-fade, then drop the class so it costs nothing at rest
+        var html = document.documentElement;
+        html.classList.add("theme-anim");
+        applyTheme(next);
+        setTimeout(function () {
+          html.classList.remove("theme-anim");
+        }, 320);
+      }
+      (function initTheme() {
+        applyTheme(
+          document.documentElement.getAttribute("data-theme") || "dark",
+        );
+        // First-visit default is the browser preference; keep following it
+        // live until the user makes an explicit choice (saved in localStorage).
+        try {
+          if (window.matchMedia) {
+            var mq = window.matchMedia("(prefers-color-scheme: light)");
+            var onChange = function (e) {
+              var stored = null;
+              try {
+                stored = localStorage.getItem(THEME_KEY);
+              } catch (_) {}
+              if (stored !== "light" && stored !== "dark")
+                applyTheme(e.matches ? "light" : "dark");
+            };
+            if (mq.addEventListener) mq.addEventListener("change", onChange);
+            else if (mq.addListener) mq.addListener(onChange);
+          }
+        } catch (e) {}
+      })();
 
       // UTF-8 safe base64 encode
       function utf8ToBase64(str) {
@@ -6710,8 +6892,8 @@
         }
         if (!b.singbox_present) {
           el.textContent = "⚠ нет бинарников";
-          el.style.color = "var(--danger, #e66)";
-          el.style.borderColor = "var(--danger, #e66)";
+          el.style.color = "var(--red)";
+          el.style.borderColor = "var(--red)";
         } else {
           el.textContent = "sb " + (b.singbox_version || "?");
           el.style.color = "";
