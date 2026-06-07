@@ -81,17 +81,11 @@ mkdir -p "$SINGBOX_PROFILES_DIR"
 # ==================== HELPERS ====================
 json_ok() { echo '{"ok":true}'; }
 json_escape() {
-    awk 'BEGIN { first = 1 }
-    {
-        gsub(/\033\[[0-9;]*m/, "")
-        gsub(/\\/, "\\\\")
-        gsub(/"/, "\\\"")
-        gsub(/\t/, "\\t")
-        gsub(/\r/, "\\r")
-        if (!first) printf "\\n"
-        printf "%s", $0
-        first = 0
-    }'
+    # sed handles the literal escapes (BusyBox awk's gsub(/"/,...) mangles quotes →
+    # broken JSON, seen on Keenetic/Entware "Update" output); awk strips ANSI +
+    # trailing CR and joins lines with \n. Order matters: backslash before quote.
+    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' | \
+    awk 'BEGIN{first=1}{gsub(/\033\[[0-9;]*m/,"");sub(/\r$/,"");if(!first)printf "\\n";printf "%s",$0;first=0}'
 }
 json_err() { printf '{"ok":false,"error":"%s"}' "$(printf '%s' "$1" | json_escape)"; }
 reply_json() {

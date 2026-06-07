@@ -146,16 +146,21 @@ if [ ! -f /opt/etc/detour/update.conf ]; then
     printf 'GH_OWNER=varyen\\nGH_REPO=detour\\nGH_TOKEN=\\nAUTO_CHECK=0\\n' > /opt/etc/detour/update.conf
     chmod 600 /opt/etc/detour/update.conf
 fi
-# Keep-alive cron (parity with OpenWrt). Entware crond reads /opt/etc/crontabs/root —
-# the dir often doesn't exist yet on KeeneticOS, so create it + add the */5 entry.
-mkdir -p /opt/etc/crontabs
+# Cron (parity with OpenWrt). Entware crond reads the SPOOL dir
+# /opt/var/spool/cron/crontabs, which usually doesn't exist on KeeneticOS — point
+# it at our /opt/etc/crontabs via a symlink (validated on a real KN-1810).
+mkdir -p /opt/etc/crontabs /opt/var/spool/cron
+ln -sf /opt/etc/crontabs /opt/var/spool/cron/crontabs
 if ! grep -qs 'vpn-keepalive' /opt/etc/crontabs/root 2>/dev/null; then
     echo '*/5 * * * * /opt/sbin/vpn-keepalive >/opt/var/log/vpn-keepalive.log 2>&1' >> /opt/etc/crontabs/root
 fi
-# Make sure Entware crond is running so the entry actually fires (no duplicate).
+if ! grep -qs 'subscription-refresh' /opt/etc/crontabs/root 2>/dev/null; then
+    echo '0 * * * * /opt/sbin/subscription-refresh >/opt/var/log/subscription-refresh.log 2>&1' >> /opt/etc/crontabs/root
+fi
+# Make sure Entware crond is running (reads the spool symlink above; no duplicate).
 if ! pgrep crond >/dev/null 2>&1; then
     if [ -x /opt/etc/init.d/S10cron ]; then /opt/etc/init.d/S10cron start 2>/dev/null
-    else crond -b -c /opt/etc/crontabs 2>/dev/null; fi
+    else crond -b 2>/dev/null; fi
 fi
 # sing-box comes from the Entware `sing-box-go` package, which ships its own
 # auto-start /opt/etc/init.d/S99sing-box (with a default config). Disable it so
