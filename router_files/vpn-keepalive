@@ -16,7 +16,15 @@ SETTINGS=/etc/sing-box/settings.json
 PROFILES=/etc/sing-box/profiles
 STATE=/var/state/vpn-keepalive.json
 
-mkdir -p /var/state
+# Keenetic/Entware platform shim (mirrors detour-api).
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    SETTINGS=/opt/etc/sing-box/settings.json
+    PROFILES=/opt/etc/sing-box/profiles
+    STATE=/opt/var/state/vpn-keepalive.json
+fi
+
+mkdir -p "$(dirname "$STATE")"
 
 now=$(date +%s 2>/dev/null)
 [ -z "$now" ] && now=0

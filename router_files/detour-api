@@ -62,6 +62,9 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     BINS_STATE="$OPT/var/state/detour-bins.json"
     AUTH_FILE="$OPT/etc/detour.auth"
     DETOUR_DIR="$OPT/etc/detour"
+    # «Все через VPN» marker — the NDM netfilter.d hook re-asserts SINGBOX_ALLVPN
+    # from this so the chain survives KeeneticOS firewall rebuilds (no fw4 on NDM).
+    ALLVPN_MARK="$OPT/etc/detour/allvpn.enabled"
     SINGBOX_BIN="$OPT/bin/sing-box"   # Entware sing-box-go installs to /opt/bin
     TPWS_BIN="$OPT/sbin/tpws-zapret"
     SUBREFRESH_BIN="$OPT/sbin/subscription-refresh"
@@ -1284,11 +1287,14 @@ allvpn_on)
         iptables -t nat -D PREROUTING -i "$VIF" -j SINGBOX_ALLVPN 2>/dev/null
         iptables -t nat -I PREROUTING 1 -i "$VIF" -j SINGBOX_ALLVPN
     done
+    # Keenetic: drop a marker so the netfilter.d hook re-asserts after NDM rebuilds.
+    [ -n "$ALLVPN_MARK" ] && touch "$ALLVPN_MARK" 2>/dev/null
     json_ok
     ;;
 
 allvpn_off)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -n "$ALLVPN_MARK" ] && rm -f "$ALLVPN_MARK" 2>/dev/null
     iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_ALLVPN 2>/dev/null
     for VIF in $(vpn_redirect_ifaces); do
         [ -n "$VIF" ] || continue

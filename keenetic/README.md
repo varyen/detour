@@ -112,10 +112,34 @@ opkg update
 opkg install ./detour-keenetic_<ver>_all.ipk
 # panel: http://<router-ip>:8080/detour/   login: admin / detour  (CHANGE IT)
 ```
-**What works in this build:** panel + login, sing-box/zapret start-stop, explicit
-IP/CIDR transparent redirect. **What does NOT yet:** domain→ipset routing (DNS not
-wired — add explicit IPs for now), self-update / subscriptions / keep-alive
-(OpenWrt-pathed scripts not shipped), killswitch persistence across NDM reloads.
+**What works in this build (v1.4.0 — parity pass, ⚠ all UNVALIDATED on hardware):**
+panel + login, sing-box/zapret start-stop, explicit IP/CIDR redirect, and now also:
+- **Domain→ipset routing** — `S50detour-dns` runs an Entware dnsmasq on
+  `:$DETOUR_DNS_PORT` (5354) that tags resolved IPs into the ipsets via generated
+  `ipset=/domain/...` config; `50-detour.sh` transparently REDIRECTs LAN `:53` to
+  it. Same domain lists as OpenWrt. (single-instance; route-map targets all funnel
+  through the one sing-box, which splits them via route.rules.)
+- **Hosts-DNS** — `detour-hosts` shipped; serves `addn-hosts=/tmp/hosts` via the
+  detour dnsmasq; re-materialized at boot by `S51detour-panel`.
+- **«Все через VPN»** — re-asserted by `50-detour.sh` from the `allvpn.enabled`
+  marker, so it survives NDM firewall rebuilds.
+- **VPN road-warrior redirect** — `vpn_redirect_ifaces` honored by the hook.
+- **Self-update** — `detour-update` has a `/opt` shim; pulls the
+  `detour-keenetic_*.ipk` asset, `opkg install` (skips the feed/sing-box ensure;
+  usign check skipped if `usign` is absent on Entware). Needs `GH_TOKEN` in
+  `/opt/etc/detour/update.conf`.
+- **Subscriptions / keep-alive** — `subscription-refresh` + `vpn-keepalive` shipped.
+
+**⚠ VALIDATE (new device-dependent assumptions in this pass):**
+- `/opt/sbin/dnsmasq` (dnsmasq-full) exists and supports `ipset=`.
+- KeeneticOS does not itself force-redirect/intercept client `:53` (some firmwares
+  do — would collide with our transparent `:53` REDIRECT).
+- `DETOUR_DNS_UPSTREAM` (default `1.1.1.1`): while redirected, clients lose
+  KeeneticOS local-name resolution — set a preferred resolver in `detour.conf`.
+- Entware crond scheduling for `vpn-keepalive`/`subscription-refresh`/auto-check
+  cron (paths are `/opt`, but how cron is registered on KeeneticOS varies).
+- `start-stop-daemon` keeps the daemons up; `xt_set`/`ipset` available in the
+  KeeneticOS iptables.
 
 **Please report back (this is our remote Phase-0 validation):**
 `uname -m`; `opkg print-architecture`; `/opt/sbin/sing-box version` (must NOT say

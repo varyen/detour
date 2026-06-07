@@ -13,6 +13,10 @@ start() {
     mkdir -p /opt/var/run /opt/var/log
     echo "Starting detour panel (lighttpd :8080) ..."
     "$BIN" -f "$CONF"
+    # Re-materialize the Hosts-DNS served file (tmpfs /tmp/hosts is lost on reboot).
+    # Stages /tmp/hosts/detour-hosts from the saved master; the detour dnsmasq (S50,
+    # started later by S52/S53) then reads it. Inert if Hosts-DNS is unused.
+    [ -x /opt/sbin/detour-hosts ] && /opt/sbin/detour-hosts apply >/dev/null 2>&1
 }
 
 stop() {

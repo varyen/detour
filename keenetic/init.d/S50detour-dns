@@ -1,0 +1,143 @@
+#!/opt/bin/sh
+# Detour / Keenetic — domain→ipset DNS service (parity with OpenWrt dnsmasq ipset).
+#
+# Why this exists: on OpenWrt the system dnsmasq tags resolved IPs into the
+# singbox_domains/zapret_domains ipsets via `ipset=/domain/...` lines, which the
+# nat REDIRECT rules then match. KeeneticOS owns :53 and we can't assume NDM-CLI
+# access, so we run our OWN Entware dnsmasq on a side port ($DETOUR_DNS_PORT) and
+# transparently REDIRECT LAN :53 to it (the redirect lives in 50-detour.sh, gated
+# by the dns.enabled marker this script drops). Same `ipset=` generation as the
+# OpenWrt init scripts, sourced from the same domain lists.
+#
+# ⚠ VALIDATE on device:
+#   * /opt/sbin/dnsmasq exists (Entware `dnsmasq-full`) and supports `ipset=`.
+#   * KeeneticOS does not itself force/redirect client :53 (would conflict).
+#   * Our instance on :$DETOUR_DNS_PORT does not collide with an Entware
+#     dnsmasq autostart (we use --conf-file=/dev/null + own pidfile/port).
+
+export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+. /opt/etc/detour/detour.conf 2>/dev/null
+
+: "${DNSMASQ_BIN:=/opt/sbin/dnsmasq}"
+: "${DETOUR_DNS_PORT:=5354}"
+: "${DETOUR_DNS_UPSTREAM:=1.1.1.1}"
+: "${DNSMASQ_CONF_DIR:=/opt/etc/detour/dnsmasq.d}"
+: "${DNSMASQ_HOSTS_DIR:=/tmp/hosts}"
+: "${SINGBOX_IPSET:=singbox_domains}"
+: "${ZAPRET_IPSET:=zapret_domains}"
+: "${SINGBOX_WL_IPSET:=singbox_whitelist}"
+: "${SINGBOX_DOMAINS_LIST:=/opt/etc/sing-box/proxy-domains.list}"
+: "${SINGBOX_WHITELIST_LIST:=/opt/etc/sing-box/whitelist-domains.list}"
+: "${SINGBOX_ROUTEMAP_LIST:=/opt/etc/sing-box/route-map.list}"
+: "${ZAPRET_DOMAINS_LIST:=/opt/etc/zapret-tpws/domains.list}"
+: "${SINGBOX_SETTINGS:=/opt/etc/sing-box/settings.json}"
+
+PIDF="/opt/var/run/detour-dnsmasq.pid"
+MARK="/opt/etc/detour/dns.enabled"
+HOOK="/opt/etc/ndm/netfilter.d/50-detour.sh"
+
+apply_fw() { [ -x "$HOOK" ] && "$HOOK" iptables nat >/dev/null 2>&1; }
+
+# Read routing_mode from settings.json (proxy-list | all-except).
+routing_mode() {
+    sed -n 's/.*"routing_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$SINGBOX_SETTINGS" 2>/dev/null | head -1
+}
+
+# gen_list <listfile> <ipset> <dnsmasq-conf-out>
+# Mirrors OpenWrt setup_domains_file(): IPs/CIDRs go straight into the ipset,
+# domains become `ipset=/domain/<ipset>` lines dnsmasq tags on resolution.
+gen_list() {
+    listfile="$1"; ipset="$2"; conf="$3"
+    iptmp="/tmp/detour-ipset-$ipset.restore"
+    : > "$conf"; : > "$iptmp"
+    [ -f "$listfile" ] || { rm -f "$iptmp"; return; }
+    awk -v ipset="$ipset" -v dnsmasq="$conf" -v iptmp="$iptmp" '
+    {
+        sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+        if ($0 == "") next
+        if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print "add " ipset " " $0 >> iptmp; next }
+        if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print "ipset=/" $0 "/" ipset >> dnsmasq; next }
+    }' "$listfile"
+    [ -s "$iptmp" ] && ipset restore -exist < "$iptmp" 2>/dev/null
+    rm -f "$iptmp"
+}
+
+# (Re)generate all ipset/dnsmasq config from the domain lists.
+regen() {
+    mkdir -p "$DNSMASQ_CONF_DIR" "$DNSMASQ_HOSTS_DIR"
+    ipset create "$SINGBOX_IPSET"    hash:net -exist 2>/dev/null
+    ipset create "$ZAPRET_IPSET"     hash:net -exist 2>/dev/null
+    ipset create "$SINGBOX_WL_IPSET" hash:net maxelem 131072 -exist 2>/dev/null
+
+    gen_list "$SINGBOX_DOMAINS_LIST"  "$SINGBOX_IPSET"    "$DNSMASQ_CONF_DIR/singbox-domains.conf"
+    gen_list "$ZAPRET_DOMAINS_LIST"   "$ZAPRET_IPSET"     "$DNSMASQ_CONF_DIR/zapret-domains.conf"
+    [ "$(routing_mode)" = "all-except" ] && \
+        gen_list "$SINGBOX_WHITELIST_LIST" "$SINGBOX_WL_IPSET" "$DNSMASQ_CONF_DIR/singbox-whitelist.conf" || \
+        : > "$DNSMASQ_CONF_DIR/singbox-whitelist.conf"
+
+    # route-map: single-instance — funnel every per-profile host/IP into singbox_domains
+    # (the one sing-box splits them across outbounds via route.rules). Strips the
+    # `// === route:ID ===` headers; keeps plain domain/IP/CIDR lines.
+    if [ -f "$SINGBOX_ROUTEMAP_LIST" ]; then
+        grep -v '===' "$SINGBOX_ROUTEMAP_LIST" 2>/dev/null > /tmp/detour-routemap.list
+        gen_list /tmp/detour-routemap.list "$SINGBOX_IPSET" "$DNSMASQ_CONF_DIR/singbox-routemap.conf"
+        rm -f /tmp/detour-routemap.list
+    else
+        : > "$DNSMASQ_CONF_DIR/singbox-routemap.conf"
+    fi
+}
+
+running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; }
+
+start() {
+    # Only run while a proxy is active. rc.unslung auto-starts every S* at boot, but
+    # S52/S53 (which set these markers) re-invoke us via dns_up — so the standalone
+    # boot start no-ops here and we don't hijack LAN :53 when nothing needs it.
+    if [ ! -f /opt/etc/detour/singbox.enabled ] && [ ! -f /opt/etc/detour/zapret.enabled ]; then
+        rm -f "$MARK"; apply_fw; return 0
+    fi
+    [ -x "$DNSMASQ_BIN" ] || { echo "detour-dns: missing $DNSMASQ_BIN (opkg install dnsmasq-full)"; exit 1; }
+    mkdir -p /opt/var/run "$DNSMASQ_CONF_DIR" "$DNSMASQ_HOSTS_DIR"
+    touch "$MARK"
+    regen
+    running && { echo "detour-dns already running"; apply_fw; return; }
+    echo "Starting detour-dns (dnsmasq :$DETOUR_DNS_PORT) ..."
+    # Standalone instance: ignore the Entware system dnsmasq.conf, own pid/port,
+    # wildcard-bind so iptables-REDIRECTed :53 packets (dst = br0 IP) reach it.
+    "$DNSMASQ_BIN" \
+        --conf-file=/dev/null \
+        --pid-file="$PIDF" \
+        --port="$DETOUR_DNS_PORT" \
+        --conf-dir="$DNSMASQ_CONF_DIR" \
+        --addn-hosts="$DNSMASQ_HOSTS_DIR" \
+        --no-resolv --no-hosts \
+        --server="$DETOUR_DNS_UPSTREAM" \
+        --cache-size=1000
+    sleep 1
+    apply_fw
+}
+
+stop() {
+    echo "Stopping detour-dns ..."
+    rm -f "$MARK"
+    [ -f "$PIDF" ] && kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null
+    rm -f "$PIDF"
+    apply_fw   # hook drops the :53 redirect once the marker is gone
+}
+
+# reload: regen lists + SIGHUP dnsmasq (re-reads conf-dir/addn-hosts, no restart).
+reload() {
+    regen
+    if running; then kill -HUP "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; else start; fi
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    reload) reload ;;
+    regen) regen ;;
+    status) running && echo "detour-dns running (pid $(cat "$PIDF"))" || echo "detour-dns stopped" ;;
+    *) echo "usage: $0 {start|stop|restart|reload|regen|status}"; exit 1 ;;
+esac

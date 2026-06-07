@@ -10,9 +10,17 @@ export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"  # Entware tools 
 PIDF="/opt/var/run/detour-singbox.pid"
 MARK="/opt/etc/detour/singbox.enabled"
 HOOK="/opt/etc/ndm/netfilter.d/50-detour.sh"
+DNS_SVC="/opt/etc/init.d/S50detour-dns"
 NAME="sing-box"
 
 apply_fw() { [ -x "$HOOK" ] && "$HOOK" iptables nat >/dev/null 2>&1; }
+# Domain→ipset DNS: run while EITHER proxy is enabled; stop when both are off.
+dns_up()   { [ -x "$DNS_SVC" ] && "$DNS_SVC" start  >/dev/null 2>&1; }
+dns_reload() { [ -x "$DNS_SVC" ] && "$DNS_SVC" reload >/dev/null 2>&1; }
+dns_down_if_idle() {
+    [ -f /opt/etc/detour/zapret.enabled ] && return
+    [ -x "$DNS_SVC" ] && "$DNS_SVC" stop >/dev/null 2>&1
+}
 
 start() {
     [ -x "$SINGBOX_BIN" ] || { echo "$NAME: missing $SINGBOX_BIN"; exit 1; }
@@ -25,6 +33,7 @@ start() {
         -d /opt/etc/sing-box \
         -x "$SINGBOX_BIN" -- run -c "$SINGBOX_CONF" >>"$SINGBOX_LOG" 2>&1
     sleep 1
+    dns_up          # ensure ipset/dnsmasq is up + regenerated for domain routing
     apply_fw
 }
 
@@ -35,7 +44,11 @@ stop() {
     rm -f "$PIDF"
     # Drop our nat rules by re-running the hook (it skips disabled svc).
     apply_fw
+    dns_down_if_idle
 }
+
+# reload: re-read domain lists into the ipsets (no daemon restart needed).
+reload() { dns_reload; apply_fw; }
 
 status() {
     if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then
@@ -46,9 +59,10 @@ status() {
 }
 
 case "$1" in
-    start) start ;;
-    stop) stop ;;
+    start|enable) start ;;
+    stop|disable) stop ;;
     restart) stop; sleep 1; start ;;
+    reload) reload ;;
     status) status ;;
-    *) echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+    *) echo "usage: $0 {start|stop|restart|reload|enable|disable|status}"; exit 1 ;;
 esac

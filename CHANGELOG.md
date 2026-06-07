@@ -5,6 +5,34 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.5.0] — 2026-06-07
+
+### Добавлено — паритет Keenetic/Entware с OpenWrt (большой порт)
+
+Keenetic-сборка (`detour-keenetic_*.ipk`) подтянута к функционалу Flint/OpenWrt.
+Раньше на Keenetic работали лишь панель, старт/стоп прокси, режим all-except и
+явные IP/CIDR. Теперь добавлено:
+
+- **Доменный роутинг (DNS→ipset)** — главный блокер закрыт. Новый
+  `S50detour-dns` поднимает выделенный Entware dnsmasq на `:5354` с генерацией
+  `ipset=/domain/...` (как на OpenWrt), а `50-detour.sh` прозрачно
+  REDIRECT'ит LAN/VPN `:53 → :5354`. Работают proxy-list-домены и zapret-домены.
+- **VPN road-warrior → обход** (`vpn_redirect_ifaces`) в nat-хуке.
+- **«Все через VPN»** переустанавливается из маркера `allvpn.enabled` и
+  переживает перестроения файрвола NDM.
+- **Hosts-DNS** (`detour-hosts`) и **самообновление** (`detour-update` с
+  `/opt`-шимом, тянет `detour-keenetic_*.ipk`, usign-проверка опциональна —
+  на Entware usign отсутствует), **keep-alive** (`vpn-keepalive`).
+- `S52/S53` получили `reload|enable|disable`; постинст создаёт `crontabs` и
+  cron keep-alive.
+- **Валидация окружения на реальном KN (MT7621):** dnsmasq-full с `ipset=`,
+  ipset/xt_set, `br0`, чистый `:53`, sing-box 1.13.3 ABI — подтверждены.
+  ⚠ Рантайм NDM-хука ещё не прогонялся → Keenetic-пакет остаётся **EXPERIMENTAL**.
+
+OpenWrt-сборка (`detour_*.ipk`) поведенчески не менялась — правки общих скриптов
+(`detour-api`/`detour-hosts`/`detour-update`/`vpn-keepalive`) для OpenWrt-ветки
+no-op; обновление для Flint/GL.iNet безопасное.
+
 ## [1.4.0] — 2026-06-04
 
 ### Добавлено — VPN-сервер: входящие клиенты через sing-box/zapret
