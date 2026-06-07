@@ -1103,11 +1103,15 @@ panel_update_status)
 panel_update_check)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
-    OUT=$("$UPDATE_BIN" check 2>&1)
-    if [ -f "$UPDATE_STATE" ]; then
-        cat "$UPDATE_STATE"
+    # Honor the updater's exit code. On failure (e.g. GitHub/DNS unreachable)
+    # `detour-update check` dies WITHOUT rewriting the state file, so catting it
+    # would surface the PREVIOUS check's result — a phantom "update available"
+    # left over from before the last install. Report the failure instead.
+    if OUT=$("$UPDATE_BIN" check 2>&1); then
+        if [ -f "$UPDATE_STATE" ]; then cat "$UPDATE_STATE"
+        else printf '{"status":"error","message":"%s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"; fi
     else
-        printf '{"status":"error","message":"%s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"
+        printf '{"status":"error","message":"проверка не удалась: %s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"
     fi
     ;;
 
@@ -1196,11 +1200,13 @@ bins_update_status)
 bins_update_check)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
-    OUT=$("$UPDATE_BIN" bins-check 2>&1)
-    if [ -f "$BINS_STATE" ]; then
-        cat "$BINS_STATE"
+    # Honor the updater's exit code (see panel_update_check) — don't pass off the
+    # previous bins-check state as a fresh result when the check actually failed.
+    if OUT=$("$UPDATE_BIN" bins-check 2>&1); then
+        if [ -f "$BINS_STATE" ]; then cat "$BINS_STATE"
+        else printf '{"status":"error","message":"%s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"; fi
     else
-        printf '{"status":"error","message":"%s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"
+        printf '{"status":"error","message":"проверка не удалась: %s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"
     fi
     ;;
 
