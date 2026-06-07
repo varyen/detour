@@ -5,6 +5,25 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.5.1] — 2026-06-07
+
+### Исправлено — фиксы Keenetic по итогам прогона 1.5.0 на реальном KN-1810
+
+Тестер (с LLM) установил 1.5.0 на железо и нашёл 4 проблемы — вмержены в исходники:
+
+- **detour-update: восстановлен `ASSET_RE`.** Рефактор 1.5.0 случайно затёр
+  определение до `ASSET_RE="$ASSET_RE"` → краш «unbound variable» при `set -u`.
+  Вернул `'^detour_.*\.ipk$'` (заодно чинит выбор не того ассета на OpenWrt).
+- **detour-api: `json_escape` с awk → sed.** BusyBox `awk gsub(/"/,…)` ломал
+  экранирование кавычек → битый JSON в ответе «Обновление» (ошибка парсинга в
+  браузере). Фикс общий — помогает и OpenWrt/GL.iNet.
+- **detour-update: `package.path` для inline-Lua.** `require("cjson.safe")` не
+  находил бандл на Entware — добавил префикс `/opt/share/lua/5.1/…` (как в
+  `subscription-refresh`); без symlink-костылей.
+- **Keenetic cron.** Entware crond читает спул `/opt/var/spool/cron/crontabs` —
+  постинст теперь создаёт симлинк на `/opt/etc/crontabs` и добавляет часовой
+  `subscription-refresh` (в дополнение к `*/5` keep-alive).
+
 ## [1.5.0] — 2026-06-07
 
 ### Добавлено — паритет Keenetic/Entware с OpenWrt (большой порт)

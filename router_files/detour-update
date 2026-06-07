@@ -63,7 +63,7 @@ AUTO_CHECK=0          # opt-in: 6h cron auto-check (default off). Toggle via `au
 
 # GitHub release asset name patterns — OpenWrt panel by default. Keenetic uses the
 # separate detour-keenetic_*.ipk asset (overridden in the platform shim below).
-ASSET_RE="$ASSET_RE"
+ASSET_RE='^detour_.*\.ipk$'
 ASSET_SIG_RE='^detour_.*\.ipk\.sig$'
 STASH_IPK=/etc/detour/installed.ipk
 
@@ -162,6 +162,10 @@ gh_assets() {
         -o "$tmp" "$url" || { rm -f "$tmp"; die "GH API request failed"; }
     # Tiny Lua JSON parser (lua-cjson is a hard dep).
     lua - <<'LUA' "$tmp"
+-- Entware/Keenetic ships a pure-Lua cjson.safe under /opt/share/lua/5.1/ (no C
+-- lua-cjson in the feed). Prepend that path so require finds it; harmless on
+-- OpenWrt (dir absent → falls through to the system cjson).
+package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
 local cjson = require("cjson.safe")
 local f = io.open(arg[1], "r"); if not f then os.exit(1) end
 local raw = f:read("*a"); f:close()
