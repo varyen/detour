@@ -161,12 +161,30 @@ gh_curl() {
     else curl "$@"; fi
 }
 
+# Retry wrapper around gh_curl. api.github.com and especially the asset CDN
+# (release-assets.githubusercontent.com) are *intermittently* unresolvable on
+# censored / throttled links (RU): a single curl miss (DNS error 6, connect
+# reset, timeout) would otherwise fail the whole self-update — exactly the
+# "Could not resolve host: release-assets.githubusercontent.com" the panel hit.
+# Re-invoking curl forces a fresh DNS lookup, which usually succeeds within a
+# couple of tries. Passes all args through unchanged; logs attempts to stderr
+# (never stdout, so captured output stays clean).
+gh_curl_retry() {
+    local _n=0
+    while [ "$_n" -lt 4 ]; do
+        _n=$((_n + 1))
+        if gh_curl "$@"; then return 0; fi
+        [ "$_n" -lt 4 ] && { log "GitHub request attempt $_n/4 failed — retrying in 3s..."; sleep 3; }
+    done
+    return 1
+}
+
 gh_assets() {
     [ -n "$GH_OWNER" ] && [ -n "$GH_REPO" ] || die "GH_OWNER/GH_REPO missing in $CONFIG"
     local url tmp
     url="https://api.github.com/repos/$GH_OWNER/$GH_REPO/releases/latest"
     tmp=$(mktemp)
-    gh_curl -fsSL \
+    gh_curl_retry -fsSL \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         --max-time 30 \
@@ -376,10 +394,10 @@ cmd_apply() {
     ipk="$tmp/${PACKAGE_NAME}_${newver}_${ARCH}.ipk"
     sig="$ipk.sig"
     log "downloading $ipk_url ..."
-    gh_curl -fsSL --max-time 600 \
+    gh_curl_retry -fsSL --max-time 600 \
         -H "Accept: application/octet-stream" \
         -o "$ipk" "$ipk_url" || { rm -rf "$tmp"; die "ipk download failed"; }
-    gh_curl -fsSL --max-time 60 \
+    gh_curl_retry -fsSL --max-time 60 \
         -H "Accept: application/octet-stream" \
         -o "$sig" "$sig_url" || { rm -rf "$tmp"; die "sig download failed"; }
 
