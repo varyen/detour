@@ -535,7 +535,7 @@ def _load_github_config():
 
 
 def _gh_request(method, url, token, *, data=None, content_type=None, expected_status=None):
-    import urllib.request, urllib.error
+    import urllib.request, urllib.error, http.client, time
     hdrs = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
@@ -548,12 +548,26 @@ def _gh_request(method, url, token, *, data=None, content_type=None, expected_st
         hdrs["Content-Type"] = "application/json"
     if content_type:
         hdrs["Content-Type"] = content_type
-    req = urllib.request.Request(url, data=body, method=method, headers=hdrs)
-    try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            status, raw = resp.status, resp.read()
-    except urllib.error.HTTPError as e:
-        status, raw = e.code, e.read()
+    # The GitHub API/CDN intermittently resets TLS on throttled/censored RU links
+    # (WinError 10054 mid-handshake/upload). Retry transient network errors —
+    # HTTPError is a real HTTP response (carries the status we want), so it is NOT
+    # retried. Mirrors detour-update's gh_curl_retry resilience.
+    attempts = 5
+    for attempt in range(1, attempts + 1):
+        req = urllib.request.Request(url, data=body, method=method, headers=hdrs)
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                status, raw = resp.status, resp.read()
+            break
+        except urllib.error.HTTPError as e:
+            status, raw = e.code, e.read()
+            break
+        except (urllib.error.URLError, ConnectionError, TimeoutError,
+                http.client.HTTPException, OSError) as e:
+            if attempt == attempts:
+                die(f"GitHub API {method} {url} failed after {attempts} attempts: {e}")
+            print(f"[publish] network error ({e}); retry {attempt}/{attempts - 1}...")
+            time.sleep(3)
     try:
         parsed = json.loads(raw.decode("utf-8")) if raw else None
     except Exception:
