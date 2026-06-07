@@ -72,7 +72,7 @@ STASH_IPK=/etc/detour/installed.ipk
 # so self-update = pull the detour-keenetic_*.ipk asset and opkg-install it; the
 # feed/sing-box ensure steps are skipped. usign may be absent on Entware → the
 # signature check is skipped if so (the asset still comes straight from GitHub).
-# ⚠ VALIDATE: GH_TOKEN must be set in /opt/etc/detour/update.conf (as on OpenWrt).
+# GH_TOKEN is OPTIONAL here (public repo) — gh_curl omits auth when it's empty.
 KEENETIC=0
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     KEENETIC=1
@@ -148,14 +148,20 @@ EOF
 #   line 1     : <tag_name>
 #   lines 2..N : <asset_name>\t<download_url>   (one per release asset)
 # A release carries two .ipk assets now (panel + bins); callers select by name.
+# curl wrapper: add a Bearer auth header only when GH_TOKEN is set. The repo is
+# PUBLIC, so unauthenticated requests work (just a lower rate limit) — self-update
+# needs no PAT. A token only raises the limit / allows a private repo.
+gh_curl() {
+    if [ -n "$GH_TOKEN" ]; then curl -H "Authorization: Bearer $GH_TOKEN" "$@"
+    else curl "$@"; fi
+}
+
 gh_assets() {
-    [ -n "$GH_OWNER" ] && [ -n "$GH_REPO" ] && [ -n "$GH_TOKEN" ] || \
-        die "GH_OWNER/GH_REPO/GH_TOKEN missing in $CONFIG"
+    [ -n "$GH_OWNER" ] && [ -n "$GH_REPO" ] || die "GH_OWNER/GH_REPO missing in $CONFIG"
     local url tmp
     url="https://api.github.com/repos/$GH_OWNER/$GH_REPO/releases/latest"
     tmp=$(mktemp)
-    curl -fsSL \
-        -H "Authorization: Bearer $GH_TOKEN" \
+    gh_curl -fsSL \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         --max-time 30 \
@@ -365,12 +371,10 @@ cmd_apply() {
     ipk="$tmp/${PACKAGE_NAME}_${newver}_${ARCH}.ipk"
     sig="$ipk.sig"
     log "downloading $ipk_url ..."
-    curl -fsSL --max-time 600 \
-        -H "Authorization: Bearer $GH_TOKEN" \
+    gh_curl -fsSL --max-time 600 \
         -H "Accept: application/octet-stream" \
         -o "$ipk" "$ipk_url" || { rm -rf "$tmp"; die "ipk download failed"; }
-    curl -fsSL --max-time 60 \
-        -H "Authorization: Bearer $GH_TOKEN" \
+    gh_curl -fsSL --max-time 60 \
         -H "Accept: application/octet-stream" \
         -o "$sig" "$sig_url" || { rm -rf "$tmp"; die "sig download failed"; }
 
