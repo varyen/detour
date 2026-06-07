@@ -503,6 +503,113 @@
         cursor: pointer;
       }
       .profile-row select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+      /* ===== PROFILE AUTOCOMPLETE COMBOBOX ===== */
+      .profile-combobox {
+        position: relative;
+        flex: 1;
+        min-width: 200px;
+      }
+      .profile-search-input {
+        width: 100%;
+        height: 32px;
+        padding: 0 30px 0 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        color: var(--text);
+        font-size: 12.5px;
+        font-family: var(--mono);
+        outline: none;
+        box-sizing: border-box;
+      }
+      .profile-search-input::placeholder { color: var(--text-muted); }
+      .profile-search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+      .profile-combobox-caret {
+        position: absolute;
+        right: 6px;
+        top: 0;
+        height: 32px;
+        width: 24px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        color: var(--text-muted);
+        cursor: pointer;
+        user-select: none;
+      }
+      .profile-dropdown {
+        display: none;
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        right: 0;
+        z-index: 60;
+        max-height: 300px;
+        overflow-y: auto;
+        background: var(--bg-elev-solid);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+        padding: 4px;
+      }
+      .profile-dropdown.open { display: block; }
+      .profile-dropdown-group {
+        padding: 7px 10px 3px;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+      }
+      .profile-dropdown-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 10px;
+        border-radius: var(--radius-sm);
+        font-size: 12.5px;
+        font-family: var(--mono);
+        color: var(--text);
+        cursor: pointer;
+      }
+      .profile-dropdown-item:hover,
+      .profile-dropdown-item.active {
+        background: var(--accent-soft);
+      }
+      .profile-dropdown-item.selected .pdi-label { color: var(--accent); font-weight: 600; }
+      .profile-dropdown-item mark {
+        background: transparent;
+        color: var(--accent);
+        font-weight: 700;
+      }
+      .pdi-label {
+        flex: 1;
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      /* Ping badge — shown on the right of every VPN row (and in the sing-box card). */
+      .pdi-ping {
+        flex-shrink: 0;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        color: var(--text-muted);
+        white-space: nowrap;
+      }
+      .ping-good { color: #3fb950; }
+      .ping-ok { color: #d29922; }
+      .ping-bad { color: #f0883e; }
+      .ping-alt { color: #58a6ff; }
+      .ping-dead { color: #f85149; }
+      .ping-pending { color: var(--text-muted); opacity: 0.5; }
+      .profile-dropdown-empty {
+        padding: 9px 10px;
+        font-size: 12px;
+        color: var(--text-muted);
+        font-family: var(--mono);
+      }
       .profile-label {
         font-size: 11px;
         font-weight: 600;
@@ -1269,6 +1376,7 @@
               <span class="label">PID</span><span class="value" id="sb-pid">—</span>
               <span class="label">Порт</span><span class="value" id="sb-port">—</span>
               <span class="label">Профиль</span><span class="value" id="sb-profile-name">—</span>
+              <span class="label">Пинг</span><span class="value" id="sb-ping">—</span>
               <span class="label">Режим</span><span class="value" id="sb-routing-mode">—</span>
               <span class="label">Записей</span><span class="value" id="sb-domains">—</span>
               <span class="label">IP в ipset</span><span class="value" id="sb-ipset">—</span>
@@ -1282,7 +1390,27 @@
               </div>
               <div class="profile-row">
                 <span class="profile-label">🔐 Профиль</span>
-                <select id="sb-profile-select" onchange="onProfileSelectChange()"></select>
+                <div class="profile-combobox" id="sb-profile-combobox">
+                  <input type="hidden" id="sb-profile-select" />
+                  <input
+                    type="text"
+                    id="sb-profile-search"
+                    class="profile-search-input"
+                    placeholder="Поиск или выбор профиля…"
+                    autocomplete="off"
+                    spellcheck="false"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded="false"
+                    aria-controls="sb-profile-dropdown"
+                    oninput="onProfileSearchInput()"
+                    onfocus="onProfileSearchFocus()"
+                    onblur="onProfileSearchBlur()"
+                    onkeydown="onProfileSearchKeydown(event)"
+                  />
+                  <span class="profile-combobox-caret" onmousedown="event.preventDefault()" onclick="toggleProfileDropdown(event)">▾</span>
+                  <div class="profile-dropdown" id="sb-profile-dropdown" role="listbox"></div>
+                </div>
                 <button class="btn primary" onclick="activateSelectedProfile()">✓ Применить</button>
               </div>
               <div class="profile-actions">
@@ -2701,6 +2829,7 @@
               ? "Все кроме указанных"
               : "Только указанные";
           document.getElementById("sb-routing-mode").textContent = modeLabel;
+          updateActivePing();
           currentRoutingMode = d.singbox.routing_mode || "proxy-list";
           currentActiveChain =
             Array.isArray(d.singbox.active_chain) &&
@@ -2959,42 +3088,404 @@
         }
       }
 
-      // Render the profile dropdown, honoring the current group filter.
+      // ===== PROFILE AUTOCOMPLETE COMBOBOX =====
+      // The "Профиль" picker is a searchable combobox: a text input drives a
+      // filterable dropdown; the chosen profile id is mirrored into the hidden
+      // <input id="sb-profile-select"> so all existing call sites that read
+      // `document.getElementById("sb-profile-select").value` keep working.
+      var profileComboVisible = []; // profiles passing the group filter (full candidate list)
+      var profileComboRendered = []; // profiles currently shown in the dropdown (after text filter)
+      var profileComboActiveIdx = -1; // highlighted item index within profileComboRendered
+
+      // ===== VPN PING / LATENCY =====
+      // The panel probes one VPN at a time (round-robin; the active VPN far more
+      // often) via the CGI `ping_check`, which ICMP-pings the profile's server and
+      // caches the result. We render the latency next to every VPN in the list and
+      // the active VPN's ping in the sing-box card, so the lowest-ping VPN is easy
+      // to spot. pingResults: id -> { rtt: <int ms; -1 = reachable w/o latency or
+      // not yet measured>, ok: <bool reachable>, ts: <epoch of last probe> }.
+      var pingResults = {};
+      var pingTimer = null; // scheduler handle
+      var pingBusy = false; // at most one probe in flight (keeps the router unloaded)
+      var PING_GAP_MS = 2500; // pause between consecutive probes
+      var PING_ACTIVE_SEC = 25; // re-probe the active VPN at least this often
+      var PING_COLORS = {
+        "ping-good": "#3fb950",
+        "ping-ok": "#d29922",
+        "ping-bad": "#f0883e",
+        "ping-alt": "#58a6ff",
+        "ping-dead": "#f85149",
+        "ping-pending": "",
+      };
+
+      // Map a cached probe result to a CSS quality class + short display text.
+      function pingInfo(id) {
+        var e = pingResults[id];
+        if (!e) return { cls: "ping-pending", text: "·", title: "ещё не проверялся" };
+        if (!e.ok) return { cls: "ping-dead", text: "✕", title: "недоступен" };
+        if (e.rtt == null || e.rtt < 0)
+          return { cls: "ping-alt", text: "✓", title: "доступен (TCP; ICMP закрыт)" };
+        var r = e.rtt;
+        var cls = r <= 80 ? "ping-good" : r <= 180 ? "ping-ok" : "ping-bad";
+        return { cls: cls, text: r + " ms", title: "пинг " + r + " ms" };
+      }
+      function pingBadgeHtml(id) {
+        var info = pingInfo(id);
+        return (
+          '<span class="pdi-ping ' + info.cls + '" data-ping-id="' +
+          escapeHtml(id) + '" title="' + escapeHtml(info.title) + '">' +
+          escapeHtml(info.text) + "</span>"
+        );
+      }
+      // Refresh rendered badge(s) for one id in place (no full dropdown re-render).
+      function updatePingBadge(id) {
+        var dd = document.getElementById("sb-profile-dropdown");
+        if (!dd) return;
+        var spans = dd.querySelectorAll("[data-ping-id]");
+        for (var i = 0; i < spans.length; i++) {
+          if (spans[i].getAttribute("data-ping-id") !== id) continue;
+          var info = pingInfo(id);
+          spans[i].className = "pdi-ping " + info.cls;
+          spans[i].textContent = info.text;
+          spans[i].title = info.title;
+        }
+      }
+      function updatePingBadgesAll() {
+        var dd = document.getElementById("sb-profile-dropdown");
+        if (!dd) return;
+        var spans = dd.querySelectorAll("[data-ping-id]");
+        for (var i = 0; i < spans.length; i++) {
+          var id = spans[i].getAttribute("data-ping-id");
+          var info = pingInfo(id);
+          spans[i].className = "pdi-ping " + info.cls;
+          spans[i].textContent = info.text;
+          spans[i].title = info.title;
+        }
+      }
+      // Active VPN ping in the sing-box status card (inline color avoids fighting
+      // the .value rule's specificity).
+      function updateActivePing() {
+        var el = document.getElementById("sb-ping");
+        if (!el) return;
+        var id = currentActiveProfileId;
+        if (!id) { el.textContent = "—"; el.style.color = ""; el.title = ""; return; }
+        var info = pingInfo(id);
+        el.textContent = info.text === "·" ? "проверка…" : info.text;
+        el.style.color = PING_COLORS[info.cls] || "";
+        el.title = info.title;
+      }
+
+      // Seed the cache from the server (instant; survives reloads / shared across devices).
+      function seedPingStatus() {
+        return api("ping_status")
+          .then(function (d) {
+            if (d && d.results) {
+              Object.keys(d.results).forEach(function (id) {
+                var r = d.results[id];
+                pingResults[id] = { rtt: r.rtt, ok: !!r.ok, ts: r.ts || 0 };
+              });
+            }
+            updateActivePing();
+            updatePingBadgesAll();
+          })
+          .catch(function () {});
+      }
+      // Pick the next profile to probe: the active VPN whenever it's stale (so it's
+      // checked far more often), otherwise the least-recently-probed profile.
+      function pickNextPingTarget() {
+        var nowSec = Math.floor(Date.now() / 1000);
+        var activeId = currentActiveProfileId;
+        if (activeId) {
+          var ae = pingResults[activeId];
+          if (!ae || nowSec - (ae.ts || 0) >= PING_ACTIVE_SEC) return activeId;
+        }
+        var best = null, bestTs = Infinity;
+        for (var i = 0; i < currentProfiles.length; i++) {
+          var id = currentProfiles[i].id;
+          var e = pingResults[id];
+          var ts = e ? e.ts || 0 : 0; // never-probed → 0 → oldest
+          if (ts < bestTs) { bestTs = ts; best = id; }
+        }
+        return best;
+      }
+      function pingProbeOnce() {
+        if (pingBusy) return Promise.resolve();
+        var id = pickNextPingTarget();
+        if (!id) return Promise.resolve();
+        pingBusy = true;
+        return api("ping_check&id=" + encodeURIComponent(id))
+          .then(function (r) {
+            if (r && r.id) {
+              pingResults[r.id] = {
+                rtt: r.rtt,
+                ok: !!r.ok,
+                ts: r.ts || Math.floor(Date.now() / 1000),
+              };
+              updatePingBadge(r.id);
+              if (r.id === currentActiveProfileId) updateActivePing();
+            }
+          })
+          .catch(function () {})
+          .then(function () { pingBusy = false; });
+      }
+      function startPingScheduler() {
+        stopPingScheduler();
+        seedPingStatus().then(function () {
+          (function loop() {
+            pingTimer = setTimeout(function () {
+              pingProbeOnce().then(loop);
+            }, PING_GAP_MS);
+          })();
+        });
+      }
+      function stopPingScheduler() {
+        if (pingTimer) { clearTimeout(pingTimer); pingTimer = null; }
+      }
+
+      // Routing-mode suffix shared by item + collapsed label.
+      function profileModeSuffix(p) {
+        if (p.routing_mode === "all-except") return " ⚡bypass";
+        if (p.routing_mode === "proxy-list") return " 📋whitelist";
+        return "";
+      }
+      // Label inside the dropdown (group shown as a header instead, so no prefix).
+      function profileItemLabel(p) {
+        return p.name + " (" + p.type + ")" + profileModeSuffix(p);
+      }
+      // Collapsed label shown in the input once a profile is chosen (group prefixed).
+      function profileFullLabel(p) {
+        var prefix = (p.group || "").trim() ? "[" + p.group + "] " : "";
+        return prefix + profileItemLabel(p);
+      }
+      // Haystack for matching: group + name + type, lowercased.
+      function profileSearchText(p) {
+        return ((p.group || "") + " " + (p.name || "") + " " + (p.type || "")).toLowerCase();
+      }
+      // Escape text, then wrap query occurrences in <mark> (both in escaped space).
+      function highlightMatch(text, query) {
+        var esc = escapeHtml(text);
+        var q = (query || "").trim();
+        if (!q) return esc;
+        var re = escapeHtml(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        try {
+          return esc.replace(new RegExp("(" + re + ")", "gi"), "<mark>$1</mark>");
+        } catch (e) {
+          return esc;
+        }
+      }
+
+      // Set the chosen profile: update hidden value + collapsed input text.
+      function setSelectedProfile(id) {
+        var hidden = document.getElementById("sb-profile-select");
+        var search = document.getElementById("sb-profile-search");
+        if (hidden) hidden.value = id || "";
+        var p = null;
+        for (var i = 0; i < currentProfiles.length; i++) {
+          if (currentProfiles[i].id === id) { p = currentProfiles[i]; break; }
+        }
+        if (search) search.value = p ? profileFullLabel(p) : "";
+      }
+
+      function chooseProfile(id) {
+        setSelectedProfile(id);
+        closeProfileDropdown(false);
+        var search = document.getElementById("sb-profile-search");
+        if (search) search.blur();
+      }
+
+      function openProfileDropdown() {
+        var dd = document.getElementById("sb-profile-dropdown");
+        var search = document.getElementById("sb-profile-search");
+        if (dd) dd.classList.add("open");
+        if (search) search.setAttribute("aria-expanded", "true");
+      }
+      // restore=true resets the input text to the currently-selected profile,
+      // discarding any half-typed query the user didn't commit to.
+      function closeProfileDropdown(restore) {
+        var dd = document.getElementById("sb-profile-dropdown");
+        var search = document.getElementById("sb-profile-search");
+        if (dd) dd.classList.remove("open");
+        if (search) search.setAttribute("aria-expanded", "false");
+        if (restore) {
+          var hidden = document.getElementById("sb-profile-select");
+          setSelectedProfile(hidden ? hidden.value : "");
+        }
+      }
+      function toggleProfileDropdown(e) {
+        if (e) { e.preventDefault(); e.stopPropagation(); }
+        var dd = document.getElementById("sb-profile-dropdown");
+        var search = document.getElementById("sb-profile-search");
+        if (dd && dd.classList.contains("open")) {
+          closeProfileDropdown(true);
+        } else {
+          if (search) search.focus();
+          renderProfileDropdown("");
+          openProfileDropdown();
+          if (search) search.select();
+        }
+      }
+
+      function setActiveItem(idx) {
+        profileComboActiveIdx = idx;
+        paintActiveItem();
+      }
+      function paintActiveItem() {
+        var dd = document.getElementById("sb-profile-dropdown");
+        if (!dd) return;
+        var items = dd.querySelectorAll(".profile-dropdown-item");
+        for (var i = 0; i < items.length; i++) {
+          if (i === profileComboActiveIdx) {
+            items[i].classList.add("active");
+            items[i].scrollIntoView({ block: "nearest" });
+          } else {
+            items[i].classList.remove("active");
+          }
+        }
+      }
+
+      // Stable sort so each subscription/group is contiguous (alphabetical by
+      // group name, ungrouped last), preserving the original within-group order.
+      // Used for the default (no-query) view so group headers appear once each.
+      function sortProfilesByGroup(list) {
+        return list
+          .map(function (p, i) { return { p: p, i: i }; })
+          .sort(function (a, b) {
+            var ga = (a.p.group || "").trim();
+            var gb = (b.p.group || "").trim();
+            if (ga !== gb) {
+              if (!ga) return 1; // ungrouped last
+              if (!gb) return -1;
+              return ga.localeCompare(gb);
+            }
+            return a.i - b.i; // stable within a group
+          })
+          .map(function (x) { return x.p; });
+      }
+
+      // Build dropdown contents filtered by `query`, grouped under group headers,
+      // with the query highlighted. No query → group-sorted (subscriptions
+      // contiguous); with a query → original order (current per-match behavior).
+      function renderProfileDropdown(query) {
+        var dd = document.getElementById("sb-profile-dropdown");
+        if (!dd) return;
+        dd.innerHTML = "";
+        profileComboRendered = [];
+        var q = (query || "").trim().toLowerCase();
+        var ordered = q ? profileComboVisible : sortProfilesByGroup(profileComboVisible);
+        var matches = ordered.filter(function (p) {
+          return !q || profileSearchText(p).indexOf(q) >= 0;
+        });
+        if (!matches.length) {
+          var empty = document.createElement("div");
+          empty.className = "profile-dropdown-empty";
+          empty.textContent = profileComboVisible.length
+            ? "Ничего не найдено"
+            : "Нет профилей в этой группе";
+          dd.appendChild(empty);
+          profileComboActiveIdx = -1;
+          return;
+        }
+        var selId = document.getElementById("sb-profile-select").value;
+        var lastGroup = null;
+        var selIdx = -1;
+        matches.forEach(function (p) {
+          var g = (p.group || "").trim();
+          if (g !== lastGroup) {
+            lastGroup = g;
+            var head = document.createElement("div");
+            head.className = "profile-dropdown-group";
+            head.textContent = g || "Без группы";
+            dd.appendChild(head);
+          }
+          var idx = profileComboRendered.length;
+          var item = document.createElement("div");
+          item.className = "profile-dropdown-item" + (p.id === selId ? " selected" : "");
+          item.setAttribute("role", "option");
+          item.innerHTML =
+            '<span class="pdi-label">' + highlightMatch(profileItemLabel(p), query) + "</span>" +
+            pingBadgeHtml(p.id);
+          // preventDefault on mousedown keeps focus on the input (no blur flicker).
+          item.addEventListener("mousedown", function (e) { e.preventDefault(); });
+          item.addEventListener("click", (function (pid) {
+            return function () { chooseProfile(pid); };
+          })(p.id));
+          item.addEventListener("mouseenter", (function (i) {
+            return function () { setActiveItem(i); };
+          })(idx));
+          dd.appendChild(item);
+          if (p.id === selId) selIdx = idx;
+          profileComboRendered.push(p);
+        });
+        profileComboActiveIdx = selIdx >= 0 ? selIdx : 0;
+        paintActiveItem();
+      }
+
+      // Entry point (called on data load + group-filter change): recompute the
+      // visible set, keep/repair the selection, and refresh the dropdown.
       function renderProfileSelect() {
-        var sel = document.getElementById("sb-profile-select");
-        if (!sel) return;
+        var hidden = document.getElementById("sb-profile-select");
+        if (!hidden) return;
         var filter = document.getElementById("sb-group-filter");
         var groupFilter = filter ? filter.value : "";
-        sel.innerHTML = "";
-        var visible = currentProfiles.filter(function (p) {
+        profileComboVisible = currentProfiles.filter(function (p) {
           if (!groupFilter) return true;
           var g = (p.group || "").trim();
           if (groupFilter === "__ungrouped__") return !g;
           return g === groupFilter;
         });
-        if (!visible.length) {
-          var opt = document.createElement("option");
-          opt.value = "";
-          opt.textContent = "(нет профилей в этой группе)";
-          opt.disabled = true;
-          sel.appendChild(opt);
-          return;
+        function visibleHas(id) {
+          return !!id && profileComboVisible.some(function (p) { return p.id === id; });
         }
-        visible.forEach(function (p) {
-          var opt = document.createElement("option");
-          opt.value = p.id;
-          var prefix = (p.group || "").trim() ? "[" + p.group + "] " : "";
-          var suffix = "";
-          if (p.routing_mode === "all-except") suffix = " ⚡bypass";
-          else if (p.routing_mode === "proxy-list") suffix = " 📋whitelist";
-          opt.textContent = prefix + p.name + " (" + p.type + ")" + suffix;
-          if (p.id === currentActiveProfileId) opt.selected = true;
-          sel.appendChild(opt);
-        });
+        var prev = hidden.value;
+        var chosen = "";
+        if (visibleHas(currentActiveProfileId)) chosen = currentActiveProfileId;
+        else if (visibleHas(prev)) chosen = prev;
+        else if (profileComboVisible.length) chosen = profileComboVisible[0].id;
+        setSelectedProfile(chosen);
+        renderProfileDropdown("");
+        closeProfileDropdown(false);
       }
 
-      function onProfileSelectChange() {
-        /* placeholder for future use */
+      function onProfileSearchFocus() {
+        var search = document.getElementById("sb-profile-search");
+        renderProfileDropdown("");
+        openProfileDropdown();
+        if (search) search.select();
+      }
+      function onProfileSearchInput() {
+        var search = document.getElementById("sb-profile-search");
+        renderProfileDropdown(search ? search.value : "");
+        openProfileDropdown();
+      }
+      // Close on tab-away / outside click (delayed so item clicks land first).
+      function onProfileSearchBlur() {
+        setTimeout(function () {
+          var box = document.getElementById("sb-profile-combobox");
+          if (box && box.contains(document.activeElement)) return;
+          var dd = document.getElementById("sb-profile-dropdown");
+          if (dd && dd.classList.contains("open")) closeProfileDropdown(true);
+        }, 120);
+      }
+      function onProfileSearchKeydown(e) {
+        var dd = document.getElementById("sb-profile-dropdown");
+        var open = dd && dd.classList.contains("open");
+        var n = profileComboRendered.length;
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          if (!open) { onProfileSearchFocus(); return; }
+          if (n) setActiveItem((profileComboActiveIdx + 1) % n);
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          if (!open) { onProfileSearchFocus(); return; }
+          if (n) setActiveItem((profileComboActiveIdx - 1 + n) % n);
+        } else if (e.key === "Enter") {
+          if (open && profileComboActiveIdx >= 0 && profileComboRendered[profileComboActiveIdx]) {
+            e.preventDefault();
+            chooseProfile(profileComboRendered[profileComboActiveIdx].id);
+          }
+        } else if (e.key === "Escape") {
+          if (open) { e.preventDefault(); closeProfileDropdown(true); }
+        }
       }
 
       // ===== SHARE-LINK EXPORT (outbound JSON → vless:// / trojan:// / ss:// / proxy URI) =====
@@ -6385,6 +6876,7 @@
         await loadDomains();
         await loadWhitelist();
         setupLogAutoRefresh();
+        startPingScheduler();
         if (window._statusInterval) clearInterval(window._statusInterval);
         window._statusInterval = setInterval(loadStatus, 10000);
       }
