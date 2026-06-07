@@ -867,6 +867,125 @@
       .tab-content.active { display: block; animation: tabIn 0.18s ease; }
       @keyframes tabIn { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
 
+      /* ===== VPN STATUS PAGE ===== */
+      .vpn-status-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+      .vpn-status-toolbar .vs-hint {
+        font-size: 12px;
+        color: var(--text-dim);
+        margin-left: auto;
+      }
+      .vpn-table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--bg-elev-solid);
+      }
+      table.vpn-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      .vpn-table th, .vpn-table td {
+        padding: 9px 12px;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      .vpn-table thead th {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-muted);
+        font-weight: 600;
+        position: sticky;
+        top: 0;
+        background: var(--surface-2);
+        z-index: 1;
+        cursor: default;
+        user-select: none;
+      }
+      .vpn-table thead th.vpn-th-sort { cursor: pointer; transition: color 0.15s; }
+      .vpn-table thead th.vpn-th-sort:hover { color: var(--text-dim); }
+      .vpn-table thead th.vpn-th-sort.active { color: var(--accent); }
+      .vpn-sort-ind { font-size: 10px; }
+      .vpn-table tbody tr:last-child td { border-bottom: none; }
+      .vpn-table tbody tr:hover { background: var(--surface); }
+      /* Active VPN — make it unmistakable: green tint + left accent bar +
+         green border + bold name + a pulsing status dot before the name. */
+      .vpn-table tr.vpn-active,
+      .vpn-table tr.vpn-active:hover { background: var(--green-soft); }
+      .vpn-table tr.vpn-active td { border-bottom-color: var(--green-border); }
+      .vpn-table tr.vpn-active td:first-child { box-shadow: inset 3px 0 0 0 var(--green); }
+      .vpn-table tr.vpn-active .vpn-name { font-weight: 700; color: var(--text); }
+      .vpn-active-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 0 0 var(--green-pulse);
+        animation: pulse 2s infinite;
+        margin-right: 9px;
+        vertical-align: middle;
+        flex-shrink: 0;
+      }
+      .vpn-name { color: var(--text); font-weight: 500; }
+      .vpn-name small {
+        color: var(--text-dim);
+        font-weight: 400;
+        margin-left: 6px;
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+      .vpn-server {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--text-dim);
+        max-width: 230px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .vpn-ping-cell { font-variant-numeric: tabular-nums; }
+      .vpn-checked { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+      .vpn-cell-actions { display: flex; gap: 6px; align-items: center; }
+      .vpn-refresh-btn {
+        width: 28px;
+        height: 28px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: var(--bg-elev-solid);
+        color: var(--text-dim);
+        cursor: pointer;
+        transition: all 0.15s;
+        flex-shrink: 0;
+      }
+      .vpn-refresh-btn:hover { background: var(--btn-hover); color: var(--text); border-color: var(--border-bright); }
+      .vpn-refresh-btn.spinning svg { animation: spin 0.7s linear infinite; }
+      .vpn-activate-btn { height: 28px; padding: 0 12px; font-size: 12px; }
+      .vpn-active-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11px;
+        font-weight: 600;
+        font-family: var(--mono);
+        color: var(--green);
+        background: var(--green-soft);
+        border: 1px solid var(--green-border);
+        padding: 4px 10px;
+        border-radius: 999px;
+        white-space: nowrap;
+      }
+      .vpn-status-summary { font-size: 12px; color: var(--text-dim); margin-top: 10px; }
+      @media (max-width: 768px) {
+        .vpn-table .col-server { display: none; }
+      }
+
       /* ===== EDITOR ===== */
       .editor-section {
         background: var(--surface);
@@ -1276,10 +1395,10 @@
         </div>
         <div class="header-right">
           <div class="header-info">
-            <span class="meter" id="sys-uptime">⏱ ...</span>
-            <span class="meter" id="sys-memory">💾 ...</span>
-            <span class="meter" id="sys-disk">💿 ...</span>
-            <span class="meter" id="sys-mptcp">🔒 MPTCP: ...</span>
+            <span class="meter" id="sys-uptime" title="Аптайм роутера — сколько он работает с момента загрузки">⏱ ...</span>
+            <span class="meter" id="sys-memory" title="Оперативная память: использовано / всего">💾 ...</span>
+            <span class="meter" id="sys-disk" title="Свободное место в /overlay (хранилище конфигов и пакетов)">💿 ...</span>
+            <span class="meter" id="sys-mptcp" title="Состояние MPTCP в ядре. Должно быть Off — при On ломаются входящие TCP-соединения (sing-box)">🔒 MPTCP: ...</span>
             <span class="meter" id="sys-keepalive" title="Keep-alive активного VPN">🛰 VPN: ...</span>
           </div>
           <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" title="Переключить тему" aria-label="Переключить тему">
@@ -1600,6 +1719,7 @@
 
         <!-- ===== TABS ===== -->
         <div class="tabs">
+          <button class="tab" data-tab="vpn-status">📡 Статусы VPN</button>
           <button class="tab active" data-tab="domains">📋 Домены sing-box</button>
           <button class="tab" data-tab="route-map">🧭 Маршрутизация</button>
           <button class="tab" data-tab="singbox-log">📜 Лог sing-box</button>
@@ -1611,6 +1731,41 @@
         </div>
 
         <!-- Tab: Domains -->
+        <div class="tab-content" id="tab-vpn-status">
+          <div class="editor-section">
+            <div class="editor-header">
+              <h3>📡 Статусы VPN</h3>
+            </div>
+            <div class="helper-text-block">
+              Все профили VPN, отсортированные по пингу (меньше — выше). Пинги
+              обновляются в фоне; можно обновить пинг конкретного сервера или все
+              сразу, а также сделать любой VPN активным прямо из таблицы.
+            </div>
+            <div class="vpn-status-toolbar">
+              <button class="btn primary" id="vpn-refresh-all-btn" onclick="refreshAllPings()">↻ Обновить все пинги</button>
+              <button class="btn" onclick="loadVpnStatus()">⟳ Обновить таблицу</button>
+              <span class="vs-hint">Сортировка — по возрастанию пинга. Зелёная строка — активный VPN.</span>
+            </div>
+            <div class="vpn-table-wrap">
+              <table class="vpn-table">
+                <thead>
+                  <tr>
+                    <th>VPN</th>
+                    <th class="col-server">Сервер</th>
+                    <th class="vpn-th-sort" data-sort="ping" onclick="setVpnSort('ping')" title="Сортировать по пингу">Пинг<span class="vpn-sort-ind" data-sortind="ping"></span></th>
+                    <th class="vpn-th-sort" data-sort="checked" onclick="setVpnSort('checked')" title="Сортировать по времени последней проверки">Проверен<span class="vpn-sort-ind" data-sortind="checked"></span></th>
+                    <th>Действия</th>
+                  </tr>
+                </thead>
+                <tbody id="vpn-status-tbody">
+                  <tr><td colspan="5" class="empty-state">Загрузка…</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="vpn-status-summary" id="vpn-status-summary"></div>
+          </div>
+        </div>
+
         <div class="tab-content active" id="tab-domains">
           <div class="editor-section">
             <div class="editor-header">
@@ -3287,6 +3442,7 @@
       // to spot. pingResults: id -> { rtt: <int ms; -1 = reachable w/o latency or
       // not yet measured>, ok: <bool reachable>, ts: <epoch of last probe> }.
       var pingResults = {};
+      var pingClockSkew = 0; // serverEpoch - clientEpoch (s); makes "проверен N назад" robust to clock drift
       var pingTimer = null; // scheduler handle
       var pingBusy = false; // at most one probe in flight (keeps the router unloaded)
       var PING_GAP_MS = 2500; // pause between consecutive probes
@@ -3361,14 +3517,22 @@
       function seedPingStatus() {
         return api("ping_status")
           .then(function (d) {
+            if (d && d.now)
+              pingClockSkew = d.now - Math.floor(Date.now() / 1000);
             if (d && d.results) {
               Object.keys(d.results).forEach(function (id) {
                 var r = d.results[id];
-                pingResults[id] = { rtt: r.rtt, ok: !!r.ok, ts: r.ts || 0 };
+                pingResults[id] = {
+                  rtt: r.rtt,
+                  ok: !!r.ok,
+                  ts: r.ts || 0,
+                  server: r.server || "",
+                };
               });
             }
             updateActivePing();
             updatePingBadgesAll();
+            renderVpnStatusTable();
           })
           .catch(function () {});
       }
@@ -3402,9 +3566,14 @@
                 rtt: r.rtt,
                 ok: !!r.ok,
                 ts: r.ts || Math.floor(Date.now() / 1000),
+                server:
+                  r.server ||
+                  (pingResults[r.id] && pingResults[r.id].server) ||
+                  "",
               };
               updatePingBadge(r.id);
               if (r.id === currentActiveProfileId) updateActivePing();
+              updateVpnStatusRow(r.id);
             }
           })
           .catch(function () {})
@@ -3422,6 +3591,312 @@
       }
       function stopPingScheduler() {
         if (pingTimer) { clearTimeout(pingTimer); pingTimer = null; }
+      }
+
+      // ===== "СТАТУСЫ VPN" PAGE =====
+      // A sortable table of every VPN profile with live ping + last-checked time,
+      // a per-row re-probe button, and one-click activation. Reuses the shared
+      // pingResults cache + background scheduler (no new CGI endpoints).
+      var vpnRefreshAllBusy = false;
+      var vpnAgoTimerStarted = false;
+      // User-controlled sort for the table. col: "ping" | "checked"; dir: 1 asc / -1 desc.
+      var vpnSort = { col: "ping", dir: 1 };
+
+      // Relative "last checked" using the server clock (pingClockSkew) so router
+      // vs. browser clock drift doesn't distort it.
+      function fmtPingAgo(ts) {
+        if (!ts) return "—";
+        var now = Math.floor(Date.now() / 1000) + pingClockSkew;
+        var d = now - ts;
+        if (d < 0) d = 0;
+        if (d < 5) return "только что";
+        if (d < 60) return d + " с назад";
+        if (d < 3600) return Math.floor(d / 60) + " мин назад";
+        if (d < 86400) return Math.floor(d / 3600) + " ч назад";
+        return Math.floor(d / 86400) + " дн назад";
+      }
+
+      // Sort key: lowest real ping first, then reachable-no-latency, then
+      // not-yet-probed, then unreachable. [rank, rtt] compared lexicographically.
+      function vpnPingSortKey(id) {
+        var e = pingResults[id];
+        if (e && e.ok && e.rtt != null && e.rtt >= 0) return [0, e.rtt];
+        if (e && e.ok) return [1, 0];
+        if (!e) return [2, 0];
+        return [3, 0];
+      }
+
+      // Comparator honouring the user's chosen column + direction. In both modes
+      // "no data yet" sinks to the bottom regardless of direction, so toggling
+      // asc/desc only reshuffles the rows that actually have a value.
+      function vpnCompare(a, b) {
+        var dir = vpnSort.dir;
+        if (vpnSort.col === "checked") {
+          var ta = (pingResults[a.id] && pingResults[a.id].ts) || 0;
+          var tb = (pingResults[b.id] && pingResults[b.id].ts) || 0;
+          if (!ta && !tb) return (a.name || "").localeCompare(b.name || "");
+          if (!ta) return 1;
+          if (!tb) return -1;
+          if (ta !== tb) return (ta - tb) * dir;
+          return (a.name || "").localeCompare(b.name || "");
+        }
+        var ka = vpnPingSortKey(a.id), kb = vpnPingSortKey(b.id);
+        if (ka[0] !== kb[0]) return ka[0] - kb[0]; // reachable grouped ahead of dead/unknown
+        if (ka[1] !== kb[1]) return (ka[1] - kb[1]) * dir;
+        return (a.name || "").localeCompare(b.name || "");
+      }
+
+      // Header click: same column → flip direction; new column → sensible default
+      // (lowest ping first / most-recently-checked first).
+      function setVpnSort(col) {
+        if (vpnSort.col === col) {
+          vpnSort.dir = -vpnSort.dir;
+        } else {
+          vpnSort.col = col;
+          vpnSort.dir = col === "checked" ? -1 : 1;
+        }
+        renderVpnStatusTable();
+      }
+
+      function updateVpnSortIndicators() {
+        var inds = document.querySelectorAll("[data-sortind]");
+        for (var i = 0; i < inds.length; i++) {
+          var c = inds[i].getAttribute("data-sortind");
+          inds[i].textContent =
+            vpnSort.col === c ? (vpnSort.dir === 1 ? " ▲" : " ▼") : "";
+        }
+        var ths = document.querySelectorAll("th.vpn-th-sort");
+        for (var j = 0; j < ths.length; j++) {
+          ths[j].classList.toggle(
+            "active",
+            ths[j].getAttribute("data-sort") === vpnSort.col,
+          );
+        }
+      }
+
+      function vpnRefreshIconSvg() {
+        return (
+          '<svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+          '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/>' +
+          '<path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>'
+        );
+      }
+
+      function vpnStatusRowHtml(p) {
+        var info = pingInfo(p.id);
+        var e = pingResults[p.id];
+        var isActive = p.id === currentActiveProfileId;
+        var server = (e && e.server) || "";
+        var group = (p.group || "").trim();
+        var sub = escapeHtml(p.type) + (group ? " · " + escapeHtml(group) : "");
+        var pingHtml =
+          '<span class="pdi-ping ' + info.cls + '" title="' +
+          escapeHtml(info.title) + '">' + escapeHtml(info.text) + "</span>";
+        var checked = e && e.ts ? fmtPingAgo(e.ts) : "—";
+        var actions =
+          '<button class="vpn-refresh-btn" title="Обновить пинг" onclick="refreshOnePing(\'' +
+          escapeHtml(p.id) + '\', this)">' + vpnRefreshIconSvg() + "</button>" +
+          (isActive
+            ? '<span class="vpn-active-badge">✓ Активен</span>'
+            : '<button class="btn primary vpn-activate-btn" onclick="activateProfileById(\'' +
+              escapeHtml(p.id) + '\')">Сделать активным</button>');
+        return (
+          '<tr class="' + (isActive ? "vpn-active" : "") + '">' +
+          '<td class="vpn-name">' +
+          (isActive
+            ? '<span class="vpn-active-dot" title="Активный VPN"></span>'
+            : "") +
+          escapeHtml(p.name) + " <small>" + sub + "</small></td>" +
+          '<td class="vpn-server col-server" title="' + escapeHtml(server) +
+          '">' + (server ? escapeHtml(server) : "—") + "</td>" +
+          '<td class="vpn-ping-cell" data-vpn-ping="' + escapeHtml(p.id) +
+          '">' + pingHtml + "</td>" +
+          '<td class="vpn-checked" data-vpn-checked="' + escapeHtml(p.id) +
+          '">' + checked + "</td>" +
+          '<td><div class="vpn-cell-actions">' + actions + "</div></td>" +
+          "</tr>"
+        );
+      }
+
+      function renderVpnStatusTable() {
+        var tbody = document.getElementById("vpn-status-tbody");
+        if (!tbody) return;
+        updateVpnSortIndicators();
+        var list = currentProfiles.slice();
+        list.sort(vpnCompare);
+        if (!list.length) {
+          tbody.innerHTML =
+            '<tr><td colspan="5" class="empty-state">Нет профилей VPN — добавьте профиль в карточке sing-box.</td></tr>';
+          updateVpnStatusSummary();
+          return;
+        }
+        tbody.innerHTML = list.map(vpnStatusRowHtml).join("");
+        updateVpnStatusSummary();
+      }
+
+      // Update one row's ping + checked cells in place (no reorder — avoids the
+      // table jumping under the cursor while the background scheduler probes).
+      function updateVpnStatusRow(id) {
+        var tbody = document.getElementById("vpn-status-tbody");
+        if (!tbody) return;
+        var pingTd = tbody.querySelector('td[data-vpn-ping="' + id + '"]');
+        if (pingTd) {
+          var info = pingInfo(id);
+          pingTd.innerHTML =
+            '<span class="pdi-ping ' + info.cls + '" title="' +
+            escapeHtml(info.title) + '">' + escapeHtml(info.text) + "</span>";
+        }
+        var chkTd = tbody.querySelector('td[data-vpn-checked="' + id + '"]');
+        if (chkTd) {
+          var e = pingResults[id];
+          chkTd.textContent = e && e.ts ? fmtPingAgo(e.ts) : "—";
+        }
+        updateVpnStatusSummary();
+      }
+
+      function updateVpnStatusSummary() {
+        var el = document.getElementById("vpn-status-summary");
+        if (!el) return;
+        var total = currentProfiles.length, up = 0, down = 0, pend = 0;
+        currentProfiles.forEach(function (p) {
+          var e = pingResults[p.id];
+          if (!e) pend++;
+          else if (e.ok) up++;
+          else down++;
+        });
+        el.textContent =
+          "Всего: " + total + " · доступно: " + up + " · недоступно: " +
+          down + " · не проверено: " + pend;
+      }
+
+      // Re-probe a single VPN now; spin its icon while in flight.
+      function refreshOnePing(id, btn) {
+        if (btn) btn.classList.add("spinning");
+        return api("ping_check&id=" + encodeURIComponent(id))
+          .then(function (r) {
+            if (r && r.id) {
+              pingResults[r.id] = {
+                rtt: r.rtt,
+                ok: !!r.ok,
+                ts: r.ts || Math.floor(Date.now() / 1000),
+                server:
+                  r.server ||
+                  (pingResults[r.id] && pingResults[r.id].server) ||
+                  "",
+              };
+              updatePingBadge(r.id);
+              if (r.id === currentActiveProfileId) updateActivePing();
+              updateVpnStatusRow(r.id);
+            }
+          })
+          .catch(function () {})
+          .then(function () { if (btn) btn.classList.remove("spinning"); });
+      }
+
+      // Probe every VPN sequentially (one in flight at a time — keeps the router
+      // unloaded), updating each row as it lands, then re-sort at the end.
+      function refreshAllPings() {
+        if (vpnRefreshAllBusy) return;
+        vpnRefreshAllBusy = true;
+        var btn = document.getElementById("vpn-refresh-all-btn");
+        var origText = btn ? btn.textContent : "";
+        if (btn) { btn.classList.add("loading"); btn.disabled = true; }
+        var ids = currentProfiles.map(function (p) { return p.id; });
+        var i = 0;
+        function done() {
+          if (btn) {
+            btn.classList.remove("loading");
+            btn.disabled = false;
+            btn.textContent = origText;
+          }
+          vpnRefreshAllBusy = false;
+          renderVpnStatusTable();
+        }
+        function next() {
+          if (i >= ids.length) return done();
+          if (btn) btn.textContent = "Обновление… " + (i + 1) + "/" + ids.length;
+          var id = ids[i++];
+          return api("ping_check&id=" + encodeURIComponent(id))
+            .then(function (r) {
+              if (r && r.id) {
+                pingResults[r.id] = {
+                  rtt: r.rtt,
+                  ok: !!r.ok,
+                  ts: r.ts || Math.floor(Date.now() / 1000),
+                  server:
+                    r.server ||
+                    (pingResults[r.id] && pingResults[r.id].server) ||
+                    "",
+                };
+                updatePingBadge(r.id);
+                if (r.id === currentActiveProfileId) updateActivePing();
+                updateVpnStatusRow(r.id);
+              }
+            })
+            .catch(function () {})
+            .then(next);
+        }
+        next();
+      }
+
+      // Activate a VPN straight from the table (same flow as the card picker).
+      async function activateProfileById(id) {
+        var p = getProfileMeta(id);
+        var label = p ? p.name : id;
+        if (
+          !confirm(
+            'Активировать профиль "' + label +
+              '"?\n\nКонфиг sing-box будет перегенерирован и сервис перезапущен.',
+          )
+        )
+          return;
+        try {
+          var d = await api(
+            "profile_activate&name=" + encodeURIComponent(id),
+            "POST",
+          );
+          if (d.ok) {
+            toast('Профиль "' + label + '" активирован', "success");
+            await loadStatus();
+            await loadProfiles();
+            renderVpnStatusTable();
+          } else {
+            toast("Ошибка: " + d.error, "error");
+          }
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast("Ошибка: " + e.message, "error");
+        }
+      }
+
+      // Keep the relative "проверен" column fresh even for rows the scheduler
+      // isn't actively probing (one cheap tick while the tab is visible).
+      function ensureVpnAgoTimer() {
+        if (vpnAgoTimerStarted) return;
+        vpnAgoTimerStarted = true;
+        setInterval(function () {
+          var tab = document.getElementById("tab-vpn-status");
+          if (!tab || !tab.classList.contains("active")) return;
+          var tbody = document.getElementById("vpn-status-tbody");
+          if (!tbody) return;
+          var cells = tbody.querySelectorAll("[data-vpn-checked]");
+          for (var i = 0; i < cells.length; i++) {
+            var id = cells[i].getAttribute("data-vpn-checked");
+            var e = pingResults[id];
+            cells[i].textContent = e && e.ts ? fmtPingAgo(e.ts) : "—";
+          }
+        }, 15000);
+      }
+
+      // Tab entry point: make sure profiles + ping cache are loaded, then render.
+      function loadVpnStatus() {
+        ensureVpnAgoTimer();
+        var prep = currentProfiles.length
+          ? Promise.resolve()
+          : loadProfiles();
+        Promise.resolve(prep)
+          .then(seedPingStatus)
+          .then(renderVpnStatusTable);
       }
 
       // Routing-mode suffix shared by item + collapsed label.
@@ -7005,6 +7480,7 @@
           document
             .getElementById("tab-" + tab.dataset.tab)
             .classList.add("active");
+          if (tab.dataset.tab === "vpn-status") loadVpnStatus();
           if (tab.dataset.tab === "domains") {
             loadDomains();
             loadWhitelist();
