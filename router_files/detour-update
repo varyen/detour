@@ -97,6 +97,13 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     # GH_OWNER/GH_REPO inherit the varyen/detour defaults set above.
 fi
 [ -f "$CONFIG" ] && . "$CONFIG"
+# A stale/placeholder update.conf may carry empty GH_OWNER=/GH_REPO= (an older
+# OpenWrt postinst seeded exactly that) and would clobber the public-repo defaults
+# set above, killing self-update with "GH_OWNER/GH_REPO missing". Re-assert the
+# defaults whenever they came back blank, so self-update never depends on
+# update.conf for the canonical public repo.
+[ -n "$GH_OWNER" ] || GH_OWNER=varyen
+[ -n "$GH_REPO" ] || GH_REPO=detour
 
 # The 6h self-update auto-check cron is OPT-IN. The manual panel "Проверить"
 # button and `detour-update check` always work regardless of this — only the
