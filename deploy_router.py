@@ -146,10 +146,11 @@ def step_uhttpd(ssh):
 
 
 def step_feed(ssh):
-    step("Configuring opkg feed (sing-box)")
+    step("Configuring opkg feed (sing-box + tpws-zapret)")
     # Add our feed line idempotently, then refresh the package index so
     # `opkg install sing-box` resolves to our 1.13.x (the distro feed's 1.8.10
-    # loses on version comparison). OpenWrt path is /etc/opkg/customfeeds.conf.
+    # loses on version comparison) and `tpws-zapret` resolves at all (it is in no
+    # other feed). OpenWrt path is /etc/opkg/customfeeds.conf.
     exec_cmd(
         ssh,
         "touch /etc/opkg/customfeeds.conf; "
@@ -161,40 +162,31 @@ def step_feed(ssh):
 
 
 def step_binaries(ssh, force=False):
-    step("Installing sing-box (opkg feed) + tpws-zapret (bundled)")
-    # tpws-zapret is in no opkg feed → push the bundled musl-static binary directly.
-    local = os.path.join(BACKUP_HOME, "usr", "bin", "tpws-zapret")
-    if os.path.exists(local):
-        if not force and remote_exists(ssh, "/usr/bin/tpws-zapret") \
-                and remote_md5(ssh, "/usr/bin/tpws-zapret") == local_md5(local):
-            print("  /usr/bin/tpws-zapret: unchanged")
-        else:
-            print(f"  uploading /usr/bin/tpws-zapret ({os.path.getsize(local)} bytes) ...")
-            got, sz = upload_large(ssh, local, "/usr/bin/tpws-zapret")
-            print(f"    -> {got}/{sz} bytes")
-            assert got == sz, "size mismatch for /usr/bin/tpws-zapret"
-    else:
-        print(f"  SKIP tpws: {local} (not in backup)")
+    step("Installing sing-box + tpws-zapret (opkg feed; direct-upload fallback)")
+    # Both binaries now come from our opkg feed (build_feed.py). --force-overwrite
+    # takes over any pre-existing UNOWNED binary from older direct deploys / a
+    # bundled panel; afterwards opkg owns it and `opkg upgrade <pkg>` is clean.
+    bins = (("sing-box", "/usr/bin/sing-box"), ("tpws-zapret", "/usr/bin/tpws-zapret"))
+    for pkg, _path in bins:
+        out, _, _ = exec_cmd(ssh, f"opkg install --force-overwrite {pkg} 2>&1 | tail -5", timeout=240)
+        print(f"  opkg install {pkg}:\n    " + "\n    ".join(l for l in out.splitlines() if l.strip()))
 
-    # sing-box comes from our opkg feed. --force-overwrite takes over any
-    # pre-existing UNOWNED /usr/bin/sing-box (older direct deploys); afterwards
-    # opkg owns it and `opkg upgrade sing-box` is clean.
-    out, _, _ = exec_cmd(ssh, "opkg install --force-overwrite sing-box 2>&1 | tail -5", timeout=240)
-    print("  opkg install sing-box:\n    " + "\n    ".join(l for l in out.splitlines() if l.strip()))
-
-    # Safety net: if the feed was unreachable and we still have the bundled
-    # binary locally, push it directly so the router isn't left without sing-box.
-    if not remote_exists(ssh, "/usr/bin/sing-box"):
-        sb_local = os.path.join(BACKUP_HOME, "usr", "bin", "sing-box")
-        if os.path.exists(sb_local):
-            print("  feed install failed — falling back to direct upload of bundled sing-box")
-            got, sz = upload_large(ssh, sb_local, "/usr/bin/sing-box")
+    # Safety net: if the feed was unreachable and we still have a bundled binary
+    # locally, push it directly so the router isn't left without it.
+    for name, path in bins:
+        if remote_exists(ssh, path):
+            continue
+        local = os.path.join(BACKUP_HOME, "usr", "bin", name)
+        if os.path.exists(local):
+            print(f"  feed install failed for {name} — falling back to direct upload")
+            got, sz = upload_large(ssh, local, path)
             print(f"    -> {got}/{sz} bytes")
         else:
-            print("  WARNING: sing-box not installed and no local fallback binary")
+            print(f"  WARNING: {name} not installed and no local fallback binary")
 
-    sbver, _, _ = exec_cmd(ssh, "opkg list-installed sing-box 2>/dev/null | awk '{print $3}' | head -1")
-    print(f"  sing-box: {(sbver or '').strip() or '(not opkg-owned)'}")
+    for pkg, _path in bins:
+        ver, _, _ = exec_cmd(ssh, f"opkg list-installed {pkg} 2>/dev/null | awk '{{print $3}}' | head -1")
+        print(f"  {pkg}: {(ver or '').strip() or '(not opkg-owned)'}")
 
 
 def step_initd(ssh):

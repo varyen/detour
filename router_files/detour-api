@@ -21,6 +21,7 @@ UPDATE_BIN="/usr/sbin/detour-update"
 VERSION_FILE="/etc/detour/version"
 UPDATE_STATE="/var/state/detour-update.json"
 BINS_STATE="/var/state/detour-bins.json"   # sing-box update state (written by detour-update bins-check)
+TPWS_STATE="/var/state/detour-tpws.json"   # tpws-zapret update state (written by detour-update tpws-check)
 PING_DB="/tmp/detour-ping.db"               # per-profile latency cache (TSV in tmpfs; cleared on reboot)
 
 AUTH_FILE="/etc/detour.auth"
@@ -65,6 +66,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     VERSION_FILE="$OPT/etc/detour/version"
     UPDATE_STATE="$OPT/var/state/detour-update.json"
     BINS_STATE="$OPT/var/state/detour-bins.json"
+    TPWS_STATE="$OPT/var/state/detour-tpws.json"
     AUTH_FILE="$OPT/etc/detour.auth"
     DETOUR_DIR="$OPT/etc/detour"
     # «Все через VPN» marker — the NDM netfilter.d hook re-asserts SINGBOX_ALLVPN
@@ -945,7 +947,7 @@ status)
     MPTCP=$(sysctl -n net.mptcp.enabled 2>/dev/null || echo "unknown")
     UPTIME=$(cat /proc/uptime | awk '{printf "%dd %dh %dm", $1/86400, ($1%86400)/3600, ($1%3600)/60}')
     MEM_FREE=$(free | awk '/Mem:/{printf "%dMB/%dMB", ($3)/1024, ($2)/1024}')
-    DISK_FREE=$(df /overlay 2>/dev/null | awk 'NR==2{print $4}')
+    DISK_FREE=$(df /overlay 2>/dev/null | awk 'NR==2{printf "%d", $4/1024}')
 
     SB_PROFILE=$(get_active_profile)
     SB_CHAIN=$(get_active_chain)
@@ -970,6 +972,12 @@ status)
     BINS_VERSION="$SB_BIN_VER"   # legacy field name kept for the panel UI
     SB_BIN_PRESENT=false; [ -x $SINGBOX_BIN ] && SB_BIN_PRESENT=true
     TPWS_BIN_PRESENT=false; [ -x $TPWS_BIN ] && TPWS_BIN_PRESENT=true
+    # tpws-zapret version: prefer the opkg-owned package (feed), fall back to the
+    # binary's own `--version` ("github version v72.12 (...)") for the bundled /
+    # transitional case where it's not yet an opkg package.
+    TPWS_BIN_VER=$(opkg list-installed 2>/dev/null | awk '$1=="tpws-zapret"{print $3; exit}')
+    [ -z "$TPWS_BIN_VER" ] && TPWS_BIN_VER=$("$TPWS_BIN" --version 2>/dev/null | awk 'NR==1{print $3}')
+    [ -z "$TPWS_BIN_VER" ] && TPWS_BIN_VER="?"
 
     cat <<EOF
 {
@@ -979,7 +987,8 @@ status)
     "bins_version": "$BINS_VERSION",
     "singbox_version": "$SB_BIN_VER",
     "singbox_present": $SB_BIN_PRESENT,
-    "tpws_present": $TPWS_BIN_PRESENT
+    "tpws_present": $TPWS_BIN_PRESENT,
+    "tpws_version": "$TPWS_BIN_VER"
   },
   "singbox": {
     "running": $SB_RUNNING,
@@ -1013,7 +1022,7 @@ status)
     "mptcp": "$MPTCP",
     "uptime": "$UPTIME",
     "memory": "$MEM_FREE",
-    "disk_free": "${DISK_FREE}KB"
+    "disk_free": "${DISK_FREE}MB"
   }
 }
 EOF
@@ -1307,6 +1316,40 @@ bins_update_apply)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
     OUT=$("$UPDATE_BIN" bins-apply 2>&1)
+    if [ $? -eq 0 ]; then
+        json_ok
+    else
+        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+    fi
+    ;;
+
+# ==================== tpws-zapret UPDATE (opkg feed) ====================
+# tpws-zapret is pulled from the same opkg feed via detour-update tpws-*; the
+# state file mirrors the sing-box {current,available} shape so the UI is uniform.
+tpws_update_status)
+    if [ -f "$TPWS_STATE" ]; then
+        cat "$TPWS_STATE"
+    else
+        echo '{"status":"unknown","message":"no tpws state yet"}'
+    fi
+    ;;
+
+tpws_update_check)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    if OUT=$("$UPDATE_BIN" tpws-check 2>&1); then
+        if [ -f "$TPWS_STATE" ]; then cat "$TPWS_STATE"
+        else printf '{"status":"error","message":"%s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"; fi
+    else
+        printf '{"status":"error","message":"проверка не удалась: %s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"
+    fi
+    ;;
+
+tpws_update_apply)
+    # opkg update + upgrade tpws-zapret from our feed (via the updater).
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    OUT=$("$UPDATE_BIN" tpws-apply 2>&1)
     if [ $? -eq 0 ]; then
         json_ok
     else
