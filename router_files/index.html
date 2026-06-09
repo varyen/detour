@@ -339,6 +339,74 @@
       }
       .btn-logout:hover { background: var(--btn-hover); color: var(--text); border-color: var(--border-bright); }
 
+      /* ===== HEADER SETTINGS (gear) DROPDOWN ===== */
+      .hdr-menu { position: relative; display: inline-flex; }
+      .hdr-menu-list {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        min-width: 220px;
+        background: var(--bg-elev-solid);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+        padding: 6px;
+        z-index: 60;
+        display: none;
+      }
+      .hdr-menu.open .hdr-menu-list { display: block; }
+      .hdr-menu-title {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-muted);
+        padding: 6px 10px 2px;
+      }
+      .hdr-menu-item {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        padding: 8px 10px;
+        border: 0;
+        background: transparent;
+        color: var(--text-dim);
+        font-size: 13px;
+        font-family: var(--sans);
+        text-align: left;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .hdr-menu-item:hover { background: var(--btn-hover); color: var(--text); }
+      .hdr-menu-item .i { flex-shrink: 0; }
+      .hdr-menu-sep { height: 1px; background: var(--border); margin: 5px 4px; }
+      /* Update CTA — only rendered when a fresh release is available. */
+      .btn-update-cta {
+        height: 32px;
+        padding: 0 12px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--on-accent);
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: filter 0.15s;
+        font-family: var(--sans);
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
+      }
+      .btn-update-cta:hover { filter: brightness(1.07); }
+      /* Version chip turns accent when an update is available. */
+      #panel-version.has-update {
+        color: var(--on-accent) !important;
+        background: var(--accent);
+        border-color: var(--accent) !important;
+      }
+
       /* ===== TOOLBAR (sub-header with admin actions) ===== */
       .toolbar {
         background: var(--bg-elev-solid);
@@ -1401,6 +1469,41 @@
             <span class="meter" id="sys-mptcp" title="Состояние MPTCP в ядре. Должно быть Off — при On ломаются входящие TCP-соединения (sing-box)">🔒 MPTCP: ...</span>
             <span class="meter" id="sys-keepalive" title="Keep-alive активного VPN">🛰 VPN: ...</span>
           </div>
+          <button class="btn-update-cta" id="hdr-update-btn" onclick="showUpdateModal()" title="Доступно обновление панели" style="display:none">
+            <svg class="i" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+            <span id="hdr-update-label">Обновить панель</span>
+          </button>
+          <div class="hdr-menu" id="hdr-settings-menu">
+            <button class="icon-btn" id="hdr-settings-btn" onclick="toggleHdrMenu(event)" title="Настройки" aria-label="Настройки" aria-haspopup="true" aria-expanded="false">
+              <svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+            <div class="hdr-menu-list" role="menu" aria-label="Настройки">
+              <div class="hdr-menu-title">Профили</div>
+              <button class="hdr-menu-item" role="menuitem" onclick="hdrMenuRun(openExportProfilesModal)" title="Экспорт всех профилей: JSON или отдельные ссылки (vless://, trojan://, ss://, socks5://, ...)">
+                <svg class="i" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Экспорт профилей
+              </button>
+              <button class="hdr-menu-item" role="menuitem" onclick="hdrMenuRun(function(){document.getElementById('profiles-import-file').click();})" title="Импорт пакета профилей из JSON">
+                <svg class="i" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                Импорт профилей
+              </button>
+              <div class="hdr-menu-sep"></div>
+              <div class="hdr-menu-title">Конфиг панели</div>
+              <button class="hdr-menu-item" role="menuitem" onclick="hdrMenuRun(exportPanelConfig)" title="Скачать конфиг панели (настройки + домены + подписка, без VPN-профилей)">
+                <svg class="i" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/></svg>
+                Экспорт конфига
+              </button>
+              <button class="hdr-menu-item" role="menuitem" onclick="hdrMenuRun(function(){document.getElementById('panel-config-import-file').click();})" title="Импорт конфига панели">
+                <svg class="i" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="18"/><polyline points="9 15 12 12 15 15"/></svg>
+                Импорт конфига
+              </button>
+            </div>
+          </div>
+          <input type="file" id="profiles-import-file" accept=".json,application/json" style="display: none" onchange="importProfilesFromFile(this)" />
+          <input type="file" id="panel-config-import-file" accept=".json,application/json" style="display: none" onchange="importPanelConfig(this)" />
+          <a class="icon-btn" href="https://github.com/varyen/detour" target="_blank" rel="noopener noreferrer" title="GitHub проекта" aria-label="GitHub проекта">
+            <svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.78 0 12.29c0 5.21 3.44 9.63 8.21 11.19.6.11.82-.25.82-.56 0-.28-.01-1.02-.02-2-3.34.71-4.04-1.58-4.04-1.58-.55-1.36-1.33-1.73-1.33-1.73-1.09-.73.08-.71.08-.71 1.2.08 1.84 1.21 1.84 1.21 1.07 1.8 2.81 1.28 3.5.98.11-.76.42-1.28.76-1.58-2.67-.3-5.47-1.31-5.47-5.81 0-1.28.47-2.33 1.23-3.15-.12-.3-.53-1.51.12-3.15 0 0 1-.31 3.3 1.2a11.6 11.6 0 0 1 6 0c2.3-1.51 3.3-1.2 3.3-1.2.65 1.64.24 2.85.12 3.15.77.82 1.23 1.87 1.23 3.15 0 4.51-2.81 5.5-5.49 5.79.43.36.81 1.08.81 2.18 0 1.58-.01 2.85-.01 3.24 0 .31.21.68.83.56C20.56 21.91 24 17.5 24 12.29 24 5.78 18.63.5 12 .5Z"/></svg>
+          </a>
           <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" title="Переключить тему" aria-label="Переключить тему">
             <svg class="i theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
             <svg class="i theme-icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
@@ -1429,31 +1532,6 @@
         <button class="tb-btn" onclick="showSubscriptionsModal()" title="Управление подписками (per-group auto-refresh)">
           <svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h4l2-3h6a2 2 0 0 1 2 2z"/><path d="M12 12v4"/><path d="m10 14 2 2 2-2"/></svg>
           Подписки
-        </button>
-        <span class="tb-divider"></span>
-        <button class="tb-btn" onclick="openExportProfilesModal()" title="Экспорт всех профилей: JSON или отдельные ссылки (vless://, trojan://, ss://, socks5://, ...)">
-          <svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Экспорт профилей
-        </button>
-        <button class="tb-btn" onclick="document.getElementById('profiles-import-file').click()" title="Импорт пакета профилей из JSON">
-          <svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          Импорт профилей
-        </button>
-        <input type="file" id="profiles-import-file" accept=".json,application/json" style="display: none" onchange="importProfilesFromFile(this)" />
-        <span class="tb-divider"></span>
-        <button class="tb-btn" onclick="exportPanelConfig()" title="Скачать конфиг панели (настройки + домены + подписка, без VPN-профилей)">
-          <svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          Экспорт конфига
-        </button>
-        <button class="tb-btn" onclick="document.getElementById('panel-config-import-file').click()" title="Импорт конфига панели">
-          <svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          Импорт конфига
-        </button>
-        <input type="file" id="panel-config-import-file" accept=".json,application/json" style="display: none" onchange="importPanelConfig(this)" />
-        <span class="tb-divider"></span>
-        <button class="tb-btn accent" onclick="showUpdateModal()" title="Обновить панель (с GitHub или из .ipk-файла)">
-          <svg class="i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
-          Обновить панель
         </button>
       </div>
 
@@ -1608,7 +1686,7 @@
               <div class="card-title">
                 <span class="status-dot stopped" id="sb-dot"></span>
                 sing-box
-                <span class="tag" id="sb-tag">Trojan proxy</span>
+                <span class="tag" id="sb-tag" style="display:none"></span>
               </div>
               <div class="refresh-indicator">
                 <span id="sb-status-text">--</span>
@@ -2529,6 +2607,31 @@
         return outbound.type;
       }
 
+      // Human-readable label for a profile/outbound type string, shown in the
+      // sing-box card badge so it reflects the ACTIVE protocol (vless → "VLESS")
+      // instead of the old hard-coded "Trojan proxy".
+      function protocolLabel(type) {
+        if (!type) return "";
+        var t = String(type).toLowerCase();
+        var map = {
+          vless: "VLESS",
+          trojan: "Trojan",
+          vmess: "VMess",
+          shadowsocks: "Shadowsocks",
+          ss: "Shadowsocks",
+          wireguard: "WireGuard",
+          hysteria: "Hysteria",
+          hysteria2: "Hysteria2",
+          tuic: "TUIC",
+          anytls: "AnyTLS",
+          "http-proxy": "HTTP-прокси",
+          "https-proxy": "HTTPS-прокси",
+        };
+        if (map[t]) return map[t];
+        if (t.indexOf("socks") === 0) return "SOCKS" + (t.slice(5) || "5");
+        return type.toUpperCase();
+      }
+
       // Converts a v2ray-core outbound (with `protocol`/`settings`/`streamSettings`)
       // to a sing-box outbound (with `type`/`server`/`server_port`/...).
       // Returns null if outbound is unsupported (direct/freedom/blackhole/dns/balancer/chain)
@@ -3157,6 +3260,15 @@
           document.getElementById("sb-enabled").textContent = d.singbox.enabled
             ? "Да"
             : "Нет";
+
+          // Protocol badge — reflect the ACTIVE outbound's type (egress profile),
+          // not a hard-coded label. Hidden when there is no typed active profile.
+          var sbTag = document.getElementById("sb-tag");
+          if (sbTag) {
+            var proto = protocolLabel(d.singbox.active_type);
+            sbTag.textContent = proto;
+            sbTag.style.display = proto ? "" : "none";
+          }
 
           // Profile & routing info
           document.getElementById("sb-profile-name").textContent =
@@ -7230,6 +7342,62 @@
       }
 
       // ===== PANEL SELF-UPDATE =====
+      // ===== HEADER SETTINGS (gear) MENU =====
+      function toggleHdrMenu(ev) {
+        if (ev) ev.stopPropagation();
+        var m = document.getElementById("hdr-settings-menu");
+        if (!m) return;
+        var open = m.classList.toggle("open");
+        var btn = document.getElementById("hdr-settings-btn");
+        if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+      }
+      function closeHdrMenu() {
+        var m = document.getElementById("hdr-settings-menu");
+        if (m) m.classList.remove("open");
+        var btn = document.getElementById("hdr-settings-btn");
+        if (btn) btn.setAttribute("aria-expanded", "false");
+      }
+      // Close the menu, then run the chosen action (so the file-picker / modal
+      // doesn't open behind a still-visible menu).
+      function hdrMenuRun(fn) {
+        closeHdrMenu();
+        try { fn(); } catch (e) { console.error(e); }
+      }
+      document.addEventListener("click", function (e) {
+        var m = document.getElementById("hdr-settings-menu");
+        if (m && m.classList.contains("open") && !m.contains(e.target)) closeHdrMenu();
+      });
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") closeHdrMenu();
+      });
+
+      // Show the header «Обновить панель» CTA + accent the version chip ONLY when a
+      // fresh release is available. Reads the CACHED update state (no GitHub call):
+      // the 6h auto-check cron or a manual «Проверить» refreshes it. status values:
+      // "update_available" | "up_to_date" | "error" | "unknown".
+      async function refreshUpdateIndicator() {
+        var btn = document.getElementById("hdr-update-btn");
+        var chip = document.getElementById("panel-version");
+        try {
+          var d = await api("panel_update_status");
+          var avail = !!(d && d.status === "update_available");
+          if (btn) {
+            btn.style.display = avail ? "" : "none";
+            var lbl = document.getElementById("hdr-update-label");
+            if (lbl)
+              lbl.textContent =
+                avail && d.available_version
+                  ? "Обновить до v" + String(d.available_version).replace(/^v/, "")
+                  : "Обновить панель";
+          }
+          if (chip) chip.classList.toggle("has-update", avail);
+        } catch (e) {
+          // offline / not authed — keep the CTA hidden, never block the UI.
+          if (btn) btn.style.display = "none";
+          if (chip) chip.classList.remove("has-update");
+        }
+      }
+
       function showUpdateModal() {
         document.getElementById("update-modal").style.display = "flex";
         var v = (
@@ -7286,6 +7454,8 @@
           el.textContent =
             (d.status ? d.status + ": " : "") +
             (d.message || JSON.stringify(d));
+          // A manual check rewrites the cached state → sync the header CTA/chip.
+          refreshUpdateIndicator();
         } catch (e) {
           el.textContent = "Ошибка: " + e.message;
         }
@@ -7549,6 +7719,7 @@
         await loadWhitelist();
         setupLogAutoRefresh();
         startPingScheduler();
+        refreshUpdateIndicator();
         if (window._statusInterval) clearInterval(window._statusInterval);
         window._statusInterval = setInterval(loadStatus, 10000);
       }

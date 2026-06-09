@@ -325,12 +325,23 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /www/cgi-bin/detour-api 2>/dev/null
 
-# 3) Enable + restart services. Errors here are non-fatal: a fresh OpenWrt
-# might lack uci defaults for sing-box; the operator can manually start.
-/etc/init.d/sing-box enable >/dev/null 2>&1
-/etc/init.d/zapret-tpws enable >/dev/null 2>&1
-/etc/init.d/sing-box restart >/dev/null 2>&1
-/etc/init.d/zapret-tpws restart >/dev/null 2>&1
+# 3) Enable + (re)start services, but HONOUR the operator's «Автозапуск» choice
+# so a panel REINSTALL never resurrects a service the user turned off. The panel
+# writes /etc/detour/autostart.{{singbox,zapret}} (1|0) on toggle; /etc/detour is
+# preserved across upgrades, so the flag survives. Absent flag = first install =
+# default ON (legacy behaviour). Errors are non-fatal: a fresh OpenWrt might lack
+# uci defaults for sing-box; the operator can manually start.
+detour_apply_autostart() {{   # $1 init.d path, $2 autostart flag file
+    if [ "$(cat "$2" 2>/dev/null)" = "0" ]; then
+        "$1" disable >/dev/null 2>&1
+        "$1" stop >/dev/null 2>&1
+    else
+        "$1" enable >/dev/null 2>&1
+        "$1" restart >/dev/null 2>&1
+    fi
+}}
+detour_apply_autostart /etc/init.d/sing-box /etc/detour/autostart.singbox
+detour_apply_autostart /etc/init.d/zapret-tpws /etc/detour/autostart.zapret
 # detour-hosts: boot hook that re-applies the dnsmasq addn-hosts snippet (tmpfs
 # is wiped on reboot). `start` is a no-op when the feature is disabled and only
 # touches dnsmasq when its config (preserved in /etc/detour) was left enabled.

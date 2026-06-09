@@ -8,7 +8,8 @@ export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"  # Entware tools 
 . /opt/etc/detour/detour.conf 2>/dev/null
 
 PIDF="/opt/var/run/detour-singbox.pid"
-MARK="/opt/etc/detour/singbox.enabled"
+MARK="/opt/etc/detour/singbox.enabled"        # running indicator (gates the fw hook)
+AUTOSTART="/opt/etc/detour/autostart.singbox" # «Автозапуск» flag (1|0); absent = on
 HOOK="/opt/etc/ndm/netfilter.d/50-detour.sh"
 DNS_SVC="/opt/etc/init.d/S50detour-dns"
 NAME="sing-box"
@@ -58,11 +59,23 @@ status() {
     fi
 }
 
+# «Автозапуск» (autostart): rc.unslung boot-starts every executable S* with `start`,
+# so the boot path honours the panel flag; manual start (panel ▶) uses `force-start`
+# to start regardless. enable/disable only flip the durable flag — they no longer
+# start/stop (parity with the OpenWrt panel, where «Автозапуск» is independent of the
+# running state). The flag lives under /opt/etc/detour, so a service the operator
+# turned off stays off across reinstalls and reboots.
+set_autostart() { mkdir -p "$(dirname "$AUTOSTART")" 2>/dev/null; echo "$1" > "$AUTOSTART"; }
 case "$1" in
-    start|enable) start ;;
-    stop|disable) stop ;;
+    start)
+        [ "$(cat "$AUTOSTART" 2>/dev/null)" = "0" ] && { echo "$NAME: autostart disabled"; exit 0; }
+        start ;;
+    force-start) start ;;
+    enable)  set_autostart 1 ;;
+    disable) set_autostart 0 ;;
+    stop)    stop ;;
     restart) stop; sleep 1; start ;;
-    reload) reload ;;
-    status) status ;;
-    *) echo "usage: $0 {start|stop|restart|reload|enable|disable|status}"; exit 1 ;;
+    reload)  reload ;;
+    status)  status ;;
+    *) echo "usage: $0 {start|force-start|stop|restart|reload|enable|disable|status}"; exit 1 ;;
 esac
