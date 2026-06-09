@@ -62,14 +62,15 @@ PACKAGE_NAME = "detour"
 PACKAGE_ARCH = os.environ.get("DETOUR_ARCH", "all")
 
 # Runtime dependencies declared in `control`. opkg refuses to install if any
-# is missing. `dnsmasq-full` is needed for ipset= entries. `sing-box` is pulled
-# from our self-hosted feed (build_feed.py → varyen/detour@feed): the GL.iNet
-# distro feed is stuck on sing-box 1.8.10 (pre-1.11 schema break), so the feed
-# MUST be configured before installing this package (deploy_router.py /
+# is missing. `dnsmasq-full` is needed for ipset= entries. `sing-box` AND
+# `tpws-zapret` are both pulled from our self-hosted feed (build_feed.py →
+# varyen/detour@feed): the GL.iNet distro feed is stuck on sing-box 1.8.10
+# (pre-1.11 schema break) and zapret's tpws is in no opkg feed at all, so the
+# feed MUST be configured before installing this package (deploy_router.py /
 # detour-update do that). The init.d tolerates a missing binary, so a router
-# without the feed still installs and routes directly — it just can't proxy
-# until sing-box arrives.
-DEPENDS = "lua, lua-cjson, curl, openssl-util, dnsmasq-full, kmod-ipt-ipset, ipset, sing-box"
+# without the feed still installs and routes directly — it just can't proxy /
+# DPI-bypass until the binaries arrive.
+DEPENDS = "lua, lua-cjson, curl, openssl-util, dnsmasq-full, kmod-ipt-ipset, ipset, sing-box, tpws-zapret"
 
 MAINTAINER = "Maintainer <you@example.com>"
 DESCRIPTION = "Sing-box + zapret-tpws management panel for OpenWrt routers."
@@ -113,12 +114,12 @@ def _is_protected(path):
 # (source_parts, archive_relative_path, mode) — archive_relative_path is what
 # ends up at the corresponding location on the router after `opkg install`.
 #
-# The release ships ONE OpenWrt package: `detour` (PANEL_FILES). sing-box is no
-# longer bundled — the panel `Depends: sing-box`, pulled from our self-hosted
-# opkg feed (build_feed.py), so panel updates stay tiny AND a panel upgrade never
-# touches the opkg-owned /usr/bin/sing-box. tpws-zapret IS bundled here (~110 KB,
-# musl-static) because zapret is in no opkg feed on any platform; keeping it in
-# the panel means DPI bypass works even if the feed is unreachable.
+# The release ships ONE OpenWrt package: `detour` (PANEL_FILES). NEITHER binary
+# is bundled — the panel `Depends: sing-box, tpws-zapret`, both pulled from our
+# self-hosted opkg feed (build_feed.py). Panel updates stay tiny AND a panel
+# upgrade never touches the opkg-owned /usr/bin/{sing-box,tpws-zapret}. The
+# Keenetic/Entware package (keenetic/build-ipk.py) still bundles tpws because
+# there is no feed there.
 PANEL_FILES = [
     (("router_files", "sing-box.initd"), "etc/init.d/sing-box", 0o755),
     (("router_files", "zapret-tpws.initd"), "etc/init.d/zapret-tpws", 0o755),
@@ -137,8 +138,8 @@ PANEL_FILES = [
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
     (("router_files", "index.html"), "www/detour/index.html", 0o644),
-    # tpws-zapret (DPI bypass) is bundled — it's in no opkg feed. ~110 KB.
-    (("router-backup", "usr", "bin", "tpws-zapret"), "usr/bin/tpws-zapret", 0o755),
+    # NOTE: tpws-zapret is NOT bundled here anymore — it comes from the opkg feed
+    # (Depends: tpws-zapret), same as sing-box. The Keenetic package still bundles it.
     # Pin our public key in two places: opkg's standard keyring (so future opkg
     # ecosystem tooling sees it) AND a stable path the updater knows about.
     (("keys", "release.usign.pub"), "etc/detour/release.usign.pub", 0o644),
@@ -739,27 +740,30 @@ def main():
         f.write(notes or "(no notes)")
         f.write("\n\n## Packages\n\n")
         f.write(f"- `{os.path.basename(panel_ipk)}` — panel for OpenWrt/GL.iNet "
-                "(scripts/UI + tpws). sing-box is pulled from the opkg feed.\n")
+                "(scripts/UI). sing-box AND tpws-zapret are pulled from the opkg feed.\n")
         if keenetic_ipk:
-            f.write(f"- `{os.path.basename(keenetic_ipk)}` — Keenetic/Entware (mipsel) package.\n")
-        f.write("\n## sing-box\n\n")
+            f.write(f"- `{os.path.basename(keenetic_ipk)}` — Keenetic/Entware (mipsel) package "
+                    "(tpws bundled; no feed there).\n")
+        f.write("\n## Binaries (sing-box + tpws-zapret)\n\n")
         f.write(
-            "sing-box is **not** bundled — the panel `Depends: sing-box`, served by "
-            f"our feed (`{FEED_LINE}`). The feed must be configured before install "
-            "(`deploy_router.py` and `detour-update` do this automatically). Build/"
-            "publish the feed with `python3 build_feed.py --version <sb-ver> --publish`.\n"
+            "Neither binary is bundled — the panel `Depends: sing-box, tpws-zapret`, "
+            f"both served by our feed (`{FEED_LINE}`). The feed must be configured "
+            "before install (`deploy_router.py` and `detour-update` do this "
+            "automatically). Build/publish the feed with "
+            "`python3 build_feed.py --version <sb-ver> --tpws-version <zapret-ver> --publish`.\n"
         )
         f.write("\n## Install\n\n")
         f.write(
             "### Fresh (SSH)\n\n"
-            f"```\nopkg update && opkg install sing-box   # from the detour feed\n"
+            f"```\nopkg update && opkg install sing-box tpws-zapret   # from the detour feed\n"
             f"opkg install /tmp/{os.path.basename(panel_ipk)}\n```\n\n"
             "### Panel update (existing install)\n\n"
             f"LuCI → Software → Upload `{os.path.basename(panel_ipk)}`, or the panel's "
             "self-update, or `detour-update apply`.\n\n"
-            "### sing-box update\n\n"
-            "Panel → «Обновить бинарники», or `detour-update bins-apply` "
-            "(`opkg update && opkg upgrade sing-box`).\n"
+            "### Binary updates\n\n"
+            "Panel → version chip → «Обновление». sing-box: `detour-update bins-apply` "
+            "(`opkg upgrade sing-box`); tpws-zapret: `detour-update tpws-apply` "
+            "(`opkg upgrade tpws-zapret`).\n"
         )
     print(f"  {notes_path}")
 

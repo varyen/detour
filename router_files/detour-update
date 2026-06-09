@@ -25,6 +25,9 @@
 #   bins-check             — opkg-check whether a newer sing-box is in the feed
 #   bins-apply             — opkg update + upgrade sing-box from the feed
 #   bins-status            — print the sing-box update state file
+#   tpws-check             — opkg-check whether a newer tpws-zapret is in the feed
+#   tpws-apply             — opkg update + upgrade tpws-zapret from the feed
+#   tpws-status            — print the tpws-zapret update state file
 #   rollback               — re-install the previous panel .ipk from backup
 #   status                 — print panel state file
 #   selftest               — usign / opkg / pinned-key sanity check
@@ -49,7 +52,9 @@ LOCKFILE=/tmp/detour-update.lock
 LOG_TAG=detour-update
 PACKAGE_NAME=detour
 SINGBOX_PKG=sing-box
+TPWS_PKG=tpws-zapret
 BINS_STATE_FILE=/var/state/detour-bins.json   # sing-box update state (panel reads this path)
+TPWS_STATE_FILE=/var/state/detour-tpws.json   # tpws-zapret update state (panel reads this path)
 # Self-hosted opkg feed serving sing-box. Keep in sync with build_release.py
 # (FEED_LINE) and deploy_router.py.
 FEED_NAME=detour
@@ -90,6 +95,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     STATE_FILE=/opt/var/state/detour-update.json
     BACKUP_DIR=/opt/var/detour-backup
     BINS_STATE_FILE=/opt/var/state/detour-bins.json
+    TPWS_STATE_FILE=/opt/var/state/detour-tpws.json
     PACKAGE_NAME=detour-keenetic
     ASSET_RE='^detour-keenetic_.*\.ipk$'
     ASSET_SIG_RE='^detour-keenetic_.*\.ipk\.sig$'
@@ -373,6 +379,90 @@ cmd_bins_apply() {
     log "sing-box now at $(sb_installed_version)"
 }
 
+# ---- tpws-zapret (opkg feed) helpers ----
+# Mirror the sing-box helpers. On Keenetic tpws is BUNDLED in the panel package
+# (there is no opkg feed there), so the feed-driven check/apply are no-ops that
+# report as much; tpws updates ride along with a panel update on that platform.
+
+# Installed tpws-zapret version per opkg ("" if not opkg-owned — e.g. when it is
+# still the binary bundled by an older `detour` panel).
+tpws_installed_version() {
+    opkg list-installed "$TPWS_PKG" 2>/dev/null | awk '{print $3}' | head -1
+}
+
+# Version opkg would upgrade tpws-zapret TO ("" = nothing newer than installed).
+tpws_upgrade_version() {
+    opkg list-upgradable 2>/dev/null | awk -v p="$TPWS_PKG" '$1==p {print $NF; exit}'
+}
+
+# Ensure tpws-zapret is installed (from the feed). --force-overwrite takes over
+# the /usr/bin/tpws-zapret that an OLD bundled panel owned, transferring opkg
+# ownership to the tpws-zapret package. Non-fatal: the init.d tolerates a missing
+# binary (DPI bypass simply off until tpws arrives).
+ensure_tpws() {
+    [ "$KEENETIC" = 1 ] && return 0   # Keenetic: tpws bundled in the panel, no feed
+    ensure_feed
+    if opkg list-installed "$TPWS_PKG" 2>/dev/null | grep -q "^$TPWS_PKG "; then
+        return 0
+    fi
+    log "tpws-zapret not installed — pulling from the feed"
+    opkg update >/dev/null 2>&1
+    opkg install --force-overwrite "$TPWS_PKG" >/dev/null 2>&1 \
+        || log "WARNING: opkg install $TPWS_PKG failed (feed unreachable?)"
+}
+
+# Write the tpws update-state file the panel reads (same shape as bins state).
+write_tpws_state() {
+    local cur="$1" avail="$2" now
+    now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+    mkdir -p "$(dirname "$TPWS_STATE_FILE")"
+    cat > "$TPWS_STATE_FILE" <<EOF
+{"current":"$cur","available":"$avail","asset":"$TPWS_PKG","last_check":"$now"}
+EOF
+}
+
+cmd_tpws_check() {
+    if [ "$KEENETIC" = 1 ]; then
+        local cur; cur=$(tpws_installed_version); [ -n "$cur" ] || cur="bundled"
+        write_tpws_state "$cur" "$cur"
+        log "tpws-zapret bundled with the panel on Keenetic (no feed check)"
+        return 0
+    fi
+    log "checking the opkg feed for a newer tpws-zapret..."
+    ensure_feed
+    opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
+    local cur avail
+    cur=$(tpws_installed_version); [ -n "$cur" ] || cur="0.0.0"
+    avail=$(tpws_upgrade_version); [ -n "$avail" ] || avail="$cur"
+    write_tpws_state "$cur" "$avail"
+    if [ "$cur" != "$avail" ]; then
+        log "tpws-zapret update available: $cur -> $avail"
+    else
+        log "tpws-zapret up to date ($cur)"
+    fi
+}
+
+cmd_tpws_apply() {
+    [ "$KEENETIC" = 1 ] && die "tpws-zapret is bundled with the panel on Keenetic — update the panel instead"
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    ensure_feed
+    log "opkg update + upgrade tpws-zapret from the feed..."
+    opkg update >/dev/null 2>&1 || die "opkg update failed (feed unreachable?)"
+    if opkg list-installed "$TPWS_PKG" 2>/dev/null | grep -q "^$TPWS_PKG "; then
+        # `opkg upgrade` no-ops if already newest; fall back to a forced install.
+        opkg upgrade "$TPWS_PKG" 2>&1 \
+            || opkg install --force-overwrite "$TPWS_PKG" 2>&1 \
+            || die "opkg upgrade tpws-zapret failed"
+    else
+        opkg install --force-overwrite "$TPWS_PKG" 2>&1 \
+            || die "opkg install tpws-zapret failed"
+    fi
+    cmd_tpws_check >/dev/null 2>&1 || true
+    log "tpws-zapret now at $(tpws_installed_version)"
+}
+
 cmd_apply() {
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
@@ -408,9 +498,10 @@ cmd_apply() {
         -H "Accept: application/octet-stream" \
         -o "$sig" "$sig_url" || { rm -rf "$tmp"; die "sig download failed"; }
 
-    # The panel `Depends: sing-box` — make sure the feed is configured and
-    # sing-box is present so opkg can resolve the dependency at install time.
+    # The panel `Depends: sing-box, tpws-zapret` — make sure the feed is
+    # configured and both are present so opkg resolves the deps at install time.
     ensure_singbox
+    ensure_tpws
 
     if ! verify_and_install_ipk "$ipk" "$sig"; then
         rm -rf "$tmp"
@@ -426,8 +517,9 @@ cmd_apply_local() {
     local ipk="$1"
     [ -n "$ipk" ] || die "usage: apply-local <ipk-file>"
     local sig="$ipk.sig"
-    # Local panel install still needs sing-box present for the Depends.
+    # Local panel install still needs sing-box + tpws-zapret present for the Depends.
     ensure_singbox
+    ensure_tpws
     verify_and_install_ipk "$ipk" "$sig"
     local cur
     cur=$(current_version)
@@ -528,11 +620,14 @@ case "$ACTION" in
     bins-check)        cmd_bins_check ;;
     bins-apply)        cmd_bins_apply ;;
     bins-status)       cat "$BINS_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
+    tpws-check)        cmd_tpws_check ;;
+    tpws-apply)        cmd_tpws_apply ;;
+    tpws-status)       cat "$TPWS_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
     rollback)          cmd_rollback ;;
     status)            cmd_status ;;
     selftest)          cmd_selftest ;;
     help|--help|-h)
-        sed -n '2,24p' "$0"
+        sed -n '2,33p' "$0"
         ;;
     *) echo "unknown subcommand: $ACTION" >&2
        echo "try: $0 help" >&2
