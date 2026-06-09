@@ -18,6 +18,8 @@ ZAPRET_DOMAINS="/etc/zapret-tpws/domains.list"
 KEEPALIVE_STATE="/var/state/vpn-keepalive.json"
 KEEPALIVE_BIN="/usr/sbin/vpn-keepalive"
 UPDATE_BIN="/usr/sbin/detour-update"
+BYPASS_BIN="/usr/sbin/detour-bypass"
+BYPASS_STRATEGY_FILE="/etc/detour/nfqws2.strategy"
 VERSION_FILE="/etc/detour/version"
 UPDATE_STATE="/var/state/detour-update.json"
 BINS_STATE="/var/state/detour-bins.json"   # sing-box update state (written by detour-update bins-check)
@@ -28,6 +30,7 @@ AUTH_FILE="/etc/detour.auth"
 SESSION_DIR="/tmp/detour-sessions"
 SINGBOX_BIN="/usr/bin/sing-box"
 TPWS_BIN="/usr/bin/tpws-zapret"
+NFQWS_BIN="/usr/bin/nfqws2"
 SUBREFRESH_BIN="/usr/sbin/subscription-refresh"
 HOSTS_BIN="/usr/sbin/detour-hosts"
 LAN_IF="br-lan"
@@ -63,6 +66,8 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     KEEPALIVE_STATE="$OPT/var/state/vpn-keepalive.json"
     KEEPALIVE_BIN="$OPT/sbin/vpn-keepalive"
     UPDATE_BIN="$OPT/sbin/detour-update"
+    BYPASS_BIN="$OPT/sbin/detour-bypass"
+    BYPASS_STRATEGY_FILE="$OPT/etc/detour/nfqws2.strategy"
     VERSION_FILE="$OPT/etc/detour/version"
     UPDATE_STATE="$OPT/var/state/detour-update.json"
     BINS_STATE="$OPT/var/state/detour-bins.json"
@@ -74,6 +79,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     ALLVPN_MARK="$OPT/etc/detour/allvpn.enabled"
     SINGBOX_BIN="$OPT/bin/sing-box"   # Entware sing-box-go installs to /opt/bin
     TPWS_BIN="$OPT/sbin/tpws-zapret"
+    NFQWS_BIN="$OPT/sbin/nfqws2"
     SUBREFRESH_BIN="$OPT/sbin/subscription-refresh"
     HOSTS_BIN="$OPT/sbin/detour-hosts"
     # LAN bridge from detour.conf (assumed br0); "Все через VPN" uses iptables (no nft fw4).
@@ -978,6 +984,11 @@ status)
     TPWS_BIN_VER=$(opkg list-installed 2>/dev/null | awk '$1=="tpws-zapret"{print $3; exit}')
     [ -z "$TPWS_BIN_VER" ] && TPWS_BIN_VER=$("$TPWS_BIN" --version 2>/dev/null | awk 'NR==1{print $3}')
     [ -z "$TPWS_BIN_VER" ] && TPWS_BIN_VER="?"
+    # nfqws2 (zapret2) version — from the binary's --version ("github version v1.0.1 ...").
+    NFQWS_BIN_VER="?"
+    [ -x "$NFQWS_BIN" ] && NFQWS_BIN_VER=$("$NFQWS_BIN" --version 2>/dev/null | awk 'NR==1{print $3}')
+    [ -z "$NFQWS_BIN_VER" ] && NFQWS_BIN_VER="?"
+    NFQWS_BIN_PRESENT=false; [ -x "$NFQWS_BIN" ] && NFQWS_BIN_PRESENT=true
 
     cat <<EOF
 {
@@ -988,7 +999,9 @@ status)
     "singbox_version": "$SB_BIN_VER",
     "singbox_present": $SB_BIN_PRESENT,
     "tpws_present": $TPWS_BIN_PRESENT,
-    "tpws_version": "$TPWS_BIN_VER"
+    "tpws_version": "$TPWS_BIN_VER",
+    "nfqws2_present": $NFQWS_BIN_PRESENT,
+    "nfqws2_version": "$NFQWS_BIN_VER"
   },
   "singbox": {
     "running": $SB_RUNNING,
@@ -1355,6 +1368,59 @@ tpws_update_apply)
     else
         json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
     fi
+    ;;
+
+# ==================== DPI-BYPASS ENGINE SWITCH (zapret | zapret2 | off) ====================
+# detour-bypass owns the mutually-exclusive engine selection + persistent state
+# (/etc/detour/bypass.{mode,autostart}). zapret2 is OpenWrt-only (needs NFQUEUE).
+bypass_status)
+    if [ -x "$BYPASS_BIN" ]; then
+        "$BYPASS_BIN" status
+    else
+        echo '{"mode":"off","autostart":0,"running":"none","zapret2_supported":false,"platform":"unknown"}'
+    fi
+    ;;
+
+bypass_set)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$BYPASS_BIN" ] || { json_err "detour-bypass not installed"; exit 0; }
+    BMODE=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]mode=\([^&]*\).*/\1/p' | head -1)
+    case "$BMODE" in off|zapret|zapret2) ;; *) json_err "invalid mode (off|zapret|zapret2)"; exit 0 ;; esac
+    OUT=$("$BYPASS_BIN" set "$BMODE" 2>&1)
+    if [ $? -eq 0 ]; then
+        printf '{"ok":true,"mode":"%s"}' "$BMODE"
+    else
+        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+    fi
+    ;;
+
+bypass_autostart)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$BYPASS_BIN" ] || { json_err "detour-bypass not installed"; exit 0; }
+    BON=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]on=\([^&]*\).*/\1/p' | head -1)
+    case "$BON" in 1|on) BV=on ;; 0|off) BV=off ;; *) json_err "invalid on flag (0|1)"; exit 0 ;; esac
+    OUT=$("$BYPASS_BIN" autostart "$BV" 2>&1)
+    if [ $? -eq 0 ]; then json_ok; else json_err "$(printf '%s' "$OUT" | tail -5 | json_escape)"; fi
+    ;;
+
+bypass_strategy)
+    # GET: echo the stored nfqws2 strategy (empty → UI uses status.strategy default).
+    # POST (body = one-line arg string): save it and re-apply if zapret2 is active.
+    if [ "$REQUEST_METHOD" != "POST" ]; then
+        head -1 "$BYPASS_STRATEGY_FILE" 2>/dev/null || echo ""
+        exit 0
+    fi
+    [ -x "$BYPASS_BIN" ] || { json_err "detour-bypass not installed"; exit 0; }
+    S=$(printf '%s' "$POST_DATA" | head -1 | tr -d '\r')
+    [ -n "$S" ] || { json_err "empty strategy"; exit 0; }
+    case "$S" in *--lua-desync=*) ;; *) json_err "стратегия должна содержать --lua-desync=..."; exit 0 ;; esac
+    mkdir -p "$(dirname "$BYPASS_STRATEGY_FILE")" 2>/dev/null
+    printf '%s\n' "$S" > "$BYPASS_STRATEGY_FILE"
+    if [ "$("$BYPASS_BIN" mode 2>/dev/null)" = zapret2 ]; then
+        OUT=$("$BYPASS_BIN" set zapret2 2>&1)
+        [ $? -eq 0 ] || { json_err "$(printf '%s' "$OUT" | tail -6 | json_escape)"; exit 0; }
+    fi
+    json_ok
     ;;
 
 singbox_opkg_upgrade)

@@ -2992,50 +2992,118 @@
             </div>
           </div>
 
-          <!-- zapret-tpws card -->
-          <div class="card">
+          <!-- DPI-обход: единый адаптивный блок (off | zapret tpws | zapret2 nfqws2) -->
+          <div class="card" id="dpi-card">
             <div class="card-header">
               <div class="card-title">
-                <span class="status-dot stopped" id="zp-dot"></span>
-                zapret-tpws
-                <span class="tag">DPI bypass v72</span>
+                <span class="status-dot stopped" id="dpi-dot"></span>
+                DPI-обход
+                <span class="tag" id="dpi-version">—</span>
               </div>
               <div class="refresh-indicator">
-                <span id="zp-status-text">--</span>
+                <span id="dpi-status-text">--</span>
               </div>
             </div>
-            <div class="card-meta">
-              <span class="label">PID</span
-              ><span class="value" id="zp-pid">—</span>
-              <span class="label">Порт</span
-              ><span class="value" id="zp-port">—</span>
-              <span class="label">Записей</span
-              ><span class="value" id="zp-domains">—</span>
-              <span class="label">IP в ipset</span
-              ><span class="value" id="zp-ipset">—</span>
-              <span class="label">Автозапуск</span
-              ><span class="value" id="zp-enabled">—</span>
-              <span class="label">Аргументы</span
-              ><span class="value" id="zp-args-short">—</span>
-            </div>
-            <div class="card-actions">
-              <button
-                class="btn primary"
-                id="zp-toggle-btn"
-                onclick="zpAction('zapret_start')"
-              >
-                ▶ Старт
-              </button>
-              <button class="btn" onclick="zpAction('zapret_restart')">
-                ↻ Рестарт
+
+            <!-- движок: тумблер + автозапуск -->
+            <div class="card-actions" style="margin-bottom: 4px">
+              <button class="btn" id="bypass-btn-off" onclick="setBypass('off')">
+                ⏹ Выкл
               </button>
               <button
                 class="btn"
-                onclick="zpAction('zapret_enable')"
-                id="zp-enable-btn"
+                id="bypass-btn-zapret"
+                onclick="setBypass('zapret')"
               >
-                Автозапуск ✓
+                zapret (tpws)
               </button>
+              <button
+                class="btn"
+                id="bypass-btn-zapret2"
+                onclick="setBypass('zapret2')"
+              >
+                zapret2 (nfqws2)
+              </button>
+              <span style="flex: 1"></span>
+              <label
+                class="check-row"
+                style="display: inline-flex; align-items: center; gap: 6px"
+                title="Применять выбранный движок при загрузке роутера"
+              >
+                <input
+                  type="checkbox"
+                  id="bypass-autostart"
+                  onchange="setBypassAutostart(this.checked)"
+                />
+                Автозапуск
+              </label>
+            </div>
+
+            <div class="card-meta" id="dpi-meta">
+              <span class="label">Состояние</span
+              ><span class="value" id="dpi-running">—</span>
+              <span class="label" id="dpi-m1-l" style="display: none"></span
+              ><span class="value" id="dpi-m1-v" style="display: none"></span>
+              <span class="label" id="dpi-m2-l" style="display: none"></span
+              ><span class="value" id="dpi-m2-v" style="display: none"></span>
+            </div>
+
+            <!-- inline-конфиг активного движка (аргументы tpws или стратегия nfqws2) -->
+            <div id="dpi-config-wrap" style="margin-top: 10px; display: none">
+              <label
+                id="dpi-config-label"
+                style="
+                  font-size: 12px;
+                  color: var(--text-dim);
+                  display: block;
+                  margin-bottom: 4px;
+                "
+              ></label>
+              <textarea
+                id="dpi-config"
+                rows="3"
+                spellcheck="false"
+                style="
+                  width: 100%;
+                  padding: 8px 10px;
+                  background: var(--bg-elev-solid);
+                  border: 1px solid var(--border);
+                  border-radius: var(--radius-sm);
+                  color: var(--text);
+                  font-family: var(--mono);
+                  font-size: 11.5px;
+                  outline: none;
+                  resize: vertical;
+                "
+              ></textarea>
+              <div class="card-actions" style="margin-top: 8px">
+                <button class="btn primary" onclick="saveDpiConfig()">
+                  💾 Сохранить
+                </button>
+                <button class="btn" onclick="resetDpiConfig()">
+                  ↺ По умолчанию
+                </button>
+                <span
+                  id="dpi-config-status"
+                  style="font-size: 12px; color: var(--text-dim)"
+                ></span>
+              </div>
+            </div>
+
+            <div
+              id="dpi-hint"
+              style="
+                font-size: 11px;
+                color: var(--text-muted);
+                margin-top: 6px;
+                min-height: 14px;
+              "
+            ></div>
+            <div
+              style="font-size: 11px; color: var(--text-dim); margin-top: 4px"
+            >
+              Список доменов общий для обоих движков — вкладка «🎯 Домены
+              Zapret/2».
             </div>
           </div>
         </div>
@@ -3045,14 +3113,13 @@
           <button class="tab active" data-tab="domains">
             📋 Домены sing-box
           </button>
-          <button class="tab" data-tab="route-map">🧭 Маршрутизация</button>
-          <button class="tab" data-tab="singbox-log">📜 Лог sing-box</button>
-          <button class="tab" data-tab="singbox-cfg">⚙ Конфиг sing-box</button>
           <button class="tab" data-tab="zapret-domains">
-            🎯 Домены zapret
+            🎯 Домены Zapret/2
           </button>
-          <button class="tab" data-tab="zapret-cfg">⚙ Настройки zapret</button>
+          <button class="tab" data-tab="route-map">🧭 Маршрутизация</button>
           <button class="tab" data-tab="hosts-dns">🧩 Hosts-DNS</button>
+          <button class="tab" data-tab="singbox-cfg">⚙ Конфиг sing-box</button>
+          <button class="tab" data-tab="singbox-log">📜 Лог sing-box</button>
           <button class="tab" data-tab="firewall">🛡 Файрвол</button>
         </div>
 
@@ -3272,7 +3339,7 @@
         <div class="tab-content" id="tab-zapret-domains">
           <div class="editor-section">
             <div class="editor-header">
-              <h3>Домены через zapret-tpws (DPI-обход)</h3>
+              <h3>Домены Zapret/2 (общий список для zapret и zapret2)</h3>
               <div class="flex-gap">
                 <button class="btn primary" onclick="saveZapretDomains(false)">
                   💾 Сохранить
@@ -3301,37 +3368,6 @@
         </div>
 
         <!-- Tab: zapret config -->
-        <div class="tab-content" id="tab-zapret-cfg">
-          <div class="editor-section">
-            <div class="editor-header">
-              <h3>Аргументы tpws (пресет DPI-обхода)</h3>
-              <div class="flex-gap">
-                <button class="btn primary" onclick="saveZapretConfig()">
-                  💾 Сохранить
-                </button>
-                <button class="btn" onclick="saveZapretRestart()">
-                  💾 Сохранить и перезапустить
-                </button>
-              </div>
-            </div>
-            <p class="helper-text-block">
-              Аргументы запуска tpws (без <code>--bind-addr</code> и
-              <code>--port</code> — они задаются init.d). Изменения применяются
-              после перезапуска.<br />
-              Текущий пресет (bol-van/zapret v72):
-              <code
-                >--filter-tcp=80 --methodeol --new --filter-tcp=443
-                --split-pos=1,midsld --disorder</code
-              >
-            </p>
-            <textarea
-              id="zapret-args-editor"
-              spellcheck="false"
-              style="min-height: 96px; font-size: 12.5px"
-              placeholder="--filter-tcp=80 --methodeol --new --filter-tcp=443 --split-pos=1,midsld --disorder"
-            ></textarea>
-          </div>
-        </div>
 
         <!-- Tab: Hosts-DNS (priority hosts file via dnsmasq addn-hosts) -->
         <div class="tab-content" id="tab-hosts-dns">
@@ -5406,60 +5442,9 @@
             }
           }
 
-          if (d.zapret) {
-            var zpDot = document.getElementById("zp-dot");
-            zpDot.className =
-              "status-dot " + (d.zapret.running ? "running" : "stopped");
-            document.getElementById("zp-status-text").textContent = d.zapret
-              .running
-              ? "Работает"
-              : "Остановлен";
-            document.getElementById("zp-pid").textContent = d.zapret.pid || "—";
-            document.getElementById("zp-port").textContent =
-              d.zapret.port || "—";
-            document.getElementById("zp-domains").textContent =
-              (d.zapret.domains || 0) +
-              " дом. + " +
-              (d.zapret.ips || 0) +
-              " IP";
-            document.getElementById("zp-ipset").textContent =
-              d.zapret.ipset_count;
-            document.getElementById("zp-enabled").textContent = d.zapret.enabled
-              ? "Да"
-              : "Нет";
-            document.getElementById("zp-args-short").textContent =
-              d.zapret.args || "—";
-
-            var zpEnBtn = document.getElementById("zp-enable-btn");
-            if (d.zapret.enabled) {
-              zpEnBtn.textContent = "Автозапуск ✓";
-              zpEnBtn.onclick = function () {
-                zpAction("zapret_disable");
-              };
-            } else {
-              zpEnBtn.textContent = "Автозапуск ✗";
-              zpEnBtn.onclick = function () {
-                zpAction("zapret_enable");
-              };
-            }
-
-            var zpToggle = document.getElementById("zp-toggle-btn");
-            if (zpToggle) {
-              if (d.zapret.running) {
-                zpToggle.textContent = "⏹ Стоп";
-                zpToggle.className = "btn danger";
-                zpToggle.onclick = function () {
-                  zpAction("zapret_stop");
-                };
-              } else {
-                zpToggle.textContent = "▶ Старт";
-                zpToggle.className = "btn primary";
-                zpToggle.onclick = function () {
-                  zpAction("zapret_start");
-                };
-              }
-            }
-          }
+          // tpws (zapret) status is shown by the unified DPI card (renderDpiCard
+          // reads d.zapret); just stash the full status object for it.
+          lastStatus = d;
 
           document.getElementById("sys-uptime").textContent =
             "⏱ " + d.system.uptime;
@@ -5469,6 +5454,9 @@
             "💿 " + d.system.disk_free;
           document.getElementById("sys-mptcp").textContent =
             "🔒 MPTCP: " + (d.system.mptcp === "0" ? "Off ✓" : "On ⚠");
+
+          // refresh the DPI-bypass engine switch alongside the rest of status
+          loadBypassStatus();
         } catch (e) {
           if (e.message !== "Not authenticated")
             console.error("Status error:", e);
@@ -10604,6 +10592,209 @@
         }
       }
 
+      // ===== DPI-BYPASS ENGINE SWITCH (off | zapret | zapret2) =====
+      var lastBypass = null;
+      var lastStatus = null;
+      var dpiMode = "off";
+      var TPWS_DEFAULT_ARGS =
+        "--filter-tcp=80 --methodeol --new --filter-tcp=443 --split-pos=1,midsld --disorder";
+      var Z2_DEFAULT_STRATEGY =
+        "--filter-tcp=443 --filter-l7=tls --payload=tls_client_hello --lua-desync=tcpseg:pos=0,midsld:ip_id=rnd:repeats=2";
+
+      async function loadBypassStatus() {
+        try {
+          var d = await api("bypass_status");
+          lastBypass = d;
+          renderDpiCard(d, lastStatus);
+        } catch (e) {}
+      }
+
+      // Single adaptive DPI card. b = bypass_status, st = full status (binaries/zapret).
+      function renderDpiCard(b, st) {
+        if (!b) return;
+        st = st || {};
+        var bins = st.binaries || {};
+        var mode = b.mode || "off";
+        var running = b.running || "none";
+        var sup = !!b.zapret2_supported;
+        dpiMode = mode;
+
+        ["off", "zapret", "zapret2"].forEach(function (m) {
+          var btn = document.getElementById("bypass-btn-" + m);
+          if (btn) btn.classList.toggle("primary", m === mode);
+        });
+        var z2btn = document.getElementById("bypass-btn-zapret2");
+        if (z2btn) {
+          z2btn.disabled = !sup;
+          z2btn.style.opacity = sup ? "" : "0.5";
+          z2btn.style.cursor = sup ? "" : "not-allowed";
+          z2btn.title = sup ? "" : "Недоступно: нужен NFQUEUE (нет на KeeneticOS)";
+        }
+        var ab = document.getElementById("bypass-autostart");
+        if (ab) ab.checked = b.autostart == 1 || b.autostart === true;
+
+        var dot = document.getElementById("dpi-dot");
+        if (dot)
+          dot.className =
+            "status-dot " + (running !== "none" ? "running" : "stopped");
+        var stxt = document.getElementById("dpi-status-text");
+        if (stxt)
+          stxt.textContent =
+            running !== "none"
+              ? "работает: " + running
+              : mode === "off"
+                ? "выключено"
+                : "выбран " + mode + ", остановлен";
+        var ver = document.getElementById("dpi-version");
+        if (ver)
+          ver.textContent =
+            mode === "zapret"
+              ? "tpws " + (bins.tpws_version || "?")
+              : mode === "zapret2"
+                ? "nfqws2 " + (bins.nfqws2_version || "?")
+                : "выкл";
+        var run = document.getElementById("dpi-running");
+        if (run)
+          run.textContent =
+            running === "none" ? "остановлен" : "работает (" + running + ")";
+
+        var m1l = document.getElementById("dpi-m1-l"),
+          m1v = document.getElementById("dpi-m1-v"),
+          m2l = document.getElementById("dpi-m2-l"),
+          m2v = document.getElementById("dpi-m2-v");
+        var wrap = document.getElementById("dpi-config-wrap");
+        var label = document.getElementById("dpi-config-label");
+        var ta = document.getElementById("dpi-config");
+        var hint = document.getElementById("dpi-hint");
+        function setMeta(l1, v1, l2, v2) {
+          [m1l, m1v, m2l, m2v].forEach(function (e) {
+            if (e) e.style.display = "";
+          });
+          if (m1l) m1l.textContent = l1;
+          if (m1v) m1v.textContent = v1;
+          if (m2l) m2l.textContent = l2;
+          if (m2v) m2v.textContent = v2;
+        }
+        function hideMeta() {
+          [m1l, m1v, m2l, m2v].forEach(function (e) {
+            if (e) e.style.display = "none";
+          });
+        }
+
+        if (mode === "zapret") {
+          var z = st.zapret || {};
+          setMeta("PID", z.pid || "—", "Порт", z.port || "—");
+          if (wrap) wrap.style.display = "block";
+          if (label)
+            label.textContent =
+              "Аргументы tpws (bol-van/zapret v72; одна строка, без --bind-addr/--port):";
+          if (ta && document.activeElement !== ta) ta.value = z.args || "";
+          if (ta) ta.disabled = false;
+          if (hint) hint.textContent = "";
+        } else if (mode === "zapret2") {
+          setMeta(
+            "Очередь",
+            b.qnum != null ? b.qnum : "—",
+            "Пакетов отдано",
+            b.queued != null ? b.queued : "—",
+          );
+          if (wrap) wrap.style.display = "block";
+          if (label)
+            label.textContent =
+              "Стратегия nfqws2 (одна строка; см. BYPASS_STRATEGIES.md):";
+          if (ta && document.activeElement !== ta && b.strategy)
+            ta.value = b.strategy;
+          if (ta) ta.disabled = !sup;
+          if (hint)
+            hint.textContent = sup
+              ? ""
+              : "nfqws2 недоступен (нужен NFQUEUE; KeeneticOS не поддерживает).";
+        } else {
+          hideMeta();
+          if (wrap) wrap.style.display = "none";
+          if (hint)
+            hint.textContent =
+              "Выберите движок: zapret (tpws) работает везде; zapret2 (nfqws2) мощнее, но нужен NFQUEUE (только OpenWrt).";
+        }
+      }
+
+      async function saveDpiConfig() {
+        var ta = document.getElementById("dpi-config");
+        var el = document.getElementById("dpi-config-status");
+        var s = (ta.value || "").trim().replace(/\s+/g, " ");
+        if (!s) {
+          if (el) el.textContent = "пусто";
+          return;
+        }
+        if (el) el.textContent = "Сохраняю…";
+        try {
+          var d;
+          if (dpiMode === "zapret") {
+            d = await api("zapret_config", "POST", s);
+            if (d && d.ok && lastBypass && lastBypass.running === "zapret")
+              await api("bypass_set&mode=zapret", "POST", ""); // re-apply (restart tpws)
+          } else if (dpiMode === "zapret2") {
+            d = await api("bypass_strategy", "POST", s); // saves + re-applies if active
+          } else {
+            if (el) el.textContent = "движок выключен";
+            return;
+          }
+          if (d && d.ok) {
+            if (el) el.textContent = "Сохранено";
+            toast("Конфиг сохранён", "success");
+            loadStatus();
+          } else if (el) el.textContent = "Ошибка: " + ((d && d.error) || "");
+        } catch (e) {
+          if (el) el.textContent = "Ошибка: " + e.message;
+        }
+      }
+      function resetDpiConfig() {
+        var ta = document.getElementById("dpi-config");
+        if (ta)
+          ta.value = dpiMode === "zapret" ? TPWS_DEFAULT_ARGS : Z2_DEFAULT_STRATEGY;
+      }
+      async function setBypass(mode) {
+        var label =
+          mode === "off"
+            ? "выключить DPI-обход"
+            : "переключить движок на «" + mode + "»";
+        if (
+          !confirm(
+            "Точно " +
+              label +
+              "?\n\nПереключение остановит другой движок и изменит правила фаервола для доменов zapret.",
+          )
+        )
+          return;
+        try {
+          var d = await api(
+            "bypass_set&mode=" + encodeURIComponent(mode),
+            "POST",
+            "",
+          );
+          if (d.ok) toast("Движок DPI-обхода: " + mode, "success");
+          else toast("Ошибка: " + (d.error || ""), "error");
+        } catch (e) {
+          toast("Ошибка: " + e.message, "error");
+        }
+        await loadBypassStatus();
+        await loadStatus();
+      }
+      async function setBypassAutostart(on) {
+        try {
+          var d = await api("bypass_autostart&on=" + (on ? 1 : 0), "POST", "");
+          if (d.ok)
+            toast(on ? "Автозапуск включён" : "Автозапуск выключен", "success");
+          else {
+            toast("Ошибка: " + (d.error || ""), "error");
+            loadBypassStatus();
+          }
+        } catch (e) {
+          toast("Ошибка: " + e.message, "error");
+          loadBypassStatus();
+        }
+      }
+
       // Tabs
       document.querySelectorAll(".tab").forEach(function (tab) {
         tab.addEventListener("click", function () {
@@ -10628,7 +10819,6 @@
           if (tab.dataset.tab === "singbox-log") loadSingboxLog();
           if (tab.dataset.tab === "singbox-cfg") loadSingboxConfig();
           if (tab.dataset.tab === "zapret-domains") loadZapretDomains();
-          if (tab.dataset.tab === "zapret-cfg") loadZapretConfig();
           if (tab.dataset.tab === "hosts-dns") loadHostsDns();
           if (tab.dataset.tab === "firewall") loadFirewall();
         });

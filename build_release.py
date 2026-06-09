@@ -136,6 +136,9 @@ PANEL_FILES = [
     (("router_files", "vpn-keepalive"), "usr/sbin/vpn-keepalive", 0o755),
     (("router_files", "detour-hosts"), "usr/sbin/detour-hosts", 0o755),
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
+    # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
+    (("router_files", "detour-bypass"), "usr/sbin/detour-bypass", 0o755),
+    (("router_files", "detour-bypass.initd"), "etc/init.d/detour-bypass", 0o755),
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
     (("router_files", "index.html"), "www/detour/index.html", 0o644),
     # NOTE: tpws-zapret is NOT bundled here anymore — it comes from the opkg feed
@@ -324,6 +327,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /etc/firewall.lan_mark_fallback /etc/hotplug.d/iface/99-proxy-guard \\
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
+    /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /www/cgi-bin/detour-api 2>/dev/null
 
 # 3) Enable + (re)start services, but HONOUR the operator's «Автозапуск» choice
@@ -342,7 +346,16 @@ detour_apply_autostart() {{   # $1 init.d path, $2 autostart flag file
     fi
 }}
 detour_apply_autostart /etc/init.d/sing-box /etc/detour/autostart.singbox
-detour_apply_autostart /etc/init.d/zapret-tpws /etc/detour/autostart.zapret
+# The DPI-bypass switch (detour-bypass) OWNS the zapret/zapret2 engine lifecycle.
+# Only fall back to the legacy standalone zapret-tpws autostart when the switch was
+# never used (no bypass.mode persisted) — otherwise it would double-start tpws.
+if [ ! -f /etc/detour/bypass.mode ]; then
+    detour_apply_autostart /etc/init.d/zapret-tpws /etc/detour/autostart.zapret
+fi
+# Register the bypass boot applier (always enabled) and re-apply the persisted
+# mode now (no-op unless autostart=1) so an upgrade restores the active engine.
+/etc/init.d/detour-bypass enable >/dev/null 2>&1
+[ -x /usr/sbin/detour-bypass ] && /usr/sbin/detour-bypass boot >/dev/null 2>&1
 # detour-hosts: boot hook that re-applies the dnsmasq addn-hosts snippet (tmpfs
 # is wiped on reboot). `start` is a no-op when the feature is disabled and only
 # touches dnsmasq when its config (preserved in /etc/detour) was left enabled.
@@ -383,6 +396,9 @@ set +e
 
 # Stop services so opkg can replace the binaries cleanly.
 /etc/init.d/sing-box stop >/dev/null 2>&1
+# Stop the bypass engine (nfqws2/tpws + its firewall) WITHOUT changing the
+# persisted mode — postinst re-applies it. Falls back to a direct tpws stop.
+[ -x /usr/sbin/detour-bypass ] && /usr/sbin/detour-bypass stop >/dev/null 2>&1
 /etc/init.d/zapret-tpws stop >/dev/null 2>&1
 # Drop the dnsmasq addn-hosts snippet (on a full removal it must not linger; on
 # upgrade the new postinst's `start` re-applies it from the preserved config).

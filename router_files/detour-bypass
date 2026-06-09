@@ -1,0 +1,279 @@
+#!/bin/sh
+# detour-bypass — select the DPI-bypass engine for the zapret_domains list:
+#
+#     off       no engine (those domains go direct / via sing-box as configured)
+#     zapret    tpws transparent proxy  (REDIRECT :1081 ; universal, incl. Keenetic)
+#     zapret2   nfqws2 NFQUEUE desync    (OpenWrt only — needs NFQUEUE; not KeeneticOS)
+#
+# Mutually exclusive: only one engine runs at a time. Selection + autostart are
+# persisted in /etc/detour so they survive reboot/upgrade. Both engines act on the
+# SAME zapret_domains ipset (same domain list, different bypass technique).
+#
+# Subcommands:
+#   set <off|zapret|zapret2>   apply now + persist as the selected mode
+#   autostart <on|off>         persist whether the selected mode is applied on boot
+#   boot                       (init.d) apply the persisted mode iff autostart=1
+#   status                     JSON: mode, autostart, running engine, zapret2 support
+#   mode                       print the persisted mode
+#
+# Strategies are documented in the repo's BYPASS_STRATEGIES.md (validated live).
+set -u
+
+# ---------- platform + paths ----------
+KEENETIC=0
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then KEENETIC=1; fi
+
+if [ "$KEENETIC" = 1 ]; then
+    DETOUR_DIR=/opt/etc/detour
+    ZAPRET_INITD=/opt/etc/init.d/S53detour-zapret
+    NFQWS_BIN=/opt/sbin/nfqws2            # not shipped on Keenetic (no NFQUEUE)
+    LUA_DIR=/opt/share/detour/lua
+    DOMAINS_FILE=/opt/etc/zapret-tpws/domains.list
+    SETTINGS_FILE=/opt/etc/sing-box/settings.json
+    NFQWS_PID=/opt/var/run/nfqws2.pid
+    NFQWS_LOG=/opt/var/log/nfqws2.log
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+else
+    DETOUR_DIR=/etc/detour
+    ZAPRET_INITD=/etc/init.d/zapret-tpws
+    NFQWS_BIN=/usr/bin/nfqws2
+    LUA_DIR=/usr/share/detour/lua
+    DOMAINS_FILE=/etc/zapret-tpws/domains.list
+    SETTINGS_FILE=/etc/sing-box/settings.json
+    NFQWS_PID=/var/run/nfqws2.pid
+    NFQWS_LOG=/var/log/nfqws2.log
+fi
+
+MODE_FILE="$DETOUR_DIR/bypass.mode"             # off | zapret | zapret2
+AUTOSTART_FILE="$DETOUR_DIR/bypass.autostart"   # 0 | 1
+STRATEGY_FILE="$DETOUR_DIR/nfqws2.strategy"     # optional override of the nfqws2 strategy
+IPSET_NAME=zapret_domains
+NFQWS_QNUM=200
+NFQWS_FWMARK=0x40000000   # nfqws2 marks its own generated packets with this → loop guard
+
+# Validated nfqws2 strategy (TLS:443) — see BYPASS_STRATEGIES.md.
+NFQWS_STRATEGY_DEFAULT="--filter-tcp=443 --filter-l7=tls --payload=tls_client_hello --lua-desync=tcpseg:pos=0,midsld:ip_id=rnd:repeats=2"
+
+log() { logger -t detour-bypass -- "$*" 2>/dev/null; echo "[detour-bypass] $*" >&2; }
+die() { log "ERROR: $*"; exit 1; }
+
+# ---------- capability detection ----------
+# zapret2 needs the nfqws2 binary AND a kernel with NFQUEUE. KeeneticOS lacks it.
+zapret2_supported() {
+    [ "$KEENETIC" = 1 ] && return 1
+    [ -x "$NFQWS_BIN" ] || return 1
+    lsmod 2>/dev/null | grep -q '^nfnetlink_queue' && return 0
+    modprobe nfnetlink_queue 2>/dev/null
+    lsmod 2>/dev/null | grep -q '^nfnetlink_queue'
+}
+
+# Extra inbound interfaces (e.g. a WG server) that should also get DPI bypass —
+# shared with sing-box / zapret-tpws via settings.json "vpn_redirect_ifaces".
+vpn_redirect_ifaces() {
+    [ -f "$SETTINGS_FILE" ] || return 0
+    sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS_FILE" \
+        | head -1 | tr ',' ' '
+}
+
+# Detect a running engine by the binary behind each pid's /proc/<pid>/exe (robust;
+# `pgrep -f` false-matches this very script's command line).
+running_engine() {
+    local p ex
+    for p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+        ex=$(readlink "/proc/$p/exe" 2>/dev/null)
+        case "$ex" in
+            *nfqws2) echo zapret2; return 0 ;;
+        esac
+    done
+    for p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+        ex=$(readlink "/proc/$p/exe" 2>/dev/null)
+        case "$ex" in
+            *tpws-zapret) echo zapret; return 0 ;;
+        esac
+    done
+    echo none
+}
+
+# ---------- zapret_domains ipset (shared list; mirrors zapret-tpws.initd) ----------
+# Needed for zapret2 mode (in zapret mode the tpws init.d populates it itself).
+ensure_zapret_domains() {
+    ipset create "$IPSET_NAME" hash:net -exist
+    mkdir -p /tmp/dnsmasq.d "$(dirname "$DOMAINS_FILE")"
+    [ -f "$DOMAINS_FILE" ] || touch "$DOMAINS_FILE"
+    local dnsmasq_conf=/tmp/dnsmasq.d/zapret-domains.conf
+    local iptmp="/tmp/ipset-restore-$IPSET_NAME.txt"
+    : > "$dnsmasq_conf"; : > "$iptmp"
+    awk -v ipset="$IPSET_NAME" -v dnsmasq="$dnsmasq_conf" -v iptmp="$iptmp" '
+        { sub(/\/\/.*/,""); sub(/#.*/,""); gsub(/\r/,""); gsub(/^[ \t]+|[ \t]+$/,"")
+          if ($0=="") next
+          if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print "add " ipset " " $0 >> iptmp; next }
+          if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print "ipset=/" $0 "/" ipset >> dnsmasq; next } }' "$DOMAINS_FILE"
+    [ -s "$iptmp" ] && ipset restore -exist < "$iptmp"; rm -f "$iptmp"
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1; sleep 1
+    awk '{ sub(/\/\/.*/,""); sub(/#.*/,""); gsub(/\r/,""); gsub(/^[ \t]+|[ \t]+$/,"")
+           if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) print $0 }' "$DOMAINS_FILE" \
+        | while IFS= read -r d; do nslookup "$d" 127.0.0.1 >/dev/null 2>&1 & done
+}
+
+# ---------- zapret2 (nfqws2) firewall (OpenWrt only) ----------
+# nat: make zapret_domains skip sing-box (ACCEPT before SINGBOX_ALL) so the
+#      connection goes DIRECT and nfqws2 can desync it in flight.
+# mangle: NFQUEUE the first packets of those :443 connections to nfqws2, with
+#         --queue-bypass (dead daemon → pass, never drop) and a fwmark loop guard.
+zapret2_fw_up() {
+    ensure_zapret_domains
+
+    iptables -t nat -N ZAPRET2_NAT 2>/dev/null
+    iptables -t nat -F ZAPRET2_NAT
+    iptables -t nat -A ZAPRET2_NAT -d 10.0.0.0/8 -j RETURN
+    iptables -t nat -A ZAPRET2_NAT -d 172.16.0.0/12 -j RETURN
+    iptables -t nat -A ZAPRET2_NAT -d 192.168.0.0/16 -j RETURN
+    iptables -t nat -A ZAPRET2_NAT -d 127.0.0.0/8 -j RETURN
+    iptables -t nat -A ZAPRET2_NAT -p tcp -m set --match-set "$IPSET_NAME" dst -j ACCEPT
+    local IF
+    for IF in br-lan $(vpn_redirect_ifaces); do
+        [ -n "$IF" ] || continue
+        iptables -t nat -D PREROUTING -i "$IF" -j ZAPRET2_NAT 2>/dev/null
+        iptables -t nat -I PREROUTING 1 -i "$IF" -j ZAPRET2_NAT
+    done
+
+    iptables -t mangle -N ZAPRET2_MANGLE 2>/dev/null
+    iptables -t mangle -F ZAPRET2_MANGLE
+    iptables -t mangle -A ZAPRET2_MANGLE -p tcp --dport 443 -m set --match-set "$IPSET_NAME" dst \
+        -m mark ! --mark "$NFQWS_FWMARK/$NFQWS_FWMARK" \
+        -m connbytes --connbytes 1:20 --connbytes-dir original --connbytes-mode packets \
+        -j NFQUEUE --queue-num "$NFQWS_QNUM" --queue-bypass
+    iptables -t mangle -D POSTROUTING -j ZAPRET2_MANGLE 2>/dev/null
+    iptables -t mangle -A POSTROUTING -j ZAPRET2_MANGLE
+}
+
+zapret2_fw_down() {
+    local IF
+    for IF in br-lan $(vpn_redirect_ifaces); do
+        [ -n "$IF" ] || continue
+        iptables -t nat -D PREROUTING -i "$IF" -j ZAPRET2_NAT 2>/dev/null
+    done
+    iptables -t nat -F ZAPRET2_NAT 2>/dev/null
+    iptables -t nat -X ZAPRET2_NAT 2>/dev/null
+    iptables -t mangle -D POSTROUTING -j ZAPRET2_MANGLE 2>/dev/null
+    iptables -t mangle -F ZAPRET2_MANGLE 2>/dev/null
+    iptables -t mangle -X ZAPRET2_MANGLE 2>/dev/null
+}
+
+nfqws2_start() {
+    local strat luaopt
+    strat=$(head -1 "$STRATEGY_FILE" 2>/dev/null); [ -n "$strat" ] || strat="$NFQWS_STRATEGY_DEFAULT"
+    luaopt="--lua-init=@$LUA_DIR/zapret-lib.lua --lua-init=@$LUA_DIR/zapret-antidpi.lua --lua-init=@$LUA_DIR/zapret-auto.lua"
+    mkdir -p "$(dirname "$NFQWS_PID")"
+    : > "$NFQWS_LOG"
+    # shellcheck disable=SC2086
+    "$NFQWS_BIN" --daemon --qnum="$NFQWS_QNUM" --pidfile="$NFQWS_PID" --fwmark="$NFQWS_FWMARK" \
+        $luaopt $strat >>"$NFQWS_LOG" 2>&1
+}
+
+nfqws2_stop() {
+    [ -f "$NFQWS_PID" ] && kill "$(cat "$NFQWS_PID" 2>/dev/null)" 2>/dev/null
+    local p
+    for p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+        case "$(readlink "/proc/$p/exe" 2>/dev/null)" in *nfqws2) kill "$p" 2>/dev/null ;; esac
+    done
+    rm -f "$NFQWS_PID"
+}
+
+# ---------- engine control ----------
+stop_all() {
+    nfqws2_stop
+    zapret2_fw_down 2>/dev/null
+    [ -x "$ZAPRET_INITD" ] && "$ZAPRET_INITD" stop >/dev/null 2>&1
+}
+
+start_zapret() {
+    [ -x "$ZAPRET_INITD" ] || die "zapret init script missing: $ZAPRET_INITD"
+    "$ZAPRET_INITD" start >/dev/null 2>&1 || die "zapret (tpws) failed to start"
+}
+
+start_zapret2() {
+    zapret2_supported || die "zapret2 (nfqws2) is not supported here (needs NFQUEUE; unavailable on KeeneticOS / binary missing)"
+    zapret2_fw_up
+    nfqws2_start
+    sleep 1
+    if [ "$(running_engine)" = zapret2 ]; then
+        return 0
+    fi
+    # daemon did not come up — undo the firewall (bypass meant traffic still flowed)
+    zapret2_fw_down
+    die "nfqws2 failed to start — see $NFQWS_LOG"
+}
+
+apply_mode() {
+    stop_all
+    case "$1" in
+        off)     log "engines stopped (mode off)" ;;
+        zapret)  start_zapret;  log "zapret (tpws) active" ;;
+        zapret2) start_zapret2; log "zapret2 (nfqws2) active" ;;
+        *)       die "unknown mode: $1" ;;
+    esac
+}
+
+# ---------- commands ----------
+cmd_set() {
+    local m="${1:-}"
+    case "$m" in
+        off|zapret) ;;
+        zapret2) zapret2_supported || die "zapret2 is not available on this platform" ;;
+        *) die "usage: $0 set <off|zapret|zapret2>" ;;
+    esac
+    apply_mode "$m"
+    mkdir -p "$DETOUR_DIR"
+    echo "$m" > "$MODE_FILE"
+    # The bypass switch OWNS the zapret engine's boot lifecycle now — disable the
+    # standalone zapret-tpws autostart so it can't double-start on boot.
+    [ -x "$ZAPRET_INITD" ] && "$ZAPRET_INITD" disable >/dev/null 2>&1
+    log "mode persisted: $m"
+}
+
+cmd_autostart() {
+    mkdir -p "$DETOUR_DIR"
+    case "${1:-}" in
+        on)  echo 1 > "$AUTOSTART_FILE"; log "autostart enabled" ;;
+        off) echo 0 > "$AUTOSTART_FILE"; log "autostart disabled" ;;
+        *)   die "usage: $0 autostart <on|off>" ;;
+    esac
+}
+
+cmd_boot() {
+    local m a
+    m=$(cat "$MODE_FILE" 2>/dev/null);      [ -n "$m" ] || m=off
+    a=$(cat "$AUTOSTART_FILE" 2>/dev/null); [ -n "$a" ] || a=0
+    if [ "$a" = 1 ] && [ "$m" != off ]; then
+        log "boot: applying persisted mode '$m' (autostart on)"
+        apply_mode "$m"
+    else
+        log "boot: not applying (mode=$m autostart=$a)"
+    fi
+}
+
+cmd_status() {
+    local m a sup running plat strat queued
+    m=$(cat "$MODE_FILE" 2>/dev/null);      [ -n "$m" ] || m=off
+    a=$(cat "$AUTOSTART_FILE" 2>/dev/null); [ -n "$a" ] || a=0
+    sup=false; zapret2_supported && sup=true
+    running=$(running_engine)
+    plat=$([ "$KEENETIC" = 1 ] && echo keenetic || echo openwrt)
+    strat=$(head -1 "$STRATEGY_FILE" 2>/dev/null); [ -n "$strat" ] || strat="$NFQWS_STRATEGY_DEFAULT"
+    strat=$(printf '%s' "$strat" | tr -d '"\\')   # keep JSON valid (strategy normally has neither)
+    queued=$(iptables -t mangle -L ZAPRET2_MANGLE -v -n 2>/dev/null | awk '/NFQUEUE/{s+=$1} END{print s+0}')
+    [ -n "$queued" ] || queued=0
+    printf '{"mode":"%s","autostart":%s,"running":"%s","zapret2_supported":%s,"platform":"%s","qnum":%s,"queued":%s,"strategy":"%s"}\n' \
+        "$m" "$a" "$running" "$sup" "$plat" "$NFQWS_QNUM" "$queued" "$strat"
+}
+
+case "${1:-status}" in
+    set)       cmd_set "${2:-}" ;;
+    autostart) cmd_autostart "${2:-}" ;;
+    boot)      cmd_boot ;;
+    stop)      stop_all; log "engines stopped (persisted mode unchanged)" ;;  # for prerm/upgrade
+    status)    cmd_status ;;
+    mode)      cat "$MODE_FILE" 2>/dev/null || echo off ;;
+    *) echo "usage: $0 set <off|zapret|zapret2> | autostart <on|off> | boot | stop | status | mode" >&2; exit 2 ;;
+esac

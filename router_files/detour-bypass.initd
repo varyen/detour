@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# detour-bypass — boot applier for the DPI-bypass engine selection.
+#
+# Always ENABLED. On boot it runs `detour-bypass boot`, which applies the
+# persisted /etc/detour/bypass.mode ONLY when /etc/detour/bypass.autostart=1.
+# The individual engines (zapret-tpws, nfqws2) are NOT auto-started on their own —
+# detour-bypass owns that lifecycle, so exactly one (or none) ever comes up.
+#
+# START=99: run late, after network + firewall (fw4) + sing-box/zapret-tpws are
+# in place, so applying a mode can build its firewall rules cleanly.
+START=99
+STOP=10
+
+BIN=/usr/sbin/detour-bypass
+
+start() {
+    [ -x "$BIN" ] || return 0
+    "$BIN" boot
+}
+
+stop() {
+    # Leave the running engine as-is on a plain service stop; a full poweroff/reboot
+    # tears everything down anyway. Use `detour-bypass set off` to actually disable.
+    return 0
+}
+
+restart() {
+    start
+}

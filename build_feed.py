@@ -63,12 +63,26 @@ FEED_ARCH_DIR = "aarch64"  # logical feed sub-dir (one per binary arch family)
 FEED_BRANCH = "feed"
 DEFAULT_REVISION = "1"
 
-# The binaries we serve. Both are static and live under router-backup/usr/bin
+# The binaries we serve. All static and live under router-backup/usr/bin
 # (refreshed from the home router by update_backups.py):
 #   sing-box    — 1.13.x, musl-free static Go, portable across aarch64
 #   tpws-zapret — zapret tpws, aarch64 musl-static (bol-van/zapret prebuilt)
+#   nfqws2      — zapret2 nfqws2, aarch64 static (bol-van/zapret2 prebuilt) + its
+#                 3 LuaJIT desync scripts. Fetched from the pinned release below
+#                 (see fetch_nfqws2_assets) — optional engine for zapret2 mode.
 SB_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "sing-box")
 TPWS_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "tpws-zapret")
+NFQWS_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "nfqws2")
+NFQWS_LUA_DIR = os.path.join(BACKUP_HOME, "usr", "share", "detour", "lua")
+NFQWS_LUA_FILES = ("zapret-lib.lua", "zapret-antidpi.lua", "zapret-auto.lua")
+
+# zapret2 upstream release used for the nfqws2 binary + lua. Bump together with
+# the --nfqws2-version you pass to build_feed.
+ZAPRET2_REPO = "bol-van/zapret2"
+ZAPRET2_REL = "v1.0.1"
+ZAPRET2_EMBEDDED = f"https://github.com/{ZAPRET2_REPO}/releases/download/{ZAPRET2_REL}/zapret2-{ZAPRET2_REL}-openwrt-embedded.tar.gz"
+ZAPRET2_SOURCE = f"https://github.com/{ZAPRET2_REPO}/releases/download/{ZAPRET2_REL}/zapret2-{ZAPRET2_REL}.tar.gz"
+ZAPRET2_ARM64_BIN = f"zapret2-{ZAPRET2_REL}/binaries/linux-arm64/nfqws2"
 
 FEED_OUT = os.path.join(HERE, "releases", "feed", FEED_ARCH_DIR)
 
@@ -100,25 +114,52 @@ set +e
 [ -x /etc/init.d/zapret-tpws ] && /etc/init.d/zapret-tpws stop >/dev/null 2>&1
 exit 0
 """
+# nfqws2 owns its binary + lua. On (re)install, if the operator has zapret2 mode
+# selected, re-apply it so the new binary takes effect. detour-bypass lives in the
+# panel package; the calls are best-effort + silent when absent.
+_NFQWS_POSTINST = """#!/bin/sh
+set +e
+chmod 0755 /usr/bin/nfqws2 2>/dev/null
+if [ -x /usr/sbin/detour-bypass ] && [ "$(cat /etc/detour/bypass.mode 2>/dev/null)" = zapret2 ]; then
+    /usr/sbin/detour-bypass set zapret2 >/dev/null 2>&1
+fi
+exit 0
+"""
+_NFQWS_PRERM = """#!/bin/sh
+set +e
+# Stop zapret2 before replacing the busy binary; detour-bypass re-applies in postinst.
+if [ -x /usr/sbin/detour-bypass ] && [ "$(/usr/sbin/detour-bypass mode 2>/dev/null)" = zapret2 ]; then
+    /usr/sbin/detour-bypass set off >/dev/null 2>&1
+fi
+exit 0
+"""
 
-# Static package specs (binary + paths + maintainer scripts + description). The
-# version is supplied at build time.
+# Package specs: a list of (src_path, dest_rel, mode) files + maintainer scripts +
+# description. Versions are supplied at build time. Sources are populated locally
+# (sing-box/tpws by update_backups.py; nfqws2 by fetch_nfqws2_assets).
 PKG_SPECS = {
     "sing-box": {
-        "binary": SB_BINARY,
-        "install_path": "usr/bin/sing-box",
+        "files": [(SB_BINARY, "usr/bin/sing-box", 0o755)],
         "postinst": _SINGBOX_POSTINST,
         "prerm": _SINGBOX_PRERM,
         "description": ("sing-box universal proxy platform. Detour feed build for "
                         "OpenWrt/GL.iNet (the distro feed is stuck on 1.8.x)."),
     },
     "tpws-zapret": {
-        "binary": TPWS_BINARY,
-        "install_path": "usr/bin/tpws-zapret",
+        "files": [(TPWS_BINARY, "usr/bin/tpws-zapret", 0o755)],
         "postinst": _TPWS_POSTINST,
         "prerm": _TPWS_PRERM,
         "description": ("zapret tpws transparent DPI-bypass proxy (bol-van/zapret). "
                         "Detour feed build — zapret is in no opkg feed."),
+    },
+    "nfqws2": {
+        "files": [(NFQWS_BINARY, "usr/bin/nfqws2", 0o755)]
+                 + [(os.path.join(NFQWS_LUA_DIR, n), "usr/share/detour/lua/" + n, 0o644)
+                    for n in NFQWS_LUA_FILES],
+        "postinst": _NFQWS_POSTINST,
+        "prerm": _NFQWS_PRERM,
+        "description": ("zapret2 nfqws2 NFQUEUE DPI-bypass engine + LuaJIT desync "
+                        "scripts (bol-van/zapret2). Optional — used by zapret2 mode."),
     },
 }
 
@@ -148,26 +189,34 @@ def _build_control_tar_gz(pkg, version, installed_size, spec):
     return buf.getvalue()
 
 
-def _build_data_tar_gz(binary_path, install_path):
+def _build_data_tar_gz(files):
+    """files: list of (src_path, dest_rel, mode)."""
+    dirs = set()
+    for _src, dest, _mode in files:
+        parts = dest.strip("/").split("/")
+        for i in range(1, len(parts)):
+            dirs.add("/".join(parts[:i]))
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.USTAR_FORMAT) as tar:
-        # explicit parent dirs (shallowest first) so opkg can extract on a clean fs
-        parts = install_path.strip("/").split("/")
-        for i in range(1, len(parts)):
-            _add_dir_to_tar(tar, "./" + "/".join(parts[:i]) + "/")
-        _add_file_to_tar(tar, binary_path, "./" + install_path, 0o755)
+        for d in sorted(dirs):
+            _add_dir_to_tar(tar, "./" + d + "/")
+        for src, dest, mode in files:
+            _add_file_to_tar(tar, src, "./" + dest.lstrip("/"), mode)
     return buf.getvalue()
 
 
 def build_ipk(pkg, version, out_dir):
     """Assemble one package's .ipk. Returns (ipk_path, installed_size)."""
     spec = PKG_SPECS[pkg]
-    binary = spec["binary"]
-    if not os.path.isfile(binary):
-        die(f"{pkg} binary not found at {binary} — run update_backups.py first")
-    installed_size = os.path.getsize(binary)
+    files = spec["files"]
+    for src, _dest, _mode in files:
+        if not os.path.isfile(src):
+            die(f"{pkg}: source file not found: {src} "
+                + ("(run fetch_nfqws2_assets / build_feed --nfqws2-version)" if pkg == "nfqws2"
+                   else "(run update_backups.py first)"))
+    installed_size = sum(os.path.getsize(src) for src, _d, _m in files)
     control_tgz = _build_control_tar_gz(pkg, version, installed_size, spec)
-    data_tgz = _build_data_tar_gz(binary, spec["install_path"])
+    data_tgz = _build_data_tar_gz(files)
     os.makedirs(out_dir, exist_ok=True)
     ipk_path = os.path.join(out_dir, f"{pkg}_{version}_{ARCH}.ipk")
     with tarfile.open(ipk_path, "w:gz", format=tarfile.USTAR_FORMAT) as tar:
@@ -175,6 +224,42 @@ def build_ipk(pkg, version, out_dir):
         _add_bytes_to_tar(tar, "./control.tar.gz", control_tgz, 0o644)
         _add_bytes_to_tar(tar, "./data.tar.gz", data_tgz, 0o644)
     return ipk_path, installed_size
+
+
+def fetch_nfqws2_assets():
+    """Populate NFQWS_BINARY + the 3 lua files from the pinned zapret2 release.
+
+    Binary comes from the openwrt-embedded bundle (binaries/linux-arm64/nfqws2);
+    the lua scripts come from the full-source tarball (the embedded bundle ships
+    only the antidpi .gz, which is incomplete — see BYPASS_STRATEGIES.md). Cached
+    under router-backup so repeat builds skip the download."""
+    import io as _io, tarfile as _tf, urllib.request
+
+    def _get(url):
+        req = urllib.request.Request(url, headers={"User-Agent": "detour-feed"})
+        return urllib.request.urlopen(req, timeout=180).read()
+
+    os.makedirs(os.path.dirname(NFQWS_BINARY), exist_ok=True)
+    os.makedirs(NFQWS_LUA_DIR, exist_ok=True)
+
+    if not os.path.isfile(NFQWS_BINARY):
+        print(f"  fetching nfqws2 (arm64) from {ZAPRET2_REL} ...")
+        with _tf.open(fileobj=_io.BytesIO(_get(ZAPRET2_EMBEDDED)), mode="r:gz") as tf:
+            data = tf.extractfile(ZAPRET2_ARM64_BIN).read()
+        with open(NFQWS_BINARY, "wb") as f:
+            f.write(data)
+        os.chmod(NFQWS_BINARY, 0o755)
+        print(f"    -> {NFQWS_BINARY} ({len(data):,} B)")
+
+    missing = [n for n in NFQWS_LUA_FILES if not os.path.isfile(os.path.join(NFQWS_LUA_DIR, n))]
+    if missing:
+        print(f"  fetching nfqws2 lua {missing} from {ZAPRET2_REL} source ...")
+        with _tf.open(fileobj=_io.BytesIO(_get(ZAPRET2_SOURCE)), mode="r:gz") as tf:
+            for n in missing:
+                data = tf.extractfile(f"zapret2-{ZAPRET2_REL}/lua/{n}").read()
+                with open(os.path.join(NFQWS_LUA_DIR, n), "wb") as f:
+                    f.write(data)
+                print(f"    -> {os.path.join(NFQWS_LUA_DIR, n)} ({len(data):,} B)")
 
 
 def _md5_file(path):
@@ -235,9 +320,11 @@ def write_feed(build_versions, out_dir):
         print(f"  built {os.path.basename(ipk_path)}  "
               f"({os.path.getsize(ipk_path):,} B, sha256 {sha256_file(ipk_path)[:16]}...)")
 
-    # Guard: every package the panel Depends on must be present in the index.
+    # Guard: every package the panel Depends on (sing-box, tpws-zapret) must be in
+    # the index. nfqws2 is OPTIONAL (only zapret2 mode uses it) — not required.
     present = {n.split("_", 1)[0] for n in os.listdir(out_dir) if n.endswith(".ipk")}
-    for required in PKG_SPECS:
+    REQUIRED = ("sing-box", "tpws-zapret")
+    for required in REQUIRED:
         if required not in present:
             die(f"{required} .ipk missing from {out_dir}. Pass its version "
                 f"(e.g. --{'tpws-version' if required == 'tpws-zapret' else 'version'}) "
@@ -345,6 +432,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--version", help="sing-box version to build, e.g. 1.13.2")
     ap.add_argument("--tpws-version", help="tpws-zapret (zapret) version to build, e.g. 72.12")
+    ap.add_argument("--nfqws2-version", help=f"nfqws2 (zapret2) version to build, e.g. 1.0.1 "
+                    f"(fetched from {ZAPRET2_REPO}@{ZAPRET2_REL})")
     ap.add_argument("--revision", default=DEFAULT_REVISION,
                     help=f"opkg package revision suffix (default {DEFAULT_REVISION})")
     ap.add_argument("--publish", action="store_true",
@@ -356,9 +445,12 @@ def main():
         build_versions["sing-box"] = f"{parse_version(args.version, 'version')}-{args.revision}"
     if args.tpws_version:
         build_versions["tpws-zapret"] = f"{parse_version(args.tpws_version, 'tpws-version')}-{args.revision}"
+    if args.nfqws2_version:
+        fetch_nfqws2_assets()   # populate binary + lua before packaging
+        build_versions["nfqws2"] = f"{parse_version(args.nfqws2_version, 'nfqws2-version')}-{args.revision}"
 
     if not build_versions and not os.path.isdir(FEED_OUT):
-        die("nothing to build: pass --version (sing-box) and/or --tpws-version")
+        die("nothing to build: pass --version / --tpws-version / --nfqws2-version")
 
     label = ", ".join(f"{k} {v}" for k, v in build_versions.items()) or "(re-index only)"
     print(f"=== Building opkg feed: {label} ({ARCH}) ===")
