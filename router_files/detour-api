@@ -94,6 +94,32 @@ reply_json() {
     echo "Cache-Control: no-cache"
 }
 
+# Run a shell command line fully detached from this CGI's session/process group.
+#   $1        = log file (worker stdout/stderr go here)
+#   $2, $3, … = the command line (joined with spaces, parsed by `sh -c`)
+# WHY: on Keenetic the panel is a dedicated lighttpd (S51detour-panel) and THIS
+# CGI is its child. A panel-package install restarts that lighttpd in its
+# prerm/postinst, which SIGTERMs lighttpd's whole CGI subtree — including the
+# in-flight `opkg`/`detour-update` — and aborts the update half-done. setsid (or
+# start-stop-daemon -b) re-parents the worker into a NEW session so it survives
+# the panel restart. Returns immediately; the worker reports via the state file.
+detach_bg() {
+    _log="$1"; shift
+    _sh=$(command -v sh 2>/dev/null); [ -n "$_sh" ] || _sh=/bin/sh
+    # The leading sleep lets this CGI flush its HTTP response and exit before the
+    # worker tears lighttpd down. Redirect is INSIDE the string so it survives
+    # start-stop-daemon's own stdio handling (which would otherwise route to /dev/null).
+    _cmd="{ sleep 1; $*; } >$_log 2>&1"
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$_sh" -c "$_cmd" </dev/null >/dev/null 2>&1 &
+    elif command -v start-stop-daemon >/dev/null 2>&1; then
+        # BusyBox applet (always present on Entware): -b daemonizes (fork+setsid).
+        start-stop-daemon -S -b -q -x "$_sh" -- -c "$_cmd"
+    else
+        ( exec "$_sh" -c "$_cmd" </dev/null >/dev/null 2>&1 ) &
+    fi
+}
+
 # Sanitize profile name: only a-zA-Z0-9_- allowed, no path traversal
 sanitize_name() {
     echo "$1" | tr -cd 'a-zA-Z0-9_-' | head -c 64
@@ -1116,15 +1142,25 @@ panel_update_check)
     ;;
 
 panel_update_apply)
-    # Install the latest signed release straight from GitHub via opkg. The
-    # running CGI keeps its already-loaded copy, so this request still finishes.
+    # Install the latest signed release straight from GitHub via opkg.
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
-    OUT=$("$UPDATE_BIN" apply 2>&1)
-    if [ $? -eq 0 ]; then
-        json_ok
+    if [ "$PLATFORM" = "keenetic" ]; then
+        # The detour-keenetic install restarts S51detour-panel (the lighttpd that
+        # hosts this CGI), which would kill the in-flight opkg mid-install. Run it
+        # detached and answer "updating" right away; the UI polls panel_update_check
+        # (state file) and the user reloads once the panel is back.
+        detach_bg "$OPT/var/log/detour-update.log" "\"$UPDATE_BIN\" apply"
+        printf '{"ok":true,"status":"updating"}'
     else
-        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+        # OpenWrt: the panel rides the system uhttpd, which the install does NOT
+        # restart — the CGI survives, so install synchronously and report errors.
+        OUT=$("$UPDATE_BIN" apply 2>&1)
+        if [ $? -eq 0 ]; then
+            json_ok
+        else
+            json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+        fi
     fi
     ;;
 
@@ -1168,21 +1204,33 @@ panel_update_local)
     IPK=/tmp/detour-upload.ipk
     SIG=/tmp/detour-upload.ipk.sig
     if [ ! -s "$IPK" ]; then json_err "no .ipk uploaded"; exit 0; fi
+    # Pick the install command: signed via the updater (usign-verify + rollback),
+    # else a plain opkg install (operator opted out of the signature, e.g. Keenetic).
     if [ -x "$UPDATE_BIN" ] && [ -s "$SIG" ]; then
-        # Signed install: usign-verify + backup/rollback via the updater.
-        OUT=$("$UPDATE_BIN" apply-local "$IPK" 2>&1)
-        RC=$?
+        INSTALL_CMD="\"$UPDATE_BIN\" apply-local \"$IPK\""
     else
-        # No signature (or no updater, e.g. Keenetic) — install directly via opkg,
-        # without verification. The operator explicitly opted out of the signature.
-        OUT=$(opkg install --force-reinstall "$IPK" 2>&1)
-        RC=$?
+        INSTALL_CMD="opkg install --force-reinstall \"$IPK\""
     fi
-    rm -f "$IPK" "$SIG"
-    if [ "$RC" -eq 0 ]; then
-        json_ok
+    if [ "$PLATFORM" = "keenetic" ]; then
+        # Installing the panel package restarts the lighttpd hosting this CGI
+        # (see panel_update_apply) — detach so it can't kill the install mid-way.
+        # The .ipk is already fully on disk; clean it up inside the worker.
+        detach_bg "$OPT/var/log/detour-update.log" "$INSTALL_CMD; rm -f \"$IPK\" \"$SIG\""
+        printf '{"ok":true,"status":"updating"}'
     else
-        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+        if [ -x "$UPDATE_BIN" ] && [ -s "$SIG" ]; then
+            OUT=$("$UPDATE_BIN" apply-local "$IPK" 2>&1)
+            RC=$?
+        else
+            OUT=$(opkg install --force-reinstall "$IPK" 2>&1)
+            RC=$?
+        fi
+        rm -f "$IPK" "$SIG"
+        if [ "$RC" -eq 0 ]; then
+            json_ok
+        else
+            json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+        fi
     fi
     ;;
 

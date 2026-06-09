@@ -7302,8 +7302,16 @@
         try {
           var d = await api("panel_update_apply", "POST", "");
           if (d.ok) {
-            el.textContent = "Установлено. Перезагрузите страницу.";
-            toast("Панель обновлена", "success");
+            if (d.status === "updating") {
+              // Keenetic: install runs detached because it restarts the panel's
+              // web server. There's no synchronous result — tell the user to wait.
+              el.textContent =
+                "Установка запущена в фоне. Панель перезапустится — обновите страницу через ~минуту.";
+              toast("Обновление запущено", "success");
+            } else {
+              el.textContent = "Установлено. Перезагрузите страницу.";
+              toast("Панель обновлена", "success");
+            }
           } else el.textContent = "Ошибка: " + d.error;
         } catch (e) {
           el.textContent = "Ошибка: " + e.message;
@@ -7344,8 +7352,14 @@
           }
           var d = await r.json();
           if (d.ok) {
-            el.textContent = "Установлено. Перезагрузите страницу.";
-            toast("Панель обновлена из файла", "success");
+            if (d.status === "updating") {
+              el.textContent =
+                "Установка запущена в фоне. Панель перезапустится — обновите страницу через ~минуту.";
+              toast("Обновление запущено", "success");
+            } else {
+              el.textContent = "Установлено. Перезагрузите страницу.";
+              toast("Панель обновлена из файла", "success");
+            }
           } else el.textContent = "Ошибка: " + d.error;
         } catch (e) {
           el.textContent = "Ошибка: " + e.message;
