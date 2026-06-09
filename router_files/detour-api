@@ -31,6 +31,10 @@ SUBREFRESH_BIN="/usr/sbin/subscription-refresh"
 HOSTS_BIN="/usr/sbin/detour-hosts"
 LAN_IF="br-lan"
 DETOUR_DIR="/etc/detour"
+# Init action for a panel-driven manual start. On OpenWrt the rc.common `start`
+# always starts; on Keenetic boot-`start` is gated by the autostart flag, so manual
+# starts use `force-start` to start regardless (overridden in the shim below).
+SVC_START="start"
 # =================================================
 # ============ PLATFORM SHIM (OpenWrt | Keenetic/Entware) ============
 # On KeeneticOS the whole stack lives under /opt (Entware) and the firewall is
@@ -72,6 +76,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     HOSTS_BIN="$OPT/sbin/detour-hosts"
     # LAN bridge from detour.conf (assumed br0); "Все через VPN" uses iptables (no nft fw4).
     LAN_IF="br0"
+    SVC_START="force-start"   # Keenetic boot-`start` is autostart-gated; manual start bypasses it
     [ -f "$OPT/etc/detour/detour.conf" ] && . "$OPT/etc/detour/detour.conf" 2>/dev/null
     mkdir -p "$OPT/var/state" "$OPT/var/log"
 fi
@@ -92,6 +97,39 @@ json_err() { printf '{"ok":false,"error":"%s"}' "$(printf '%s' "$1" | json_escap
 reply_json() {
     echo "Content-Type: application/json"
     echo "Cache-Control: no-cache"
+}
+
+# ---- «Автозапуск» (autostart) preference ----------------------------------
+# A durable per-service flag (/etc/detour/autostart.{singbox,zapret} = 1|0), kept
+# under the state dir so it survives panel REINSTALLS and reboots. It is the single
+# source of truth for «Автозапуск» on BOTH platforms:
+#   • OpenWrt — the init.d enable/disable symlink is the boot trigger, but it gets
+#     clobbered on reinstall (postinst runs `enable`) and the proxy-guard hotplug
+#     resurrects sing-box on each WAN ifup; the postinst + guard now consult this
+#     flag instead, so a disabled service stays disabled.
+#   • Keenetic — rc.unslung boot-starts every executable S* with `start`; the S52/
+#     S53 scripts gate that `start` on this flag (manual start uses `force-start`).
+autostart_file() {   # $1 = singbox|zapret
+    echo "$DETOUR_DIR/autostart.$1"
+}
+set_autostart() {    # $1 = singbox|zapret, $2 = 1|0
+    mkdir -p "$DETOUR_DIR" 2>/dev/null
+    printf '%s\n' "$2" > "$(autostart_file "$1")" 2>/dev/null
+}
+# Resolve effective autostart state into the caller's var name ($3): the explicit
+# flag wins; absent → fall back (OpenWrt: rc.d symlink $2; Keenetic: default ON,
+# since rc.unslung boot-starts every executable S*).
+read_autostart() {   # $1 = singbox|zapret, $2 = rc.d symlink path, $3 = out var
+    local f val="false"
+    f="$(autostart_file "$1")"
+    if [ -f "$f" ]; then
+        [ "$(cat "$f" 2>/dev/null)" = "1" ] && val="true"
+    elif [ "$PLATFORM" = "keenetic" ]; then
+        val="true"
+    else
+        [ -L "$2" ] 2>/dev/null && val="true"
+    fi
+    eval "$3=$val"
 }
 
 # Run a shell command line fully detached from this CGI's session/process group.
@@ -869,7 +907,7 @@ status)
         SB_RUNNING="true"
         SB_PORT=$(netstat -tlnp 2>/dev/null | grep "$SB_PID/sing-box" | awk '{print $4}' | sed 's/.*://' | head -1)
     fi
-    [ -L /etc/rc.d/S99sing-box ] 2>/dev/null && SB_ENABLED="true"
+    read_autostart singbox /etc/rc.d/S99sing-box SB_ENABLED
 
     ALLVPN_ACTIVE="false"
     iptables -t nat -C PREROUTING -i $LAN_IF -j SINGBOX_ALLVPN 2>/dev/null && ALLVPN_ACTIVE="true"
@@ -893,7 +931,7 @@ status)
         ZP_RUNNING="true"
         ZP_PORT=$(netstat -tlnp 2>/dev/null | grep "$ZP_PID/tpws-zapret" | awk '{print $4}' | sed 's/.*://' | head -1)
     fi
-    [ -L /etc/rc.d/S98zapret-tpws ] 2>/dev/null && ZP_ENABLED="true"
+    read_autostart zapret /etc/rc.d/S98zapret-tpws ZP_ENABLED
     ZP_ARGS=""
     [ -f "$ZAPRET_CONF" ] && ZP_ARGS=$(head -1 "$ZAPRET_CONF")
     ZP_DOMAINS=0
@@ -912,6 +950,11 @@ status)
     SB_PROFILE=$(get_active_profile)
     SB_CHAIN=$(get_active_chain)
     SB_ROUTING=$(get_routing_mode)
+    # Type of the active (egress) profile, for the panel's protocol badge. Empty
+    # when no typed profile is active (e.g. bare "default") — panel hides the tag.
+    SB_TYPE=""
+    [ -f "$SINGBOX_PROFILES_DIR/$SB_PROFILE.json" ] && \
+        SB_TYPE=$(json_val "type" "$SINGBOX_PROFILES_DIR/$SB_PROFILE.json")
     SB_MODE=$(get_singbox_mode)
     SB_ROUTE_TARGETS=$(route_map_targets | grep -c . 2>/dev/null)
     [ -z "$SB_ROUTE_TARGETS" ] && SB_ROUTE_TARGETS=0
@@ -950,6 +993,7 @@ status)
     "ipset_count": $IPSET_COUNT,
     "ipset_members": "$IPSET_MEMBERS",
     "active_profile": "$SB_PROFILE",
+    "active_type": "$SB_TYPE",
         "active_chain": $(print_csv_json_array "$SB_CHAIN"),
     "routing_mode": "$SB_ROUTING",
     "singbox_mode": "$SB_MODE",
@@ -1305,11 +1349,11 @@ singbox_config)
     fi
     ;;
 
-singbox_start)  $SINGBOX_INITD start >/dev/null 2>&1; sleep 2; json_ok ;;
+singbox_start)  $SINGBOX_INITD $SVC_START >/dev/null 2>&1; sleep 2; json_ok ;;
 singbox_stop)   $SINGBOX_INITD stop >/dev/null 2>&1; sleep 1; json_ok ;;
 singbox_restart) $SINGBOX_INITD restart >/dev/null 2>&1; sleep 3; json_ok ;;
-singbox_enable) $SINGBOX_INITD enable >/dev/null 2>&1; json_ok ;;
-singbox_disable) $SINGBOX_INITD disable >/dev/null 2>&1; json_ok ;;
+singbox_enable) $SINGBOX_INITD enable >/dev/null 2>&1; set_autostart singbox 1; json_ok ;;
+singbox_disable) $SINGBOX_INITD disable >/dev/null 2>&1; set_autostart singbox 0; json_ok ;;
 
 singbox_log)
     if [ -f "$SINGBOX_LOG" ]; then
@@ -1323,11 +1367,11 @@ singbox_log)
 singbox_log_clear) > "$SINGBOX_LOG" 2>/dev/null; json_ok ;;
 
 # ==================== ZAPRET-TPWS ====================
-zapret_start)   $ZAPRET_INITD start >/dev/null 2>&1; sleep 2; json_ok ;;
+zapret_start)   $ZAPRET_INITD $SVC_START >/dev/null 2>&1; sleep 2; json_ok ;;
 zapret_stop)    $ZAPRET_INITD stop >/dev/null 2>&1; sleep 1; json_ok ;;
-zapret_restart) $ZAPRET_INITD stop >/dev/null 2>&1; sleep 1; $ZAPRET_INITD start >/dev/null 2>&1; sleep 2; json_ok ;;
-zapret_enable)  $ZAPRET_INITD enable >/dev/null 2>&1; json_ok ;;
-zapret_disable) $ZAPRET_INITD disable >/dev/null 2>&1; json_ok ;;
+zapret_restart) $ZAPRET_INITD stop >/dev/null 2>&1; sleep 1; $ZAPRET_INITD $SVC_START >/dev/null 2>&1; sleep 2; json_ok ;;
+zapret_enable)  $ZAPRET_INITD enable >/dev/null 2>&1; set_autostart zapret 1; json_ok ;;
+zapret_disable) $ZAPRET_INITD disable >/dev/null 2>&1; set_autostart zapret 0; json_ok ;;
 
 zapret_config)
     if [ "$REQUEST_METHOD" = "POST" ]; then
