@@ -4536,6 +4536,29 @@
         return r.json();
       }
 
+      // Read the response to a panel-update "apply" request tolerantly. Installing
+      // the panel package restarts the web server hosting this CGI (on Keenetic the
+      // prerm stops lighttpd), so the HTTP response can arrive empty/truncated even
+      // though the install — which runs detached — is proceeding. An empty or
+      // unparseable body therefore means "update started, panel restarting", NOT a
+      // hard error (which used to surface as «Unexpected end of JSON input»).
+      async function readApplyResponse(r) {
+        if (r.status === 401) {
+          showLogin();
+          throw new Error("Not authenticated");
+        }
+        var t = "";
+        try {
+          t = (await r.text()).trim();
+        } catch (_) {}
+        if (!t) return { ok: true, status: "updating" };
+        try {
+          return JSON.parse(t);
+        } catch (_) {
+          return { ok: true, status: "updating" };
+        }
+      }
+
       function escapeHtml(text) {
         return String(text).replace(/[&<>"']/g, function (ch) {
           return {
@@ -10388,7 +10411,12 @@
         var el = document.getElementById("upd-github-status");
         el.textContent = "Установка… (может занять до минуты)";
         try {
-          var d = await api("panel_update_apply", "POST", "");
+          var r = await fetch(API + "?action=panel_update_apply", {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: "",
+          });
+          var d = await readApplyResponse(r);
           if (d.ok) {
             if (d.status === "updating") {
               // Keenetic: install runs detached because it restarts the panel's
@@ -10402,7 +10430,12 @@
             }
           } else el.textContent = "Ошибка: " + d.error;
         } catch (e) {
-          el.textContent = "Ошибка: " + e.message;
+          // A connection reset mid-restart lands here — the install is likely
+          // already running detached, so guide the user to reload rather than
+          // showing a raw error.
+          el.textContent =
+            "Соединение прервано (панель перезапускается). Обновите страницу через ~минуту и проверьте версию.";
+          toast("Обновление, вероятно, запущено", "success");
         }
       }
       async function applyUpdateLocal() {
@@ -10442,7 +10475,7 @@
             showLogin();
             return;
           }
-          var d = await r.json();
+          var d = await readApplyResponse(r);
           if (d.ok) {
             if (d.status === "updating") {
               el.textContent =
