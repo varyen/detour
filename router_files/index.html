@@ -466,11 +466,42 @@
       .btn-update-cta:hover {
         filter: brightness(1.07);
       }
-      /* Version chip turns accent when an update is available. */
-      #panel-version.has-update {
+      /* Header version chips (panel / sing-box / zapret / zapret2). */
+      .ver-chip {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-muted);
+        border: 1px solid var(--border);
+        padding: 1px 7px;
+        border-radius: 10px;
+        margin-left: 6px;
+        cursor: pointer;
+      }
+      /* A chip blinks green while an update is available for its component. */
+      .ver-chip.has-update {
         color: var(--on-accent) !important;
-        background: var(--accent);
-        border-color: var(--accent) !important;
+        background: var(--green);
+        border-color: var(--green) !important;
+        animation: chipBlink 1.4s ease-in-out infinite;
+      }
+      @keyframes chipBlink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .ver-chip.has-update {
+          animation: none;
+        }
+      }
+      /* Muted state — component unavailable on this platform (e.g. zapret2 «н/д»). */
+      .ver-chip.chip-na {
+        opacity: 0.5;
+        font-style: italic;
       }
 
       /* ===== TOOLBAR (sub-header with admin actions) ===== */
@@ -1938,8 +1969,7 @@
           display: none;
         }
         /* Tight on space — drop the version chips (still reachable via gear menu). */
-        #panel-version,
-        #bins-version {
+        .ver-chip {
           display: none;
         }
       }
@@ -2099,33 +2129,27 @@
           >
           <span
             id="panel-version"
-            title="Версия панели — нажмите, чтобы обновить"
-            style="
-              font-size: 11px;
-              font-weight: 600;
-              color: var(--text-muted);
-              border: 1px solid var(--border);
-              padding: 1px 7px;
-              border-radius: 10px;
-              margin-left: 8px;
-              cursor: pointer;
-            "
+            class="ver-chip"
+            title="Версия панели — нажмите, чтобы проверить и обновить"
             onclick="showUpdateModal()"
           ></span>
           <span
             id="bins-version"
-            title="Версии бинарников (sing-box / tpws-zapret) — нажмите, чтобы обновить"
-            style="
-              font-size: 11px;
-              font-weight: 600;
-              color: var(--text-muted);
-              border: 1px solid var(--border);
-              padding: 1px 7px;
-              border-radius: 10px;
-              margin-left: 6px;
-              cursor: pointer;
-            "
-            onclick="showBinsModal()"
+            class="ver-chip"
+            title="sing-box — нажмите, чтобы проверить и обновить"
+            onclick="showBinsModal('singbox')"
+          ></span>
+          <span
+            id="chip-zapret"
+            class="ver-chip"
+            title="zapret (tpws) — нажмите, чтобы проверить и обновить"
+            onclick="showBinsModal('zapret')"
+          ></span>
+          <span
+            id="chip-zapret2"
+            class="ver-chip"
+            title="zapret2 (nfqws2) — нажмите, чтобы проверить и обновить"
+            onclick="showBinsModal('zapret2')"
           ></span>
         </div>
         <div class="header-right">
@@ -2717,7 +2741,9 @@
         </div>
       </div>
 
-      <!-- Update sing-box modal (sing-box from the opkg feed; tpws ships with the panel) -->
+      <!-- Engine update modal — scoped per component via showBinsModal(engine):
+           sing-box (opkg feed / Entware OPKG), zapret = tpws-zapret (feed),
+           zapret2 = nfqws2 (feed, OpenWrt only). -->
       <div
         class="modal-overlay"
         id="bins-modal"
@@ -2744,16 +2770,11 @@
               <path d="m3.3 7 8.7 5 8.7-5" />
               <path d="M12 22V12" />
             </svg>
-            Обновление бинарников
+            <span id="bins-modal-title">Обновление</span>
           </h3>
-          <p class="helper-text-block">
-            <strong>sing-box:</strong>
-            <span id="bins-sb-version">…</span> &nbsp;·&nbsp;
-            <strong>tpws-zapret:</strong> <span id="bins-tpws-version">…</span>.
-            Оба бинарника ставятся и обновляются через <code>opkg</code> из фида
-            <code>detour</code> независимо от версии панели.
-          </p>
+          <p class="helper-text-block" id="bins-modal-desc"></p>
 
+          <!-- Entware OPKG path — sing-box on Keenetic -->
           <div
             class="editor-section"
             id="bins-opkg-section"
@@ -2784,25 +2805,32 @@
             ></div>
           </div>
 
+          <!-- opkg feed path (GitHub-hosted) — sing-box / zapret / zapret2 -->
           <div
             class="editor-section"
             id="bins-feed-section"
-            style="margin-bottom: 14px"
+            style="display: none; margin-bottom: 14px"
           >
-            <h4 style="margin: 0 0 8px">Из фида opkg</h4>
-            <p class="helper-text-block">
-              sing-box ставится из нашего фида <code>detour</code> (<code
-                >opkg update &amp;&amp; opkg upgrade sing-box</code
-              >) и перезапускается автоматически.
-            </p>
+            <h4 style="margin: 0 0 8px">Из фида opkg (GitHub)</h4>
+            <p class="helper-text-block" id="bins-feed-desc"></p>
             <div class="flex-gap">
-              <button class="btn" onclick="binsCheck()">↻ Проверить</button>
-              <button class="btn primary" onclick="binsApplyFeed()">
-                ⬇ Обновить sing-box
+              <button
+                class="btn"
+                id="bins-modal-check-btn"
+                onclick="binsModalCheck()"
+              >
+                ↻ Проверить
+              </button>
+              <button
+                class="btn primary"
+                id="bins-modal-apply-btn"
+                onclick="binsModalApply()"
+              >
+                ⬇ Обновить
               </button>
             </div>
             <div
-              id="bins-github-status"
+              id="bins-modal-status"
               style="
                 font-size: 12px;
                 color: var(--text-dim);
@@ -2812,32 +2840,13 @@
             ></div>
           </div>
 
+          <!-- Unavailable note (zapret2 on Keenetic, tpws bundled with panel, …) -->
           <div
             class="editor-section"
-            id="tpws-feed-section"
-            style="margin-bottom: 14px"
+            id="bins-unavail-section"
+            style="display: none; margin-bottom: 14px"
           >
-            <h4 style="margin: 0 0 8px">tpws-zapret из фида opkg</h4>
-            <p class="helper-text-block">
-              tpws (DPI-bypass) ставится из нашего фида <code>detour</code> (<code
-                >opkg update &amp;&amp; opkg upgrade tpws-zapret</code
-              >) и перезапускается автоматически.
-            </p>
-            <div class="flex-gap">
-              <button class="btn" onclick="tpwsCheck()">↻ Проверить</button>
-              <button class="btn primary" onclick="tpwsApplyFeed()">
-                ⬇ Обновить tpws
-              </button>
-            </div>
-            <div
-              id="tpws-feed-status"
-              style="
-                font-size: 12px;
-                color: var(--text-dim);
-                margin-top: 8px;
-                min-height: 16px;
-              "
-            ></div>
+            <p class="helper-text-block" id="bins-unavail-text"></p>
           </div>
 
           <div class="modal-footer">
@@ -3162,8 +3171,10 @@
             <div id="domains-proxy-list-panel">
               <p class="helper-text-block">
                 По одной записи на строку: домены, IP-адреса, CIDR-подсети.
-                Комментарии через <code>//</code> (в начале строки или после
-                записи). Строки без точки (заголовки секций) игнорируются.
+                <code>*.host.ru</code> = все поддомены (как и просто
+                <code>host.ru</code>). Комментарии через <code>//</code> или
+                <code>#</code> (в начале строки или после записи). Строки без
+                точки (заголовки секций) игнорируются.
               </p>
               <textarea
                 class="domains"
@@ -3174,10 +3185,10 @@
             </div>
             <div id="domains-all-except-panel" style="display: none">
               <p class="helper-text-block">
-                Сайты-исключения: домены, IP-адреса и подсети из этого списка
-                <strong>НЕ</strong> будут проксироваться. Весь остальной трафик
-                пойдёт через VPN. Комментарии через <code>//</code> или
-                <code>#</code>.
+                Сайты-исключения: домены, <code>*.поддомены</code>, IP-адреса и
+                подсети из этого списка <strong>НЕ</strong> будут проксироваться.
+                Весь остальной трафик пойдёт через VPN. Комментарии через
+                <code>//</code> или <code>#</code>.
               </p>
               <textarea
                 class="domains"
@@ -3263,8 +3274,8 @@
 
             <p class="helper-text-block">
               Правила: выбери профиль, нажми «Добавить секцию», затем впиши
-              домены / IP / CIDR (по одному на строку) — как в обычном списке
-              доменов. Каждая секция начинается заголовком
+              домены / <code>*.поддомены</code> / IP / CIDR (по одному на строку)
+              — как в обычном списке доменов. Каждая секция начинается заголовком
               <code>// === route:ID ===</code>. Хосты из правил автоматически
               попадают в проксируемый набор.
             </p>
@@ -3352,7 +3363,9 @@
             <p class="helper-text-block">
               Эти домены идут НАПРЯМУЮ через WAN с DPI-трюками (минуя sing-box
               VLESS). Полезно для YouTube/Discord/LinkedIn без удалённого
-              прокси, и для проверки tpws-пресета на конкретных сайтах.
+              прокси, и для проверки tpws-пресета на конкретных сайтах. Форматы:
+              домены, <code>*.поддомены</code>, IP, CIDR; комментарии
+              <code>//</code> и <code>#</code>.
             </p>
             <textarea
               class="domains"
@@ -9780,7 +9793,8 @@
           var line = lines[i]
             .replace(/\/\/.*/, "")
             .replace(/#.*/, "")
-            .trim();
+            .trim()
+            .replace(/^\*\./, "");
           if (!line) continue;
           if (/^\d+\.\d+\.\d+\.\d+\/\d+$/.test(line)) cidrs++;
           else if (/^\d+\.\d+\.\d+\.\d+$/.test(line)) ips++;
@@ -10251,27 +10265,46 @@
       // fresh release is available. Reads the CACHED update state (no GitHub call):
       // the 6h auto-check cron or a manual «Проверить» refreshes it. status values:
       // "update_available" | "up_to_date" | "error" | "unknown".
+      // Header chip ids keyed by the updates_overview component name.
+      var UPDATE_CHIP_IDS = {
+        panel: "panel-version",
+        singbox: "bins-version",
+        tpws: "chip-zapret",
+        nfqws2: "chip-zapret2",
+      };
+      // Poll the combined update overview (cached state written by the 6h
+      // `detour-update check-all` cron) and blink any chip with a pending update.
       async function refreshUpdateIndicator() {
         var btn = document.getElementById("hdr-update-btn");
-        var chip = document.getElementById("panel-version");
         try {
-          var d = await api("panel_update_status");
-          var avail = !!(d && d.status === "update_available");
+          var d = await api("updates_overview");
+          var panel = (d && d.panel) || {};
+          var avail = !!panel.update_available;
           if (btn) {
             btn.style.display = avail ? "" : "none";
             var lbl = document.getElementById("hdr-update-label");
             if (lbl)
               lbl.textContent =
-                avail && d.available_version
+                avail && panel.available_version
                   ? "Обновить до v" +
-                    String(d.available_version).replace(/^v/, "")
+                    String(panel.available_version).replace(/^v/, "")
                   : "Обновить панель";
           }
-          if (chip) chip.classList.toggle("has-update", avail);
+          Object.keys(UPDATE_CHIP_IDS).forEach(function (key) {
+            var el = document.getElementById(UPDATE_CHIP_IDS[key]);
+            if (!el) return;
+            el.classList.toggle(
+              "has-update",
+              !!(d && d[key] && d[key].update_available),
+            );
+          });
         } catch (e) {
           // offline / not authed — keep the CTA hidden, never block the UI.
           if (btn) btn.style.display = "none";
-          if (chip) chip.classList.remove("has-update");
+          Object.keys(UPDATE_CHIP_IDS).forEach(function (key) {
+            var el = document.getElementById(UPDATE_CHIP_IDS[key]);
+            if (el) el.classList.remove("has-update");
+          });
         }
       }
 
@@ -10430,48 +10463,224 @@
       // ===== BINARIES (sing-box + tpws-zapret) UPDATE =====
       var lastBinaries = null;
       var currentPlatform = "openwrt"; // "keenetic" → sing-box comes from opkg
-      function renderBinariesChip(b) {
-        lastBinaries = b || null;
-        var el = document.getElementById("bins-version");
+
+      // Engine config shared by the header version chips + the update modal.
+      // Each maps to an opkg feed package; detour-update / detour-api expose the
+      // matching <engine>_update_check / _apply actions.
+      var BINS_ENGINES = {
+        singbox: {
+          label: "sing-box",
+          chipId: "bins-version",
+          chipPrefix: "sb ",
+          presentKey: "singbox_present",
+          verKey: "singbox_version",
+          checkAction: "bins_update_check",
+          applyAction: "bins_update_apply",
+          applyLabel: "⬇ Обновить sing-box",
+          feedDesc:
+            "sing-box ставится из нашего фида <code>detour</code> " +
+            "(<code>opkg update &amp;&amp; opkg upgrade sing-box</code>) и " +
+            "перезапускается автоматически.",
+          keeneticOpkg: true, // Keenetic: sing-box from Entware (sing-box-go)
+        },
+        zapret: {
+          label: "zapret (tpws)",
+          chipId: "chip-zapret",
+          chipPrefix: "zapret ",
+          presentKey: "tpws_present",
+          verKey: "tpws_version",
+          checkAction: "tpws_update_check",
+          applyAction: "tpws_update_apply",
+          applyLabel: "⬇ Обновить zapret",
+          feedDesc:
+            "zapret (tpws DPI-bypass) ставится из нашего фида <code>detour</code> " +
+            "(<code>opkg update &amp;&amp; opkg upgrade tpws-zapret</code>) и " +
+            "перезапускается автоматически.",
+          keeneticBundled: true, // Keenetic: tpws bundled in the panel package
+        },
+        zapret2: {
+          label: "zapret2 (nfqws2)",
+          chipId: "chip-zapret2",
+          chipPrefix: "zapret2 ",
+          presentKey: "nfqws2_present",
+          verKey: "nfqws2_version",
+          checkAction: "nfqws2_update_check",
+          applyAction: "nfqws2_update_apply",
+          applyLabel: "⬇ Обновить zapret2",
+          feedDesc:
+            "zapret2 (nfqws2 NFQUEUE DPI-bypass) ставится из нашего фида " +
+            "<code>detour</code> (<code>opkg update &amp;&amp; opkg upgrade nfqws2</code>) " +
+            "и перезапускается автоматически.",
+          openwrtOnly: true, // needs NFQUEUE — OpenWrt only (not KeeneticOS)
+        },
+      };
+      var binsModalEngine = "singbox"; // engine currently shown in the modal
+
+      // zapret2 is supported only on OpenWrt with NFQUEUE (the CGI reports this as
+      // binaries.nfqws2_supported; false on Keenetic / mipsel — no feed there).
+      function zapret2Supported(b) {
+        return currentPlatform !== "keenetic" && (b || {}).nfqws2_supported !== false;
+      }
+
+      // Render one engine chip: version when installed, «н/д» when unsupported,
+      // «—» when supported but not yet installed. sing-box is mandatory → red warn.
+      function renderEngineChip(engine, b) {
+        var cfg = BINS_ENGINES[engine];
+        var el = document.getElementById(cfg.chipId);
         if (!el) return;
-        if (!b) {
-          el.textContent = "";
+        el.classList.remove("chip-na");
+        el.style.color = "";
+        el.style.borderColor = "";
+        if (engine === "zapret2" && !zapret2Supported(b)) {
+          el.textContent = "zapret2 н/д";
+          el.classList.add("chip-na");
           return;
         }
-        if (!b.singbox_present) {
-          el.textContent = "⚠ нет бинарников";
-          el.style.color = "var(--red)";
-          el.style.borderColor = "var(--red)";
-        } else {
-          el.textContent = "sb " + (b.singbox_version || "?");
-          el.style.color = "";
-          el.style.borderColor = "";
+        if (!b[cfg.presentKey]) {
+          if (engine === "singbox") {
+            el.textContent = "⚠ нет sing-box";
+            el.style.color = "var(--red)";
+            el.style.borderColor = "var(--red)";
+          } else {
+            el.textContent = cfg.chipPrefix + "—";
+            el.classList.add("chip-na");
+          }
+          return;
         }
+        el.textContent = cfg.chipPrefix + (b[cfg.verKey] || "?");
       }
-      function showBinsModal() {
-        document.getElementById("bins-modal").style.display = "flex";
+
+      function renderBinariesChip(b) {
+        lastBinaries = b || null;
+        if (!b) {
+          ["bins-version", "chip-zapret", "chip-zapret2"].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) {
+              el.textContent = "";
+              el.classList.remove("chip-na", "has-update");
+            }
+          });
+          return;
+        }
+        renderEngineChip("singbox", b);
+        renderEngineChip("zapret", b);
+        renderEngineChip("zapret2", b);
+      }
+
+      // Open the generalized update modal scoped to one engine.
+      function showBinsModal(engine) {
+        engine = BINS_ENGINES[engine] ? engine : "singbox";
+        binsModalEngine = engine;
+        var cfg = BINS_ENGINES[engine];
         var b = lastBinaries || {};
-        document.getElementById("bins-sb-version").textContent =
-          b.singbox_present ? b.singbox_version || "?" : "не установлен";
-        document.getElementById("bins-tpws-version").textContent = b.tpws_present
-          ? b.tpws_version || "?"
-          : "не установлен";
-        document.getElementById("bins-github-status").textContent = "";
-        var tps = document.getElementById("tpws-feed-status");
-        if (tps) tps.textContent = "";
-        // Keenetic pulls sing-box from the Entware feed; OpenWrt from our opkg
-        // feed. tpws comes from our feed on OpenWrt, but is bundled with the panel
-        // on Keenetic — so hide its feed section there.
         var isKeen = currentPlatform === "keenetic";
+
+        document.getElementById("bins-modal").style.display = "flex";
+        document.getElementById("bins-modal-title").textContent =
+          "Обновление: " + cfg.label;
+        var present = !!b[cfg.presentKey];
+        var ver = present ? b[cfg.verKey] || "?" : "не установлен";
+        document.getElementById("bins-modal-desc").innerHTML =
+          "<strong>" + escapeHtml(cfg.label) + ":</strong> " + escapeHtml(ver) + ".";
+
         var opkgSec = document.getElementById("bins-opkg-section");
-        if (opkgSec) opkgSec.style.display = isKeen ? "block" : "none";
         var feedSec = document.getElementById("bins-feed-section");
-        if (feedSec) feedSec.style.display = isKeen ? "none" : "block";
-        var tpwsSec = document.getElementById("tpws-feed-section");
-        if (tpwsSec) tpwsSec.style.display = isKeen ? "none" : "block";
+        var naSec = document.getElementById("bins-unavail-section");
+        opkgSec.style.display = "none";
+        feedSec.style.display = "none";
+        naSec.style.display = "none";
+        document.getElementById("bins-modal-status").textContent = "";
         var os = document.getElementById("bins-opkg-status");
         if (os) os.textContent = "";
+
+        // zapret2 where NFQUEUE is unavailable → unsupported note, no actions.
+        if (engine === "zapret2" && !zapret2Supported(b)) {
+          naSec.style.display = "block";
+          document.getElementById("bins-unavail-text").innerHTML =
+            "zapret2 (nfqws2) использует NFQUEUE и доступен только на OpenWrt. " +
+            "На этой платформе он не поддерживается.";
+          return;
+        }
+        // sing-box on Keenetic → Entware OPKG path (sing-box-go).
+        if (isKeen && cfg.keeneticOpkg) {
+          opkgSec.style.display = "block";
+          return;
+        }
+        // tpws bundled with the panel on Keenetic → update with the panel.
+        if (isKeen && cfg.keeneticBundled) {
+          naSec.style.display = "block";
+          document.getElementById("bins-unavail-text").innerHTML =
+            "На этой платформе zapret (tpws) входит в пакет панели и обновляется " +
+            "вместе с ней — откройте «Версия панели», чтобы обновить.";
+          return;
+        }
+        // OpenWrt: opkg feed path (sing-box / zapret / zapret2).
+        feedSec.style.display = "block";
+        document.getElementById("bins-feed-desc").innerHTML = cfg.feedDesc;
+        document.getElementById("bins-modal-apply-btn").textContent = cfg.applyLabel;
       }
+
+      // Check the feed for a newer version of the modal's current engine.
+      async function binsModalCheck() {
+        var cfg = BINS_ENGINES[binsModalEngine];
+        var el = document.getElementById("bins-modal-status");
+        el.textContent = "Проверка…";
+        try {
+          var d = await api(cfg.checkAction, "POST", "");
+          if (d && d.current && d.available) {
+            var has =
+              d.available !== d.current &&
+              d.available !== "?" &&
+              d.available !== "n/a";
+            el.textContent =
+              "Текущая: " +
+              d.current +
+              " · доступна: " +
+              d.available +
+              (has ? " — есть обновление" : " — актуально");
+          } else {
+            el.textContent =
+              (d && d.status ? d.status + ": " : "") +
+              ((d && d.message) || JSON.stringify(d));
+          }
+        } catch (e) {
+          el.textContent = "Ошибка: " + e.message;
+        }
+      }
+
+      // Apply (opkg upgrade) the modal's current engine from the feed.
+      async function binsModalApply() {
+        var cfg = BINS_ENGINES[binsModalEngine];
+        if (
+          !confirm(
+            "Обновить " +
+              cfg.label +
+              " из фида opkg?\n\nopkg update + upgrade, затем перезапуск сервиса " +
+              "(кратковременный обрыв связи).",
+          )
+        )
+          return;
+        var el = document.getElementById("bins-modal-status");
+        var btn = document.getElementById("bins-modal-apply-btn");
+        if (btn) btn.disabled = true;
+        el.textContent = "opkg update + upgrade… (может занять минуту)";
+        try {
+          var d = await api(cfg.applyAction, "POST", "");
+          if (d && d.ok) {
+            el.textContent = "Установлено.";
+            toast(cfg.label + " обновлён", "success");
+            await loadStatus();
+            refreshUpdateIndicator();
+          } else {
+            el.textContent = "Ошибка: " + ((d && d.error) || "не удалось обновить");
+          }
+        } catch (e) {
+          el.textContent = "Ошибка: " + e.message;
+        } finally {
+          if (btn) btn.disabled = false;
+        }
+      }
+
       async function singboxOpkgUpgrade() {
         if (
           !confirm(
@@ -10504,92 +10713,6 @@
       }
       function closeBinsModal() {
         document.getElementById("bins-modal").style.display = "none";
-      }
-      async function binsCheck() {
-        var el = document.getElementById("bins-github-status");
-        el.textContent = "Проверка…";
-        try {
-          var d = await api("bins_update_check", "POST", "");
-          if (d.current && d.available) {
-            el.textContent =
-              "Текущая: v" +
-              d.current +
-              " · доступна: v" +
-              d.available +
-              (d.available !== d.current
-                ? " — есть обновление"
-                : " — актуально");
-          } else {
-            el.textContent =
-              (d.status ? d.status + ": " : "") +
-              (d.message || JSON.stringify(d));
-          }
-        } catch (e) {
-          el.textContent = "Ошибка: " + e.message;
-        }
-      }
-      async function binsApplyFeed() {
-        if (
-          !confirm(
-            "Обновить sing-box из фида opkg?\n\nopkg update + upgrade sing-box, затем перезапуск сервиса (кратковременный обрыв связи).",
-          )
-        )
-          return;
-        var el = document.getElementById("bins-github-status");
-        el.textContent = "opkg update + upgrade… (может занять минуту)";
-        try {
-          var d = await api("bins_update_apply", "POST", "");
-          if (d.ok) {
-            el.textContent = "Установлено.";
-            toast("sing-box обновлён", "success");
-            loadStatus();
-          } else el.textContent = "Ошибка: " + d.error;
-        } catch (e) {
-          el.textContent = "Ошибка: " + e.message;
-        }
-      }
-      async function tpwsCheck() {
-        var el = document.getElementById("tpws-feed-status");
-        el.textContent = "Проверка…";
-        try {
-          var d = await api("tpws_update_check", "POST", "");
-          if (d.current && d.available) {
-            el.textContent =
-              "Текущая: " +
-              d.current +
-              " · доступна: " +
-              d.available +
-              (d.available !== d.current
-                ? " — есть обновление"
-                : " — актуально");
-          } else {
-            el.textContent =
-              (d.status ? d.status + ": " : "") +
-              (d.message || JSON.stringify(d));
-          }
-        } catch (e) {
-          el.textContent = "Ошибка: " + e.message;
-        }
-      }
-      async function tpwsApplyFeed() {
-        if (
-          !confirm(
-            "Обновить tpws-zapret из фида opkg?\n\nopkg update + upgrade tpws-zapret, затем перезапуск zapret-tpws (кратковременный обрыв DPI-обхода).",
-          )
-        )
-          return;
-        var el = document.getElementById("tpws-feed-status");
-        el.textContent = "opkg update + upgrade… (может занять минуту)";
-        try {
-          var d = await api("tpws_update_apply", "POST", "");
-          if (d.ok) {
-            el.textContent = "Установлено.";
-            toast("tpws-zapret обновлён", "success");
-            loadStatus();
-          } else el.textContent = "Ошибка: " + d.error;
-        } catch (e) {
-          el.textContent = "Ошибка: " + e.message;
-        }
       }
 
       // ===== DPI-BYPASS ENGINE SWITCH (off | zapret | zapret2) =====

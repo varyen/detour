@@ -19,7 +19,8 @@
 #
 # Subcommands:
 #   check                  — query GH for latest PANEL tag; write state file
-#   autocheck on|off|status — toggle the unattended 6h auto-check cron (default off)
+#   check-all              — one tick: panel + sing-box + tpws + nfqws2 checks (cron)
+#   autocheck on|off|status — toggle the unattended 6h auto-check cron (default on)
 #   apply                  — ensure feed+sing-box, then install latest panel release
 #   apply-local <ipk>      — install a panel .ipk already on disk (verifies sig)
 #   bins-check             — opkg-check whether a newer sing-box is in the feed
@@ -28,6 +29,9 @@
 #   tpws-check             — opkg-check whether a newer tpws-zapret is in the feed
 #   tpws-apply             — opkg update + upgrade tpws-zapret from the feed
 #   tpws-status            — print the tpws-zapret update state file
+#   nfqws2-check           — opkg-check whether a newer nfqws2 (zapret2) is in the feed
+#   nfqws2-apply           — opkg update + upgrade nfqws2 from the feed
+#   nfqws2-status          — print the nfqws2 (zapret2) update state file
 #   rollback               — re-install the previous panel .ipk from backup
 #   status                 — print panel state file
 #   selftest               — usign / opkg / pinned-key sanity check
@@ -53,8 +57,10 @@ LOG_TAG=detour-update
 PACKAGE_NAME=detour
 SINGBOX_PKG=sing-box
 TPWS_PKG=tpws-zapret
-BINS_STATE_FILE=/var/state/detour-bins.json   # sing-box update state (panel reads this path)
-TPWS_STATE_FILE=/var/state/detour-tpws.json   # tpws-zapret update state (panel reads this path)
+NFQWS2_PKG=nfqws2
+BINS_STATE_FILE=/var/state/detour-bins.json     # sing-box update state (panel reads this path)
+TPWS_STATE_FILE=/var/state/detour-tpws.json     # tpws-zapret update state (panel reads this path)
+NFQWS2_STATE_FILE=/var/state/detour-nfqws2.json # nfqws2 (zapret2) update state (panel reads this)
 # Self-hosted opkg feed serving sing-box. Keep in sync with build_release.py
 # (FEED_LINE) and deploy_router.py.
 FEED_NAME=detour
@@ -70,7 +76,7 @@ ARCH=all
 GH_OWNER=varyen
 GH_REPO=detour
 GH_TOKEN=""
-AUTO_CHECK=0          # opt-in: 6h cron auto-check (default off). Toggle via `autocheck on|off`.
+AUTO_CHECK=1          # 6h cron auto-check (default on). Opt out via `autocheck off` or AUTO_CHECK=0.
 
 # GitHub release asset name patterns — OpenWrt panel by default. Keenetic uses the
 # separate detour-keenetic_*.ipk asset (overridden in the platform shim below).
@@ -96,6 +102,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     BACKUP_DIR=/opt/var/detour-backup
     BINS_STATE_FILE=/opt/var/state/detour-bins.json
     TPWS_STATE_FILE=/opt/var/state/detour-tpws.json
+    NFQWS2_STATE_FILE=/opt/var/state/detour-nfqws2.json
     PACKAGE_NAME=detour-keenetic
     ASSET_RE='^detour-keenetic_.*\.ipk$'
     ASSET_SIG_RE='^detour-keenetic_.*\.ipk\.sig$'
@@ -111,12 +118,14 @@ fi
 [ -n "$GH_OWNER" ] || GH_OWNER=varyen
 [ -n "$GH_REPO" ] || GH_REPO=detour
 
-# The 6h self-update auto-check cron is OPT-IN. The manual panel "Проверить"
-# button and `detour-update check` always work regardless of this — only the
-# unattended cron tick is gated.
-CHECK_CRON_LINE="0 */6 * * * /usr/sbin/detour-update check >/var/log/detour-update.log 2>&1"
+# The 6h auto-check cron runs `check-all` (panel + sing-box + tpws + nfqws2) so
+# the panel can light up any stale version chip. The manual panel "Проверить"
+# buttons and `detour-update check` always work regardless of this cron — only the
+# unattended tick is gated. CHECK_CRON_MATCH stays "detour-update check" so it also
+# matches the legacy `check` line (a substring of `check-all`) for clean removal.
+CHECK_CRON_LINE="0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
 CHECK_CRON_MATCH="detour-update check"
-[ "$KEENETIC" = 1 ] && CHECK_CRON_LINE="0 */6 * * * /opt/sbin/detour-update check >/opt/var/log/detour-update.log 2>&1"
+[ "$KEENETIC" = 1 ] && CHECK_CRON_LINE="0 */6 * * * /opt/sbin/detour-update check-all >/opt/var/log/detour-update.log 2>&1"
 
 log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null; echo "[$LOG_TAG] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -463,6 +472,85 @@ cmd_tpws_apply() {
     log "tpws-zapret now at $(tpws_installed_version)"
 }
 
+# ---- nfqws2 / zapret2 (opkg feed) helpers ----
+# zapret2 ships as the `nfqws2` feed package (aarch64, OpenWrt only — KeeneticOS
+# lacks NFQUEUE so the binary is never shipped there). Mirrors the sing-box/tpws
+# feed flow; the nfqws2 package's own postinst re-applies zapret2 mode after an
+# upgrade, so no service restart is needed here.
+
+# Installed nfqws2 version per opkg ("" if not opkg-owned / not installed).
+nfqws2_installed_version() {
+    opkg list-installed "$NFQWS2_PKG" 2>/dev/null | awk '{print $3}' | head -1
+}
+
+# Version opkg would upgrade nfqws2 TO ("" = nothing newer than installed).
+nfqws2_upgrade_version() {
+    opkg list-upgradable 2>/dev/null | awk -v p="$NFQWS2_PKG" '$1==p {print $NF; exit}'
+}
+
+# Write the nfqws2 update-state file the panel reads (same shape as bins/tpws).
+write_nfqws2_state() {
+    local cur="$1" avail="$2" now
+    now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+    mkdir -p "$(dirname "$NFQWS2_STATE_FILE")"
+    cat > "$NFQWS2_STATE_FILE" <<EOF
+{"current":"$cur","available":"$avail","asset":"$NFQWS2_PKG","last_check":"$now"}
+EOF
+}
+
+cmd_nfqws2_check() {
+    if [ "$KEENETIC" = 1 ]; then
+        write_nfqws2_state "n/a" "n/a"
+        log "zapret2 (nfqws2) not supported on Keenetic (no NFQUEUE) — no feed check"
+        return 0
+    fi
+    log "checking the opkg feed for a newer nfqws2 (zapret2)..."
+    ensure_feed
+    opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
+    local cur avail
+    cur=$(nfqws2_installed_version); [ -n "$cur" ] || cur="0.0.0"
+    avail=$(nfqws2_upgrade_version); [ -n "$avail" ] || avail="$cur"
+    write_nfqws2_state "$cur" "$avail"
+    if [ "$cur" != "$avail" ]; then
+        log "nfqws2 update available: $cur -> $avail"
+    else
+        log "nfqws2 up to date ($cur)"
+    fi
+}
+
+cmd_nfqws2_apply() {
+    [ "$KEENETIC" = 1 ] && die "zapret2 (nfqws2) is not supported on Keenetic (no NFQUEUE)"
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    ensure_feed
+    log "opkg update + upgrade nfqws2 from the feed..."
+    opkg update >/dev/null 2>&1 || die "opkg update failed (feed unreachable?)"
+    if opkg list-installed "$NFQWS2_PKG" 2>/dev/null | grep -q "^$NFQWS2_PKG "; then
+        # `opkg upgrade` no-ops if already newest; fall back to a forced install.
+        opkg upgrade "$NFQWS2_PKG" 2>&1 \
+            || opkg install --force-overwrite "$NFQWS2_PKG" 2>&1 \
+            || die "opkg upgrade nfqws2 failed"
+    else
+        opkg install --force-overwrite "$NFQWS2_PKG" 2>&1 \
+            || die "opkg install nfqws2 failed"
+    fi
+    cmd_nfqws2_check >/dev/null 2>&1 || true
+    log "nfqws2 now at $(nfqws2_installed_version)"
+}
+
+# check-all — one cron tick: panel + all three feed binaries. Each runs in a
+# subshell so a failure (feed unreachable, gh_assets `exit 1`, `die`) isolates to
+# that component and never aborts the rest. The 6h auto-check cron calls this so
+# the panel can light up any stale version chip from the written state files.
+cmd_check_all() {
+    ( cmd_check )        || log "check-all: panel check failed"
+    ( cmd_bins_check )   || log "check-all: sing-box check failed"
+    ( cmd_tpws_check )   || log "check-all: tpws check failed"
+    ( cmd_nfqws2_check ) || log "check-all: nfqws2 check failed"
+    return 0
+}
+
 cmd_apply() {
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
@@ -614,6 +702,7 @@ cmd_autocheck() {
 ACTION="${1:-help}"
 case "$ACTION" in
     check)             cmd_check ;;
+    check-all)         cmd_check_all ;;
     autocheck)         cmd_autocheck "${2:-status}" ;;
     apply)             cmd_apply ;;
     apply-local)       cmd_apply_local "${2:-}" ;;
@@ -623,6 +712,9 @@ case "$ACTION" in
     tpws-check)        cmd_tpws_check ;;
     tpws-apply)        cmd_tpws_apply ;;
     tpws-status)       cat "$TPWS_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
+    nfqws2-check)      cmd_nfqws2_check ;;
+    nfqws2-apply)      cmd_nfqws2_apply ;;
+    nfqws2-status)     cat "$NFQWS2_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
     rollback)          cmd_rollback ;;
     status)            cmd_status ;;
     selftest)          cmd_selftest ;;

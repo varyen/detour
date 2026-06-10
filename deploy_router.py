@@ -365,7 +365,7 @@ def step_auth(ssh, cfg, reset=False):
     print(f"  auth set: user={panel_user}, pass={panel_pass}")
 
 
-def step_updater(ssh, cfg, global_cfg, enable_autocheck=False):
+def step_updater(ssh, cfg, global_cfg, enable_autocheck=True):
     """Install the self-update infrastructure on the router.
 
     Components:
@@ -373,11 +373,12 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=False):
         /etc/detour/release.usign.pub     — pinned usign public key
         /etc/detour/update.conf           — GH owner/repo/token + AUTO_CHECK flag
         /etc/detour/version               — current version marker
-        /etc/crontabs/root entry               — 6h auto-check (OPT-IN, default off)
+        /etc/crontabs/root entry               — 6h check-all auto-check (default on)
 
-    The unattended 6h auto-check cron is only installed when enable_autocheck is
-    True (--enable-autocheck). By default it's off and AUTO_CHECK=0 is recorded so
-    the panel toggle and the .ipk postinst agree on the state.
+    The unattended 6h auto-check cron runs `detour-update check-all` (panel +
+    sing-box + tpws + nfqws2) and is ON by default; pass enable_autocheck=False
+    (--no-autocheck) to skip it. AUTO_CHECK is recorded so the panel toggle and the
+    .ipk postinst agree on the state.
     """
     step("Installing self-update infrastructure")
 
@@ -426,7 +427,7 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=False):
         f"GH_OWNER={gh_owner}",
         f"GH_REPO={gh_repo}",
         f"GH_TOKEN={gh_token}",
-        # Unattended 6h auto-check cron: opt-in (default off). Panel toggles this.
+        # Unattended 6h auto-check cron: ON by default. Panel toggles this.
         f"AUTO_CHECK={'1' if enable_autocheck else '0'}",
         "",
     ]
@@ -447,9 +448,9 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=False):
         out, _, _ = exec_cmd(ssh, "cat /etc/detour/version")
         print(f"  /etc/detour/version: {out.strip()} (kept)")
 
-    # 5. Cron: 6h auto-check — OPT-IN (default off). Strip any stale entry first,
-    #    then re-add only when explicitly enabled (panel toggle does the same).
-    cron_line = "0 */6 * * * /usr/sbin/detour-update check >/var/log/detour-update.log 2>&1"
+    # 5. Cron: 6h check-all auto-check (panel + sing-box + tpws + nfqws2) — ON by
+    #    default. Strip any stale entry first, then re-add unless --no-autocheck.
+    cron_line = "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
     if enable_autocheck:
         exec_cmd(
             ssh,
@@ -460,7 +461,7 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=False):
         exec_cmd(ssh, "crontab -l 2>/dev/null | grep -v 'detour-update' | crontab - 2>/dev/null")
     exec_cmd(ssh, "/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1")
     out, _, _ = exec_cmd(ssh, "crontab -l 2>/dev/null | grep detour-update")
-    print(f"  cron auto-check: {out.strip() or 'disabled (opt-in: --enable-autocheck / panel toggle)'}")
+    print(f"  cron auto-check: {out.strip() or 'disabled (--no-autocheck / panel toggle)'}")
 
     # 6. Subscription auto-refresh helper (Lua) + multi-subscription storage dir.
     sub_refresh_local = os.path.join(ROUTER_FILES, "subscription-refresh")
@@ -555,8 +556,11 @@ def main():
     ap.add_argument("--skip-binaries", action="store_true")
     ap.add_argument("--reset-panel-auth", action="store_true")
     ap.add_argument("--enable-autocheck", action="store_true",
-                    help="enable the unattended 6h self-update auto-check cron "
-                         "(default: off — only manual 'Проверить' in the panel)")
+                    help="(deprecated; auto-check is on by default) no-op — kept "
+                         "for back-compat")
+    ap.add_argument("--no-autocheck", action="store_true",
+                    help="skip the unattended 6h check-all auto-check cron "
+                         "(default: on — panel + sing-box + tpws + nfqws2)")
     args = ap.parse_args()
 
     cfg = load_router(args.router)
@@ -577,7 +581,7 @@ def main():
     step_panel(ssh)
     step_hosts(ssh)
     step_auth(ssh, cfg, reset=args.reset_panel_auth)
-    step_updater(ssh, cfg, global_cfg, enable_autocheck=args.enable_autocheck)
+    step_updater(ssh, cfg, global_cfg, enable_autocheck=not args.no_autocheck)
     step_hotplug_guard(ssh)
     step_enable_services(ssh)
     step_verify(ssh, cfg["host"])

@@ -40,6 +40,7 @@ setup_domains_file() {
         awk -v ipset="$IPSET_NAME" -v dnsmasq="$dnsmasq_conf" -v iptmp="$ipset_tmp" '
         {
             sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+            sub(/^\*\./, "")   # *.host.ru -> host.ru (dnsmasq ipset matches subdomains)
             if ($0 == "") next
             if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) {
                 print "add " ipset " " $0 >> iptmp; next
@@ -57,10 +58,28 @@ resolve_domains() {
     [ -f "$DOMAINS_FILE" ] || return
     awk '{
         sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+        sub(/^\*\./, "")
         if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) print $0
     }' "$DOMAINS_FILE" | while IFS= read -r d; do
         nslookup "$d" 127.0.0.1 >/dev/null 2>&1 &
     done
+}
+
+# Drop conntrack entries for every IP/CIDR in the given ipset(s). The nat
+# PREROUTING verdict (REDIRECT vs direct) is cached in conntrack per connection,
+# so a flow opened BEFORE its dst IP entered the set keeps the old route for
+# hours (keep-alive refreshes the entry). No conntrack tool -> skip; entries
+# expire on their own eventually.
+flush_ipset_conntrack() {
+    command -v conntrack >/dev/null 2>&1 || return 0
+    local set ip
+    for set in "$@"; do
+        ipset list "$set" 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | \
+        while read -r ip; do
+            [ -n "$ip" ] && conntrack -D -d "$ip" >/dev/null 2>&1
+        done
+    done
+    return 0
 }
 
 open_port_lan() {
@@ -111,6 +130,13 @@ add_rules() {
         iptables -t nat -D PREROUTING -i "$VIF" -j ZAPRET_REDIRECT 2>/dev/null
         iptables -t nat -I PREROUTING 1 -i "$VIF" -j ZAPRET_REDIRECT
     done
+
+    # Flows opened before their dst IP entered the set are still pinned to the
+    # old route (often sing-box) in conntrack — drop them AFTER the REDIRECT is
+    # in place so the next packet re-routes here. sleep lets the async
+    # resolve_domains lookups land in the ipset first.
+    sleep 1
+    flush_ipset_conntrack "$IPSET_NAME"
 }
 
 del_rules() {
@@ -123,6 +149,10 @@ del_rules() {
     iptables -t nat -X ZAPRET_REDIRECT 2>/dev/null
 
     close_port_lan
+
+    # Purge flows still DNATed to the (now dead) tpws port so clients reconnect
+    # cleanly instead of hanging until the conntrack entry expires.
+    command -v conntrack >/dev/null 2>&1 && conntrack -D -p tcp --reply-port-src "$PORT" >/dev/null 2>&1
 
     rm -f /tmp/dnsmasq.d/zapret-domains.conf
     /etc/init.d/dnsmasq restart
@@ -168,9 +198,14 @@ stop_service() {
 reload_service() {
     # Domain list / ipset changes don't require tpws restart — it works per-connection.
     # Only TPWS_OPT changes need full restart, use 'restart' for that.
+    # NOTE: the panel calls this reload on zapret-list save in BOTH zapret and
+    # zapret2 modes (shared ipset), so the conntrack flush below is what makes a
+    # freshly added domain take effect for already-connected clients.
     ipset flush "$IPSET_NAME" 2>/dev/null
     setup_domains_file
     /etc/init.d/dnsmasq restart
     sleep 1
     resolve_domains
+    sleep 1
+    flush_ipset_conntrack "$IPSET_NAME"
 }

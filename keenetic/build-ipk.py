@@ -142,8 +142,9 @@ chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update 
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
 # Seed self-update config (public repo; add a GH_TOKEN here to enable update checks).
+# AUTO_CHECK=1 → the 6h `check-all` cron below runs by default (opt out with =0).
 if [ ! -f /opt/etc/detour/update.conf ]; then
-    printf 'GH_OWNER=varyen\\nGH_REPO=detour\\nGH_TOKEN=\\nAUTO_CHECK=0\\n' > /opt/etc/detour/update.conf
+    printf 'GH_OWNER=varyen\\nGH_REPO=detour\\nGH_TOKEN=\\nAUTO_CHECK=1\\n' > /opt/etc/detour/update.conf
     chmod 600 /opt/etc/detour/update.conf
 fi
 # Cron (parity with OpenWrt). Entware crond reads the SPOOL dir
@@ -156,6 +157,12 @@ if ! grep -qs 'vpn-keepalive' /opt/etc/crontabs/root 2>/dev/null; then
 fi
 if ! grep -qs 'subscription-refresh' /opt/etc/crontabs/root 2>/dev/null; then
     echo '0 * * * * /opt/sbin/subscription-refresh >/opt/var/log/subscription-refresh.log 2>&1' >> /opt/etc/crontabs/root
+fi
+# 6h update auto-check (panel + sing-box + tpws; nfqws2 reports n/a on Keenetic).
+# ON by default; opt out with AUTO_CHECK=0 in update.conf.
+AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /opt/etc/detour/update.conf 2>/dev/null | tail -1)
+if [ "$AUTO_CHECK" != "0" ] && ! grep -qs 'detour-update check' /opt/etc/crontabs/root 2>/dev/null; then
+    echo '0 */6 * * * /opt/sbin/detour-update check-all >/opt/var/log/detour-update.log 2>&1' >> /opt/etc/crontabs/root
 fi
 # Make sure Entware crond is running (reads the spool symlink above; no duplicate).
 if ! pgrep crond >/dev/null 2>&1; then
