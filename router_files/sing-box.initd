@@ -22,13 +22,16 @@ has_nft() {
 }
 
 # Parse a line from the domains file.
-# Supports: domains, IPs, CIDRs, // comments, # comments, section headers.
+# Supports: domains, *.wildcards, IPs, CIDRs, // comments, # comments, section headers.
 # Returns via globals: LINE_TYPE (domain|ip|skip), LINE_VALUE
 parse_line() {
     local raw="$1"
 
     # Strip // comments and # comments, trim
     local line=$(echo "$raw" | sed 's|//.*||; s|#.*||' | tr -d '\r' | xargs)
+    # Normalize a leading "*." wildcard to the bare domain — dnsmasq's ipset match
+    # already covers all subdomains, so *.host.ru is equivalent to host.ru.
+    line=${line#\*.}
 
     # Skip empty
     if [ -z "$line" ]; then
@@ -104,6 +107,8 @@ setup_domains_file() {
         {
             # Strip // and # comments, trim whitespace
             sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+            # *.host.ru -> host.ru (dnsmasq ipset already matches all subdomains)
+            sub(/^\*\./, "")
             if ($0 == "") next
             # IP or CIDR
             if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) {
@@ -131,12 +136,45 @@ resolve_domains() {
     if [ -f "$domains_file" ]; then
         awk '{
             sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+            sub(/^\*\./, "")
             if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/)
                 print $0
         }' "$domains_file" | while IFS= read -r d; do
             nslookup "$d" 127.0.0.1 >/dev/null 2>&1 &
         done
     fi
+}
+
+# Drop conntrack entries for every IP/CIDR in the given ipset(s). The nat
+# PREROUTING verdict (REDIRECT vs direct) is cached in conntrack per connection,
+# so a flow opened BEFORE its dst IP entered the set keeps the old route for
+# hours (keep-alive refreshes the entry). No conntrack tool -> skip; entries
+# expire on their own eventually.
+flush_ipset_conntrack() {
+    command -v conntrack >/dev/null 2>&1 || return 0
+    local set ip
+    for set in "$@"; do
+        ipset list "$set" 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | \
+        while read -r ip; do
+            [ -n "$ip" ] && conntrack -D -d "$ip" >/dev/null 2>&1
+        done
+    done
+    return 0
+}
+
+# Drop conntrack flows re-routed by the current routing mode: redirect-set
+# members (listed mode) or whitelist members (all-except mode), plus every
+# per-target set in multi mode.
+flush_routing_conntrack() {
+    local routing_mode="$1" s
+    if [ "$routing_mode" = "all-except" ]; then
+        flush_ipset_conntrack $IPSET_WL
+    else
+        flush_ipset_conntrack $IPSET_NAME
+    fi
+    for s in $(ipset list -n 2>/dev/null | grep '^singbox_t'); do
+        flush_ipset_conntrack "$s"
+    done
 }
 
 # Open LAN-side port for sing-box.
@@ -201,6 +239,7 @@ route_map_section() {
         line=$0
         sub(/\/\/.*/, "", line); sub(/#.*/, "", line); gsub(/\r/, "", line)
         gsub(/^[ \t]+|[ \t]+$/, "", line)
+        sub(/^\*\./, "", line)
         if (line == "") next
         if (line ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print line; next }
         if (line ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print line; next }
@@ -365,6 +404,11 @@ start_service() {
         fi
     done
 
+    # Connections already pinned (conntrack) to the old route for IPs now in the
+    # redirect/whitelist sets keep flowing the old way until the entry dies —
+    # drop them now that all PREROUTING rules are in place.
+    flush_routing_conntrack "$ROUTING_MODE"
+
     # Clear log
     > $LOG
 
@@ -426,6 +470,15 @@ stop_service() {
 
     close_port_lan
 
+    # Purge flows still DNATed to the (now dead) sing-box ports — otherwise
+    # established connections hang on a closed socket until the entry expires.
+    if command -v conntrack >/dev/null 2>&1; then
+        conntrack -D -p tcp --reply-port-src 12345 >/dev/null 2>&1
+        multi_instances | while read -r n id port ipset conf; do
+            conntrack -D -p tcp --reply-port-src "$port" >/dev/null 2>&1
+        done
+    fi
+
     # Remove dnsmasq configs (default, route-map, all per-target sets)
     rm -f /tmp/dnsmasq.d/singbox-domains.conf
     rm -f /tmp/dnsmasq.d/singbox-whitelist.conf
@@ -482,6 +535,10 @@ reload_service() {
     [ -s /tmp/routemap-all.list ] && resolve_domains /tmp/routemap-all.list
     sleep 1
     rm -f /tmp/routemap-all.list
+
+    # Re-route connections pinned to the pre-reload verdict for IPs that just
+    # entered the redirect/whitelist sets (see flush_ipset_conntrack).
+    flush_routing_conntrack "$ROUTING_MODE"
 
     procd_send_signal sing-box
 }

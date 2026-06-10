@@ -24,6 +24,7 @@ VERSION_FILE="/etc/detour/version"
 UPDATE_STATE="/var/state/detour-update.json"
 BINS_STATE="/var/state/detour-bins.json"   # sing-box update state (written by detour-update bins-check)
 TPWS_STATE="/var/state/detour-tpws.json"   # tpws-zapret update state (written by detour-update tpws-check)
+NFQWS2_STATE="/var/state/detour-nfqws2.json" # nfqws2 (zapret2) update state (written by detour-update nfqws2-check)
 PING_DB="/tmp/detour-ping.db"               # per-profile latency cache (TSV in tmpfs; cleared on reboot)
 
 AUTH_FILE="/etc/detour.auth"
@@ -72,6 +73,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     UPDATE_STATE="$OPT/var/state/detour-update.json"
     BINS_STATE="$OPT/var/state/detour-bins.json"
     TPWS_STATE="$OPT/var/state/detour-tpws.json"
+    NFQWS2_STATE="$OPT/var/state/detour-nfqws2.json"
     AUTH_FILE="$OPT/etc/detour.auth"
     DETOUR_DIR="$OPT/etc/detour"
     # «Все через VPN» marker — the NDM netfilter.d hook re-asserts SINGBOX_ALLVPN
@@ -427,6 +429,7 @@ route_map_section() {
         line=$0
         sub(/\/\/.*/, "", line); sub(/#.*/, "", line); gsub(/\r/, "", line)
         gsub(/^[ \t]+|[ \t]+$/, "", line)
+        sub(/^\*\./, "", line)
         if (line == "") next
         if (line ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print "I " line; next }
         if (line ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print "D " line; next }
@@ -926,7 +929,7 @@ status)
     DOMAIN_COUNT=0
     IP_COUNT=0
     if [ -f "$SINGBOX_DOMAINS" ]; then
-        DOMAIN_COUNT=$(sed 's|//.*||; s|#.*||' "$SINGBOX_DOMAINS" | tr -d '\r' | grep -cE '^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}\s*$' || true)
+        DOMAIN_COUNT=$(sed 's|//.*||; s|#.*||; s|^\*\.||' "$SINGBOX_DOMAINS" | tr -d '\r' | grep -cE '^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}\s*$' || true)
         IP_COUNT=$(sed 's|//.*||; s|#.*||' "$SINGBOX_DOMAINS" | tr -d '\r' | grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?\s*$' || true)
     fi
     ENTRY_TOTAL=$((DOMAIN_COUNT + IP_COUNT))
@@ -945,7 +948,7 @@ status)
     ZP_DOMAINS=0
     ZP_IPS=0
     if [ -f "$ZAPRET_DOMAINS" ]; then
-        ZP_DOMAINS=$(sed 's|//.*||; s|#.*||' "$ZAPRET_DOMAINS" | tr -d '\r' | grep -cE '^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}\s*$' || true)
+        ZP_DOMAINS=$(sed 's|//.*||; s|#.*||; s|^\*\.||' "$ZAPRET_DOMAINS" | tr -d '\r' | grep -cE '^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}\s*$' || true)
         ZP_IPS=$(sed 's|//.*||; s|#.*||' "$ZAPRET_DOMAINS" | tr -d '\r' | grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?\s*$' || true)
     fi
     ZP_IPSET_COUNT=$(ipset list zapret_domains 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | grep -c '.' || true)
@@ -989,6 +992,9 @@ status)
     [ -x "$NFQWS_BIN" ] && NFQWS_BIN_VER=$("$NFQWS_BIN" --version 2>/dev/null | awk 'NR==1{print $3}')
     [ -z "$NFQWS_BIN_VER" ] && NFQWS_BIN_VER="?"
     NFQWS_BIN_PRESENT=false; [ -x "$NFQWS_BIN" ] && NFQWS_BIN_PRESENT=true
+    # zapret2 capability: OpenWrt only (KeeneticOS lacks NFQUEUE; no mipsel feed).
+    # The panel uses this to show the zapret2 chip as «н/д» where unsupported.
+    NFQWS_SUPPORTED=true; [ "$PLATFORM" = keenetic ] && NFQWS_SUPPORTED=false
 
     cat <<EOF
 {
@@ -1001,7 +1007,8 @@ status)
     "tpws_present": $TPWS_BIN_PRESENT,
     "tpws_version": "$TPWS_BIN_VER",
     "nfqws2_present": $NFQWS_BIN_PRESENT,
-    "nfqws2_version": "$NFQWS_BIN_VER"
+    "nfqws2_version": "$NFQWS_BIN_VER",
+    "nfqws2_supported": $NFQWS_SUPPORTED
   },
   "singbox": {
     "running": $SB_RUNNING,
@@ -1368,6 +1375,70 @@ tpws_update_apply)
     else
         json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
     fi
+    ;;
+
+# ==================== nfqws2 / zapret2 UPDATE (opkg feed) ====================
+# nfqws2 (zapret2) is pulled from the same opkg feed via detour-update nfqws2-*;
+# the state file mirrors the sing-box/tpws {current,available} shape. zapret2 is
+# OpenWrt-only — on Keenetic nfqws2-check writes {"current":"n/a",...} and apply errors.
+nfqws2_update_status)
+    if [ -f "$NFQWS2_STATE" ]; then
+        cat "$NFQWS2_STATE"
+    else
+        echo '{"status":"unknown","message":"no nfqws2 state yet"}'
+    fi
+    ;;
+
+nfqws2_update_check)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    if OUT=$("$UPDATE_BIN" nfqws2-check 2>&1); then
+        if [ -f "$NFQWS2_STATE" ]; then cat "$NFQWS2_STATE"
+        else printf '{"status":"error","message":"%s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"; fi
+    else
+        printf '{"status":"error","message":"проверка не удалась: %s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"
+    fi
+    ;;
+
+nfqws2_update_apply)
+    # opkg update + upgrade nfqws2 from our feed (via the updater).
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    OUT=$("$UPDATE_BIN" nfqws2-apply 2>&1)
+    if [ $? -eq 0 ]; then
+        json_ok
+    else
+        json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"
+    fi
+    ;;
+
+# Combined update overview — the panel polls this on load / every refresh to blink
+# any stale version chip. Reads only the cached state files (written by
+# `detour-update check-all` every 6h); never spawns a live GitHub/opkg query.
+updates_overview)
+    # feed_upd <statefile> → "true"/"false": an update is pending when the cached
+    # `available` differs from `current` and is a real version (not ?, n/a, empty).
+    feed_upd() {
+        local f="$1" cur avail
+        [ -f "$f" ] || { echo false; return; }
+        cur=$(json_val current "$f"); avail=$(json_val available "$f")
+        if [ -n "$avail" ] && [ "$avail" != "?" ] && [ "$avail" != "n/a" ] && [ "$avail" != "$cur" ]; then
+            echo true
+        else
+            echo false
+        fi
+    }
+    P_STATUS=""; P_AVAIL=""
+    if [ -f "$UPDATE_STATE" ]; then
+        P_STATUS=$(json_val status "$UPDATE_STATE")
+        P_AVAIL=$(json_val available_version "$UPDATE_STATE")
+    fi
+    P_UPD=false; [ "$P_STATUS" = "update_available" ] && P_UPD=true
+    SB_UPD=$(feed_upd "$BINS_STATE")
+    TPWS_UPD=$(feed_upd "$TPWS_STATE")
+    NFQWS2_UPD=$(feed_upd "$NFQWS2_STATE")
+    printf '{"panel":{"update_available":%s,"available_version":"%s"},"singbox":{"update_available":%s},"tpws":{"update_available":%s},"nfqws2":{"update_available":%s}}\n' \
+        "$P_UPD" "$P_AVAIL" "$SB_UPD" "$TPWS_UPD" "$NFQWS2_UPD"
     ;;
 
 # ==================== DPI-BYPASS ENGINE SWITCH (zapret | zapret2 | off) ====================

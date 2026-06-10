@@ -104,15 +104,31 @@ ensure_zapret_domains() {
     local iptmp="/tmp/ipset-restore-$IPSET_NAME.txt"
     : > "$dnsmasq_conf"; : > "$iptmp"
     awk -v ipset="$IPSET_NAME" -v dnsmasq="$dnsmasq_conf" -v iptmp="$iptmp" '
-        { sub(/\/\/.*/,""); sub(/#.*/,""); gsub(/\r/,""); gsub(/^[ \t]+|[ \t]+$/,"")
+        { sub(/\/\/.*/,""); sub(/#.*/,""); gsub(/\r/,""); gsub(/^[ \t]+|[ \t]+$/,""); sub(/^\*\./,"")
           if ($0=="") next
           if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print "add " ipset " " $0 >> iptmp; next }
           if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print "ipset=/" $0 "/" ipset >> dnsmasq; next } }' "$DOMAINS_FILE"
     [ -s "$iptmp" ] && ipset restore -exist < "$iptmp"; rm -f "$iptmp"
     /etc/init.d/dnsmasq restart >/dev/null 2>&1; sleep 1
-    awk '{ sub(/\/\/.*/,""); sub(/#.*/,""); gsub(/\r/,""); gsub(/^[ \t]+|[ \t]+$/,"")
+    awk '{ sub(/\/\/.*/,""); sub(/#.*/,""); gsub(/\r/,""); gsub(/^[ \t]+|[ \t]+$/,""); sub(/^\*\./,"")
            if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) print $0 }' "$DOMAINS_FILE" \
         | while IFS= read -r d; do nslookup "$d" 127.0.0.1 >/dev/null 2>&1 & done
+}
+
+# Drop conntrack entries for every IP/CIDR in the given ipset(s). The nat
+# PREROUTING verdict (sing-box REDIRECT vs direct) is cached in conntrack per
+# connection, so a flow opened BEFORE its dst IP entered the set keeps the old
+# route for hours (keep-alive refreshes the entry). No conntrack tool -> skip.
+flush_ipset_conntrack() {
+    command -v conntrack >/dev/null 2>&1 || return 0
+    local set ip
+    for set in "$@"; do
+        ipset list "$set" 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | \
+        while read -r ip; do
+            [ -n "$ip" ] && conntrack -D -d "$ip" >/dev/null 2>&1
+        done
+    done
+    return 0
 }
 
 # ---------- zapret2 (nfqws2) firewall (OpenWrt only) ----------
@@ -145,6 +161,13 @@ zapret2_fw_up() {
         -j NFQUEUE --queue-num "$NFQWS_QNUM" --queue-bypass
     iptables -t mangle -D POSTROUTING -j ZAPRET2_MANGLE 2>/dev/null
     iptables -t mangle -A POSTROUTING -j ZAPRET2_MANGLE
+
+    # Flows opened before their dst IP entered the set are still pinned to
+    # sing-box in conntrack — drop them AFTER the ACCEPT chain is in place so
+    # the next packet re-routes direct. sleep lets the async warm-up lookups
+    # from ensure_zapret_domains land in the ipset first.
+    sleep 1
+    flush_ipset_conntrack "$IPSET_NAME"
 }
 
 zapret2_fw_down() {
@@ -158,6 +181,10 @@ zapret2_fw_down() {
     iptables -t mangle -D POSTROUTING -j ZAPRET2_MANGLE 2>/dev/null
     iptables -t mangle -F ZAPRET2_MANGLE 2>/dev/null
     iptables -t mangle -X ZAPRET2_MANGLE 2>/dev/null
+
+    # zapret2 is off — re-route the direct-pinned flows so they pick up
+    # whatever PREROUTING says now (usually back through sing-box).
+    flush_ipset_conntrack "$IPSET_NAME"
 }
 
 nfqws2_start() {
