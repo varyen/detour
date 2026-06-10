@@ -161,12 +161,16 @@ detach_bg() {
     if command -v setsid >/dev/null 2>&1; then
         setsid "$_sh" -c "$_cmd" </dev/null >/dev/null 2>&1 &
     elif command -v start-stop-daemon >/dev/null 2>&1; then
-        # BusyBox applet (always present on Entware): -b daemonizes (fork+setsid).
-        # Redirect ALL stdio to /dev/null so the daemonized worker can't inherit
-        # this CGI's stdout pipe — otherwise lighttpd blocks waiting for that pipe
-        # to close and never flushes our response before the panel restart kills
-        # the connection (browser then sees an empty body → JSON parse error).
-        start-stop-daemon -S -b -q -x "$_sh" -- -c "$_cmd" </dev/null >/dev/null 2>&1
+        # BusyBox applet (always present on Entware). -b daemonizes (fork+setsid).
+        # CRITICAL: match by a UNIQUE, non-existent pidfile and start via -a — do
+        # NOT use -x "$_sh". With -x, start-stop-daemon matches the executable
+        # against every running /bin/sh (including this very CGI), concludes the
+        # "service" is already up, and silently exits WITHOUT starting the worker
+        # (verified on BusyBox: -x /bin/sh → exit 1, no start). -p <nonexistent>
+        # gives it a match key that can't hit, so it always starts. The redirect
+        # keeps the daemonized worker off this CGI's stdout pipe (so lighttpd can
+        # flush our response before the panel restart, instead of an empty body).
+        start-stop-daemon -S -b -q -p "/tmp/detour-bg-$$.pid" -a "$_sh" -- -c "$_cmd" </dev/null >/dev/null 2>&1
     else
         ( exec "$_sh" -c "$_cmd" </dev/null >/dev/null 2>&1 ) &
     fi
