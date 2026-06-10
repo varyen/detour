@@ -383,8 +383,14 @@ def publish_feed(commit_msg, feed_arch_dir):
 
     stage = os.path.join(HERE, "releases", "feed", ".git-publish")
     import shutil
+    import stat
     if os.path.isdir(stage):
-        shutil.rmtree(stage, ignore_errors=True)
+        # .git objects are read-only on Windows — plain rmtree leaves them behind
+        # and the makedirs below dies with FileExistsError.
+        def _chmod_retry(func, path, _exc):
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        shutil.rmtree(stage, onerror=_chmod_retry)
     os.makedirs(stage)
 
     # Lay the feed tree under <stage>/<arch>/...
