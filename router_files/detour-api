@@ -162,7 +162,11 @@ detach_bg() {
         setsid "$_sh" -c "$_cmd" </dev/null >/dev/null 2>&1 &
     elif command -v start-stop-daemon >/dev/null 2>&1; then
         # BusyBox applet (always present on Entware): -b daemonizes (fork+setsid).
-        start-stop-daemon -S -b -q -x "$_sh" -- -c "$_cmd"
+        # Redirect ALL stdio to /dev/null so the daemonized worker can't inherit
+        # this CGI's stdout pipe — otherwise lighttpd blocks waiting for that pipe
+        # to close and never flushes our response before the panel restart kills
+        # the connection (browser then sees an empty body → JSON parse error).
+        start-stop-daemon -S -b -q -x "$_sh" -- -c "$_cmd" </dev/null >/dev/null 2>&1
     else
         ( exec "$_sh" -c "$_cmd" </dev/null >/dev/null 2>&1 ) &
     fi
