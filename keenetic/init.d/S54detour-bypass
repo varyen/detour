@@ -1,0 +1,22 @@
+#!/opt/bin/sh
+# Detour / Keenetic — DPI-bypass engine boot applier (Entware service).
+#
+# Runs `detour-bypass boot`, which applies the persisted /opt/etc/detour/bypass.mode
+# ONLY when /opt/etc/detour/bypass.autostart=1. The unified switch (detour-bypass)
+# OWNS the zapret engine lifecycle — selecting a mode disables the standalone
+# S53detour-zapret autostart — so exactly one engine (or none) comes up on boot.
+#
+# S54 > S52 (sing-box) and S53 (zapret): rc.unslung runs S* scripts in order with
+# `start`, so the engine init scripts already exist when a mode is applied here.
+# zapret2 (nfqws2/NFQUEUE) is OpenWrt-only; on Keenetic `boot` only ever applies
+# off/zapret (detour-bypass refuses zapret2 on this platform).
+
+export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+BIN=/opt/sbin/detour-bypass
+
+case "$1" in
+    start|force-start) [ -x "$BIN" ] && "$BIN" boot ;;
+    stop) ;;   # leave the running engine; a real reboot tears it all down anyway
+    restart) [ -x "$BIN" ] && "$BIN" boot ;;
+    *) echo "usage: $0 {start|stop|restart}"; exit 1 ;;
+esac
