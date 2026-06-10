@@ -26,6 +26,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then KEENETIC=1; fi
 if [ "$KEENETIC" = 1 ]; then
     DETOUR_DIR=/opt/etc/detour
     ZAPRET_INITD=/opt/etc/init.d/S53detour-zapret
+    ZAPRET_START=force-start             # S53 `start` is autostart-gated; the switch owns the lifecycle, so bypass cmd_set disables it
     NFQWS_BIN=/opt/sbin/nfqws2            # not shipped on Keenetic (no NFQUEUE)
     LUA_DIR=/opt/share/detour/lua
     DOMAINS_FILE=/opt/etc/zapret-tpws/domains.list
@@ -36,6 +37,7 @@ if [ "$KEENETIC" = 1 ]; then
 else
     DETOUR_DIR=/etc/detour
     ZAPRET_INITD=/etc/init.d/zapret-tpws
+    ZAPRET_START=start                   # OpenWrt procd `start` always starts (no force-start verb)
     NFQWS_BIN=/usr/bin/nfqws2
     LUA_DIR=/usr/share/detour/lua
     DOMAINS_FILE=/etc/zapret-tpws/domains.list
@@ -216,7 +218,7 @@ stop_all() {
 
 start_zapret() {
     [ -x "$ZAPRET_INITD" ] || die "zapret init script missing: $ZAPRET_INITD"
-    "$ZAPRET_INITD" start >/dev/null 2>&1 || die "zapret (tpws) failed to start"
+    "$ZAPRET_INITD" "$ZAPRET_START" >/dev/null 2>&1 || die "zapret (tpws) failed to start"
 }
 
 start_zapret2() {

@@ -10877,6 +10877,9 @@
           ta.value = dpiMode === "zapret" ? TPWS_DEFAULT_ARGS : Z2_DEFAULT_STRATEGY;
       }
       async function setBypass(mode) {
+        // The active mode's button is highlighted (primary); a click on it is a
+        // no-op — don't prompt/POST to re-apply the engine that's already selected.
+        if (mode === dpiMode) return;
         var label =
           mode === "off"
             ? "выключить DPI-обход"

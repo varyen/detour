@@ -63,6 +63,11 @@ FILES = [
     (os.path.join(ROUTER_FILES, "detour-hosts"), "opt/sbin/detour-hosts", 0o755, True),
     # Self-update (shared source, /opt shim for Keenetic): pulls detour-keenetic_*.ipk.
     (os.path.join(ROUTER_FILES, "detour-update"), "opt/sbin/detour-update", 0o755, True),
+    # Unified DPI-bypass engine switch (off|zapret|zapret2). The panel's single DPI
+    # toggle calls this via the CGI bypass_* endpoints; absent here, enabling zapret
+    # returned "detour-bypass not installed". zapret2 (NFQUEUE) is OpenWrt-only — on
+    # Keenetic the shared source drives only off/zapret. fix_shebang → /opt/bin/sh.
+    (os.path.join(ROUTER_FILES, "detour-bypass"), "opt/sbin/detour-bypass", 0o755, True),
     # VPN endpoint health probe (shared source, /opt shim). ⚠ cron scheduling on
     # Entware/KeeneticOS is device-specific — set up a */5 cron manually if wanted.
     (os.path.join(ROUTER_FILES, "vpn-keepalive"), "opt/sbin/vpn-keepalive", 0o755, True),
@@ -73,6 +78,9 @@ FILES = [
     (os.path.join(HERE, "init.d", "S50detour-dns"), "opt/etc/init.d/S50detour-dns", 0o755, False),
     (os.path.join(HERE, "init.d", "S52detour-singbox"), "opt/etc/init.d/S52detour-singbox", 0o755, False),
     (os.path.join(HERE, "init.d", "S53detour-zapret"), "opt/etc/init.d/S53detour-zapret", 0o755, False),
+    # Boot applier for the persisted bypass mode (runs `detour-bypass boot`); S54 so
+    # it runs after the sing-box (S52) and zapret (S53) init scripts exist.
+    (os.path.join(HERE, "init.d", "S54detour-bypass"), "opt/etc/init.d/S54detour-bypass", 0o755, False),
     (os.path.join(HERE, "ndm", "netfilter.d", "50-detour.sh"), "opt/etc/ndm/netfilter.d/50-detour.sh", 0o755, False),
     (os.path.join(HERE, "lighttpd", "detour.conf"), "opt/etc/lighttpd/detour.conf", 0o644, False),
     (os.path.join(HERE, "etc", "detour.conf"), "opt/etc/detour/detour.conf", 0o644, False),
@@ -138,8 +146,9 @@ mkdir -p /opt/etc/detour/subscriptions /opt/etc/sing-box/profiles /opt/etc/zapre
 echo "{version}" > /opt/etc/detour/version
 touch /opt/etc/detour/platform            # the panel CGI's platform shim keys off this
 chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
+    /opt/sbin/detour-bypass \\
     /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
-    /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret \\
+    /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
 # Seed self-update config (public repo; add a GH_TOKEN here to enable update checks).
 # AUTO_CHECK=1 → the 6h `check-all` cron below runs by default (opt out with =0).
@@ -185,7 +194,15 @@ fi
 # Start now (Entware rc.unslung auto-starts /opt/etc/init.d/S* on boot).
 /opt/etc/init.d/S51detour-panel start 2>/dev/null
 /opt/etc/init.d/S52detour-singbox start 2>/dev/null
-/opt/etc/init.d/S53detour-zapret start 2>/dev/null
+# The DPI-bypass switch (detour-bypass) OWNS the zapret engine lifecycle. Only fall
+# back to the standalone zapret autostart when the switch was never used (no
+# bypass.mode persisted) — otherwise it would double-start tpws against the switch.
+if [ ! -f /opt/etc/detour/bypass.mode ]; then
+    /opt/etc/init.d/S53detour-zapret start 2>/dev/null
+fi
+# Re-apply the persisted bypass mode now (no-op unless bypass.autostart=1) so an
+# upgrade restores the active engine.
+[ -x /opt/sbin/detour-bypass ] && /opt/sbin/detour-bypass boot 2>/dev/null
 echo ""
 echo "detour-keenetic {version} installed."
 echo "  Panel:  http://<router-ip>:8080/detour/"
@@ -196,6 +213,9 @@ exit 0
 """
     prerm = """#!/bin/sh
 set +e
+# Stop the bypass-managed engine (tpws + its rules) WITHOUT changing the persisted
+# mode — the new postinst's `detour-bypass boot` re-applies it. Falls back to S53.
+[ -x /opt/sbin/detour-bypass ] && /opt/sbin/detour-bypass stop 2>/dev/null
 /opt/etc/init.d/S53detour-zapret stop 2>/dev/null
 /opt/etc/init.d/S52detour-singbox stop 2>/dev/null
 /opt/etc/init.d/S51detour-panel stop 2>/dev/null

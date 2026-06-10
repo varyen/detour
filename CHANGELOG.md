@@ -5,6 +5,37 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.8.1] — 2026-06-10
+
+### Исправлено
+
+- **Keenetic: единый переключатель DPI-обхода больше не падает с «detour-bypass
+  not installed».** Пакет `detour-keenetic` не клал скрипт `detour-bypass` —
+  CGI-эндпоинты `bypass_set`/`bypass_autostart`/`bypass_strategy` требуют
+  `/opt/sbin/detour-bypass`, поэтому включение zapret (tpws) через панель
+  выдавало ошибку. Скрипт добавлен в сборку (`keenetic/build-ipk.py`), с
+  правкой shebang на `/opt/bin/sh`.
+- **Карточка DPI: кнопка «Выкл» (и любой уже активный режим) больше не
+  запрашивает подтверждение и не шлёт лишний POST.** `setBypass()` теперь
+  игнорирует клик по уже выбранному движку.
+- **`build_feed.py` на Windows** — публикация фида падала на `rmtree`, который
+  не удалял read-only объекты `.git` staging-каталога.
+
+### Добавлено
+
+- **Boot-применятель режима обхода на Keenetic** — Entware-init `S54detour-bypass`
+  запускает `detour-bypass boot` (применяет сохранённый `bypass.mode`, если
+  `bypass.autostart=1`). `postinst` переприменяет режим после установки, не
+  запуская standalone-zapret при наличии сохранённого режима; `prerm` останавливает
+  движок без сброса режима.
+
+### Изменено
+
+- **На Keenetic переключатель использует `force-start`** для zapret-init вместо
+  `start`: единый переключатель владеет жизненным циклом движка и отключает
+  собственный autostart-флаг S53, поэтому повторный `set zapret` иначе молча
+  отказывался стартовать tpws. На OpenWrt путь без изменений (`start`).
+
 ## [1.8.0] — 2026-06-10
 
 ### Добавлено — zapret2 (nfqws2) и единый переключатель DPI-обхода
