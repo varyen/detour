@@ -67,9 +67,16 @@ DNSRED=$(iptables -t nat -S 2>/dev/null | grep -E 'dpt:53|--dport 53')
 [ -n "$DNSRED" ] && { bad "KeeneticOS ALREADY has :53 nat rules (may collide with our redirect):"; printf '%s\n' "$DNSRED" | sed 's/^/    /'; } \
     || ok "no pre-existing :53 nat redirect — our transparent :53->5354 should be clear"
 
-hdr "8. cron (for keep-alive / auto-check)"
-have crond && ok "crond: $(command -v crond)" || info "no crond in PATH — check Entware cron / KeeneticOS scheduler"
-info "crontab dir: $(ls -d /opt/etc/crontabs 2>/dev/null || echo '(none)')"
+hdr "8. scheduler (keep-alive / sub-refresh / 6h auto-check)"
+# KeeneticOS kills the shell crond spawns for a job → we run the schedule from a
+# daemon (S90detour-cron → /opt/sbin/detour-cron), not crontab.
+if [ -f /opt/var/run/detour-cron.pid ] && kill -0 "$(cat /opt/var/run/detour-cron.pid 2>/dev/null)" 2>/dev/null; then
+    ok "detour-cron running (pid $(cat /opt/var/run/detour-cron.pid))"
+else
+    bad "detour-cron NOT running — scheduled update-check/keep-alive won't fire (start: /opt/etc/init.d/S90detour-cron start)"
+fi
+[ -x /opt/sbin/detour-cron ] && ok "/opt/sbin/detour-cron present" || bad "/opt/sbin/detour-cron missing"
+info "last update-check log: $(tail -1 /opt/var/log/detour-update.log 2>/dev/null || echo '(none yet)')"
 
 hdr "9. Detour install state"
 info "version file: $(cat /opt/etc/detour/version 2>/dev/null || echo '(detour not installed)')"

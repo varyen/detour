@@ -672,26 +672,41 @@ set_conf_flag() {
     chmod 0600 "$CONFIG" 2>/dev/null
 }
 
-# The installed cron is the source of truth for "is autocheck on".
+# Source of truth for "is autocheck on". On OpenWrt that's the installed cron line;
+# on Keenetic there is NO crond (the firmware kills its job shell — S90detour-cron
+# runs the schedule instead), so the AUTO_CHECK flag in update.conf is canonical,
+# re-read live from disk (the cron daemon honors the same flag each cycle).
 autocheck_enabled() {
+    if [ "$KEENETIC" = 1 ]; then
+        local ac
+        ac=$(sed -n 's/^AUTO_CHECK=//p' "$CONFIG" 2>/dev/null | tail -1)
+        [ "$ac" = "0" ] && echo 0 || echo 1
+        return
+    fi
     crontab -l 2>/dev/null | grep -q "$CHECK_CRON_MATCH" && echo 1 || echo 0
 }
 
-# autocheck on|off|status — manage the unattended 6h check cron + persist the flag.
+# autocheck on|off|status — toggle the unattended 6h check + persist the flag.
+# OpenWrt installs/removes the crontab line; Keenetic only flips AUTO_CHECK in
+# update.conf — S90detour-cron's loop re-reads it and runs (or skips) check-all.
 cmd_autocheck() {
     case "${1:-status}" in
         on)
             set_conf_flag AUTO_CHECK 1
-            ( crontab -l 2>/dev/null | grep -v "$CHECK_CRON_MATCH"; echo "$CHECK_CRON_LINE" ) | crontab -
-            /etc/init.d/cron enable >/dev/null 2>&1
-            /etc/init.d/cron restart >/dev/null 2>&1
-            log "autocheck enabled (6h cron installed)"
+            if [ "$KEENETIC" != 1 ]; then
+                ( crontab -l 2>/dev/null | grep -v "$CHECK_CRON_MATCH"; echo "$CHECK_CRON_LINE" ) | crontab -
+                /etc/init.d/cron enable >/dev/null 2>&1
+                /etc/init.d/cron restart >/dev/null 2>&1
+            fi
+            log "autocheck enabled"
             ;;
         off)
             set_conf_flag AUTO_CHECK 0
-            crontab -l 2>/dev/null | grep -v "$CHECK_CRON_MATCH" | crontab - 2>/dev/null
-            /etc/init.d/cron restart >/dev/null 2>&1
-            log "autocheck disabled (6h cron removed)"
+            if [ "$KEENETIC" != 1 ]; then
+                crontab -l 2>/dev/null | grep -v "$CHECK_CRON_MATCH" | crontab - 2>/dev/null
+                /etc/init.d/cron restart >/dev/null 2>&1
+            fi
+            log "autocheck disabled"
             ;;
         status) ;;
         *) die "autocheck: expected on|off|status" ;;

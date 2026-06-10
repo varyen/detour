@@ -129,6 +129,11 @@ panel + login, sing-box/zapret start-stop, explicit IP/CIDR redirect, and now al
   usign check skipped if `usign` is absent on Entware). Needs `GH_TOKEN` in
   `/opt/etc/detour/update.conf`.
 - **Subscriptions / keep-alive** — `subscription-refresh` + `vpn-keepalive` shipped.
+- **Scheduler** — `/opt/sbin/detour-cron` + `S90detour-cron` run the periodic jobs
+  (keep-alive, sub-refresh, 6h update auto-check) as an init.d-launched daemon
+  loop. KeeneticOS kills the shell `crond` spawns for a job, so cron silently
+  never fires; the daemon sidesteps it entirely (same session model as the panel /
+  proxy daemons). Tunable via `DETOUR_CRON_TICK`; update check honors `AUTO_CHECK`.
 
 **⚠ VALIDATE (new device-dependent assumptions in this pass):**
 - `/opt/sbin/dnsmasq` (dnsmasq-full) exists and supports `ipset=`.

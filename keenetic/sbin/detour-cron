@@ -1,0 +1,64 @@
+#!/opt/bin/sh
+# Detour / Keenetic — standalone periodic task runner (crond replacement).
+#
+# WHY this exists: on KeeneticOS the system shell that busybox/Entware `crond`
+# spawns to run a scheduled command is killed by the firmware's process sandbox,
+# so cron jobs silently never fire — the panel's update chip stays stale,
+# VPN keep-alive never probes, subscriptions never refresh. An init.d-launched
+# daemon does NOT go through crond: it is a plain background `/opt/bin/sh` loop
+# living in its own session (started by S90detour-cron via start-stop-daemon -b),
+# which is exactly the session model the panel CGI and the S52/S53 proxy daemons
+# use — and those DO run on KeeneticOS. So this loop reliably runs cron's detour
+# jobs where crond can't.
+#
+# Tick-based schedule (base tick = $DETOUR_CRON_TICK, default 300 s):
+#   * vpn-keepalive          every tick      (~5 min)
+#   * subscription-refresh   every 12 ticks  (~1 h)
+#   * detour-update check-all every 72 ticks (~6 h), gated by AUTO_CHECK in
+#     /opt/etc/detour/update.conf (the panel «Авто-проверка» toggle writes it).
+# The very first pass runs all three once (after a short boot settle) so the
+# panel shows fresh state right after a reboot.
+
+export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+
+LOGDIR=/opt/var/log
+UPDATE_CONF=/opt/etc/detour/update.conf
+TICK="${DETOUR_CRON_TICK:-300}"               # base loop period, seconds
+BOOT_DELAY="${DETOUR_CRON_BOOT_DELAY:-120}"   # settle (let LAN/DNS come up) before the first pass
+
+mkdir -p "$LOGDIR"
+
+log() { logger -t detour-cron -- "$*" 2>/dev/null; }
+
+# AUTO_CHECK gate for the 6h update check (default on). Re-read every cycle from
+# disk so the panel toggle (writes AUTO_CHECK= into update.conf) takes effect on
+# the next update tick without restarting this daemon.
+update_enabled() {
+    ac=$(sed -n 's/^AUTO_CHECK=//p' "$UPDATE_CONF" 2>/dev/null | tail -1)
+    [ "$ac" != "0" ]
+}
+
+log "detour-cron started (tick=${TICK}s, first pass in ${BOOT_DELAY}s)"
+sleep "$BOOT_DELAY"
+
+# n cycles 0..71 (LCM of the 1/12/72 intervals) so it never grows unbounded;
+# n=0 on the first pass fires all three jobs once.
+n=0
+while :; do
+    # VPN endpoint keep-alive — every tick (~5 min). Self-no-ops if no VPN profile.
+    [ -x /opt/sbin/vpn-keepalive ] && \
+        /opt/sbin/vpn-keepalive >"$LOGDIR/vpn-keepalive.log" 2>&1
+
+    # Subscription refresh — hourly.
+    if [ $((n % 12)) -eq 0 ] && [ -x /opt/sbin/subscription-refresh ]; then
+        /opt/sbin/subscription-refresh >"$LOGDIR/subscription-refresh.log" 2>&1
+    fi
+
+    # Update auto-check (panel + sing-box + tpws) — every ~6 h, unless AUTO_CHECK=0.
+    if [ $((n % 72)) -eq 0 ] && [ -x /opt/sbin/detour-update ] && update_enabled; then
+        /opt/sbin/detour-update check-all >"$LOGDIR/detour-update.log" 2>&1
+    fi
+
+    n=$(((n + 1) % 72))
+    sleep "$TICK"
+done

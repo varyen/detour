@@ -68,9 +68,12 @@ FILES = [
     # returned "detour-bypass not installed". zapret2 (NFQUEUE) is OpenWrt-only — on
     # Keenetic the shared source drives only off/zapret. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-bypass"), "opt/sbin/detour-bypass", 0o755, True),
-    # VPN endpoint health probe (shared source, /opt shim). ⚠ cron scheduling on
-    # Entware/KeeneticOS is device-specific — set up a */5 cron manually if wanted.
+    # VPN endpoint health probe (shared source, /opt shim). Driven by the
+    # S90detour-cron loop below (KeeneticOS kills crond's job shell — see below).
     (os.path.join(ROUTER_FILES, "vpn-keepalive"), "opt/sbin/vpn-keepalive", 0o755, True),
+    # Standalone scheduler daemon (Keenetic-only): replaces the broken crond for
+    # detour's periodic jobs — keep-alive, subscription-refresh, update auto-check.
+    (os.path.join(HERE, "sbin", "detour-cron"), "opt/sbin/detour-cron", 0o755, False),
     # Pinned usign public key (used by detour-update if usign is present on Entware).
     (os.path.join(ROOT, "keys", "release.usign.pub"), "opt/etc/detour/release.usign.pub", 0o644, False),
     (os.path.join(HERE, "init.d", "S51detour-panel"), "opt/etc/init.d/S51detour-panel", 0o755, False),
@@ -81,6 +84,9 @@ FILES = [
     # Boot applier for the persisted bypass mode (runs `detour-bypass boot`); S54 so
     # it runs after the sing-box (S52) and zapret (S53) init scripts exist.
     (os.path.join(HERE, "init.d", "S54detour-bypass"), "opt/etc/init.d/S54detour-bypass", 0o755, False),
+    # Scheduler daemon launcher (rc.unslung boot-start). S90 = last, after the
+    # panel/proxies are up. Drives /opt/sbin/detour-cron — the crond replacement.
+    (os.path.join(HERE, "init.d", "S90detour-cron"), "opt/etc/init.d/S90detour-cron", 0o755, False),
     (os.path.join(HERE, "ndm", "netfilter.d", "50-detour.sh"), "opt/etc/ndm/netfilter.d/50-detour.sh", 0o755, False),
     (os.path.join(HERE, "lighttpd", "detour.conf"), "opt/etc/lighttpd/detour.conf", 0o644, False),
     (os.path.join(HERE, "etc", "detour.conf"), "opt/etc/detour/detour.conf", 0o644, False),
@@ -146,38 +152,32 @@ mkdir -p /opt/etc/detour/subscriptions /opt/etc/sing-box/profiles /opt/etc/zapre
 echo "{version}" > /opt/etc/detour/version
 touch /opt/etc/detour/platform            # the panel CGI's platform shim keys off this
 chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
-    /opt/sbin/detour-bypass \\
+    /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
     /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
+    /opt/etc/init.d/S90detour-cron \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
 # Seed self-update config (public repo; add a GH_TOKEN here to enable update checks).
-# AUTO_CHECK=1 → the 6h `check-all` cron below runs by default (opt out with =0).
+# AUTO_CHECK=1 → S90detour-cron runs the 6h `check-all` by default (opt out with =0).
 if [ ! -f /opt/etc/detour/update.conf ]; then
     printf 'GH_OWNER=varyen\\nGH_REPO=detour\\nGH_TOKEN=\\nAUTO_CHECK=1\\n' > /opt/etc/detour/update.conf
     chmod 600 /opt/etc/detour/update.conf
 fi
-# Cron (parity with OpenWrt). Entware crond reads the SPOOL dir
-# /opt/var/spool/cron/crontabs, which usually doesn't exist on KeeneticOS — point
-# it at our /opt/etc/crontabs via a symlink (validated on a real KN-1810).
-mkdir -p /opt/etc/crontabs /opt/var/spool/cron
-ln -sf /opt/etc/crontabs /opt/var/spool/cron/crontabs
-if ! grep -qs 'vpn-keepalive' /opt/etc/crontabs/root 2>/dev/null; then
-    echo '*/5 * * * * /opt/sbin/vpn-keepalive >/opt/var/log/vpn-keepalive.log 2>&1' >> /opt/etc/crontabs/root
+# Scheduled tasks. On KeeneticOS the firmware sandbox kills the shell crond spawns
+# to run a job, so cron silently never fires here — instead we run the schedule
+# (vpn-keepalive / subscription-refresh / detour-update check-all) from an
+# init.d-launched daemon (S90detour-cron), the same session model the panel and
+# proxy daemons use, which DO work on KeeneticOS. Strip any detour crontab lines a
+# pre-1.8.4 install left in /opt/etc/crontabs/root so the work can't double-run on
+# devices where crond happens to work.
+if [ -f /opt/etc/crontabs/root ]; then
+    grep -v -e 'vpn-keepalive' -e 'subscription-refresh' -e 'detour-update check' \\
+        /opt/etc/crontabs/root > /opt/etc/crontabs/root.detour.tmp 2>/dev/null \\
+        && mv /opt/etc/crontabs/root.detour.tmp /opt/etc/crontabs/root \\
+        || rm -f /opt/etc/crontabs/root.detour.tmp
 fi
-if ! grep -qs 'subscription-refresh' /opt/etc/crontabs/root 2>/dev/null; then
-    echo '0 * * * * /opt/sbin/subscription-refresh >/opt/var/log/subscription-refresh.log 2>&1' >> /opt/etc/crontabs/root
-fi
-# 6h update auto-check (panel + sing-box + tpws; nfqws2 reports n/a on Keenetic).
-# ON by default; opt out with AUTO_CHECK=0 in update.conf.
-AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /opt/etc/detour/update.conf 2>/dev/null | tail -1)
-if [ "$AUTO_CHECK" != "0" ] && ! grep -qs 'detour-update check' /opt/etc/crontabs/root 2>/dev/null; then
-    echo '0 */6 * * * /opt/sbin/detour-update check-all >/opt/var/log/detour-update.log 2>&1' >> /opt/etc/crontabs/root
-fi
-# Make sure Entware crond is running (reads the spool symlink above; no duplicate).
-if ! pgrep crond >/dev/null 2>&1; then
-    if [ -x /opt/etc/init.d/S10cron ]; then /opt/etc/init.d/S10cron start 2>/dev/null
-    else crond -b 2>/dev/null; fi
-fi
+# (Re)start the scheduler daemon now; rc.unslung also boot-starts it via S90.
+/opt/etc/init.d/S90detour-cron restart 2>/dev/null
 # sing-box comes from the Entware `sing-box-go` package, which ships its own
 # auto-start /opt/etc/init.d/S99sing-box (with a default config). Disable it so
 # ONLY detour's S52detour-singbox drives the daemon — otherwise two sing-box
@@ -213,6 +213,8 @@ exit 0
 """
     prerm = """#!/bin/sh
 set +e
+# Stop the scheduler daemon first so a periodic task can't fire mid-upgrade.
+[ -x /opt/etc/init.d/S90detour-cron ] && /opt/etc/init.d/S90detour-cron stop 2>/dev/null
 # Stop the bypass-managed engine (tpws + its rules) WITHOUT changing the persisted
 # mode — the new postinst's `detour-bypass boot` re-applies it. Falls back to S53.
 [ -x /opt/sbin/detour-bypass ] && /opt/sbin/detour-bypass stop 2>/dev/null
