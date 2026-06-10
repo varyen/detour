@@ -1,0 +1,45 @@
+#!/opt/bin/sh
+# Detour / Keenetic — periodic task runner service (crond replacement).
+#
+# rc.unslung boot-starts every executable /opt/etc/init.d/S* with `start`. S90
+# runs LAST (after S50-S54) so the panel/proxies are already up when the first
+# task pass fires. KeeneticOS kills the shell crond spawns for a job, so detour's
+# scheduled work (update auto-check, VPN keep-alive, subscription refresh) lives
+# in this daemon instead of in crontab. See /opt/sbin/detour-cron for the loop.
+
+export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+
+DAEMON=/opt/sbin/detour-cron
+PIDF=/opt/var/run/detour-cron.pid
+NAME=detour-cron
+
+running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; }
+
+start() {
+    [ -x "$DAEMON" ] || { echo "$NAME: missing $DAEMON"; exit 1; }
+    running && { echo "$NAME already running (pid $(cat "$PIDF"))"; exit 0; }
+    rm -f "$PIDF"          # clear any stale pidfile so -m records the new PID cleanly
+    mkdir -p /opt/var/run /opt/var/log
+    echo "Starting $NAME ..."
+    # -b daemonize (fork + own session — standalone setsid(1) is absent on
+    #    KeeneticOS, so start-stop-daemon's own re-session is what detaches the
+    #    loop from this init invocation), -m writes the forked PID to the pidfile.
+    # $DAEMON is a UNIQUE path, so -x cannot false-match other shells the way a
+    # bare `-x /opt/bin/sh` would (that footgun is documented in detour-api's
+    # detach_bg — it makes s-s-d think the "service" is already up and skip start).
+    start-stop-daemon -S -q -b -m -p "$PIDF" -x "$DAEMON"
+}
+
+stop() {
+    echo "Stopping $NAME ..."
+    start-stop-daemon -K -q -p "$PIDF" 2>/dev/null
+    rm -f "$PIDF"
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; sleep 1; start ;;
+    status)  running && echo "$NAME running (pid $(cat "$PIDF"))" || echo "$NAME stopped" ;;
+    *) echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
