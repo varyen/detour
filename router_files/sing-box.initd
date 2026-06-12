@@ -17,6 +17,12 @@ LOG=/var/log/sing-box.log
 # Set by restart() for the duration of a reconfigure bounce: tells stop_service to
 # leave the REDIRECT rules in place so the daemon gap fails CLOSED (never direct).
 KEEPFW_FLAG=/tmp/.singbox-keepfw
+# Set by reconfigure() for a PROFILE/CHAIN switch: only the upstream server changes,
+# domains/ipsets/dnsmasq do NOT. Tells start_service to skip the heavy domain warm-up
+# (dnsmasq restart, resolve_domains) and the conntrack flush (one `conntrack -D` per
+# whitelist member = thousands of calls / ~100s with a big all-except list). Cuts the
+# switch from ~100s to a few seconds. Full restart still does all of it.
+FASTSWITCH_FLAG=/tmp/.singbox-fastswitch
 
 # Detect whether nftables (fw4) is available on this router.
 # OpenWrt 23.05+ uses nftables; older firmwares (e.g. GL.iNet 21.02 builds) use fw3+iptables only.
@@ -284,6 +290,10 @@ start_service() {
     local ROUTING_MODE=$(get_routing_mode)
     local SB_POS=1 ZL
     local INST_TMP=/tmp/singbox-instances.start.$$
+    # Fast profile/chain switch (reconfigure): domains/ipsets/dnsmasq unchanged, so
+    # skip the DNS warm-up + per-IP conntrack flush below. Firewall is rebuilt either
+    # way (cheap) so the new upstream RETURN takes effect.
+    local FAST=0; [ -f "$FASTSWITCH_FLAG" ] && FAST=1
 
     # Create ipset(s) — hash:net supports both IPs and CIDRs
     ipset create $IPSET_NAME hash:net -exist
@@ -323,12 +333,14 @@ start_service() {
         done < "$INST_TMP"
     fi
 
-    /etc/init.d/dnsmasq restart
-    sleep 1
-    resolve_domains "$DOMAINS_FILE"
-    [ "$ROUTING_MODE" = "all-except" ] && resolve_domains "$WHITELIST_FILE"
-    [ -s /tmp/routemap-all.list ] && resolve_domains /tmp/routemap-all.list
-    sleep 1
+    if [ "$FAST" != 1 ]; then
+        /etc/init.d/dnsmasq restart
+        sleep 1
+        resolve_domains "$DOMAINS_FILE"
+        [ "$ROUTING_MODE" = "all-except" ] && resolve_domains "$WHITELIST_FILE"
+        [ -s /tmp/routemap-all.list ] && resolve_domains /tmp/routemap-all.list
+        sleep 1
+    fi
     rm -f /tmp/routemap-all.list
 
     open_port_lan 12345
@@ -409,8 +421,10 @@ start_service() {
 
     # Connections already pinned (conntrack) to the old route for IPs now in the
     # redirect/whitelist sets keep flowing the old way until the entry dies —
-    # drop them now that all PREROUTING rules are in place.
-    flush_routing_conntrack "$ROUTING_MODE"
+    # drop them now that all PREROUTING rules are in place. Skipped on a fast
+    # profile switch: the sets didn't change (so no stale verdicts to clear), and
+    # this is one `conntrack -D` per member — ~100s with a big all-except whitelist.
+    [ "$FAST" != 1 ] && flush_routing_conntrack "$ROUTING_MODE"
 
     # Clear log
     > $LOG
@@ -573,3 +587,18 @@ restart() {
     start
     rm -f "$KEEPFW_FLAG"
 }
+
+# Fast path for a PROFILE/CHAIN switch (panel profile_activate/chain_activate): only
+# the upstream server changed, so this is a fail-closed daemon bounce that ALSO skips
+# the DNS warm-up + per-IP conntrack flush (see FASTSWITCH_FLAG). ~few seconds vs the
+# ~100s a full restart costs with a large all-except whitelist. Domain/mode changes
+# (whitelist/domains save, route-map, settings) must still use `restart`.
+reconfigure() {
+    trap '' TERM
+    touch "$KEEPFW_FLAG" "$FASTSWITCH_FLAG"
+    stop
+    start
+    rm -f "$KEEPFW_FLAG" "$FASTSWITCH_FLAG"
+}
+EXTRA_COMMANDS="reconfigure"
+EXTRA_HELP="	reconfigure	Fast profile switch: bounce daemon, keep firewall/DNS, skip conntrack flush"

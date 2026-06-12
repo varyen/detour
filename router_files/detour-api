@@ -1773,7 +1773,9 @@ chain_activate)
         UPSTREAM_IPS=$(collect_upstream_ips)
         write_settings "$CHAIN" "$RMODE" "$UPSTREAM_IPS" "$SBMODE"
 
-        $SINGBOX_INITD restart >/dev/null 2>&1
+        # Profile/chain switch only changes the upstream server — use the fast
+        # reconfigure (skips the per-IP conntrack flush + DNS warm-up); fail-closed.
+        $SINGBOX_INITD reconfigure >/dev/null 2>&1
         sleep 3
         json_ok
         ;;
@@ -1796,7 +1798,9 @@ profile_activate)
         UPSTREAM_IPS=$(collect_upstream_ips)
         write_settings "$PNAME" "$RMODE" "$UPSTREAM_IPS" "$SBMODE"
 
-        $SINGBOX_INITD restart >/dev/null 2>&1
+        # Profile/chain switch only changes the upstream server — use the fast
+        # reconfigure (skips the per-IP conntrack flush + DNS warm-up); fail-closed.
+        $SINGBOX_INITD reconfigure >/dev/null 2>&1
         sleep 3
         json_ok
     ;;
