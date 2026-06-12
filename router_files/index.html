@@ -10401,6 +10401,67 @@
           el.textContent = "Ошибка: " + e.message;
         }
       }
+      // Keenetic: the panel install runs detached (it restarts the panel's own
+      // web server), so there's no synchronous result. Poll the updater's state
+      // file — a cheap read via panel_update_status — until it reports applied or
+      // error, or the version changes. Connection errors during the lighttpd
+      // restart are expected; keep retrying until the overall timeout, then fall
+      // back to the manual-reload hint.
+      function pollPanelUpdate(statusEl) {
+        var pv = document.getElementById("panel-version");
+        var preVersion = (pv ? pv.textContent : "").replace(/^v/, "").trim();
+        var tries = 0;
+        var maxTries = 45; // ~3 min at 4s
+        var sawInstalling = false;
+        function tick() {
+          tries++;
+          fetch(API + "?action=panel_update_status")
+            .then(function (r) {
+              if (!r.ok) throw new Error("http " + r.status);
+              return r.json();
+            })
+            .then(function (d) {
+              var st = d.status || "";
+              var cur = d.current_version || "";
+              if (st === "installing") {
+                sawInstalling = true;
+                statusEl.textContent = "⏳ " + (d.message || "Установка…");
+              } else if (st === "error") {
+                statusEl.textContent =
+                  "Ошибка обновления: " + (d.message || "неизвестно");
+                toast("Обновление не удалось", "error");
+                return; // stop polling
+              } else if (
+                st === "applied" &&
+                (sawInstalling || (preVersion && cur && cur !== preVersion))
+              ) {
+                statusEl.textContent =
+                  "✅ Обновлено до v" + cur + ". Перезагрузка…";
+                toast("Панель обновлена до v" + cur, "success");
+                setTimeout(function () {
+                  location.reload();
+                }, 1500);
+                return; // stop polling
+              } else {
+                statusEl.textContent = "⏳ Обновление… (" + tries + ")";
+              }
+              if (tries < maxTries) setTimeout(tick, 4000);
+              else
+                statusEl.textContent =
+                  "Долго нет ответа — обновите страницу вручную и проверьте версию.";
+            })
+            .catch(function () {
+              // Connection refused/reset → the panel's lighttpd is mid-restart.
+              statusEl.textContent =
+                "⏳ Панель перезапускается… (" + tries + ")";
+              if (tries < maxTries) setTimeout(tick, 4000);
+              else
+                statusEl.textContent =
+                  "Обновите страницу вручную и проверьте версию.";
+            });
+        }
+        tick();
+      }
       async function applyUpdateGithub() {
         if (
           !confirm(
@@ -10420,22 +10481,20 @@
           if (d.ok) {
             if (d.status === "updating") {
               // Keenetic: install runs detached because it restarts the panel's
-              // web server. There's no synchronous result — tell the user to wait.
-              el.textContent =
-                "Установка запущена в фоне. Панель перезапустится — обновите страницу через ~минуту.";
+              // web server. No synchronous result — poll the state file for
+              // progress and auto-reload once the new version is live.
               toast("Обновление запущено", "success");
+              pollPanelUpdate(el);
             } else {
               el.textContent = "Установлено. Перезагрузите страницу.";
               toast("Панель обновлена", "success");
             }
           } else el.textContent = "Ошибка: " + d.error;
         } catch (e) {
-          // A connection reset mid-restart lands here — the install is likely
-          // already running detached, so guide the user to reload rather than
-          // showing a raw error.
-          el.textContent =
-            "Соединение прервано (панель перезапускается). Обновите страницу через ~минуту и проверьте версию.";
+          // A connection reset mid-restart lands here — the install is already
+          // running detached. Poll the state file instead of showing a raw error.
           toast("Обновление, вероятно, запущено", "success");
+          pollPanelUpdate(el);
         }
       }
       async function applyUpdateLocal() {
@@ -10478,9 +10537,8 @@
           var d = await readApplyResponse(r);
           if (d.ok) {
             if (d.status === "updating") {
-              el.textContent =
-                "Установка запущена в фоне. Панель перезапустится — обновите страницу через ~минуту.";
               toast("Обновление запущено", "success");
+              pollPanelUpdate(el);
             } else {
               el.textContent = "Установлено. Перезагрузите страницу.";
               toast("Панель обновлена из файла", "success");

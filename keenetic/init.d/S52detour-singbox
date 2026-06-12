@@ -74,7 +74,20 @@ case "$1" in
     enable)  set_autostart 1 ;;
     disable) set_autostart 0 ;;
     stop)    stop ;;
-    restart) stop; sleep 1; start ;;
+    restart)
+        # Reconfigure, NOT a teardown: bounce only the daemon and KEEP the enabled
+        # marker so the REDIRECT rules — and the detour DNS server — stay up the
+        # whole time. The brief gap then fails CLOSED (LAN hits :12345 and is
+        # refused, never routed direct). DNS is reloaded GRACEFULLY (dns_reload =
+        # regen + SIGHUP), never restarted: a DNS-server restart here stalls all
+        # LAN/router name resolution for seconds and freezes both this panel and
+        # the native KeeneticOS panel. Only `stop` (manual «Выкл») clears the
+        # marker and allows direct traffic. ⚠ VALIDATE on device.
+        start-stop-daemon -K -q -p "$PIDF" 2>/dev/null
+        rm -f "$PIDF"
+        sleep 1
+        start
+        dns_reload ;;
     reload)  reload ;;
     status)  status ;;
     *) echo "usage: $0 {start|force-start|stop|restart|reload|enable|disable|status}"; exit 1 ;;
