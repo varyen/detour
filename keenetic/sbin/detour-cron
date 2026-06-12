@@ -49,6 +49,12 @@ while :; do
     [ -x /opt/sbin/vpn-keepalive ] && \
         /opt/sbin/vpn-keepalive >"$LOGDIR/vpn-keepalive.log" 2>&1
 
+    # Per-profile latency sweep — every tick (~5 min). Rebuilds the ping cache the
+    # panel reads (ping_status); replaces the old browser-driven probing. Coarser
+    # than OpenWrt's 1-min cron, but Keenetic is the secondary platform.
+    [ -x /opt/sbin/detour-ping ] && \
+        /opt/sbin/detour-ping >"$LOGDIR/detour-ping.log" 2>&1
+
     # Subscription refresh — hourly.
     if [ $((n % 12)) -eq 0 ] && [ -x /opt/sbin/subscription-refresh ]; then
         /opt/sbin/subscription-refresh >"$LOGDIR/subscription-refresh.log" 2>&1

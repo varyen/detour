@@ -500,6 +500,23 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=True):
         out, _, _ = exec_cmd(ssh, "crontab -l 2>/dev/null | grep vpn-keepalive")
         print(f"  cron: {out.strip() or 'NOT INSTALLED'}")
 
+    # 8. Per-profile latency sweep (background ping scheduler — replaces the
+    #    browser-driven probing; the panel just reads the cache via ping_status).
+    ping_local = os.path.join(ROUTER_FILES, "detour-ping")
+    if os.path.isfile(ping_local):
+        with open(ping_local, "rb") as f:
+            n = upload(ssh, f.read(), "/usr/sbin/detour-ping", "0755")
+        print(f"  /usr/sbin/detour-ping: {n} bytes")
+        # Sweep every minute. Record-only — rebuilds /tmp/detour-ping.db.
+        ping_cron = "* * * * * /usr/sbin/detour-ping >/dev/null 2>&1"
+        exec_cmd(
+            ssh,
+            "( crontab -l 2>/dev/null | grep -v 'detour-ping' ; "
+            f"echo '{ping_cron}' ) | crontab -",
+        )
+        out, _, _ = exec_cmd(ssh, "crontab -l 2>/dev/null | grep detour-ping")
+        print(f"  cron: {out.strip() or 'NOT INSTALLED'}")
+
 
 def step_hotplug_guard(ssh):
     step("Installing hotplug guard")
