@@ -161,11 +161,21 @@ resolve_domains() {
 # expire on their own eventually.
 flush_ipset_conntrack() {
     command -v conntrack >/dev/null 2>&1 || return 0
-    local set ip
-    for set in "$@"; do
-        ipset list "$set" 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | \
-        while read -r ip; do
-            [ -n "$ip" ] && conntrack -D -d "$ip" >/dev/null 2>&1
+    # Drop conntrack flows whose destination is a member of one of the given sets.
+    # We snapshot the destinations that ACTUALLY have a live conntrack entry (one
+    # `conntrack -L` dump) and test each against the set(s) — instead of issuing one
+    # blind `conntrack -D -d <member>` per set member. The old way cost ~15 ms/member
+    # = ~130 s for an 8600-entry all-except whitelist, even though only ~130 of those
+    # IPs had a live flow. Cost now scales with active flows, not set size (~0.5 s).
+    local ips ip set
+    ips=$(conntrack -L 2>/dev/null | grep -oE 'dst=[0-9.]+' | sed 's/^dst=//' | sort -u)
+    [ -n "$ips" ] || return 0
+    for ip in $ips; do
+        for set in "$@"; do
+            if ipset test "$set" "$ip" >/dev/null 2>&1; then
+                conntrack -D -d "$ip" >/dev/null 2>&1
+                break
+            fi
         done
     done
     return 0
@@ -175,15 +185,15 @@ flush_ipset_conntrack() {
 # members (listed mode) or whitelist members (all-except mode), plus every
 # per-target set in multi mode.
 flush_routing_conntrack() {
-    local routing_mode="$1" s
+    local routing_mode="$1" sets
     if [ "$routing_mode" = "all-except" ]; then
-        flush_ipset_conntrack $IPSET_WL
+        sets="$IPSET_WL"
     else
-        flush_ipset_conntrack $IPSET_NAME
+        sets="$IPSET_NAME"
     fi
-    for s in $(ipset list -n 2>/dev/null | grep '^singbox_t'); do
-        flush_ipset_conntrack "$s"
-    done
+    # ...plus every per-target set (multi mode). One flush call => one conntrack dump.
+    sets="$sets $(ipset list -n 2>/dev/null | grep '^singbox_t' | tr '\n' ' ')"
+    flush_ipset_conntrack $sets
 }
 
 # Open LAN-side port for sing-box.

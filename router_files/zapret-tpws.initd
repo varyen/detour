@@ -72,11 +72,19 @@ resolve_domains() {
 # expire on their own eventually.
 flush_ipset_conntrack() {
     command -v conntrack >/dev/null 2>&1 || return 0
-    local set ip
-    for set in "$@"; do
-        ipset list "$set" 2>/dev/null | sed -n '/^Members:/,$p' | tail -n +2 | \
-        while read -r ip; do
-            [ -n "$ip" ] && conntrack -D -d "$ip" >/dev/null 2>&1
+    # Snapshot the destinations that ACTUALLY have a live conntrack entry (one
+    # `conntrack -L` dump) and drop only those whose dst is a member of one of the
+    # given sets — instead of one blind `conntrack -D -d <member>` per set member
+    # (~15 ms each = minutes on a large set). Cost now scales with active flows.
+    local ips ip set
+    ips=$(conntrack -L 2>/dev/null | grep -oE 'dst=[0-9.]+' | sed 's/^dst=//' | sort -u)
+    [ -n "$ips" ] || return 0
+    for ip in $ips; do
+        for set in "$@"; do
+            if ipset test "$set" "$ip" >/dev/null 2>&1; then
+                conntrack -D -d "$ip" >/dev/null 2>&1
+                break
+            fi
         done
     done
     return 0
