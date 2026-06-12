@@ -311,6 +311,35 @@ set_outbound_chain_fields() {
     printf '%s' "$line"
 }
 
+# Resolve a hostname with a hard ~3s ceiling so a broken/old tunnel can't wedge
+# the CGI (hung nslookup → zombie procs → router meltdown). BusyBox/Entware have
+# no dependable `timeout` applet, so run nslookup detached and poll: once the
+# budget is spent send TERM, then KILL, then reap (wait) to avoid zombies, and
+# finally emit whatever it managed to write. Output matches a bare nslookup so
+# the caller's awk parser is unchanged.
+nslookup_with_timeout() {
+    local host="$1"
+    local server="$2"
+    local tmpf="/tmp/detour-nslookup.$$"
+    local pid count
+    nslookup "$host" "$server" > "$tmpf" 2>/dev/null &
+    pid=$!
+    count=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$count" -ge 2 ]; then
+            kill "$pid" 2>/dev/null
+            sleep 1
+            kill -9 "$pid" 2>/dev/null
+            break
+        fi
+        sleep 1
+        count=$((count + 1))
+    done
+    wait "$pid" 2>/dev/null
+    cat "$tmpf" 2>/dev/null
+    rm -f "$tmpf"
+}
+
 collect_upstream_ips() {
     {
         sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SINGBOX_CONFIG" 2>/dev/null
@@ -323,7 +352,7 @@ collect_upstream_ips() {
         if echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
             printf '%s\n' "$host"
         else
-            nslookup "$host" 127.0.0.1 2>/dev/null | \
+            nslookup_with_timeout "$host" 127.0.0.1 | \
                 awk '/^Address [0-9]+: /{print $3} /^Address: /{print $2}' | \
                 grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true
         fi

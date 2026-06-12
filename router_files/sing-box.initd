@@ -14,6 +14,9 @@ SETTINGS_FILE=/etc/sing-box/settings.json
 IPSET_NAME=singbox_domains
 IPSET_WL=singbox_whitelist
 LOG=/var/log/sing-box.log
+# Set by restart() for the duration of a reconfigure bounce: tells stop_service to
+# leave the REDIRECT rules in place so the daemon gap fails CLOSED (never direct).
+KEEPFW_FLAG=/tmp/.singbox-keepfw
 
 # Detect whether nftables (fw4) is available on this router.
 # OpenWrt 23.05+ uses nftables; older firmwares (e.g. GL.iNet 21.02 builds) use fw3+iptables only.
@@ -435,6 +438,18 @@ start_service() {
 }
 
 stop_service() {
+    # Reconfigure bounce (set by restart()): leave EVERY REDIRECT rule in place so
+    # the daemon gap fails CLOSED — LAN hits :12345 and is refused, never routed
+    # direct. start_service re-asserts the rules idempotently right after. We only
+    # purge conntrack so existing flows re-pin to the freshly started daemon. A
+    # real (manual) stop has no flag and falls through to the full teardown below,
+    # which removes the rules and lets traffic flow direct — the only intended path
+    # to direct traffic.
+    if [ -f "$KEEPFW_FLAG" ]; then
+        command -v conntrack >/dev/null 2>&1 && conntrack -D -p tcp --reply-port-src 12345 >/dev/null 2>&1
+        return 0
+    fi
+
     # Remove "Все через VPN" (all-traffic redirect) chain if active
     iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_ALLVPN 2>/dev/null
     iptables -t nat -F SINGBOX_ALLVPN 2>/dev/null
@@ -541,4 +556,20 @@ reload_service() {
     flush_routing_conntrack "$ROUTING_MODE"
 
     procd_send_signal sing-box
+}
+
+# A panel/CLI `restart` is a RECONFIGURE, not a teardown. Override the rc.common
+# default (stop;start) so the REDIRECT firewall stays UP across the daemon bounce:
+# the flag makes the stop_service below skip its iptables teardown, then start
+# re-asserts the rules idempotently. The gap therefore fails CLOSED (LAN → :12345
+# → connection refused), never direct. Only `stop` (manual «Выкл», no flag) tears
+# the firewall down and allows direct traffic. ⚠ VALIDATE on device. If a given
+# rc.common build ignores this override, behaviour falls back to the old (leaky)
+# restart — no worse than before, and never a blackhole.
+restart() {
+    trap '' TERM
+    touch "$KEEPFW_FLAG"
+    stop
+    start
+    rm -f "$KEEPFW_FLAG"
 }
