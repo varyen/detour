@@ -620,6 +620,12 @@ def publish_to_github(version, out_dir):
     # GitHub release body comes out as mojibake ("Р±РѕР»СЊС€Рµ").
     notes_path = os.path.join(out_dir, "RELEASE_NOTES.md")
     body = open(notes_path, encoding="utf-8").read() if os.path.isfile(notes_path) else ""
+    # Guard: never ship a body carrying the Unicode replacement char (U+FFFD) — it's
+    # a sure sign the notes got mangled (read with the wrong codepage, or passed via
+    # --notes on a non-UTF-8 console). Abort with a clear message instead.
+    if chr(0xFFFD) in body:
+        die("RELEASE_NOTES.md is corrupted - contains U+FFFD (replacement char). "
+            f"Re-write {notes_path} as UTF-8 (or fix the --notes source) and re-run.")
     if status == 404:
         payload = {
             "tag_name": tag, "name": tag, "body": body,
@@ -635,6 +641,23 @@ def publish_to_github(version, out_dir):
             _gh_request("PATCH", f"{api}/releases/{release['id']}", token,
                         data={"body": body}, expected_status={200})
             print(f"[publish] updated release notes for {tag}")
+
+    # Post-publish verify: re-read the stored body from GitHub and confirm the notes
+    # round-tripped intact. U+FFFD -> hard fail (encoding corruption); a benign
+    # reformat -> warning only. Catches any transport/encoding surprise before we
+    # treat the release as done.
+    if body:
+        _, _check = _gh_request("GET", f"{api}/releases/tags/{tag}", token,
+                                expected_status={200})
+        _stored = _check.get("body") or ""
+        if chr(0xFFFD) in _stored:
+            die("published release body contains U+FFFD - encoding corruption on "
+                f"publish: {_check.get('html_url', tag)}")
+        elif _stored.replace("\r\n", "\n").strip() != body.replace("\r\n", "\n").strip():
+            print("[publish] WARNING: stored release body differs from RELEASE_NOTES.md "
+                  "(GitHub may have normalised it - verify the release page)")
+        else:
+            print("[publish] release notes verified intact (UTF-8 round-trip OK)")
 
     upload_url = release["upload_url"].split("{", 1)[0]
     existing = {a["name"]: a["id"] for a in (release.get("assets") or [])}
