@@ -71,6 +71,9 @@ FILES = [
     # VPN endpoint health probe (shared source, /opt shim). Driven by the
     # S90detour-cron loop below (KeeneticOS kills crond's job shell — see below).
     (os.path.join(ROUTER_FILES, "vpn-keepalive"), "opt/sbin/vpn-keepalive", 0o755, True),
+    # Per-profile latency sweep (shared source, /opt shim). Also driven by the
+    # S90detour-cron loop — replaces the old browser-driven ping probing.
+    (os.path.join(ROUTER_FILES, "detour-ping"), "opt/sbin/detour-ping", 0o755, True),
     # Standalone scheduler daemon (Keenetic-only): replaces the broken crond for
     # detour's periodic jobs — keep-alive, subscription-refresh, update auto-check.
     (os.path.join(HERE, "sbin", "detour-cron"), "opt/sbin/detour-cron", 0o755, False),
@@ -152,7 +155,7 @@ mkdir -p /opt/etc/detour/subscriptions /opt/etc/sing-box/profiles /opt/etc/zapre
 echo "{version}" > /opt/etc/detour/version
 touch /opt/etc/detour/platform            # the panel CGI's platform shim keys off this
 chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
-    /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
+    /opt/sbin/detour-ping /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
     /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron \\

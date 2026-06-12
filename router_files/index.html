@@ -5659,18 +5659,21 @@
       var profileComboActiveIdx = -1; // highlighted item index within profileComboRendered
 
       // ===== VPN PING / LATENCY =====
-      // The panel probes one VPN at a time (round-robin; the active VPN far more
-      // often) via the CGI `ping_check`, which ICMP-pings the profile's server and
-      // caches the result. We render the latency next to every VPN in the list and
-      // the active VPN's ping in the sing-box card, so the lowest-ping VPN is easy
-      // to spot. pingResults: id -> { rtt: <int ms; -1 = reachable w/o latency or
-      // not yet measured>, ok: <bool reachable>, ts: <epoch of last probe> }.
+      // The ROUTER owns the latency probing: a background sweep (`detour-ping`,
+      // cron every minute / Keenetic daemon tick) ICMP-pings every profile's
+      // server and rebuilds the cache the CGI `ping_status` serves. The panel is
+      // a pure READER — it polls `ping_status` and renders the cache, so the
+      // badges / active-VPN card stay fresh with no tab open and the browser no
+      // longer drives a round-robin of `ping_check` calls. The per-row and
+      // "обновить все" buttons still call `ping_check` for an on-demand re-check.
+      // We render the latency next to every VPN in the list and the active VPN's
+      // ping in the sing-box card, so the lowest-ping VPN is easy to spot.
+      // pingResults: id -> { rtt: <int ms; -1 = reachable w/o latency or not yet
+      // measured>, ok: <bool reachable>, ts: <epoch of last probe> }.
       var pingResults = {};
       var pingClockSkew = 0; // serverEpoch - clientEpoch (s); makes "проверен N назад" robust to clock drift
-      var pingTimer = null; // scheduler handle
-      var pingBusy = false; // at most one probe in flight (keeps the router unloaded)
-      var PING_GAP_MS = 2500; // pause between consecutive probes
-      var PING_ACTIVE_SEC = 25; // re-probe the active VPN at least this often
+      var pingTimer = null; // poll handle
+      var PING_POLL_MS = 12000; // how often the panel re-reads the router's ping cache
       var PING_COLORS = {
         "ping-good": "#3fb950",
         "ping-ok": "#d29922",
@@ -5776,68 +5779,18 @@
           })
           .catch(function () {});
       }
-      // Pick the next profile to probe: the active VPN whenever it's stale (so it's
-      // checked far more often), otherwise the least-recently-probed profile.
-      function pickNextPingTarget() {
-        var nowSec = Math.floor(Date.now() / 1000);
-        var activeId = currentActiveProfileId;
-        if (activeId) {
-          var ae = pingResults[activeId];
-          if (!ae || nowSec - (ae.ts || 0) >= PING_ACTIVE_SEC) return activeId;
-        }
-        var best = null,
-          bestTs = Infinity;
-        for (var i = 0; i < currentProfiles.length; i++) {
-          var id = currentProfiles[i].id;
-          var e = pingResults[id];
-          var ts = e ? e.ts || 0 : 0; // never-probed → 0 → oldest
-          if (ts < bestTs) {
-            bestTs = ts;
-            best = id;
-          }
-        }
-        return best;
-      }
-      function pingProbeOnce() {
-        if (pingBusy) return Promise.resolve();
-        var id = pickNextPingTarget();
-        if (!id) return Promise.resolve();
-        pingBusy = true;
-        return api("ping_check&id=" + encodeURIComponent(id))
-          .then(function (r) {
-            if (r && r.id) {
-              pingResults[r.id] = {
-                rtt: r.rtt,
-                ok: !!r.ok,
-                ts: r.ts || Math.floor(Date.now() / 1000),
-                server:
-                  r.server ||
-                  (pingResults[r.id] && pingResults[r.id].server) ||
-                  "",
-              };
-              updatePingBadge(r.id);
-              if (r.id === currentActiveProfileId) updateActivePing();
-              updateVpnStatusRow(r.id);
-            }
-          })
-          .catch(function () {})
-          .then(function () {
-            pingBusy = false;
-          });
-      }
+      // Reader loop: re-read the router's ping cache on an interval. The router's
+      // `detour-ping` sweep is what actually probes the servers; the panel only
+      // mirrors the cache, so badges/table/active-card stay live without the
+      // browser issuing any `ping_check` of its own.
       function startPingScheduler() {
         stopPingScheduler();
-        seedPingStatus().then(function () {
-          (function loop() {
-            pingTimer = setTimeout(function () {
-              pingProbeOnce().then(loop);
-            }, PING_GAP_MS);
-          })();
-        });
+        seedPingStatus();
+        pingTimer = setInterval(seedPingStatus, PING_POLL_MS);
       }
       function stopPingScheduler() {
         if (pingTimer) {
-          clearTimeout(pingTimer);
+          clearInterval(pingTimer);
           pingTimer = null;
         }
       }

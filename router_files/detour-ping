@@ -1,0 +1,147 @@
+#!/bin/sh
+# detour-ping — background latency sweep of every sing-box VPN profile.
+#
+# Run from cron (OpenWrt: every minute) or from the detour-cron daemon (Keenetic,
+# every tick). RECORD ONLY: it never restarts sing-box and never fails over — it
+# rebuilds the per-profile latency cache the panel reads, so the panel no longer
+# has to drive the probes from the browser. With this in place the ping badges /
+# active-VPN card stay fresh even with no panel tab open; the panel just polls
+# the `ping_status` CGI and renders the cache.
+#
+# This mirrors the probe logic of the CGI `ping_check` action (detour-api) so
+# manual re-checks and the background sweep produce identical cache lines. The
+# probes originate from the router (OUTPUT path), not br-lan, so they are never
+# caught by the sing-box REDIRECT rules — they genuinely test upstream reach.
+#
+# Profiles are probed in BOUNDED-PARALLEL batches: a serial sweep of a large
+# subscription (100+ profiles, each dead one costing ~7s of ICMP retries + TCP
+# fallback) easily overruns the 1-minute cron tick. Up to $MAXJOBS run at once.
+#
+# Cache format (TSV in tmpfs, one line per profile, same as ping_check):
+#   <id>\t<rtt_ms>\t<ok>\t<ts>\t<server>
+#   rtt_ms : integer ms from ICMP; -1 when reachable only via TCP or unreachable.
+#   ok     : 1 reachable / 0 down.
+
+SETTINGS=/etc/sing-box/settings.json
+PROFILES=/etc/sing-box/profiles
+# PING_DB is /tmp on BOTH platforms (detour-api does NOT remap it under the
+# Keenetic shim) — write where the CGI `ping_status` reads.
+PING_DB=/tmp/detour-ping.db
+LOCK=/tmp/detour-ping.lock
+# Probes are network-I/O-bound (mostly waiting on ICMP/TCP timeouts for dead
+# servers), so high concurrency is cheap and is what keeps a large profile set
+# (100+) under the 1-minute cron tick: wall ≈ ceil(N/MAXJOBS) × ~7s worst case.
+MAXJOBS=24
+
+# Keenetic/Entware platform shim (mirrors detour-api / vpn-keepalive).
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    SETTINGS=/opt/etc/sing-box/settings.json
+    PROFILES=/opt/etc/sing-box/profiles
+fi
+
+NOW=$(date +%s 2>/dev/null)
+[ -z "$NOW" ] && NOW=0
+
+# Single-flight lock. A sweep can still outrun the 1-minute cron tick on a very
+# large / mostly-dead profile set, so skip overlapping runs. Steal a stale lock
+# (>10 min — a crashed run) so we never wedge forever.
+if mkdir "$LOCK" 2>/dev/null; then
+    :
+else
+    lts=$(cat "$LOCK/ts" 2>/dev/null)
+    [ -z "$lts" ] && lts=0
+    if [ "$((NOW - lts))" -lt 600 ]; then
+        exit 0
+    fi
+    rm -rf "$LOCK"
+    mkdir "$LOCK" 2>/dev/null || exit 0
+fi
+echo "$NOW" > "$LOCK/ts"
+
+# PID-private scratch dir for one result file per profile (lets probes run in
+# parallel without clobbering a shared file). Kept OUTSIDE the lock dir so a
+# lock-steal/cleanup by another run can never delete this run's in-flight files.
+WORK="/tmp/detour-ping.work.$$"
+rm -rf "$WORK"; mkdir -p "$WORK"
+trap 'rm -rf "$LOCK" "$WORK"' EXIT INT TERM
+
+[ -d "$PROFILES" ] || exit 0
+
+jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
+jnum() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -1; }
+
+# Probe one profile by id and write its cache line to "$WORK/<id>". Identical
+# logic to the `ping_check` CGI: ICMP first (latency + reachability in one shot),
+# retry once to kill single-packet false negatives, then a TCP-connect fallback
+# for proxy types whose servers may filter ICMP (skip UDP types — TCP is moot).
+probe_one() {
+    pid="$1"
+    pfile="$PROFILES/$pid.json"
+    [ -f "$pfile" ] || return 0
+    server=$(jstr server "$pfile")
+    port=$(jnum server_port "$pfile")
+    ptype=$(jstr type "$pfile")
+    rtt=-1; okv=0
+    if [ -n "$server" ]; then
+        pt=$(ping -c1 -W2 "$server" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -1)
+        [ -z "$pt" ] && pt=$(ping -c1 -W2 "$server" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -1)
+        if [ -n "$pt" ]; then
+            rtt=$(echo "$pt" | awk '{printf "%.0f", $1}')
+            okv=1
+        else
+            case "$ptype" in
+                wireguard|hysteria2|tuic) : ;;
+                *)
+                    if [ -n "$port" ] && [ "$port" != "0" ]; then
+                        if timeout 3 nc "$server" "$port" </dev/null >/dev/null 2>&1; then
+                            okv=1; rtt=-1
+                        fi
+                    fi
+                    ;;
+            esac
+        fi
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$pid" "$rtt" "$okv" "$NOW" "$server" > "$WORK/$pid"
+}
+
+# Sweep every profile, up to $MAXJOBS in parallel. Iterating *.json covers exactly
+# the set the panel lists (chains are just CSVs of these ids).
+jobs=0
+for f in "$PROFILES"/*.json; do
+    [ -f "$f" ] || continue
+    id=$(basename "$f" .json)
+    probe_one "$id" &
+    jobs=$((jobs + 1))
+    if [ "$jobs" -ge "$MAXJOBS" ]; then
+        wait
+        jobs=0
+    fi
+done
+wait
+
+# Resolve the active profile (active_profile, else last item of the active_chain
+# CSV "a,b,c") so its line leads the cache — the panel's active-VPN card reads it.
+ACTIVE=$(jstr active_profile "$SETTINGS")
+[ -z "$ACTIVE" ] && ACTIVE=$(jstr active_chain "$SETTINGS" | sed 's/.*,//')
+
+# Assemble the cache: active first, then everyone else. Rebuilding from the live
+# scratch dir prunes lines for profiles that were deleted since the last sweep.
+TMPDB="$PING_DB.tmp.$$"
+: > "$TMPDB"
+[ -n "$ACTIVE" ] && [ -f "$WORK/$ACTIVE" ] && cat "$WORK/$ACTIVE" >> "$TMPDB"
+for r in "$WORK"/*; do
+    [ -f "$r" ] || continue
+    [ "$r" = "$WORK/$ACTIVE" ] && continue
+    cat "$r" >> "$TMPDB"
+done
+
+# Safety: never replace a good cache with an empty one. If the sweep produced no
+# lines (e.g. profiles dir briefly empty, or a race nuked the scratch), keep the
+# previous cache so the panel doesn't blank every badge.
+if [ -s "$TMPDB" ]; then
+    mv "$TMPDB" "$PING_DB" 2>/dev/null || rm -f "$TMPDB"
+else
+    rm -f "$TMPDB"
+fi
+exit 0
