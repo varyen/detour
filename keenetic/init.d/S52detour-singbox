@@ -74,7 +74,7 @@ case "$1" in
     enable)  set_autostart 1 ;;
     disable) set_autostart 0 ;;
     stop)    stop ;;
-    restart)
+    restart|reconfigure)
         # Reconfigure, NOT a teardown: bounce only the daemon and KEEP the enabled
         # marker so the REDIRECT rules — and the detour DNS server — stay up the
         # whole time. The brief gap then fails CLOSED (LAN hits :12345 and is
@@ -90,5 +90,5 @@ case "$1" in
         dns_reload ;;
     reload)  reload ;;
     status)  status ;;
-    *) echo "usage: $0 {start|force-start|stop|restart|reload|enable|disable|status}"; exit 1 ;;
+    *) echo "usage: $0 {start|force-start|stop|restart|reconfigure|reload|enable|disable|status}"; exit 1 ;;
 esac
