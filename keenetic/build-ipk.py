@@ -74,6 +74,9 @@ FILES = [
     # Per-profile latency sweep (shared source, /opt shim). Also driven by the
     # S90detour-cron loop — replaces the old browser-driven ping probing.
     (os.path.join(ROUTER_FILES, "detour-ping"), "opt/sbin/detour-ping", 0o755, True),
+    # Functional health check (shared source, /opt shim). Driven hourly by the
+    # S90detour-cron loop. Self-no-ops if Entware sing-box lacks clash_api.
+    (os.path.join(ROUTER_FILES, "detour-health"), "opt/sbin/detour-health", 0o755, True),
     # Standalone scheduler daemon (Keenetic-only): replaces the broken crond for
     # detour's periodic jobs — keep-alive, subscription-refresh, update auto-check.
     (os.path.join(HERE, "sbin", "detour-cron"), "opt/sbin/detour-cron", 0o755, False),
@@ -155,11 +158,15 @@ mkdir -p /opt/etc/detour/subscriptions /opt/etc/sing-box/profiles /opt/etc/zapre
 echo "{version}" > /opt/etc/detour/version
 touch /opt/etc/detour/platform            # the panel CGI's platform shim keys off this
 chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
-    /opt/sbin/detour-ping /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
+    /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
     /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
+# Seed the health-check target list on first install (preserved on upgrade).
+if [ ! -f /opt/etc/sing-box/health-urls.list ]; then
+    printf '# Цели проверки: "Название|https://адрес" на строку. Профиль рабочий, только если открылись ВСЕ.\\nYouTube|https://www.youtube.com/generate_204\\nYouTube видео|https://redirector.googlevideo.com/generate_204\\nGoogle|https://www.google.com/generate_204\\n' > /opt/etc/sing-box/health-urls.list
+fi
 # Seed self-update config (public repo; add a GH_TOKEN here to enable update checks).
 # AUTO_CHECK=1 → S90detour-cron runs the 6h `check-all` by default (opt out with =0).
 if [ ! -f /opt/etc/detour/update.conf ]; then

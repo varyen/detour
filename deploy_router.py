@@ -517,6 +517,40 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=True):
         out, _, _ = exec_cmd(ssh, "crontab -l 2>/dev/null | grep detour-ping")
         print(f"  cron: {out.strip() or 'NOT INSTALLED'}")
 
+    # 8b. Functional health check (hourly): a throwaway sing-box does a REAL fetch
+    #     of target URLs THROUGH each profile's outbound. Catches "server pings
+    #     but YouTube/site is dead at the egress" that detour-ping can't see.
+    health_local = os.path.join(ROUTER_FILES, "detour-health")
+    if os.path.isfile(health_local):
+        with open(health_local, "rb") as f:
+            n = upload(ssh, f.read(), "/usr/sbin/detour-health", "0755")
+        print(f"  /usr/sbin/detour-health: {n} bytes")
+        # Seed the editable target list on first install only (preserve user edits).
+        seed = (
+            "# Цели проверки работоспособности VPN: \"Название|https://адрес\" на строку\n"
+            "# ('#'/пустые игнорируются; название необязательно). Профиль «рабочий»,\n"
+            "# только если открылись ВСЕ цели. Список редактируется в панели.\n"
+            "YouTube|https://www.youtube.com/generate_204\n"
+            "YouTube видео|https://redirector.googlevideo.com/generate_204\n"
+            "Google|https://www.google.com/generate_204\n"
+        )
+        out, _, _ = exec_cmd(ssh, "test -f /etc/sing-box/health-urls.list && echo exists")
+        if "exists" not in out:
+            upload(ssh, seed, "/etc/sing-box/health-urls.list", "0644")
+            print("  /etc/sing-box/health-urls.list: seeded defaults")
+        else:
+            print("  /etc/sing-box/health-urls.list: kept (already present)")
+        # Hourly sweep (minute 41 — offset from the other detour crons).
+        health_cron = "41 * * * * /usr/sbin/detour-health sweep >/dev/null 2>&1"
+        exec_cmd(
+            ssh,
+            "( crontab -l 2>/dev/null | grep -v 'detour-health' ; "
+            f"echo '{health_cron}' ) | crontab -",
+        )
+        out, _, _ = exec_cmd(ssh, "crontab -l 2>/dev/null | grep detour-health")
+        print(f"  cron: {out.strip() or 'NOT INSTALLED'}")
+        exec_cmd(ssh, "/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1")
+
 
 def step_hotplug_guard(ssh):
     step("Installing hotplug guard")

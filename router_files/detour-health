@@ -1,0 +1,502 @@
+#!/bin/sh
+# detour-health — hourly FUNCTIONAL health check of every sing-box VPN profile.
+#
+# WHY this exists (vs detour-ping): detour-ping only ICMP/TCP-pings each profile's
+# SERVER — it answers "is the box reachable", not "does traffic actually flow".
+# A VPN can ping green while YouTube / a specific site is dead at the egress
+# (blocked, throttled, broken route). This script catches exactly that: it spins
+# up a SECOND, throwaway sing-box — its own clash-API controller, its own data
+# dir, NO inbounds — loaded with every profile's outbound, then asks the clash
+# API to perform a REAL HTTP fetch of each configured health URL THROUGH each
+# outbound. A profile is "healthy" only if ALL health URLs return a delay.
+#
+# The throwaway instance never touches the live :12345 proxy: it only binds a
+# loopback clash port and dials outbound (router OUTPUT path, same as detour-ping,
+# so the dials are never caught by the sing-box REDIRECT rules — they genuinely
+# test upstream reach). It is started, probed, and killed within this run.
+#
+# Profiles are probed in robust CHUNKS: a malformed/unsupported outbound would
+# make sing-box reject a whole config, so we load ≤CHUNK outbounds per throwaway
+# instance; if a chunk's instance fails to start we re-probe that chunk one
+# profile at a time so a single bad profile can't blank the rest. Within a live
+# instance, profiles are probed BOUNDED-PARALLEL ($MAXJOBS) since each probe is
+# I/O-bound (mostly waiting on the per-URL delay timeout for dead egress).
+#
+# Cache format (TSV in tmpfs, one line per profile, read by CGI health_status):
+#   <id>\t<ok>\t<ts>\t<rtt_ms>\t<delays>
+#   ok      : 1 = every health URL passed / 0 = at least one failed (or down).
+#   rtt_ms  : first successful URL delay in ms; -1 if none succeeded.
+#   delays  : comma list, one per health URL in order, ms or -1 for a failure.
+#
+# Opt-in auto-switch: if settings.health_auto_switch=1 AND the ACTIVE profile is
+# a SINGLE profile (not a multi-hop chain) that fails its functional check
+# (confirmed by a re-probe), switch to the healthiest other profile via the
+# panel's own activation path (detour-api internal `activate` CLI). Records the
+# event in /tmp/detour-health.switch + /var/log/detour-health.log.
+
+SETTINGS=/etc/sing-box/settings.json
+PROFILES=/etc/sing-box/profiles
+URLS_FILE=/etc/sing-box/health-urls.list
+SINGBOX_BIN=/usr/bin/sing-box
+API_BIN=/www/cgi-bin/detour-api
+LOG=/var/log/detour-health.log
+
+# HEALTH_DB / scratch live in /tmp on BOTH platforms (the CGI does NOT remap them
+# under the Keenetic shim) — write where the CGI health_status reads.
+HEALTH_DB=/tmp/detour-health.db
+SWITCH_MARK=/tmp/detour-health.switch
+UNSUPP_MARK=/tmp/detour-health.unsupported   # set when sing-box has no working clash_api
+LOCK=/tmp/detour-health.lock
+WORK="/tmp/detour-health.work.$$"
+URLS_RESOLVED="/tmp/detour-health.urls.$$"
+ALL_IDS="/tmp/detour-health.ids.$$"
+SB_CONF="/tmp/detour-health.conf.$$"
+SB_MAP="/tmp/detour-health.map.$$"
+SB_DATA="/tmp/detour-health.sbd.$$"
+SB_LOG="/tmp/detour-health.sb.$$"
+
+# Throwaway clash controller — loopback only, on a PER-RUN port. A FIXED port was
+# a footgun: if a run is killed by a signal the trap doesn't catch (SIGHUP from a
+# detached/hung-up shell), its sing-box is orphaned and keeps squatting the port;
+# the NEXT run's readiness poll then attaches to that DEAD instance and every
+# probe times out (the whole sweep falsely reports "down"). A $$-derived port
+# can't collide with an orphan, and reap_orphans() (sweep) clears the leaked RAM.
+CLASH_ADDR="127.0.0.1:$((19390 + $$ % 1000))"
+MAXJOBS=4                       # concurrent per-profile probes. Unlike a cheap ICMP
+                                # ping, each probe is a full TLS/Reality handshake +
+                                # HTTP fetch (CPU + a real connection). On a single-core
+                                # router, firing many at once is a load spike that fights
+                                # the live VPN's own traffic — so keep it a small trickle.
+PACE=1                          # seconds to idle between batches, so the sweep spreads
+                                # connections over time instead of one solid block of load
+DELAY_TO=4000                   # clash delay test timeout (ms) — bounds a dead-egress probe
+CURL_M=6                        # curl wall timeout (s) — must exceed DELAY_TO/1000
+SB_WAIT=20                      # seconds to wait for the clash controller to bind
+
+# Keenetic/Entware platform shim (mirrors detour-api / detour-ping / vpn-keepalive).
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    SETTINGS=/opt/etc/sing-box/settings.json
+    PROFILES=/opt/etc/sing-box/profiles
+    URLS_FILE=/opt/etc/sing-box/health-urls.list
+    SINGBOX_BIN=/opt/bin/sing-box
+    API_BIN=/opt/www/cgi-bin/detour-api
+    LOG=/opt/var/log/detour-health.log
+fi
+
+NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
+log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+
+jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
+
+# Modes:
+#   (none) | sweep   — probe every profile, rebuild the cache, opt-in auto-switch.
+#   one <id>         — probe ONE profile fast (panel per-row re-check); upsert its
+#                      cache line, no auto-switch. Bypasses the enabled-gate (it is
+#                      an explicit user action) and the sweep lock. Both modes use
+#                      the per-run $$-derived CLASH_ADDR set above (no fixed port),
+#                      so `one` and `sweep` never collide and neither can attach to
+#                      a stale orphan.
+MODE="${1:-sweep}"
+ONEID="$2"
+case "$MODE" in
+    sweep) ;;
+    one)
+        ONEID=$(printf '%s' "$ONEID" | tr -cd 'A-Za-z0-9_.-')
+        [ -n "$ONEID" ] || { echo "usage: detour-health one <id>" >&2; exit 2; }
+        [ -f "$PROFILES/$ONEID.json" ] || { echo "profile not found" >&2; exit 2; }
+        ;;
+    *) echo "usage: detour-health [sweep | one <id>]" >&2; exit 2 ;;
+esac
+
+# Gate: the background sweep skips when disabled (default ON — only explicit 0/off
+# opts out). A manual `one` re-check is always allowed.
+ENABLED=$(jstr health_check_enabled "$SETTINGS")
+if [ "$MODE" = "sweep" ]; then
+    case "$ENABLED" in 0|off|false|no) exit 0 ;; esac
+fi
+AUTOSWITCH=$(jstr health_auto_switch "$SETTINGS")
+
+[ -d "$PROFILES" ] || exit 0
+[ -x "$SINGBOX_BIN" ] || exit 0
+command -v lua >/dev/null 2>&1 || { log "lua missing — cannot build probe config"; exit 0; }
+
+SBPID=""
+LOCK_HELD=""   # set to 1 only once WE create the lock dir, so cleanup never
+               # removes a concurrent sweep's lock (e.g. from a `one`-mode run).
+cleanup() {
+    [ -n "$SBPID" ] && kill "$SBPID" 2>/dev/null
+    [ -n "$SBPID" ] && kill -9 "$SBPID" 2>/dev/null
+    [ -n "$LOCK_HELD" ] && rm -rf "$LOCK"
+    rm -rf "$WORK" "$URLS_RESOLVED" "$ALL_IDS" "$SB_CONF" "$SB_MAP" \
+        "$SB_DATA" "$SB_LOG" "$ALL_IDS.chunk.$$" 2>/dev/null
+}
+# HUP included so a detached/hung-up shell still triggers cleanup (the missing HUP
+# is exactly how orphaned throwaway sing-boxes used to leak and squat a port).
+trap cleanup EXIT INT TERM HUP
+
+# Reap orphaned throwaway sing-box(es) from prior runs that died before cleanup.
+# Match via ps (busybox pkill -f is unreliable here). Called in sweep mode only —
+# the lock guarantees no sibling sweep, and ours isn't started yet at call time.
+reap_orphans() {
+    for opid in $(ps w 2>/dev/null | grep '[/]tmp/detour-health\.conf\.' | awk '{print $1}'); do
+        kill -9 "$opid" 2>/dev/null
+    done
+}
+
+# Single-flight lock (sweep only). An hourly sweep of a large/mostly-dead profile
+# set can run a few minutes; skip overlapping runs but steal a stale lock
+# (>30 min = crash). `one` mode takes no lock (LOCK_HELD stays empty so cleanup
+# never touches a concurrent sweep's lock dir).
+if [ "$MODE" = "sweep" ]; then
+    if mkdir "$LOCK" 2>/dev/null; then
+        :
+    else
+        lts=$(cat "$LOCK/ts" 2>/dev/null); [ -z "$lts" ] && lts=0
+        if [ "$((NOW - lts))" -lt 1800 ]; then exit 0; fi
+        rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || exit 0
+    fi
+    LOCK_HELD=1
+    echo "$NOW" > "$LOCK/ts"
+    reap_orphans
+fi
+
+rm -rf "$WORK"; mkdir -p "$WORK"
+
+# ---- Lua prep: resolve health URLs (label<TAB>encoded<TAB>raw) + collect every
+# profile id that carries a usable outbound. cjson.safe is guaranteed present
+# (the panel CGI relies on it for config building).
+lua - "$PROFILES" "$URLS_FILE" "$URLS_RESOLVED" "$ALL_IDS" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local pdir, ufile, uout, idout = arg[1], arg[2], arg[3], arg[4]
+
+local function enc(s)
+  return (s:gsub("[^%w%-%._~]", function(c) return string.format("%%%02X", string.byte(c)) end))
+end
+
+-- Health URLs: "label|url" per line ('#'/blank ignored); url may omit a label.
+local urls = {}
+local fh = io.open(ufile, "r")
+if fh then
+  for line in fh:lines() do
+    line = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if line ~= "" and line:sub(1,1) ~= "#" then
+      local label, u = line:match("^(.-)%s*|%s*(.+)$")
+      if not u then u = line; label = nil end
+      if u:match("^https?://") then
+        if not label or label == "" then label = (u:match("^https?://([^/]+)") or u) end
+        urls[#urls+1] = { label = label, url = u }
+      end
+    end
+  end
+  fh:close()
+end
+if #urls == 0 then
+  urls = {
+    { label = "YouTube",       url = "https://www.youtube.com/generate_204" },
+    { label = "YouTube видео", url = "https://redirector.googlevideo.com/generate_204" },
+    { label = "Google",        url = "https://www.google.com/generate_204" },
+  }
+end
+local uf = io.open(uout, "w")
+for _, e in ipairs(urls) do
+  uf:write(e.label .. "\t" .. enc(e.url) .. "\t" .. e.url .. "\n")
+end
+uf:close()
+
+-- Every profile carrying a decodable outbound.
+local ids = {}
+local p = io.popen('ls "' .. pdir .. '"/*.json 2>/dev/null')
+if p then
+  for f in p:lines() do
+    local h = io.open(f, "r")
+    if h then
+      local obj = cjson.decode(h:read("*a") or "")
+      h:close()
+      if obj and obj.outbound and obj.id then ids[#ids+1] = obj.id end
+    end
+  end
+  p:close()
+end
+local idf = io.open(idout, "w")
+for _, id in ipairs(ids) do idf:write(id .. "\n") end
+idf:close()
+LUA
+
+[ -s "$URLS_RESOLVED" ] || { log "no health URLs resolved"; exit 0; }
+[ -s "$ALL_IDS" ] || { log "no profiles with outbounds"; exit 0; }
+
+URL_COUNT=$(grep -c . "$URLS_RESOLVED" 2>/dev/null)
+
+# ---- Lua cfg-builder: emit a throwaway config (clash_api + given ids' outbounds,
+# each retagged h<n>) and an id<TAB>tag map. Invoked once per chunk / per profile.
+build_cfg() { # $1 = ids file, writes $SB_CONF + $SB_MAP
+    : > "$SB_MAP"
+    lua - "$PROFILES" "$1" "$CLASH_ADDR" "$SB_CONF" "$SB_MAP" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local pdir, idfile, clash, cout, mout = arg[1], arg[2], arg[3], arg[4], arg[5]
+local outbounds = { { type = "direct", tag = "direct" } }
+local map = {}
+local n = 0
+local idf = io.open(idfile, "r")
+if idf then
+  for id in idf:lines() do
+    id = id:gsub("%s+$", "")
+    if id ~= "" then
+      local h = io.open(pdir .. "/" .. id .. ".json", "r")
+      if h then
+        local obj = cjson.decode(h:read("*a") or "")
+        h:close()
+        if obj and obj.outbound then
+          n = n + 1
+          local ob = obj.outbound
+          local tag = "h" .. n
+          ob.tag = tag
+          outbounds[#outbounds + 1] = ob
+          map[#map + 1] = id .. "\t" .. tag
+        end
+      end
+    end
+  end
+  idf:close()
+end
+local conf = {
+  log = { level = "error", timestamp = false },
+  experimental = { clash_api = { external_controller = clash } },
+  outbounds = outbounds,
+  route = { final = "direct" },
+}
+local cf = io.open(cout, "w"); cf:write(cjson.encode(conf)); cf:close()
+local mf = io.open(mout, "w"); mf:write(table.concat(map, "\n")); if #map > 0 then mf:write("\n") end; mf:close()
+LUA
+}
+
+start_sb() { # builds nothing; starts $SB_CONF, waits for clash. 0=up 1=failed
+    rm -rf "$SB_DATA"; mkdir -p "$SB_DATA"
+    "$SINGBOX_BIN" run -c "$SB_CONF" -D "$SB_DATA" >"$SB_LOG" 2>&1 &
+    SBPID=$!
+    i=0
+    while [ "$i" -lt "$SB_WAIT" ]; do
+        if curl -s -o /dev/null "http://$CLASH_ADDR/version" 2>/dev/null; then return 0; fi
+        kill -0 "$SBPID" 2>/dev/null || { SBPID=""; return 1; }
+        sleep 1; i=$((i + 1))
+    done
+    return 1
+}
+
+stop_sb() {
+    [ -n "$SBPID" ] && kill "$SBPID" 2>/dev/null
+    i=0
+    while [ "$i" -lt 5 ] && kill -0 "$SBPID" 2>/dev/null; do sleep 1; i=$((i + 1)); done
+    [ -n "$SBPID" ] && kill -9 "$SBPID" 2>/dev/null
+    SBPID=""
+}
+
+# Run the clash delay test for one outbound+URL; echo the ms delay, or nothing on
+# failure ({"message":...} / no response). The delay test does a real HTTP GET of
+# the URL THROUGH the named outbound — this is what makes the check "functional".
+clash_delay() {
+    resp=$(curl -s -m "$CURL_M" "http://$CLASH_ADDR/proxies/$1/delay?timeout=$DELAY_TO&url=$2" 2>/dev/null)
+    printf '%s' "$resp" | sed -n 's/.*"delay"[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+# Probe one profile's outbound (tag) through the running throwaway instance: run
+# the clash delay test for every health URL; write its cache line to $WORK/<id>.
+probe_one() {
+    pid="$1"; tag="$2"
+    okall=1; delays=""; rtt=-1; failed=0
+    while IFS="	" read -r plabel penc praw; do
+        [ -n "$penc" ] || continue
+        # Short-circuit: once ANY target fails, the profile is already "not healthy"
+        # (we require ALL to pass), so don't waste a retry×timeout on the rest — just
+        # record them as untested (-1). This keeps a down/blocked server cheap (~1
+        # target probe instead of all 3). Healthy profiles still probe every target,
+        # so the per-target detail the panel shows is complete for the ones that work.
+        if [ "$failed" = "1" ]; then delays="$delays,-1"; continue; fi
+        d=$(clash_delay "$tag" "$penc")
+        # One retry on failure — egress probes flake (transient "An error occurred")
+        # the same way single ICMP packets drop; a retry kills the false negatives.
+        [ -z "$d" ] && d=$(clash_delay "$tag" "$penc")
+        if [ -n "$d" ]; then
+            [ "$rtt" = "-1" ] && rtt="$d"
+            delays="$delays,$d"
+        else
+            delays="$delays,-1"; okall=0; failed=1
+        fi
+    done < "$URLS_RESOLVED"
+    delays=${delays#,}
+    [ -z "$delays" ] && { delays="-1"; okall=0; }
+    printf '%s\t%s\t%s\t%s\t%s\n' "$pid" "$okall" "$NOW" "$rtt" "$delays" > "$WORK/$pid"
+}
+
+# Write a "down" line for a profile we could not even load into sing-box (its
+# outbound is malformed/unsupported) so it surfaces as broken, not pending.
+mark_down() {
+    pid="$1"; d="-1"; i=1
+    while [ "$i" -lt "$URL_COUNT" ]; do d="$d,-1"; i=$((i + 1)); done
+    printf '%s\t%s\t%s\t%s\t%s\n' "$pid" 0 "$NOW" -1 "$d" > "$WORK/$pid"
+}
+
+# Probe every profile id in a file through ONE throwaway instance (bounded
+# parallel). Returns 1 if the instance failed to start.
+#
+# CRITICAL: wait ONLY on the probe_one PIDs, never bare `wait`. The throwaway
+# sing-box is itself a background child of this shell (start_sb launched it with
+# `&`); a bare `wait` would block on it forever — it's a server, it never exits —
+# so the sweep/one-mode would hang after probing, never reach stop_sb, leak the
+# instance and (one-mode) pile up. `wait $pids` waits for the probes and nothing else.
+probe_idfile() {
+    build_cfg "$1"
+    [ -s "$SB_MAP" ] || return 0
+    if ! start_sb; then stop_sb; return 1; fi
+    jobs=0; pids=""
+    while IFS="	" read -r mid mtag; do
+        [ -n "$mtag" ] || continue
+        probe_one "$mid" "$mtag" &
+        pids="$pids $!"
+        jobs=$((jobs + 1))
+        # Batch full → drain it, then idle PACE so connections trickle out over
+        # time rather than landing as one continuous wall of handshakes. (One-mode
+        # has a single profile, so jobs never reaches MAXJOBS and it stays instant.)
+        if [ "$jobs" -ge "$MAXJOBS" ]; then wait $pids; pids=""; jobs=0; sleep "$PACE"; fi
+    done < "$SB_MAP"
+    [ -n "$pids" ] && wait $pids
+    stop_sb
+    return 0
+}
+
+# Capability probe: can THIS sing-box bind a clash-API controller at all? (Entware
+# sing-box-go on Keenetic may be built without with_clash_api.) Without it the
+# delay endpoint doesn't exist and every probe would falsely look "down", so we
+# detect once up front and bail — leaving a marker the panel reads to hide the UI
+# instead of painting every VPN red.
+clash_supported() {
+    printf '{"log":{"level":"error"},"experimental":{"clash_api":{"external_controller":"%s"}},"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}' \
+        "$CLASH_ADDR" > "$SB_CONF"
+    if start_sb; then stop_sb; return 0; fi
+    stop_sb; return 1
+}
+# Only the sweep pays for this extra start: a manual `one` re-check trusts the
+# marker the last sweep left (and the panel hides the UI when unsupported, so a
+# re-check isn't reachable there anyway). Keeps per-row re-check to one start.
+if [ "$MODE" = "sweep" ]; then
+    if ! clash_supported; then
+        : > "$UNSUPP_MARK"
+        log "sing-box has no working clash_api on $CLASH_ADDR — functional health check unavailable here"
+        exit 0
+    fi
+    rm -f "$UNSUPP_MARK"
+fi
+
+# ---- ONE mode: probe a single profile, upsert its cache line, print it, done.
+if [ "$MODE" = "one" ]; then
+    printf '%s\n' "$ONEID" > "$WORK/.one-ids"
+    if ! probe_idfile "$WORK/.one-ids"; then mark_down "$ONEID"; fi
+    LINE=$(cat "$WORK/$ONEID" 2>/dev/null)
+    [ -n "$LINE" ] || { mark_down "$ONEID"; LINE=$(cat "$WORK/$ONEID"); }
+    TMPDB="$HEALTH_DB.one.$$"
+    if [ -f "$HEALTH_DB" ]; then
+        awk -F'\t' -v id="$ONEID" '$1!=id' "$HEALTH_DB" > "$TMPDB" 2>/dev/null
+    else
+        : > "$TMPDB"
+    fi
+    printf '%s\n' "$LINE" >> "$TMPDB"
+    mv "$TMPDB" "$HEALTH_DB" 2>/dev/null || rm -f "$TMPDB"
+    printf '%s\n' "$LINE"
+    exit 0
+fi
+
+# ---- Sweep: load EVERY profile's outbound into ONE throwaway instance and probe
+# them all (outbounds dial lazily, so a 100+-outbound config is cheap until each
+# is tested). Common case = a single sing-box start. Only if that config is
+# REJECTED (a malformed/unsupported outbound poisons the whole file) do we bisect
+# the id list: good halves probe normally, the half holding the bad profile keeps
+# splitting until it is isolated and marked down — far faster than N serial starts.
+probe_range() { # $1 = ids file
+    if probe_idfile "$1"; then return 0; fi
+    cnt=$(grep -c . "$1" 2>/dev/null)
+    if [ "${cnt:-0}" -le 1 ]; then
+        bad=$(head -1 "$1"); [ -n "$bad" ] && { mark_down "$bad"; log "profile rejected by sing-box: $bad"; }
+        return 0
+    fi
+    half=$((cnt / 2))
+    head -n "$half" "$1" > "$1.a"
+    tail -n +"$((half + 1))" "$1" > "$1.b"
+    probe_range "$1.a"
+    probe_range "$1.b"
+    rm -f "$1.a" "$1.b"
+}
+
+total=$(grep -c . "$ALL_IDS")
+log "health sweep: $total profiles, $URL_COUNT url(s)"
+SWEEP_IDS="$WORK/.sweep-ids"
+cp "$ALL_IDS" "$SWEEP_IDS"
+probe_range "$SWEEP_IDS"
+DONE=$(ls "$WORK" 2>/dev/null | grep -vc '^\.')
+log "sweep probed $DONE/$total profiles"
+
+# ---- Assemble the cache: active profile first (panel's active card reads it),
+# then the rest. Rebuilt from the live scratch dir so deleted profiles drop out.
+ACTIVE=$(jstr active_profile "$SETTINGS")
+[ -z "$ACTIVE" ] && ACTIVE=$(jstr active_chain "$SETTINGS" | sed 's/.*,//')
+
+TMPDB="$HEALTH_DB.tmp.$$"
+: > "$TMPDB"
+[ -n "$ACTIVE" ] && [ -f "$WORK/$ACTIVE" ] && cat "$WORK/$ACTIVE" >> "$TMPDB"
+for r in "$WORK"/*; do
+    [ -f "$r" ] || continue
+    [ "$r" = "$WORK/$ACTIVE" ] && continue
+    cat "$r" >> "$TMPDB"
+done
+
+# Safety: never replace a good cache with an empty one (e.g. sing-box wouldn't
+# start at all this round) — keep the previous results so badges don't all blank.
+if [ -s "$TMPDB" ]; then
+    mv "$TMPDB" "$HEALTH_DB" 2>/dev/null || rm -f "$TMPDB"
+else
+    rm -f "$TMPDB"; log "sweep produced no results — kept previous cache"
+fi
+
+# ==================== OPT-IN AUTO-SWITCH ====================
+# Only when enabled AND the active profile is a SINGLE profile (auto-switching a
+# multi-hop chain is ambiguous) AND it failed its functional check. Confirm with
+# a fresh re-probe (one hourly blip shouldn't trigger a switch), then activate the
+# healthiest OTHER profile through the panel's own activation pipeline.
+case "$AUTOSWITCH" in 1|on|true|yes) ;; *) exit 0 ;; esac
+[ -x "$API_BIN" ] || exit 0
+ACHAIN=$(jstr active_chain "$SETTINGS")
+case "$ACHAIN" in *,*) exit 0 ;; esac          # multi-hop chain → never auto-switch
+[ -z "$ACTIVE" ] && exit 0
+[ -f "$WORK/$ACTIVE" ] || exit 0
+AOK=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$ACTIVE")
+[ "$AOK" = "0" ] || exit 0                      # active is healthy → nothing to do
+
+# Confirm the failure: rebuild a one-profile instance for the active VPN and
+# re-probe. A transient flap clears here and we DON'T switch.
+printf '%s\n' "$ACTIVE" > "$WORK/.active-ids"
+if probe_idfile "$WORK/.active-ids"; then
+    AOK2=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$ACTIVE" 2>/dev/null)
+    [ "$AOK2" = "0" ] || { log "active $ACTIVE recovered on re-probe — no switch"; exit 0; }
+fi
+
+# Pick the healthiest OTHER profile: ok=1, lowest positive rtt wins (rtt=-1 sinks).
+CAND=$(awk -F'\t' -v active="$ACTIVE" '
+    $1 != active && $2 == "1" {
+        r = ($4 == "" || $4 < 0) ? 999999 : $4
+        if (best == "" || r < bestr) { best = $1; bestr = r }
+    }
+    END { if (best != "") print best }' "$HEALTH_DB")
+
+if [ -z "$CAND" ]; then
+    log "active $ACTIVE unhealthy but no healthy candidate — staying put"
+    exit 0
+fi
+
+log "AUTO-SWITCH: active $ACTIVE failed health check → activating $CAND"
+if OUT=$("$API_BIN" activate "$CAND" 2>&1); then
+    printf '{"from":"%s","to":"%s","ts":%s}\n' "$ACTIVE" "$CAND" "$NOW" > "$SWITCH_MARK"
+    log "AUTO-SWITCH ok: $ACTIVE → $CAND"
+else
+    log "AUTO-SWITCH failed ($ACTIVE → $CAND): $OUT"
+fi
+exit 0

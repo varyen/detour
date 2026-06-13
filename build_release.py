@@ -135,6 +135,7 @@ PANEL_FILES = [
     (("router_files", "subscription-refresh"), "usr/sbin/subscription-refresh", 0o755),
     (("router_files", "vpn-keepalive"), "usr/sbin/vpn-keepalive", 0o755),
     (("router_files", "detour-ping"), "usr/sbin/detour-ping", 0o755),
+    (("router_files", "detour-health"), "usr/sbin/detour-health", 0o755),
     (("router_files", "detour-hosts"), "usr/sbin/detour-hosts", 0o755),
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
@@ -274,6 +275,7 @@ $BEGIN
 /etc/sing-box/settings.json
 /etc/sing-box/proxy-domains.list
 /etc/sing-box/whitelist-domains.list
+/etc/sing-box/health-urls.list
 /etc/sing-box/route-map.list
 /etc/zapret-tpws.conf
 /etc/zapret-tpws/domains.list
@@ -327,9 +329,25 @@ fi
 chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /etc/firewall.lan_mark_fallback /etc/hotplug.d/iface/99-proxy-guard \\
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
-    /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
+    /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
+    /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /www/cgi-bin/detour-api 2>/dev/null
+
+# 2b) Seed the health-check target list on first install (preserved on upgrade
+# via the keeplist + this guard). detour-health/health_urls fall back to built-in
+# defaults if it's missing, but seeding makes the panel's target editor non-empty.
+if [ ! -f /etc/sing-box/health-urls.list ]; then
+    mkdir -p /etc/sing-box
+    cat > /etc/sing-box/health-urls.list <<'HURLS'
+# Цели проверки работоспособности VPN: "Название|https://адрес" на строку
+# ('#'/пустые игнорируются; название необязательно). Профиль «рабочий»,
+# только если открылись ВСЕ цели. Список редактируется в панели.
+YouTube|https://www.youtube.com/generate_204
+YouTube видео|https://redirector.googlevideo.com/generate_204
+Google|https://www.google.com/generate_204
+HURLS
+fi
 
 # 3) Enable + (re)start services, but HONOUR the operator's «Автозапуск» choice
 # so a panel REINSTALL never resurrects a service the user turned off. The panel
@@ -373,11 +391,12 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-hosts'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
   echo "* * * * * /usr/sbin/detour-ping >/dev/null 2>&1"
+  echo "41 * * * * /usr/sbin/detour-health sweep >/var/log/detour-health.log 2>&1"
   echo "23 */12 * * * /usr/sbin/detour-hosts refresh-cron >/var/log/detour-hosts.log 2>&1"
 ) | crontab -
 /etc/init.d/cron enable >/dev/null 2>&1
@@ -413,6 +432,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'subscription-refresh' \\
                       | grep -v 'vpn-keepalive' \\
                       | grep -v 'detour-ping' \\
+                      | grep -v 'detour-health' \\
                       | grep -v 'detour-hosts' \\
                       | crontab - 2>/dev/null
 exit 0
