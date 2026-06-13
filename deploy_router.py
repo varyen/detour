@@ -540,8 +540,9 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=True):
             print("  /etc/sing-box/health-urls.list: seeded defaults")
         else:
             print("  /etc/sing-box/health-urls.list: kept (already present)")
-        # Hourly sweep (minute 41 — offset from the other detour crons).
-        health_cron = "41 * * * * /usr/sbin/detour-health sweep >/dev/null 2>&1"
+        # Staggered check every 2 min: each profile re-checked on its own random
+        # 45-60 min cadence (tick mode), so statuses don't all update at once.
+        health_cron = "*/2 * * * * /usr/sbin/detour-health tick >/dev/null 2>&1"
         exec_cmd(
             ssh,
             "( crontab -l 2>/dev/null | grep -v 'detour-health' ; "

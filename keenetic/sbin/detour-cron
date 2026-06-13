@@ -60,12 +60,15 @@ while :; do
         /opt/sbin/subscription-refresh >"$LOGDIR/subscription-refresh.log" 2>&1
     fi
 
-    # Functional health check — hourly. A throwaway sing-box does a REAL fetch of
-    # the target URLs THROUGH each profile's outbound (catches "pings but the site
-    # is dead at the egress"). Self-no-ops if sing-box lacks clash_api. Heavier
-    # than the ping sweep, so hourly (not every tick).
-    if [ $((n % 12)) -eq 0 ] && [ -x /opt/sbin/detour-health ]; then
-        /opt/sbin/detour-health sweep >"$LOGDIR/detour-health.log" 2>&1
+    # Functional health check — STAGGERED. A throwaway sing-box does a REAL fetch
+    # of the target URLs THROUGH each profile's outbound (catches "pings but the
+    # site is dead at the egress"). `tick` re-checks each profile on its own random
+    # 45-60 min cadence, probing only the due ones, so statuses trickle in instead
+    # of all updating at once. Run every 2 ticks (~10 min) — coarser than OpenWrt's
+    # 2-min cron but keeps per-tick load light on the single-core box. The first
+    # pass (empty cache) bootstraps a full fill. Self-no-ops if no clash_api.
+    if [ $((n % 2)) -eq 0 ] && [ -x /opt/sbin/detour-health ]; then
+        /opt/sbin/detour-health tick >"$LOGDIR/detour-health.log" 2>&1
     fi
 
     # Update auto-check (panel + sing-box + tpws) — every ~6 h, unless AUTO_CHECK=0.

@@ -1,5 +1,11 @@
 #!/bin/sh
-# detour-health — hourly FUNCTIONAL health check of every sing-box VPN profile.
+# detour-health — STAGGERED functional health check of every sing-box VPN profile.
+#
+# SCHEDULING (see `tick` mode + SCHED below): the cron runs `tick` frequently, but
+# each profile is re-checked on its OWN randomized cadence in [45,60] min, so the
+# panel's statuses trickle in spread over time instead of all updating at once on
+# the same timestamp (the old all-at-once hourly `sweep`). `sweep` still does a
+# full all-profiles probe (panel «Проверить работу всех» button).
 #
 # WHY this exists (vs detour-ping): detour-ping only ICMP/TCP-pings each profile's
 # SERVER — it answers "is the box reachable", not "does traffic actually flow".
@@ -44,6 +50,7 @@ LOG=/var/log/detour-health.log
 # HEALTH_DB / scratch live in /tmp on BOTH platforms (the CGI does NOT remap them
 # under the Keenetic shim) — write where the CGI health_status reads.
 HEALTH_DB=/tmp/detour-health.db
+SCHED=/tmp/detour-health.sched   # per-profile next-due schedule (TSV: id\tnext_due_epoch)
 SWITCH_MARK=/tmp/detour-health.switch
 UNSUPP_MARK=/tmp/detour-health.unsupported   # set when sing-box has no working clash_api
 LOCK=/tmp/detour-health.lock
@@ -73,6 +80,13 @@ DELAY_TO=4000                   # clash delay test timeout (ms) — bounds a dea
 CURL_M=6                        # curl wall timeout (s) — must exceed DELAY_TO/1000
 SB_WAIT=20                      # seconds to wait for the clash controller to bind
 
+# `tick` mode (cron) re-checks each profile on its OWN randomized cadence in
+# [INTERVAL_MIN, INTERVAL_MAX] instead of probing everything at once every hour.
+# Each tick probes only the profiles that are due, so updates trickle in spread
+# over time rather than all landing on the same timestamp (the old `sweep`).
+INTERVAL_MIN=2700               # 45 min — soonest a profile is re-checked
+INTERVAL_MAX=3600               # 60 min — latest a profile is re-checked
+
 # Keenetic/Entware platform shim (mirrors detour-api / detour-ping / vpn-keepalive).
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
@@ -89,30 +103,46 @@ log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
 
 jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
 
+# Random integer in [$1,$2] from /dev/urandom (decorrelates per-profile cadence so
+# checks never re-cluster). Falls back to NOW+PID if /dev/urandom/od are missing.
+rand_range() {
+    _rr_u=$(od -An -N4 -tu4 /dev/urandom 2>/dev/null | tr -d ' \n\t')
+    case "$_rr_u" in ''|*[!0-9]*) _rr_u=$((NOW + $$)) ;; esac
+    echo $(( $1 + _rr_u % ($2 - $1 + 1) ))
+}
+
 # Modes:
-#   (none) | sweep   — probe every profile, rebuild the cache, opt-in auto-switch.
+#   tick             — STAGGERED background check (cron default). Probes only the
+#                      profiles whose randomized [45,60]min cadence is due, upserts
+#                      just those lines, opt-in auto-switch (if the active was due).
+#                      First run after boot (empty cache) bootstraps a full sweep so
+#                      the panel populates fast; thereafter updates trickle in.
+#   sweep            — probe EVERY profile at once, rebuild the cache, re-seed the
+#                      schedule (so the staggered cadence restarts). Used by the
+#                      panel's «Проверить работу всех» button.
 #   one <id>         — probe ONE profile fast (panel per-row re-check); upsert its
 #                      cache line, no auto-switch. Bypasses the enabled-gate (it is
-#                      an explicit user action) and the sweep lock. Both modes use
-#                      the per-run $$-derived CLASH_ADDR set above (no fixed port),
-#                      so `one` and `sweep` never collide and neither can attach to
-#                      a stale orphan.
-MODE="${1:-sweep}"
+#                      an explicit user action) and the lock. All modes use the
+#                      per-run $$-derived CLASH_ADDR set above (no fixed port), so
+#                      concurrent runs never collide nor attach to a stale orphan.
+MODE="${1:-tick}"
 ONEID="$2"
+# Background modes (cron): take the lock, gate on enabled, reap orphans, auto-switch.
+BG=0; case "$MODE" in sweep|tick) BG=1 ;; esac
 case "$MODE" in
-    sweep) ;;
+    sweep|tick) ;;
     one)
         ONEID=$(printf '%s' "$ONEID" | tr -cd 'A-Za-z0-9_.-')
         [ -n "$ONEID" ] || { echo "usage: detour-health one <id>" >&2; exit 2; }
         [ -f "$PROFILES/$ONEID.json" ] || { echo "profile not found" >&2; exit 2; }
         ;;
-    *) echo "usage: detour-health [sweep | one <id>]" >&2; exit 2 ;;
+    *) echo "usage: detour-health [tick | sweep | one <id>]" >&2; exit 2 ;;
 esac
 
-# Gate: the background sweep skips when disabled (default ON — only explicit 0/off
-# opts out). A manual `one` re-check is always allowed.
+# Gate: the background check (tick/sweep) skips when disabled (default ON — only
+# explicit 0/off opts out). A manual `one` re-check is always allowed.
 ENABLED=$(jstr health_check_enabled "$SETTINGS")
-if [ "$MODE" = "sweep" ]; then
+if [ "$BG" = "1" ]; then
     case "$ENABLED" in 0|off|false|no) exit 0 ;; esac
 fi
 AUTOSWITCH=$(jstr health_auto_switch "$SETTINGS")
@@ -144,11 +174,11 @@ reap_orphans() {
     done
 }
 
-# Single-flight lock (sweep only). An hourly sweep of a large/mostly-dead profile
-# set can run a few minutes; skip overlapping runs but steal a stale lock
+# Single-flight lock (background tick/sweep). A check of a large/mostly-dead
+# profile set can run a few minutes; skip overlapping runs but steal a stale lock
 # (>30 min = crash). `one` mode takes no lock (LOCK_HELD stays empty so cleanup
-# never touches a concurrent sweep's lock dir).
-if [ "$MODE" = "sweep" ]; then
+# never touches a concurrent run's lock dir).
+if [ "$BG" = "1" ]; then
     if mkdir "$LOCK" 2>/dev/null; then
         :
     else
@@ -376,10 +406,20 @@ clash_supported() {
     if start_sb; then stop_sb; return 0; fi
     stop_sb; return 1
 }
-# Only the sweep pays for this extra start: a manual `one` re-check trusts the
-# marker the last sweep left (and the panel hides the UI when unsupported, so a
-# re-check isn't reachable there anyway). Keeps per-row re-check to one start.
-if [ "$MODE" = "sweep" ]; then
+# Capability + bootstrap decision. clash_supported() costs one sing-box start, so
+# pay it only when about to do a FULL probe: a `sweep`, or the FIRST `tick` after
+# boot (empty cache → bootstrap a full fill so the panel populates fast). A steady
+# `tick` and a manual `one` trust the marker the bootstrap left this boot (tmpfs is
+# wiped on reboot, so the marker is always re-established each boot).
+FORCE_ALL=0
+[ "$MODE" = "sweep" ] && FORCE_ALL=1
+if [ "$MODE" = "tick" ] && { [ ! -f "$HEALTH_DB" ] || [ ! -s "$HEALTH_DB" ]; }; then
+    FORCE_ALL=1
+fi
+if [ "$MODE" = "tick" ] && [ "$FORCE_ALL" = "0" ] && [ -f "$UNSUPP_MARK" ]; then
+    exit 0   # this boot already found no clash_api — a steady tick can do nothing
+fi
+if [ "$FORCE_ALL" = "1" ]; then
     if ! clash_supported; then
         : > "$UNSUPP_MARK"
         log "sing-box has no working clash_api on $CLASH_ADDR — functional health check unavailable here"
@@ -402,6 +442,14 @@ if [ "$MODE" = "one" ]; then
     fi
     printf '%s\n' "$LINE" >> "$TMPDB"
     mv "$TMPDB" "$HEALTH_DB" 2>/dev/null || rm -f "$TMPDB"
+    # Defer this profile's next auto tick by a fresh random interval (a manual
+    # re-check just measured it — no need for the scheduler to re-probe it soon).
+    if [ -f "$SCHED" ]; then
+        ND=$(rand_range "$INTERVAL_MIN" "$INTERVAL_MAX")
+        awk -F'\t' -v id="$ONEID" -v nd="$((NOW + ND))" '
+            $1!=id{print} END{print id "\t" nd}' "$SCHED" > "$SCHED.one.$$" 2>/dev/null \
+            && mv "$SCHED.one.$$" "$SCHED" 2>/dev/null
+    fi
     printf '%s\n' "$LINE"
     exit 0
 fi
@@ -427,34 +475,101 @@ probe_range() { # $1 = ids file
     rm -f "$1.a" "$1.b"
 }
 
+# ---- Pick the id set to probe. FORCE_ALL (sweep / boot bootstrap) → every
+# profile. Steady `tick` → only profiles whose randomized [45,60]min cadence is
+# DUE. The schedule (SCHED) is rebuilt each tick: a new profile gets a random
+# initial phase in [0,INTERVAL_MAX) (so the first cycle is staggered, not a herd),
+# deleted profiles drop out. If nothing is due, the tick exits before starting
+# sing-box at all — a near-free no-op most minutes.
 total=$(grep -c . "$ALL_IDS")
-log "health sweep: $total profiles, $URL_COUNT url(s)"
-SWEEP_IDS="$WORK/.sweep-ids"
-cp "$ALL_IDS" "$SWEEP_IDS"
-probe_range "$SWEEP_IDS"
+PROBE_IDS="$WORK/.probe-ids"
+if [ "$FORCE_ALL" = "1" ]; then
+    cp "$ALL_IDS" "$PROBE_IDS"
+    log "health $MODE: full probe of $total profiles, $URL_COUNT url(s)"
+else
+    touch "$SCHED"
+    awk -v now="$NOW" -v imax="$INTERVAL_MAX" -v schedf="$SCHED" -v allf="$ALL_IDS" \
+        -v duef="$PROBE_IDS" -v newschedf="$SCHED.new" '
+        BEGIN { srand(now) }
+        FILENAME==schedf { if (NF>=2) nd[$1]=$2; next }
+        FILENAME==allf {
+            id=$1; if (id=="") next; present[id]=1
+            if (!(id in nd)) nd[id] = now + int(rand()*imax)   # new → random phase
+            if (now >= nd[id]) print id > duef                  # due now
+        }
+        END { for (id in nd) if (id in present) print id "\t" nd[id] > newschedf }
+    ' "$SCHED" "$ALL_IDS" 2>/dev/null
+    mv "$SCHED.new" "$SCHED" 2>/dev/null
+    if [ ! -s "$PROBE_IDS" ]; then
+        log "health tick: nothing due ($total profiles)"
+        exit 0   # cheap tick — no sing-box start this minute
+    fi
+    log "health tick: $(grep -c . "$PROBE_IDS")/$total profiles due, $URL_COUNT url(s)"
+fi
+probe_range "$PROBE_IDS"
 DONE=$(ls "$WORK" 2>/dev/null | grep -vc '^\.')
-log "sweep probed $DONE/$total profiles"
+log "$MODE probed $DONE profiles"
 
-# ---- Assemble the cache: active profile first (panel's active card reads it),
-# then the rest. Rebuilt from the live scratch dir so deleted profiles drop out.
+# ---- Assemble the cache: active profile first (panel's active card reads it).
+# FORCE_ALL probed everything → rebuild from the scratch dir (deleted profiles
+# drop out). A steady tick probed only a subset → UPSERT: carry over previous
+# lines for present-but-unprobed profiles, then overlay this tick's fresh lines.
 ACTIVE=$(jstr active_profile "$SETTINGS")
 [ -z "$ACTIVE" ] && ACTIVE=$(jstr active_chain "$SETTINGS" | sed 's/.*,//')
 
+PROBED="$WORK/.probed"
+ls -1 "$WORK" 2>/dev/null | grep -v '^\.' > "$PROBED"
+
 TMPDB="$HEALTH_DB.tmp.$$"
 : > "$TMPDB"
-[ -n "$ACTIVE" ] && [ -f "$WORK/$ACTIVE" ] && cat "$WORK/$ACTIVE" >> "$TMPDB"
+if [ "$FORCE_ALL" != "1" ] && [ -f "$HEALTH_DB" ]; then
+    # keep prior lines for profiles still present and NOT probed this round
+    awk -F'\t' -v probedf="$PROBED" -v allf="$ALL_IDS" '
+        FILENAME==probedf { probed[$1]=1; next }
+        FILENAME==allf    { present[$1]=1; next }
+        { if (!($1 in probed) && ($1 in present)) print }
+    ' "$PROBED" "$ALL_IDS" "$HEALTH_DB" >> "$TMPDB"
+fi
 for r in "$WORK"/*; do
     [ -f "$r" ] || continue
-    [ "$r" = "$WORK/$ACTIVE" ] && continue
     cat "$r" >> "$TMPDB"
 done
+# Float the active profile's line to the top.
+if [ -n "$ACTIVE" ]; then
+    AL=$(awk -F'\t' -v id="$ACTIVE" '$1==id{print; exit}' "$TMPDB" 2>/dev/null)
+    if [ -n "$AL" ]; then
+        { printf '%s\n' "$AL"; awk -F'\t' -v id="$ACTIVE" '$1!=id' "$TMPDB"; } > "$TMPDB.r" 2>/dev/null
+        mv "$TMPDB.r" "$TMPDB" 2>/dev/null
+    fi
+fi
 
 # Safety: never replace a good cache with an empty one (e.g. sing-box wouldn't
 # start at all this round) — keep the previous results so badges don't all blank.
 if [ -s "$TMPDB" ]; then
     mv "$TMPDB" "$HEALTH_DB" 2>/dev/null || rm -f "$TMPDB"
 else
-    rm -f "$TMPDB"; log "sweep produced no results — kept previous cache"
+    rm -f "$TMPDB"; log "$MODE produced no results — kept previous cache"
+fi
+
+# ---- Re-arm the schedule for the profiles we just probed: next check after a
+# fresh random [INTERVAL_MIN, INTERVAL_MAX]. FORCE_ALL re-seeds EVERY profile with
+# a random phase in [0, INTERVAL_MAX) so the cadence after a full probe is spread,
+# not re-clustered. The active profile rides the same pool (its failover check is
+# on the same 45–60 min cadence as before — a full sweep was hourly too).
+if [ "$FORCE_ALL" = "1" ]; then
+    awk -v now="$NOW" -v imax="$INTERVAL_MAX" 'BEGIN{srand(now+1)} {print $1 "\t" (now + int(rand()*imax))}' \
+        "$ALL_IDS" > "$SCHED.new" 2>/dev/null
+    mv "$SCHED.new" "$SCHED" 2>/dev/null
+elif [ -s "$PROBED" ]; then
+    touch "$SCHED"
+    awk -v now="$NOW" -v imin="$INTERVAL_MIN" -v imax="$INTERVAL_MAX" \
+        -v schedf="$SCHED" -v probedf="$PROBED" '
+        BEGIN { srand(now+1); span = imax - imin + 1 }
+        FILENAME==schedf  { if (NF>=2) nd[$1]=$2; next }
+        FILENAME==probedf { nd[$1] = now + imin + int(rand()*span); next }
+        END { for (id in nd) print id "\t" nd[id] }
+    ' "$SCHED" "$PROBED" > "$SCHED.new" 2>/dev/null
+    mv "$SCHED.new" "$SCHED" 2>/dev/null
 fi
 
 # ==================== OPT-IN AUTO-SWITCH ====================
