@@ -396,7 +396,7 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
   echo "* * * * * /usr/sbin/detour-ping >/dev/null 2>&1"
-  echo "41 * * * * /usr/sbin/detour-health sweep >/var/log/detour-health.log 2>&1"
+  echo "*/2 * * * * /usr/sbin/detour-health tick >/dev/null 2>&1"
   echo "23 */12 * * * /usr/sbin/detour-hosts refresh-cron >/var/log/detour-hosts.log 2>&1"
 ) | crontab -
 /etc/init.d/cron enable >/dev/null 2>&1

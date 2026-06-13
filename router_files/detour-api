@@ -1353,9 +1353,10 @@ ping_check)
     ;;
 
 # ==================== FUNCTIONAL HEALTH CHECK (real fetch through sing-box) ====================
-# detour-health (hourly cron) spins up a throwaway sing-box and does a REAL HTTP
-# fetch of each target URL THROUGH every profile's outbound — catching "server
-# pings but the site is dead at the egress" that ping_check cannot. These handlers
+# detour-health (staggered cron `tick`: each profile re-checked on its own random
+# 45-60 min cadence) spins up a throwaway sing-box and does a REAL HTTP fetch of
+# each target URL THROUGH every profile's outbound — catching "server pings but
+# the site is dead at the egress" that ping_check cannot. These handlers
 # are thin readers/controllers over its cache (HEALTH_DB), the editable target
 # list (HEALTH_URLS), the auto-switch flags (settings.json) and a manual re-run.
 
