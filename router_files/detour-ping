@@ -19,7 +19,8 @@
 #
 # Cache format (TSV in tmpfs, one line per profile, same as ping_check):
 #   <id>\t<rtt_ms>\t<ok>\t<ts>\t<server>
-#   rtt_ms : integer ms from ICMP; -1 when reachable only via TCP or unreachable.
+#   rtt_ms : integer ms — ICMP RTT, or the TCP-handshake RTT when ICMP is
+#            filtered; -1 only when reachable but untimeable, or unreachable.
 #   ok     : 1 reachable / 0 down.
 
 SETTINGS=/etc/sing-box/settings.json
@@ -71,6 +72,47 @@ trap 'rm -rf "$LOCK" "$WORK"' EXIT INT TERM
 jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
 jnum() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -1; }
 
+# TCP-handshake latency probe — MUST stay byte-identical to detour-api's tcp_probe
+# so the cron sweep and the CGI's on-demand ping_check produce the same numbers.
+# Echoes integer ms on success (SYN/SYN-ACK round-trip, comparable to ICMP RTT),
+# nothing on failure; return 0 = reachable. Prefers luasocket (accurate, sub-ms),
+# falls back to busybox nc + /proc/uptime (~10ms grade) where luasocket is absent.
+tcp_probe() {
+    _tp_h="$1"; _tp_p="$2"
+    [ -n "$_tp_h" ] && [ -n "$_tp_p" ] && [ "$_tp_p" != "0" ] || return 1
+    _tp_ms=$(lua - "$_tp_h" "$_tp_p" 2>/dev/null <<'LUA'
+local ok, socket = pcall(require, "socket")
+if not ok then os.exit(3) end
+local h, p = arg[1], tonumber(arg[2])
+local c = socket.tcp(); c:settimeout(3)
+local t0 = socket.gettime()
+local cok = c:connect(h, p)
+local t1 = socket.gettime()
+c:close()
+if not cok then os.exit(1) end
+io.write(string.format("%d", math.floor((t1 - t0) * 1000 + 0.5)))
+LUA
+)
+    _tp_rc=$?
+    if [ "$_tp_rc" = "0" ]; then
+        case "$_tp_ms" in ''|*[!0-9]*) echo "-1" ;; *) echo "$_tp_ms" ;; esac
+        return 0
+    fi
+    [ "$_tp_rc" = "1" ] && return 1
+    command -v nc >/dev/null 2>&1 || return 1
+    _tp_t0=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+    if timeout 3 nc "$_tp_h" "$_tp_p" </dev/null >/dev/null 2>&1; then
+        _tp_t1=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+        if [ -n "$_tp_t0" ] && [ -n "$_tp_t1" ]; then
+            echo "$_tp_t0 $_tp_t1" | awk '{d=($2-$1)*1000; if(d<0)d=0; printf "%d", d}'
+        else
+            echo "-1"
+        fi
+        return 0
+    fi
+    return 1
+}
+
 # Probe one profile by id and write its cache line to "$WORK/<id>". Identical
 # logic to the `ping_check` CGI: ICMP first (latency + reachability in one shot),
 # retry once to kill single-packet false negatives, then a TCP-connect fallback
@@ -90,13 +132,15 @@ probe_one() {
             rtt=$(echo "$pt" | awk '{printf "%.0f", $1}')
             okv=1
         else
+            # ICMP filtered → TCP handshake gives reachability AND a real latency
+            # number (so ICMP-dropping servers show "42 ms", not a bare tick).
             case "$ptype" in
                 wireguard|hysteria2|tuic) : ;;
                 *)
-                    if [ -n "$port" ] && [ "$port" != "0" ]; then
-                        if timeout 3 nc "$server" "$port" </dev/null >/dev/null 2>&1; then
-                            okv=1; rtt=-1
-                        fi
+                    tr=$(tcp_probe "$server" "$port")
+                    if [ $? -eq 0 ]; then
+                        okv=1
+                        case "$tr" in ''|*[!0-9]*) rtt=-1 ;; *) rtt="$tr" ;; esac
                     fi
                     ;;
             esac
