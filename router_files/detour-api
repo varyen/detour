@@ -453,6 +453,54 @@ numeric_json_val() {
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -1
 }
 
+# TCP-handshake latency probe to HOST:PORT. Echoes integer ms on success (the
+# SYN/SYN-ACK round-trip — one round-trip, directly comparable to an ICMP RTT),
+# nothing on failure; return 0 = reachable, non-zero = unreachable. Used when a
+# server filters ICMP so the panel shows a real number instead of a bare
+# "reachable" tick — the same application-layer latency Clash-style clients show.
+# Prefers luasocket: connect() returns exactly at handshake completion and
+# socket.gettime() is sub-ms, so there is no nc fork or /proc/uptime centisecond
+# flooring. Falls back to busybox nc timed against /proc/uptime (~10ms grade,
+# ~+10ms spawn bias) where luasocket is absent (e.g. some Keenetic/Entware builds).
+tcp_probe() {
+    _tp_h="$1"; _tp_p="$2"
+    [ -n "$_tp_h" ] && [ -n "$_tp_p" ] && [ "$_tp_p" != "0" ] || return 1
+    # luasocket path — accurate, and the connect doubles as the reachability check.
+    # exit: 0 ok (ms on stdout) / 1 connect failed / 3 no luasocket; lua missing → 127.
+    _tp_ms=$(lua - "$_tp_h" "$_tp_p" 2>/dev/null <<'LUA'
+local ok, socket = pcall(require, "socket")
+if not ok then os.exit(3) end
+local h, p = arg[1], tonumber(arg[2])
+local c = socket.tcp(); c:settimeout(3)
+local t0 = socket.gettime()
+local cok = c:connect(h, p)
+local t1 = socket.gettime()
+c:close()
+if not cok then os.exit(1) end
+io.write(string.format("%d", math.floor((t1 - t0) * 1000 + 0.5)))
+LUA
+)
+    _tp_rc=$?
+    if [ "$_tp_rc" = "0" ]; then
+        case "$_tp_ms" in ''|*[!0-9]*) echo "-1" ;; *) echo "$_tp_ms" ;; esac
+        return 0
+    fi
+    [ "$_tp_rc" = "1" ] && return 1   # luasocket present, connect failed → down
+    # No luasocket (or no lua): busybox nc + /proc/uptime fallback.
+    command -v nc >/dev/null 2>&1 || return 1
+    _tp_t0=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+    if timeout 3 nc "$_tp_h" "$_tp_p" </dev/null >/dev/null 2>&1; then
+        _tp_t1=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+        if [ -n "$_tp_t0" ] && [ -n "$_tp_t1" ]; then
+            echo "$_tp_t0 $_tp_t1" | awk '{d=($2-$1)*1000; if(d<0)d=0; printf "%d", d}'
+        else
+            echo "-1"   # reachable but couldn't time it → keep old "TCP up" semantics
+        fi
+        return 0
+    fi
+    return 1
+}
+
 # Emit unique route-map target profile ids, in file order. Section headers:
 #   // === route:PROFILEID ===
 route_map_targets() {
@@ -1234,8 +1282,9 @@ keepalive_check)
 # ==================== PER-PROFILE PING (latency probe) ====================
 # Lets the panel rank VPNs by ping. The cache is a flat TSV in tmpfs, one line
 # per profile:  <id>\t<rtt_ms>\t<ok>\t<ts>\t<server>
-#   rtt_ms : integer ms from ICMP; -1 when reachable only via TCP (ICMP filtered)
-#            or not yet measured.   ok : 1 reachable / 0 down.
+#   rtt_ms : integer ms — ICMP RTT, or the TCP-handshake RTT when ICMP is
+#            filtered (tcp_probe); -1 only when reachable but untimeable or not
+#            yet measured.   ok : 1 reachable / 0 down.
 # The panel calls ping_check for one profile at a time (round-robin, active VPN
 # more often) so the box is never flooded; ping_status just reads the cache.
 ping_status)
@@ -1275,16 +1324,17 @@ ping_check)
             RTT=$(echo "$PT" | awk '{printf "%.0f", $1}')
             OKV=1; METHOD="icmp"
         else
-            # ICMP filtered → confirm reachability with a TCP connect (TCP types only).
-            # BusyBox nc has no -w, so bound it with `timeout`; </dev/null returns as
-            # soon as the handshake completes instead of blocking on a silent TLS server.
+            # ICMP filtered → a TCP handshake gives BOTH reachability AND a real
+            # latency number (one round-trip, comparable to the ICMP RTT), so the
+            # panel shows "42 ms" instead of a bare tick for servers that drop ICMP.
+            # TCP types only (UDP-based wireguard/hysteria2/tuic have no handshake).
             case "$PTYPE" in
                 wireguard|hysteria2|tuic) : ;;
                 *)
-                    if [ -n "$PPORT" ] && [ "$PPORT" != "0" ]; then
-                        if timeout 3 nc "$PSRV" "$PPORT" </dev/null >/dev/null 2>&1; then
-                            OKV=1; RTT=-1; METHOD="tcp"
-                        fi
+                    TR=$(tcp_probe "$PSRV" "$PPORT"); TRC=$?
+                    if [ "$TRC" = "0" ]; then
+                        OKV=1; METHOD="tcp"
+                        case "$TR" in ''|*[!0-9]*) RTT=-1 ;; *) RTT="$TR" ;; esac
                     fi
                     ;;
             esac
