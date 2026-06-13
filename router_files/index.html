@@ -88,6 +88,10 @@
         --ping-bad: #f0883e;
         --ping-alt: #58a6ff;
         --ping-dead: #f85149;
+        /* functional health-check badges (shares the ping palette) */
+        --health-good: #3fb950;
+        --health-bad: #f0883e;
+        --health-dead: #f85149;
         --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
         --shadow-md: 0 6px 22px rgba(0, 0, 0, 0.45);
         --shadow-lg: 0 18px 56px rgba(0, 0, 0, 0.6);
@@ -152,6 +156,9 @@
         --ping-bad: #bc4c00;
         --ping-alt: #0969da;
         --ping-dead: #cf222e;
+        --health-good: #1a7f37;
+        --health-bad: #bc4c00;
+        --health-dead: #cf222e;
         --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.08);
         --shadow-md: 0 6px 22px rgba(16, 24, 40, 0.12);
         --shadow-lg: 0 18px 56px rgba(16, 24, 40, 0.18);
@@ -1071,6 +1078,62 @@
         color: var(--text-muted);
         opacity: 0.5;
       }
+      /* functional health-check badge (sits next to the ping badge) */
+      .pdi-health {
+        flex-shrink: 0;
+        margin-left: 6px;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+        color: var(--text-muted);
+      }
+      .health-good {
+        color: var(--health-good);
+      }
+      .health-bad {
+        color: var(--health-bad);
+      }
+      .health-dead {
+        color: var(--health-dead);
+      }
+      .health-pending {
+        color: var(--text-muted);
+        opacity: 0.5;
+      }
+      /* health controls on the "СТАТУСЫ VPN" page */
+      .health-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        margin: 8px 0 4px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--card-bg, transparent);
+      }
+      .health-controls .health-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .health-switch-note {
+        font-size: 12px;
+        color: var(--ping-bad, #d29922);
+        margin: 4px 0;
+      }
+      #health-urls-box {
+        margin: 6px 0;
+      }
+      #health-urls-editor {
+        width: 100%;
+        min-height: 84px;
+        font-family: monospace;
+        font-size: 12px;
+        box-sizing: border-box;
+      }
       .profile-dropdown-empty {
         padding: 9px 10px;
         font-size: 12px;
@@ -1358,6 +1421,13 @@
       .vpn-name {
         color: var(--text);
         font-weight: 500;
+        /* Cap the widest column so the «Работает» column + actions fit without
+           horizontal scroll; long «… · Liberty VPN» tails ellipsis (full name in
+           the cell's title=). Lifted back to wrapping in the mobile card layout. */
+        max-width: 300px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .vpn-name small {
         color: var(--text-dim);
@@ -1381,6 +1451,19 @@
         font-size: 12px;
         color: var(--text-muted);
         font-variant-numeric: tabular-nums;
+      }
+      .vpn-checked .vc-line {
+        white-space: nowrap;
+        line-height: 1.45;
+      }
+      .vpn-checked .vc-lbl {
+        display: inline-block;
+        min-width: 30px;
+        color: var(--text-muted);
+        opacity: 0.7;
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
       }
       .vpn-cell-actions {
         display: flex;
@@ -1407,6 +1490,13 @@
         border-color: var(--border-bright);
       }
       .vpn-refresh-btn.spinning svg {
+        animation: spin 0.7s linear infinite;
+      }
+      /* The health (⚕) button has no SVG — spin its glyph instead. */
+      .vpn-health-btn .health-glyph {
+        display: inline-block;
+      }
+      .vpn-refresh-btn.spinning .health-glyph {
         animation: spin 0.7s linear infinite;
       }
       .vpn-activate-btn {
@@ -1469,6 +1559,9 @@
         .vpn-table .vpn-name {
           flex: 1 1 100%;
           white-space: normal;
+          max-width: none;
+          overflow: visible;
+          text-overflow: clip;
         }
         .vpn-table .col-server {
           display: none;
@@ -2880,6 +2973,8 @@
               ><span class="value" id="sb-profile-name">—</span>
               <span class="label">Пинг</span
               ><span class="value" id="sb-ping">—</span>
+              <span class="label">Работает</span
+              ><span class="value" id="sb-health" title="функциональная проверка через VPN (раз в час)">—</span>
               <span class="label">Режим</span
               ><span class="value" id="sb-routing-mode">—</span>
               <span class="label">Записей</span
@@ -3621,6 +3716,40 @@
               VPN.</span
             >
           </div>
+          <!-- Functional health check: real fetch of target URLs THROUGH each VPN
+               (raз в час). Catches "сервер пингуется, но YouTube/сайт не работает". -->
+          <div class="health-controls" id="health-controls">
+            <button class="btn primary" id="health-check-all-btn" onclick="refreshHealthAll(this)">
+              ⚕ Проверить работу всех
+            </button>
+            <label class="health-toggle" title="Фоновая проверка работоспособности раз в час">
+              <input type="checkbox" id="health-enabled" onchange="saveHealthConfig()" />
+              Проверять работу (раз в час)
+            </label>
+            <label class="health-toggle" title="Если активный VPN не прошёл проверку — автоматически переключиться на ближайший рабочий профиль">
+              <input type="checkbox" id="health-autoswitch" onchange="saveHealthConfig()" />
+              Авто-переключение на рабочий
+            </label>
+            <button class="btn" type="button" onclick="toggleHealthUrlsBox()" id="health-urls-toggle-btn">
+              🎯 Цели проверки
+            </button>
+          </div>
+          <div class="health-switch-note" id="health-switch-note" style="display: none"></div>
+          <div id="health-urls-box" style="display: none">
+            <p class="helper-text-block">
+              По одной цели на строку: <code>Название|https://адрес</code> (название
+              необязательно). Профиль считается «рабочим», только если открылись
+              ВСЕ цели. Пусто = значения по умолчанию (YouTube + видео-CDN + Google).
+            </p>
+            <textarea
+              id="health-urls-editor"
+              spellcheck="false"
+              placeholder="YouTube|https://www.youtube.com/generate_204&#10;YouTube видео|https://redirector.googlevideo.com/generate_204&#10;Google|https://www.google.com/generate_204"
+            ></textarea>
+            <div class="flex-gap">
+              <button class="btn primary" onclick="saveHealthUrls()">💾 Сохранить цели</button>
+            </div>
+          </div>
           <div class="vpn-table-wrap">
             <table class="vpn-table">
               <thead>
@@ -3634,6 +3763,9 @@
                     title="Сортировать по пингу"
                   >
                     Пинг<span class="vpn-sort-ind" data-sortind="ping"></span>
+                  </th>
+                  <th title="Реальная проверка через VPN: открываются ли целевые сайты (раз в час)">
+                    Работает
                   </th>
                   <th
                     class="vpn-th-sort"
@@ -3651,7 +3783,7 @@
               </thead>
               <tbody id="vpn-status-tbody">
                 <tr>
-                  <td colspan="5" class="empty-state">Загрузка…</td>
+                  <td colspan="6" class="empty-state">Загрузка…</td>
                 </tr>
               </tbody>
             </table>
@@ -5775,7 +5907,7 @@
             }
             updateActivePing();
             updatePingBadgesAll();
-            renderVpnStatusTable();
+            refreshVpnRowsInPlace();
           })
           .catch(function () {});
       }
@@ -5792,6 +5924,298 @@
         if (pingTimer) {
           clearInterval(pingTimer);
           pingTimer = null;
+        }
+      }
+
+      // ===== FUNCTIONAL HEALTH CHECK (real fetch through sing-box) =====
+      // detour-health (hourly cron) spins a throwaway sing-box and does a REAL
+      // HTTP fetch of each target URL THROUGH every profile's outbound — so it
+      // reports whether traffic actually flows (YouTube/site reachable), not just
+      // whether the server pings. The panel is a pure READER of its cache, just
+      // like the ping layer. healthResults: id -> { ok, ts, rtt, delays:[ms|-1] }.
+      var healthResults = {};
+      var healthMeta = {
+        enabled: true,
+        auto_switch: false,
+        supported: true,
+        urls: [],
+        switch: null,
+      };
+      var healthTimer = null;
+      var HEALTH_POLL_MS = 60000; // hourly probe → a 1-min reader poll is ample
+      var HEALTH_COLORS = {
+        "health-good": "#3fb950",
+        "health-bad": "#f0883e",
+        "health-dead": "#f85149",
+        "health-pending": "",
+      };
+
+      // Map a profile's functional result to a CSS class + glyph + a per-target
+      // tooltip (so the user sees WHICH target failed, e.g. "YouTube ✓ · Google ✗").
+      function healthInfo(id) {
+        var e = healthResults[id];
+        if (!e)
+          return {
+            cls: "health-pending",
+            text: "·",
+            title: "проверка работоспособности ещё не выполнялась",
+          };
+        var urls = healthMeta.urls || [];
+        var dl = e.delays || [];
+        var parts = [],
+          pass = 0,
+          total = 0;
+        for (var i = 0; i < dl.length; i++) {
+          total++;
+          var okd = dl[i] != null && dl[i] >= 0;
+          if (okd) pass++;
+          var lbl = (urls[i] && urls[i].label) || "#" + (i + 1);
+          parts.push(lbl + " " + (okd ? "✓ " + dl[i] + "ms" : "✗"));
+        }
+        var ago = e.ts ? " · " + fmtPingAgo(e.ts) : "";
+        var title = (parts.join(" · ") || "нет данных") + ago;
+        if (e.ok && total > 0)
+          return { cls: "health-good", text: "✓", title: title };
+        if (pass > 0) return { cls: "health-bad", text: "✕", title: title };
+        return { cls: "health-dead", text: "✕", title: title };
+      }
+      function healthBadgeHtml(id) {
+        if (!healthMeta.supported) return "";
+        var info = healthInfo(id);
+        return (
+          '<span class="pdi-health ' +
+          info.cls +
+          '" data-health-id="' +
+          escapeHtml(id) +
+          '" title="' +
+          escapeHtml(info.title) +
+          '">' +
+          escapeHtml(info.text) +
+          "</span>"
+        );
+      }
+      function updateHealthBadgesAll() {
+        var dd = document.getElementById("sb-profile-dropdown");
+        if (!dd) return;
+        var spans = dd.querySelectorAll("[data-health-id]");
+        for (var i = 0; i < spans.length; i++) {
+          var id = spans[i].getAttribute("data-health-id");
+          var info = healthInfo(id);
+          spans[i].className = "pdi-health " + info.cls;
+          spans[i].textContent = info.text;
+          spans[i].title = info.title;
+        }
+      }
+      // Active VPN's functional status in the sing-box card (word + colour).
+      function updateActiveHealth() {
+        var el = document.getElementById("sb-health");
+        if (!el) return;
+        var id = currentActiveProfileId;
+        if (!id || !healthMeta.supported) {
+          el.textContent = "—";
+          el.style.color = "";
+          el.title = "";
+          return;
+        }
+        var info = healthInfo(id);
+        if (info.text === "·") el.textContent = "проверка…";
+        else if (info.cls === "health-good") el.textContent = "✓ работает";
+        else el.textContent = "✕ не работает";
+        el.style.color = HEALTH_COLORS[info.cls] || "";
+        el.title = info.title;
+      }
+      function profileNameById(id) {
+        for (var i = 0; i < currentProfiles.length; i++)
+          if (currentProfiles[i].id === id) return currentProfiles[i].name;
+        return null;
+      }
+      // Show the last auto-switch event (detour-health writes it when it moves
+      // off a broken active VPN), so the user knows the exit changed.
+      function renderHealthSwitchNote() {
+        var el = document.getElementById("health-switch-note");
+        if (!el) return;
+        var sw = healthMeta.switch;
+        if (!sw || !sw.to) {
+          el.style.display = "none";
+          el.textContent = "";
+          return;
+        }
+        var fromN = profileNameById(sw.from) || sw.from;
+        var toN = profileNameById(sw.to) || sw.to;
+        el.style.display = "";
+        el.textContent =
+          "⚠ Авто-переключение: " +
+          fromN +
+          " → " +
+          toN +
+          (sw.ts ? " (" + fmtPingAgo(sw.ts) + ")" : "");
+      }
+      function applyHealthMeta(d) {
+        if (!d) return;
+        healthMeta.enabled = !!d.enabled;
+        healthMeta.auto_switch = !!d.auto_switch;
+        healthMeta.supported = d.supported !== false;
+        healthMeta.urls = d.urls || [];
+        healthMeta.switch = d.switch || null;
+        var en = document.getElementById("health-enabled");
+        if (en) en.checked = healthMeta.enabled;
+        var as = document.getElementById("health-autoswitch");
+        if (as) as.checked = healthMeta.auto_switch;
+        var box = document.getElementById("health-controls");
+        if (box) box.style.display = healthMeta.supported ? "" : "none";
+      }
+      // Seed/refresh from the router's health cache (pure reader, like ping).
+      function seedHealthStatus() {
+        return api("health_status")
+          .then(function (d) {
+            applyHealthMeta(d);
+            if (d && d.results) {
+              healthResults = {};
+              Object.keys(d.results).forEach(function (id) {
+                var r = d.results[id];
+                healthResults[id] = {
+                  ok: !!r.ok,
+                  ts: r.ts || 0,
+                  rtt: r.rtt,
+                  delays: r.delays || [],
+                };
+              });
+            }
+            updateHealthBadgesAll();
+            updateActiveHealth();
+            refreshVpnRowsInPlace();
+            renderHealthSwitchNote();
+          })
+          .catch(function () {});
+      }
+      function startHealthScheduler() {
+        stopHealthScheduler();
+        seedHealthStatus();
+        healthTimer = setInterval(seedHealthStatus, HEALTH_POLL_MS);
+      }
+      function stopHealthScheduler() {
+        if (healthTimer) {
+          clearInterval(healthTimer);
+          healthTimer = null;
+        }
+      }
+      // Save the two health toggles (no sing-box restart on the router side).
+      async function saveHealthConfig() {
+        var en = document.getElementById("health-enabled").checked ? 1 : 0;
+        var as = document.getElementById("health-autoswitch").checked ? 1 : 0;
+        try {
+          var d = await api(
+            "health_config",
+            "POST",
+            JSON.stringify({ enabled: en, auto_switch: as }),
+          );
+          if (d && d.ok) {
+            healthMeta.enabled = !!en;
+            healthMeta.auto_switch = !!as;
+            toast("Настройки проверки сохранены", "success");
+          } else {
+            toast("Не удалось сохранить настройки", "error");
+          }
+        } catch (e) {
+          toast("Ошибка сохранения настроек", "error");
+        }
+      }
+      function toggleHealthUrlsBox() {
+        var box = document.getElementById("health-urls-box");
+        if (!box) return;
+        if (box.style.display === "none") {
+          box.style.display = "";
+          loadHealthUrlsEditor();
+        } else {
+          box.style.display = "none";
+        }
+      }
+      async function loadHealthUrlsEditor() {
+        try {
+          var d = await api("health_urls");
+          var t = document.getElementById("health-urls-editor");
+          if (t) t.value = (d && d.list) || "";
+        } catch (e) {}
+      }
+      async function saveHealthUrls() {
+        var t = document.getElementById("health-urls-editor").value;
+        try {
+          var d = await api("health_urls", "POST", t);
+          if (d && d.ok) {
+            toast("Список целей сохранён", "success");
+            seedHealthStatus();
+          } else {
+            toast("Не удалось сохранить цели", "error");
+          }
+        } catch (e) {
+          toast("Ошибка сохранения целей", "error");
+        }
+      }
+      // Kick a full background sweep; results land over the next minute (poller).
+      async function refreshHealthAll(btn) {
+        if (btn) btn.disabled = true;
+        try {
+          await api("health_check", "POST");
+          toast(
+            "Проверка запущена — идёт аккуратно, по очереди; результаты появятся в течение нескольких минут",
+            "info",
+          );
+        } catch (e) {
+          toast("Не удалось запустить проверку", "error");
+        }
+        setTimeout(function () {
+          if (btn) btn.disabled = false;
+          seedHealthStatus();
+        }, 8000);
+      }
+      // Synchronous single-profile re-check (the per-row ⚕ button).
+      // "Проверен" column: two lines — when ping was last checked, and when the
+      // functional (VPN) check last ran. Used by the row builder + live updates.
+      function vpnCheckedHtml(id) {
+        var p = pingResults[id],
+          h = healthResults[id];
+        var pingAgo = p && p.ts ? fmtPingAgo(p.ts) : "—";
+        var line1 =
+          '<div class="vc-line"><span class="vc-lbl">пинг</span> ' +
+          pingAgo +
+          "</div>";
+        if (!healthMeta.supported) return line1;
+        var hAgo = h && h.ts ? fmtPingAgo(h.ts) : "—";
+        return (
+          line1 +
+          '<div class="vc-line"><span class="vc-lbl">VPN</span> ' +
+          hAgo +
+          "</div>"
+        );
+      }
+      async function refreshOneHealth(id, btn) {
+        // Spin the ⚕ glyph (and block re-clicks) for the duration, like ping.
+        if (btn) {
+          btn.classList.add("spinning");
+          btn.disabled = true;
+        }
+        try {
+          var d = await api(
+            "health_check&id=" + encodeURIComponent(id),
+            "POST",
+          );
+          if (d && d.result) {
+            healthResults[id] = {
+              ok: !!d.result.ok,
+              ts: d.result.ts || 0,
+              rtt: d.result.rtt,
+              delays: d.result.delays || [],
+            };
+            updateHealthBadgesAll();
+            updateVpnStatusRow(id);
+            updateActiveHealth();
+          }
+        } catch (e) {
+          toast("Проверка не удалась", "error");
+        }
+        if (btn) {
+          btn.classList.remove("spinning");
+          btn.disabled = false;
         }
       }
 
@@ -5908,13 +6332,25 @@
           '">' +
           escapeHtml(info.text) +
           "</span>";
-        var checked = e && e.ts ? fmtPingAgo(e.ts) : "—";
+        var hinfo = healthInfo(p.id);
+        var healthHtml = healthMeta.supported
+          ? '<span class="pdi-health ' +
+            hinfo.cls +
+            '" title="' +
+            escapeHtml(hinfo.title) +
+            '">' +
+            escapeHtml(hinfo.text) +
+            "</span>"
+          : "—";
         var actions =
           '<button class="vpn-refresh-btn" title="Обновить пинг" onclick="refreshOnePing(\'' +
           escapeHtml(p.id) +
           "', this)\">" +
           vpnRefreshIconSvg() +
           "</button>" +
+          '<button class="vpn-refresh-btn vpn-health-btn" title="Проверить работу через VPN" onclick="refreshOneHealth(\'' +
+          escapeHtml(p.id) +
+          "', this)\"><span class=\"health-glyph\">⚕</span></button>" +
           (isActive
             ? '<span class="vpn-active-badge">✓ Активен</span>'
             : '<button class="btn primary vpn-activate-btn" onclick="activateProfileById(\'' +
@@ -5924,7 +6360,9 @@
           '<tr class="' +
           (isActive ? "vpn-active" : "") +
           '">' +
-          '<td class="vpn-name">' +
+          '<td class="vpn-name" title="' +
+          escapeHtml(p.name + (group ? " · " + group : "")) +
+          '">' +
           (isActive
             ? '<span class="vpn-active-dot" title="Активный VPN"></span>'
             : "") +
@@ -5942,10 +6380,15 @@
           '">' +
           pingHtml +
           "</td>" +
+          '<td class="vpn-health-cell" data-label="Работает" data-vpn-health="' +
+          escapeHtml(p.id) +
+          '">' +
+          healthHtml +
+          "</td>" +
           '<td class="vpn-checked" data-label="Проверен" data-vpn-checked="' +
           escapeHtml(p.id) +
           '">' +
-          checked +
+          vpnCheckedHtml(p.id) +
           "</td>" +
           '<td><div class="vpn-cell-actions">' +
           actions +
@@ -5962,7 +6405,7 @@
         list.sort(vpnCompare);
         if (!list.length) {
           tbody.innerHTML =
-            '<tr><td colspan="5" class="empty-state">Нет профилей VPN — добавьте профиль в карточке sing-box.</td></tr>';
+            '<tr><td colspan="6" class="empty-state">Нет профилей VPN — добавьте профиль в карточке sing-box.</td></tr>';
           updateVpnStatusSummary();
           return;
         }
@@ -5970,13 +6413,14 @@
         updateVpnStatusSummary();
       }
 
-      // Update one row's ping + checked cells in place (no reorder — avoids the
-      // table jumping under the cursor while the background scheduler probes).
-      function updateVpnStatusRow(id) {
-        var tbody = document.getElementById("vpn-status-tbody");
-        if (!tbody) return;
+      // Update one row's ping / health / checked cells IN PLACE (no DOM rebuild,
+      // no reorder — avoids the table jumping/flickering under the cursor while the
+      // background scheduler polls). Returns false if the row isn't rendered.
+      function updateVpnRowCells(id, tbody) {
+        var found = false;
         var pingTd = tbody.querySelector('td[data-vpn-ping="' + id + '"]');
         if (pingTd) {
+          found = true;
           var info = pingInfo(id);
           pingTd.innerHTML =
             '<span class="pdi-ping ' +
@@ -5987,10 +6431,47 @@
             escapeHtml(info.text) +
             "</span>";
         }
+        var healthTd = tbody.querySelector('td[data-vpn-health="' + id + '"]');
+        if (healthTd) {
+          if (!healthMeta.supported) {
+            healthTd.textContent = "—";
+          } else {
+            var hinfo = healthInfo(id);
+            healthTd.innerHTML =
+              '<span class="pdi-health ' +
+              hinfo.cls +
+              '" title="' +
+              escapeHtml(hinfo.title) +
+              '">' +
+              escapeHtml(hinfo.text) +
+              "</span>";
+          }
+        }
         var chkTd = tbody.querySelector('td[data-vpn-checked="' + id + '"]');
-        if (chkTd) {
-          var e = pingResults[id];
-          chkTd.textContent = e && e.ts ? fmtPingAgo(e.ts) : "—";
+        if (chkTd) chkTd.innerHTML = vpnCheckedHtml(id);
+        return found;
+      }
+      // Single-row update (per-row re-check buttons).
+      function updateVpnStatusRow(id) {
+        var tbody = document.getElementById("vpn-status-tbody");
+        if (!tbody) return;
+        updateVpnRowCells(id, tbody);
+        updateVpnStatusSummary();
+      }
+      // Poller path: refresh EVERY rendered row's cells in place (no innerHTML
+      // rebuild, no re-sort) so the table never flickers or jumps on a tick. Falls
+      // back to a one-time full render if the table hasn't been built yet. The
+      // order is only (re)sorted by an explicit full render — initial load, a sort
+      // header click, or «Обновить таблицу» — never on a background poll.
+      function refreshVpnRowsInPlace() {
+        var tbody = document.getElementById("vpn-status-tbody");
+        if (!tbody) return;
+        if (!tbody.querySelector("[data-vpn-ping]")) {
+          renderVpnStatusTable();
+          return;
+        }
+        for (var i = 0; i < currentProfiles.length; i++) {
+          updateVpnRowCells(currentProfiles[i].id, tbody);
         }
         updateVpnStatusSummary();
       }
@@ -6141,8 +6622,9 @@
           var cells = tbody.querySelectorAll("[data-vpn-checked]");
           for (var i = 0; i < cells.length; i++) {
             var id = cells[i].getAttribute("data-vpn-checked");
-            var e = pingResults[id];
-            cells[i].textContent = e && e.ts ? fmtPingAgo(e.ts) : "—";
+            // Use the SAME full two-line "пинг / VPN" renderer — a bare
+            // textContent here would clobber the VPN line every tick (flicker).
+            cells[i].innerHTML = vpnCheckedHtml(id);
           }
         }, 15000);
       }
@@ -6409,7 +6891,8 @@
             '<span class="pdi-label">' +
             highlightMatch(profileItemLabel(p), query) +
             "</span>" +
-            pingBadgeHtml(p.id);
+            pingBadgeHtml(p.id) +
+            healthBadgeHtml(p.id);
           // preventDefault on mousedown keeps focus on the input (no blur flicker).
           item.addEventListener("mousedown", function (e) {
             e.preventDefault();
@@ -11033,6 +11516,7 @@
         await loadWhitelist();
         setupLogAutoRefresh();
         startPingScheduler();
+        startHealthScheduler();
         refreshUpdateIndicator();
         if (window._statusInterval) clearInterval(window._statusInterval);
         window._statusInterval = setInterval(loadStatus, 10000);

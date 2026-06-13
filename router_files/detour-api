@@ -26,6 +26,11 @@ BINS_STATE="/var/state/detour-bins.json"   # sing-box update state (written by d
 TPWS_STATE="/var/state/detour-tpws.json"   # tpws-zapret update state (written by detour-update tpws-check)
 NFQWS2_STATE="/var/state/detour-nfqws2.json" # nfqws2 (zapret2) update state (written by detour-update nfqws2-check)
 PING_DB="/tmp/detour-ping.db"               # per-profile latency cache (TSV in tmpfs; cleared on reboot)
+HEALTH_DB="/tmp/detour-health.db"           # per-profile FUNCTIONAL check cache (TSV; written by detour-health)
+HEALTH_SWITCH="/tmp/detour-health.switch"   # last auto-switch event marker (JSON; written by detour-health)
+HEALTH_UNSUPP="/tmp/detour-health.unsupported" # set by detour-health when sing-box lacks clash_api
+HEALTH_URLS="/etc/sing-box/health-urls.list" # health-check targets: "label|url" per line (panel-editable)
+HEALTH_BIN="/usr/sbin/detour-health"
 
 AUTH_FILE="/etc/detour.auth"
 SESSION_DIR="/tmp/detour-sessions"
@@ -84,6 +89,8 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     NFQWS_BIN="$OPT/sbin/nfqws2"
     SUBREFRESH_BIN="$OPT/sbin/subscription-refresh"
     HOSTS_BIN="$OPT/sbin/detour-hosts"
+    HEALTH_URLS="$OPT/etc/sing-box/health-urls.list"  # HEALTH_DB/SWITCH stay /tmp (not remapped, like PING_DB)
+    HEALTH_BIN="$OPT/sbin/detour-health"
     # LAN bridge from detour.conf (assumed br0); "Все через VPN" uses iptables (no nft fw4).
     LAN_IF="br0"
     SVC_START="force-start"   # Keenetic boot-`start` is autostart-gated; manual start bypasses it
@@ -376,6 +383,16 @@ write_settings() {
     local vpn_ifaces
     vpn_ifaces=$(get_settings_val "vpn_redirect_ifaces")
 
+    # Health-check flags: same deal. Re-read from the current file so a profile
+    # switch / settings POST doesn't wipe them; callers (health_config action)
+    # change a value by exporting an override before calling us. Defaults: the
+    # functional check is ON, auto-switch is OFF.
+    local health_enabled health_autoswitch
+    health_enabled=${HEALTH_ENABLED_OVERRIDE:-$(get_settings_val "health_check_enabled")}
+    [ -z "$health_enabled" ] && health_enabled="1"
+    health_autoswitch=${HEALTH_AUTOSWITCH_OVERRIDE:-$(get_settings_val "health_auto_switch")}
+    [ -z "$health_autoswitch" ] && health_autoswitch="0"
+
     cat > "$SINGBOX_SETTINGS" <<EOF
 {
   "active_profile": "$active_profile",
@@ -383,7 +400,9 @@ write_settings() {
   "routing_mode": "$routing_mode",
   "upstream_ips": "$upstream_ips",
   "singbox_mode": "$singbox_mode",
-  "vpn_redirect_ifaces": "$vpn_ifaces"
+  "vpn_redirect_ifaces": "$vpn_ifaces",
+  "health_check_enabled": "$health_enabled",
+  "health_auto_switch": "$health_autoswitch"
 }
 EOF
 }
@@ -773,7 +792,7 @@ get_upstream_ips() {
 # ==================== AUTH ====================
 get_session_token() {
     echo "$HTTP_COOKIE" | tr ';' '\n' | sed 's/^ *//' | \
-        grep '^proxy_session=' | head -1 | cut -d'=' -f2
+        grep '^detour_session=' | head -1 | cut -d'=' -f2
 }
 
 check_auth() {
@@ -800,6 +819,29 @@ gen_token() {
     local b=$(cat /proc/sys/kernel/random/uuid | tr -d '-')
     printf '%s%s' "$a" "$b"
 }
+# =================================================
+
+# ==================== INTERNAL CLI (no HTTP / no auth) ====================
+# Reached only when invoked as a plain command with argv (uhttpd/lighttpd run
+# CGIs with NO argv — they pass everything via env — so a web request can never
+# trigger this; it is a local, root-only entrypoint). Used by detour-health's
+# opt-in auto-switch to activate a profile through the SAME pipeline the panel
+# uses (build_config → write_settings → reconfigure), avoiding a second copy of
+# that logic. All referenced functions are defined above.
+if [ "$1" = "activate" ]; then
+    CHAIN=$(normalize_profile_list "$2")
+    [ -z "$CHAIN" ] && { echo "activate: chain/profile required" >&2; exit 2; }
+    SBMODE=$(get_singbox_mode)
+    if ! BUILD_ERR=$(build_config "$SBMODE" "$CHAIN" 2>&1); then
+        echo "activate: config build failed: $BUILD_ERR" >&2; exit 1
+    fi
+    RMODE=$(resolve_routing_mode_for_chain "$CHAIN")
+    UPSTREAM_IPS=$(collect_upstream_ips)
+    write_settings "$CHAIN" "$RMODE" "$UPSTREAM_IPS" "$SBMODE"
+    $SINGBOX_INITD reconfigure >/dev/null 2>&1
+    echo "activate: $CHAIN"
+    exit 0
+fi
 # =================================================
 
 # Read POST data
@@ -869,7 +911,7 @@ if [ "$ACTION" = "panel_first_setup" ]; then
     # re-enter the credentials they literally just typed.
     TOKEN=$(gen_token)
     echo "$SETUP_USER" > "$SESSION_DIR/$TOKEN"
-    echo "Set-Cookie: proxy_session=$TOKEN; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
+    echo "Set-Cookie: detour_session=$TOKEN; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
     echo ""
     json_ok
     exit 0
@@ -889,7 +931,7 @@ if [ "$ACTION" = "login" ]; then
     if verify_password "$LOGIN_USER" "$LOGIN_PASS"; then
         TOKEN=$(gen_token)
         echo "$LOGIN_USER" > "$SESSION_DIR/$TOKEN"
-        echo "Set-Cookie: proxy_session=$TOKEN; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
+        echo "Set-Cookie: detour_session=$TOKEN; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
         echo ""
         json_ok
     else
@@ -903,7 +945,7 @@ fi
 # ==================== LOGOUT (no auth) ====================
 if [ "$ACTION" = "logout" ]; then
     reply_json
-    echo "Set-Cookie: proxy_session=deleted; Path=/; HttpOnly; Max-Age=0"
+    echo "Set-Cookie: detour_session=deleted; Path=/; HttpOnly; Max-Age=0"
     TOKEN=$(get_session_token)
     [ -n "$TOKEN" ] && rm -f "$SESSION_DIR/$TOKEN" 2>/dev/null
     echo ""
@@ -935,6 +977,39 @@ fi
 # ==================== AUTHENTICATED HEADERS ====================
 reply_json
 echo ""
+
+# Emit the configured health targets as a JSON array [{label,url},...], falling
+# back to the built-in defaults detour-health uses when the list file is absent.
+# (Defined here, outside the case, so the health_status branch can call it.)
+health_urls_json() {
+    lua - "$HEALTH_URLS" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r")
+local urls = {}
+if f then
+  for line in f:lines() do
+    line = line:gsub("^%s+",""):gsub("%s+$","")
+    if line ~= "" and line:sub(1,1) ~= "#" then
+      local label, u = line:match("^(.-)%s*|%s*(.+)$")
+      if not u then u = line; label = nil end
+      if u:match("^https?://") then
+        if not label or label == "" then label = (u:match("^https?://([^/]+)") or u) end
+        urls[#urls+1] = { label = label, url = u }
+      end
+    end
+  end
+  f:close()
+end
+if #urls == 0 then
+  urls = {
+    { label = "YouTube",       url = "https://www.youtube.com/generate_204" },
+    { label = "YouTube видео", url = "https://redirector.googlevideo.com/generate_204" },
+    { label = "Google",        url = "https://www.google.com/generate_204" },
+  }
+end
+io.write(cjson.encode(urls))
+LUA
+}
 
 # ==================== MAIN API ====================
 case "$ACTION" in
@@ -1225,6 +1300,117 @@ ping_check)
     OKJSON=false; [ "$OKV" = "1" ] && OKJSON=true
     printf '{"id":"%s","rtt":%s,"ok":%s,"ts":%s,"server":"%s","method":"%s"}' \
         "$PID_" "$RTT" "$OKJSON" "$NOW" "$(printf '%s' "$PSRV" | json_escape)" "$METHOD"
+    ;;
+
+# ==================== FUNCTIONAL HEALTH CHECK (real fetch through sing-box) ====================
+# detour-health (hourly cron) spins up a throwaway sing-box and does a REAL HTTP
+# fetch of each target URL THROUGH every profile's outbound — catching "server
+# pings but the site is dead at the egress" that ping_check cannot. These handlers
+# are thin readers/controllers over its cache (HEALTH_DB), the editable target
+# list (HEALTH_URLS), the auto-switch flags (settings.json) and a manual re-run.
+
+health_status)
+    NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
+    HEN=$(get_settings_val health_check_enabled); [ -z "$HEN" ] && HEN=1
+    HAS=$(get_settings_val health_auto_switch);   [ -z "$HAS" ] && HAS=0
+    EN_J=true;  case "$HEN" in 0|off|false|no) EN_J=false ;; esac
+    AS_J=false; case "$HAS" in 1|on|true|yes) AS_J=true ;; esac
+    URLS_J=$(health_urls_json); [ -z "$URLS_J" ] && URLS_J='[]'
+    SW_J=null; [ -f "$HEALTH_SWITCH" ] && SW_J=$(cat "$HEALTH_SWITCH" 2>/dev/null)
+    [ -z "$SW_J" ] && SW_J=null
+    HEALTHY_J=false; [ -x "$HEALTH_BIN" ] && [ ! -f "$HEALTH_UNSUPP" ] && HEALTHY_J=true
+    printf '{"now":%s,"supported":%s,"enabled":%s,"auto_switch":%s,"urls":%s,"switch":%s,"results":{' \
+        "$NOW" "$HEALTHY_J" "$EN_J" "$AS_J" "$URLS_J" "$SW_J"
+    if [ -f "$HEALTH_DB" ]; then
+        # TSV: id \t ok \t ts \t rtt \t delays(csv of ms|-1). $5 has no tabs, so
+        # wrapping it in [] yields a JSON array; rebuild it to normalise blanks.
+        awk -F'\t' 'BEGIN{first=1}
+            NF>=5 {
+                if(!first)printf ","; first=0;
+                n=split($5,a,","); d="";
+                for(i=1;i<=n;i++){ if(i>1)d=d","; v=a[i]; if(v=="")v="-1"; d=d v }
+                printf "\"%s\":{\"ok\":%s,\"ts\":%s,\"rtt\":%s,\"delays\":[%s]}",
+                    $1, ($2=="1"?"true":"false"), ($3==""?0:$3), ($4==""?-1:$4), d;
+            }' "$HEALTH_DB"
+    fi
+    printf '}}'
+    ;;
+
+# Manual re-check. POST with no body → kick a full background sweep (returns
+# immediately; the panel polls health_status as lines land). POST id=<profile>
+# → synchronous single-profile probe (~5-10s), returns that profile's fresh line.
+health_check)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$HEALTH_BIN" ] || { json_err "detour-health not installed"; exit 0; }
+    HID=$(echo "$QUERY_STRING" | sed -n 's/.*id=\([^&]*\).*/\1/p')
+    HID=$(sanitize_name "$HID")
+    if [ -n "$HID" ]; then
+        if [ ! -f "$SINGBOX_PROFILES_DIR/$HID.json" ]; then json_err "profile not found"; exit 0; fi
+        LINE=$("$HEALTH_BIN" one "$HID" 2>/dev/null)
+        OKV=$(printf '%s' "$LINE" | awk -F'\t' '{print $2}')
+        TSV=$(printf '%s' "$LINE" | awk -F'\t' '{print $3}')
+        RTTV=$(printf '%s' "$LINE" | awk -F'\t' '{print $4}')
+        DLS=$(printf '%s' "$LINE" | awk -F'\t' '{print $5}')
+        [ -z "$OKV" ] && OKV=0
+        [ -z "$TSV" ] && TSV=0
+        [ -z "$RTTV" ] && RTTV=-1
+        [ -z "$DLS" ] && DLS=-1
+        OKJ=false; [ "$OKV" = "1" ] && OKJ=true
+        printf '{"ok":true,"id":"%s","result":{"ok":%s,"ts":%s,"rtt":%s,"delays":[%s]}}' \
+            "$HID" "$OKJ" "$TSV" "$RTTV" "$DLS"
+    else
+        # Detach the full sweep so the request returns at once AND the sweep keeps
+        # running after uhttpd reaps the CGI. A bare `&` is NOT enough: the child
+        # gets SIGHUP when the CGI exits and dies mid-sweep (no setsid on this
+        # busybox). start-stop-daemon -b reparents it into its own session (the same
+        # mechanism S90detour-cron uses), so it survives; fallbacks for other envs.
+        if command -v start-stop-daemon >/dev/null 2>&1; then
+            start-stop-daemon -S -q -b -x "$HEALTH_BIN" -- sweep >/dev/null 2>&1
+        elif command -v setsid >/dev/null 2>&1; then
+            setsid "$HEALTH_BIN" sweep >/dev/null 2>&1 &
+        else
+            "$HEALTH_BIN" sweep </dev/null >/dev/null 2>&1 &
+        fi
+        printf '{"ok":true,"started":true}'
+    fi
+    ;;
+
+# GET → raw target list (one "label|url" per line); POST body replaces it. The
+# panel edits it as a textarea. Saved verbatim; detour-health/health_urls_json
+# parse it. Empty/invalid lines are ignored at read time.
+health_urls)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        printf '%s' "$POST_DATA" > "$HEALTH_URLS"
+        json_ok
+    else
+        if [ -f "$HEALTH_URLS" ]; then
+            printf '{"list":"%s"}' "$(cat "$HEALTH_URLS" | json_escape)"
+        else
+            printf '{"list":""}'
+        fi
+    fi
+    ;;
+
+# Toggle the two health flags WITHOUT a sing-box restart. POST {"enabled":0|1,
+# "auto_switch":0|1} (missing key keeps its current value). write_settings
+# re-emits the whole settings file (preserving the rest) with our overrides.
+health_config)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    NEW_EN=$(printf '%s' "$POST_DATA" | sed -n 's/.*"enabled"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
+    NEW_AS=$(printf '%s' "$POST_DATA" | sed -n 's/.*"auto_switch"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
+    CUR_EN=$(get_settings_val health_check_enabled); [ -z "$CUR_EN" ] && CUR_EN=1
+    CUR_AS=$(get_settings_val health_auto_switch);   [ -z "$CUR_AS" ] && CUR_AS=0
+    [ -z "$NEW_EN" ] && NEW_EN="$CUR_EN"
+    [ -z "$NEW_AS" ] && NEW_AS="$CUR_AS"
+    ACHAIN=$(get_active_chain)
+    RMODE=$(get_routing_mode)
+    UPSTREAM=$(get_settings_val upstream_ips)
+    SBMODE=$(get_singbox_mode)
+    HEALTH_ENABLED_OVERRIDE="$NEW_EN" HEALTH_AUTOSWITCH_OVERRIDE="$NEW_AS" \
+        write_settings "$ACHAIN" "$RMODE" "$UPSTREAM" "$SBMODE"
+    printf '{"ok":true,"enabled":%s,"auto_switch":%s}' \
+        "$([ "$NEW_EN" = "1" ] && echo true || echo false)" \
+        "$([ "$NEW_AS" = "1" ] && echo true || echo false)"
     ;;
 
 # ==================== PANEL SELF-UPDATE ====================
