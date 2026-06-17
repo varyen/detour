@@ -12335,7 +12335,18 @@
           el.style.display = "none";
           return;
         }
+        // "feed already has it?" — from updates_overview (update_available bool) OR
+        // from a state-file response (binsModalCheck/<engine>_update_check), which
+        // carries current/available but NO update_available flag. Without the second
+        // branch the note wrongly claimed «в фиде её пока нет» right next to the feed
+        // section saying «доступна: …-1 — есть обновление».
         var feedHas = !!info.update_available;
+        if (!feedHas && info.available && info.current) {
+          feedHas =
+            info.available !== info.current &&
+            info.available !== "?" &&
+            info.available !== "n/a";
+        }
         var newer = !!info.upstream_newer && !feedHas;
         el.style.display = "block";
         if (newer) {

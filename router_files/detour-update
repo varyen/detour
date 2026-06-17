@@ -443,13 +443,31 @@ cmd_bins_check() {
     fi
 }
 
+# opkg update with retries + VISIBLE output. The detour feed is on
+# raw.githubusercontent.com (Fastly), intermittently throttled on censored RU
+# links: opkg's one-shot downloader fails with "wget returned 4" while a plain
+# fetch of the same URL succeeds (verified on home). Retry a few times — each is a
+# fresh connection. Output is NOT suppressed, so the live apply log shows exactly
+# what opkg did (and the real error if it ultimately fails).
+opkg_update_retry() {
+    local n=0
+    while :; do
+        n=$((n + 1))
+        log "opkg update (попытка $n/4)..."
+        opkg update && return 0
+        [ "$n" -ge 4 ] && return 1
+        log "opkg update не удался — повтор через 3с..."
+        sleep 3
+    done
+}
+
 cmd_bins_apply() {
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
     ensure_feed
     log "opkg update + upgrade sing-box from the feed..."
-    opkg update >/dev/null 2>&1 || die "opkg update failed (feed unreachable?)"
+    opkg_update_retry || die "opkg update failed после 4 попыток (feed unreachable?)"
     if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG "; then
         # `opkg upgrade` no-ops if already newest; fall back to a forced install.
         opkg upgrade "$SINGBOX_PKG" 2>&1 \
@@ -538,7 +556,7 @@ cmd_tpws_apply() {
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
     ensure_feed
     log "opkg update + upgrade tpws-zapret from the feed..."
-    opkg update >/dev/null 2>&1 || die "opkg update failed (feed unreachable?)"
+    opkg_update_retry || die "opkg update failed после 4 попыток (feed unreachable?)"
     if opkg list-installed "$TPWS_PKG" 2>/dev/null | grep -q "^$TPWS_PKG "; then
         # `opkg upgrade` no-ops if already newest; fall back to a forced install.
         opkg upgrade "$TPWS_PKG" 2>&1 \
@@ -610,7 +628,7 @@ cmd_nfqws2_apply() {
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
     ensure_feed
     log "opkg update + upgrade nfqws2 from the feed..."
-    opkg update >/dev/null 2>&1 || die "opkg update failed (feed unreachable?)"
+    opkg_update_retry || die "opkg update failed после 4 попыток (feed unreachable?)"
     if opkg list-installed "$NFQWS2_PKG" 2>/dev/null | grep -q "^$NFQWS2_PKG "; then
         # `opkg upgrade` no-ops if already newest; fall back to a forced install.
         opkg upgrade "$NFQWS2_PKG" 2>&1 \
