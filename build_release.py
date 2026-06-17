@@ -136,6 +136,8 @@ PANEL_FILES = [
     (("router_files", "vpn-keepalive"), "usr/sbin/vpn-keepalive", 0o755),
     (("router_files", "detour-ping"), "usr/sbin/detour-ping", 0o755),
     (("router_files", "detour-health"), "usr/sbin/detour-health", 0o755),
+    (("router_files", "detour-push"), "usr/sbin/detour-push", 0o755),
+    (("router_files", "detour-cert"), "usr/sbin/detour-cert", 0o755),
     (("router_files", "detour-hosts"), "usr/sbin/detour-hosts", 0o755),
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
@@ -143,6 +145,7 @@ PANEL_FILES = [
     (("router_files", "detour-bypass.initd"), "etc/init.d/detour-bypass", 0o755),
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
     (("router_files", "index.html"), "www/detour/index.html", 0o644),
+    (("router_files", "sw.js"), "www/detour/sw.js", 0o644),
     # NOTE: tpws-zapret is NOT bundled here anymore — it comes from the opkg feed
     # (Depends: tpws-zapret), same as sing-box. The Keenetic package still bundles it.
     # Pin our public key in two places: opkg's standard keyring (so future opkg
@@ -277,6 +280,7 @@ $BEGIN
 /etc/sing-box/whitelist-domains.list
 /etc/sing-box/health-urls.list
 /etc/sing-box/route-map.list
+/etc/sing-box/autoswitch-exclude.list
 /etc/zapret-tpws.conf
 /etc/zapret-tpws/domains.list
 $END
@@ -330,7 +334,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /etc/firewall.lan_mark_fallback /etc/hotplug.d/iface/99-proxy-guard \\
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
-    /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
+    /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /www/cgi-bin/detour-api 2>/dev/null
 
@@ -348,6 +352,11 @@ YouTube видео|https://redirector.googlevideo.com/generate_204
 Google|https://www.google.com/generate_204
 HURLS
 fi
+
+# 2c) Pre-generate the VAPID keypair for Web Push (lazy-generated otherwise on the
+# first push_config / alert). Lives in /etc/detour (keeplist-preserved); harmless
+# if openssl is unavailable — the panel just reports push unavailable.
+[ -x /usr/sbin/detour-push ] && /usr/sbin/detour-push ensure-keys >/dev/null 2>&1
 
 # 3) Enable + (re)start services, but HONOUR the operator's «Автозапуск» choice
 # so a panel REINSTALL never resurrects a service the user turned off. The panel
@@ -397,6 +406,11 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
   echo "* * * * * /usr/sbin/detour-ping >/dev/null 2>&1"
   echo "*/2 * * * * /usr/sbin/detour-health tick >/dev/null 2>&1"
+  # Active-only functional check — re-launched EVERY minute; each run self-paces a
+  # 30-60s loop (ACTIVE_LOOP_BUDGET) so the active VPN is re-checked sub-minute. It
+  # uses a distinct throwaway-config name, so tick's reap_orphans can't kill its
+  # in-flight sing-box and the old odd/even-minute split is no longer needed.
+  echo "* * * * * /usr/sbin/detour-health active >/dev/null 2>&1"
   echo "23 */12 * * * /usr/sbin/detour-hosts refresh-cron >/var/log/detour-hosts.log 2>&1"
 ) | crontab -
 /etc/init.d/cron enable >/dev/null 2>&1
@@ -565,6 +579,18 @@ def read_git_log_for_notes(version):
 # ============ GitHub publish ============
 
 def _load_github_config():
+    # CI / headless path (feed auto-publish GitHub Action): env vars take
+    # precedence so no routers.local.json needs to be checked in. Set
+    # DETOUR_PUBLISH_TOKEN (a PAT with Contents: Read+Write) and optionally
+    # DETOUR_GH_OWNER / DETOUR_GH_REPO (default varyen/detour).
+    env_token = (
+        os.environ.get("DETOUR_PUBLISH_TOKEN")
+        or os.environ.get("FEED_PUBLISH_TOKEN")
+    )
+    if env_token:
+        owner = os.environ.get("DETOUR_GH_OWNER") or "varyen"
+        repo = os.environ.get("DETOUR_GH_REPO") or "detour"
+        return owner, repo, env_token
     candidates = [
         os.environ.get("ROUTERS_CONFIG") or "",
         os.path.join(HERE, "routers.local.json"),

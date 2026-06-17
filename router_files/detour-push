@@ -1,0 +1,324 @@
+#!/bin/sh
+# detour-push — minimal Web Push (VAPID, payload-less) sender for the Detour panel.
+#
+# WHY payload-less: encrypting a Web Push payload (RFC 8188 aes128gcm) needs
+# AES-128-GCM with an auth tag, which the BusyBox/OpenSSL `enc` CLI can't emit.
+# So we send a push WITH NO BODY (valid per RFC 8030) carrying only the VAPID
+# auth header; the browser's service worker then fetches the actual text from
+# the panel CGI (`?action=push_message`, same-origin, cookie-authed). That keeps
+# the on-router crypto to just the VAPID JWT (ES256), which OpenSSL 3 + Lua can do.
+#
+# Pipeline (validated on GL-BE9300, OpenSSL 3.0.13 + Lua 5.1):
+#   key   : openssl ecparam -genkey -name prime256v1   (P-256, persistent)
+#   pubkey: last 65 bytes of the DER SPKI = 0x04||X||Y → base64url (applicationServerKey)
+#   JWT   : header.payload signed with `openssl dgst -sha256 -sign`; the DER
+#           ECDSA signature (SEQ{INT r, INT s}) is converted to raw r||s (64 B)
+#           in Lua, then base64url — that is the JWS ES256 signature.
+#   send  : curl POST to each subscription endpoint, empty body, header
+#           `Authorization: vapid t=<jwt>,k=<pubkey>` + `TTL`. 404/410 → prune.
+#
+# Subcommands:
+#   ensure-keys           generate the VAPID keypair if missing; print public key
+#   pubkey                print the VAPID public key (base64url, applicationServerKey)
+#   count                 print number of stored subscriptions
+#   add                   read a PushSubscription JSON from stdin, store (dedup by endpoint)
+#   remove <endpoint>     drop the subscription with this endpoint
+#   send <title> <body>   record the message + push (empty body) to ALL subscriptions
+#   test                  send a test notification to all subscriptions
+
+DETOUR_DIR=/etc/detour
+SUBS="$DETOUR_DIR/push-subs.json"      # array of PushSubscription objects (persistent)
+VAPID_KEY="$DETOUR_DIR/vapid.pem"      # EC P-256 private key (persistent, 0600)
+VAPID_PUB="$DETOUR_DIR/vapid.pub"      # cached base64url public key
+PUSH_CONF="$DETOUR_DIR/push.conf"      # optional overrides (VAPID_SUB=...)
+MSG=/tmp/detour-push.msg               # latest message JSON the service worker fetches
+VAPID_SUB="mailto:you@example.com"    # VAPID contact ('sub' claim); override in push.conf
+PLATFORM=openwrt
+
+# VPN-bypass for the browser's push channel (see bypass_apply). In all-except mode a
+# LAN/WG client's TCP is redirected into sing-box → through the active VPN; if that VPN
+# dies the browser loses its push connection and never gets the "VPN down" alert. We add
+# the push services' RECEIVE endpoints to the singbox_whitelist ipset (RETURN = direct),
+# so the push channel always rides the WAN, independent of VPN health. Chrome receives via
+# mtalk.google.com:5228 (+ alt hosts); Firefox via push.services.mozilla.com; Safari via
+# *.push.apple.com. fcm.googleapis.com is the SEND host (router→service, already direct via
+# OUTPUT, but harmless to whitelist too).
+IPSET_WL=singbox_whitelist
+PUSH_BYPASS_CONF=/tmp/dnsmasq.d/singbox-push-bypass.conf
+PUSH_BYPASS_HOSTS="mtalk.google.com mtalk4.google.com alt1-mtalk.google.com alt2-mtalk.google.com alt3-mtalk.google.com alt4-mtalk.google.com alt5-mtalk.google.com alt6-mtalk.google.com alt7-mtalk.google.com alt8-mtalk.google.com fcm.googleapis.com push.services.mozilla.com updates.push.services.mozilla.com web.push.apple.com push.apple.com"
+
+# Keenetic/Entware platform shim (mirrors detour-api / detour-health).
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DETOUR_DIR=/opt/etc/detour
+    SUBS="$DETOUR_DIR/push-subs.json"
+    VAPID_KEY="$DETOUR_DIR/vapid.pem"
+    VAPID_PUB="$DETOUR_DIR/vapid.pub"
+    PUSH_CONF="$DETOUR_DIR/push.conf"
+fi
+[ -f "$PUSH_CONF" ] && . "$PUSH_CONF" 2>/dev/null
+
+b64url() { base64 | tr -d '\n' | tr '+/' '-_' | tr -d '='; }
+
+json_str() {   # echo a JSON string literal (quoted, minimally escaped) for $1
+    printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"
+}
+
+# Generate the VAPID keypair on first use; (re)derive the cached public key.
+ensure_keys() {
+    command -v openssl >/dev/null 2>&1 || return 1
+    mkdir -p "$DETOUR_DIR" 2>/dev/null
+    if [ ! -f "$VAPID_KEY" ]; then
+        ( umask 077; openssl ecparam -genkey -name prime256v1 -noout -out "$VAPID_KEY" 2>/dev/null )
+        [ -f "$VAPID_KEY" ] || return 1
+        chmod 0600 "$VAPID_KEY" 2>/dev/null
+        rm -f "$VAPID_PUB"   # force re-derive to stay in sync with the new key
+    fi
+    if [ ! -s "$VAPID_PUB" ]; then
+        openssl ec -in "$VAPID_KEY" -pubout -outform DER 2>/dev/null | tail -c 65 | b64url > "$VAPID_PUB"
+    fi
+    [ -s "$VAPID_PUB" ]
+}
+
+pubkey() { ensure_keys || return 1; cat "$VAPID_PUB"; }
+
+count() {
+    [ -f "$SUBS" ] || { echo 0; return 0; }
+    lua - "$SUBS" <<'LUA' 2>/dev/null || echo 0
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); local d = f and f:read("*a"); if f then f:close() end
+local a = cjson.decode(d or "") or {}
+print(type(a) == "table" and #a or 0)
+LUA
+}
+
+# Build a VAPID JWT (ES256) for an audience (the endpoint's scheme://host origin).
+make_jwt() {
+    _aud="$1"
+    _h=$(printf '%s' '{"typ":"JWT","alg":"ES256"}' | b64url)
+    _now=$(date +%s 2>/dev/null); [ -z "$_now" ] && _now=0
+    _exp=$((_now + 43200))   # 12h — well under the 24h push services cap
+    _p=$(printf '%s' "{\"aud\":\"$_aud\",\"exp\":$_exp,\"sub\":\"$VAPID_SUB\"}" | b64url)
+    _si="$_h.$_p"
+    _der="/tmp/detour-push.der.$$"; _raw="/tmp/detour-push.raw.$$"
+    printf '%s' "$_si" | openssl dgst -sha256 -sign "$VAPID_KEY" -binary > "$_der" 2>/dev/null
+    lua - "$_der" "$_raw" <<'LUA' 2>/dev/null
+local inf, outf = arg[1], arg[2]
+local f = io.open(inf, "rb"); local d = f and f:read("*a"); if f then f:close() end
+if not d or #d < 8 then os.exit(1) end
+local b = {}; for i = 1, #d do b[i] = d:byte(i) end
+if b[1] ~= 0x30 then os.exit(1) end
+local pos = 3
+if b[2] >= 0x80 then pos = 3 + (b[2] - 0x80) end
+if b[pos] ~= 0x02 then os.exit(1) end
+local rlen = b[pos + 1]; local rs = pos + 2
+local r = {}; for i = 0, rlen - 1 do r[#r + 1] = b[rs + i] end
+pos = rs + rlen
+if b[pos] ~= 0x02 then os.exit(1) end
+local slen = b[pos + 1]; local ss = pos + 2
+local s = {}; for i = 0, slen - 1 do s[#s + 1] = b[ss + i] end
+local function norm(t)
+  while #t > 32 and t[1] == 0 do table.remove(t, 1) end
+  while #t < 32 do table.insert(t, 1, 0) end
+  if #t ~= 32 then os.exit(1) end
+  return t
+end
+r = norm(r); s = norm(s)
+local o = io.open(outf, "wb")
+for i = 1, 32 do o:write(string.char(r[i])) end
+for i = 1, 32 do o:write(string.char(s[i])) end
+o:close()
+LUA
+    if [ -s "$_raw" ]; then
+        _sig=$(b64url < "$_raw")
+        printf '%s.%s' "$_si" "$_sig"
+    fi
+    rm -f "$_der" "$_raw"
+}
+
+# Push an empty (payload-less) message to every stored subscription. Endpoints
+# that return 404/410 (subscription expired) are pruned from the store.
+send() {
+    _title="$1"; _body="$2"
+    ensure_keys || { echo "detour-push: no VAPID key (openssl missing?)" >&2; return 1; }
+    _ts=$(date +%s 2>/dev/null); [ -z "$_ts" ] && _ts=0
+    printf '{"title":%s,"body":%s,"ts":%s}\n' "$(json_str "$_title")" "$(json_str "$_body")" "$_ts" > "$MSG"
+    [ -f "$SUBS" ] || return 0
+    _vpub=$(cat "$VAPID_PUB")
+    _endp="/tmp/detour-push.endp.$$"
+    lua - "$SUBS" "$_endp" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); local d = f and f:read("*a"); if f then f:close() end
+local arr = cjson.decode(d or "") or {}
+local o = io.open(arg[2], "w")
+if type(arr) == "table" then
+  for _, s in ipairs(arr) do
+    local ep = type(s) == "table" and s.endpoint
+    if type(ep) == "string" and ep:match("^https://") then
+      local origin = ep:match("^(https://[^/]+)")
+      o:write(ep .. "\t" .. (origin or "") .. "\n")
+    end
+  end
+end
+o:close()
+LUA
+    _dead="/tmp/detour-push.dead.$$"; : > "$_dead"
+    _sent=0
+    while IFS="	" read -r ep origin; do
+        [ -n "$ep" ] && [ -n "$origin" ] || continue
+        jwt=$(make_jwt "$origin")
+        [ -n "$jwt" ] || continue
+        code=$(curl -s -o /dev/null -w '%{http_code}' -m 15 -X POST "$ep" \
+            -H "Authorization: vapid t=$jwt,k=$_vpub" \
+            -H "TTL: 120" -H "Content-Length: 0" 2>/dev/null)
+        case "$code" in
+            201|202|200) _sent=$((_sent + 1)) ;;
+            404|410)     echo "$ep" >> "$_dead" ;;   # gone → prune
+            *)           : ;;                          # transient → keep, retry next event
+        esac
+    done < "$_endp"
+    if [ -s "$_dead" ]; then
+        lua - "$SUBS" "$_dead" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); local d = f and f:read("*a"); if f then f:close() end
+local arr = cjson.decode(d or "") or {}
+local dead = {}
+local g = io.open(arg[2], "r")
+if g then for line in g:lines() do dead[line] = true end; g:close() end
+local out = {}
+if type(arr) == "table" then
+  for _, s in ipairs(arr) do
+    if type(s) == "table" and not dead[s.endpoint] then out[#out + 1] = s end
+  end
+end
+local w = io.open(arg[1], "w"); w:write(#out == 0 and "[]" or cjson.encode(out)); w:close()
+LUA
+    fi
+    rm -f "$_endp" "$_dead"
+    echo "$_sent"
+}
+
+# Store a PushSubscription read from stdin (dedup by endpoint).
+add_sub() {
+    ensure_keys >/dev/null 2>&1
+    mkdir -p "$DETOUR_DIR" 2>/dev/null
+    _tmp="/tmp/detour-push.add.$$"
+    cat > "$_tmp"
+    lua - "$SUBS" "$_tmp" <<'LUA'
+local cjson = require("cjson.safe")
+local subsfile, newfile = arg[1], arg[2]
+local g = io.open(newfile, "r"); local nd = g and g:read("*a"); if g then g:close() end
+local sub = cjson.decode(nd or "")
+if type(sub) ~= "table" or type(sub.endpoint) ~= "string" or not sub.endpoint:match("^https://") then
+  os.exit(3)
+end
+local arr = {}
+local f = io.open(subsfile, "r")
+if f then arr = cjson.decode(f:read("*a") or "") or {}; f:close() end
+if type(arr) ~= "table" then arr = {} end
+local out = {}
+for _, s in ipairs(arr) do
+  if type(s) == "table" and s.endpoint ~= sub.endpoint then out[#out + 1] = s end
+end
+out[#out + 1] = sub
+local w = io.open(subsfile, "w"); w:write(#out == 0 and "[]" or cjson.encode(out)); w:close()
+os.exit(0)
+LUA
+    _rc=$?
+    rm -f "$_tmp"
+    [ "$_rc" = "0" ] && chmod 0600 "$SUBS" 2>/dev/null
+    return $_rc
+}
+
+reload_dnsmasq() {
+    # ipset= directives are config (not hosts) → need a restart, not a SIGHUP reload.
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1
+}
+
+# Whether the VPN-bypass is meaningfully applicable here: OpenWrt + all-except mode
+# (the singbox_whitelist ipset exists). In other modes / on Keenetic, push hosts already
+# go direct (or routing differs), so the bypass is a no-op.
+bypass_applicable() {
+    [ "$PLATFORM" = keenetic ] && return 1
+    command -v ipset >/dev/null 2>&1 || return 1
+    ipset list "$IPSET_WL" >/dev/null 2>&1
+}
+
+# Route the browsers' push endpoints DIRECT (into the whitelist ipset) so the push
+# channel survives the active VPN going down. Idempotent. With --no-reload, only writes
+# the dnsmasq file (caller restarts dnsmasq) — used from sing-box.initd before its own
+# dnsmasq restart so the rule is loaded once.
+bypass_apply() {
+    _reload=1; [ "$1" = "--no-reload" ] && _reload=0
+    if ! bypass_applicable; then
+        [ -f "$PUSH_BYPASS_CONF" ] && { rm -f "$PUSH_BYPASS_CONF"; [ "$_reload" = 1 ] && reload_dnsmasq; }
+        return 0
+    fi
+    _cnt=$(count); case "$_cnt" in ''|*[!0-9]*) _cnt=0 ;; esac
+    if [ "$_cnt" -lt 1 ]; then            # no subscribers → no need to bypass
+        [ -f "$PUSH_BYPASS_CONF" ] && { rm -f "$PUSH_BYPASS_CONF"; [ "$_reload" = 1 ] && reload_dnsmasq; }
+        return 0
+    fi
+    mkdir -p "$(dirname "$PUSH_BYPASS_CONF")" 2>/dev/null
+    _new="$PUSH_BYPASS_CONF.new"
+    {
+        echo "# Managed by detour-push — keep the browser's push channel OFF the VPN."
+        echo "# These push endpoints resolve into the $IPSET_WL ipset → SINGBOX_ALL RETURN"
+        echo "# (direct), so a LAN/WG client still receives pushes when the active VPN is down."
+        for h in $PUSH_BYPASS_HOSTS; do echo "ipset=/$h/$IPSET_WL"; done
+    } > "$_new" 2>/dev/null
+    if [ -f "$PUSH_BYPASS_CONF" ] && cmp -s "$_new" "$PUSH_BYPASS_CONF"; then
+        rm -f "$_new"; return 0            # unchanged → no reload
+    fi
+    mv "$_new" "$PUSH_BYPASS_CONF" 2>/dev/null || rm -f "$_new"
+    [ "$_reload" = 1 ] && reload_dnsmasq
+    return 0
+}
+
+bypass_clear() {
+    [ -f "$PUSH_BYPASS_CONF" ] || return 0
+    rm -f "$PUSH_BYPASS_CONF"
+    reload_dnsmasq
+}
+
+# active|inactive — for the panel to show whether the push channel bypasses the VPN.
+bypass_status() {
+    if [ -f "$PUSH_BYPASS_CONF" ]; then echo active
+    elif bypass_applicable; then echo inactive
+    else echo "n/a"; fi
+}
+
+remove_sub() {
+    [ -n "$1" ] || return 2
+    [ -f "$SUBS" ] || return 0
+    lua - "$SUBS" "$1" <<'LUA'
+local cjson = require("cjson.safe")
+local subsfile, ep = arg[1], arg[2]
+local f = io.open(subsfile, "r"); local d = f and f:read("*a"); if f then f:close() end
+local arr = cjson.decode(d or "") or {}
+local out = {}
+if type(arr) == "table" then
+  for _, s in ipairs(arr) do
+    if type(s) == "table" and s.endpoint ~= ep then out[#out + 1] = s end
+  end
+end
+local w = io.open(subsfile, "w"); w:write(#out == 0 and "[]" or cjson.encode(out)); w:close()
+os.exit(0)
+LUA
+}
+
+CMD="${1:-}"
+case "$CMD" in
+    ensure-keys) ensure_keys && pubkey ;;
+    pubkey)      pubkey ;;
+    count)       count ;;
+    add)         add_sub && bypass_apply ;;       # new subscriber → ensure push channel bypasses the VPN
+    remove)      remove_sub "$2"; bypass_apply ;; # auto-clears the bypass when the last sub goes
+    send)        send "$2" "$3" ;;
+    test)        send "Detour: тест" "Тестовое уведомление работает ✅" ;;
+    bypass-apply) bypass_apply "$2" ;;            # [--no-reload] — also called from sing-box.initd on start
+    bypass-clear) bypass_clear ;;
+    bypass-status) bypass_status ;;
+    *) echo "usage: detour-push {ensure-keys|pubkey|count|add|remove <ep>|send <title> <body>|test|bypass-apply [--no-reload]|bypass-clear|bypass-status}" >&2; exit 2 ;;
+esac

@@ -76,10 +76,15 @@ NFQWS_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "nfqws2")
 NFQWS_LUA_DIR = os.path.join(BACKUP_HOME, "usr", "share", "detour", "lua")
 NFQWS_LUA_FILES = ("zapret-lib.lua", "zapret-antidpi.lua", "zapret-auto.lua")
 
+# Upstream source repos for --fetch-upstream (CI auto-publish needs no
+# router-backup). sing-box ships the binary in a per-libc tarball; zapret/zapret2
+# ship per-arch prebuilts inside the release tarball.
+SINGBOX_REPO = "SagerNet/sing-box"
+ZAPRET_REPO = "bol-van/zapret"
 # zapret2 upstream release used for the nfqws2 binary + lua. Bump together with
 # the --nfqws2-version you pass to build_feed.
 ZAPRET2_REPO = "bol-van/zapret2"
-ZAPRET2_REL = "v1.0.1"
+ZAPRET2_REL = "v1.0.2"
 ZAPRET2_EMBEDDED = f"https://github.com/{ZAPRET2_REPO}/releases/download/{ZAPRET2_REL}/zapret2-{ZAPRET2_REL}-openwrt-embedded.tar.gz"
 ZAPRET2_SOURCE = f"https://github.com/{ZAPRET2_REPO}/releases/download/{ZAPRET2_REL}/zapret2-{ZAPRET2_REL}.tar.gz"
 ZAPRET2_ARM64_BIN = f"zapret2-{ZAPRET2_REL}/binaries/linux-arm64/nfqws2"
@@ -226,26 +231,109 @@ def build_ipk(pkg, version, out_dir):
     return ipk_path, installed_size
 
 
-def fetch_nfqws2_assets():
-    """Populate NFQWS_BINARY + the 3 lua files from the pinned zapret2 release.
+def _http_get(url):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "detour-feed"})
+    return urllib.request.urlopen(req, timeout=300).read()
+
+
+def _assert_static_arm64(data, label):
+    """Guard against shipping a binary that won't run on the musl router. Accepts
+    an aarch64 ELF with NO PT_INTERP (fully static). sing-box's plain linux-arm64
+    build went DYNAMIC/glibc at 1.13.13 — only the `-musl` asset is static — so
+    this check is what catches a wrong-variant download before it reaches a router."""
+    import struct
+    if data[:4] != b"\x7fELF":
+        die(f"{label}: not an ELF binary")
+    le = data[5] == 1
+    e = "<" if le else ">"
+    mach = struct.unpack(e + "H", data[0x12:0x14])[0]
+    phoff = struct.unpack(e + "Q", data[0x20:0x28])[0]
+    phentsize = struct.unpack(e + "H", data[0x36:0x38])[0]
+    phnum = struct.unpack(e + "H", data[0x38:0x3a])[0]
+    interp = any(
+        struct.unpack(e + "I", data[phoff + i * phentsize: phoff + i * phentsize + 4])[0] == 3
+        for i in range(phnum)
+    )
+    if mach != 0xB7:
+        die(f"{label}: not aarch64 (machine=0x{mach:x})")
+    if interp:
+        die(f"{label}: dynamically linked (PT_INTERP present) — needs the musl/static build")
+    return True
+
+
+def fetch_singbox(version):
+    """Download sing-box <version> (linux-arm64 MUSL = fully static) → SB_BINARY.
+    Overwrites any existing copy. The plain `-linux-arm64` asset is glibc-dynamic
+    since 1.13.13; we MUST use `-musl` for the musl-based router."""
+    import io as _io, tarfile as _tf
+    url = (f"https://github.com/{SINGBOX_REPO}/releases/download/v{version}/"
+           f"sing-box-{version}-linux-arm64-musl.tar.gz")
+    print(f"  fetching sing-box {version} (linux-arm64-musl) ...")
+    with _tf.open(fileobj=_io.BytesIO(_http_get(url)), mode="r:gz") as tf:
+        member = next((m for m in tf.getmembers() if m.name.endswith("/sing-box")), None)
+        if member is None:
+            die(f"sing-box {version}: no sing-box binary in {url}")
+        data = tf.extractfile(member).read()
+    _assert_static_arm64(data, f"sing-box {version}")
+    os.makedirs(os.path.dirname(SB_BINARY), exist_ok=True)
+    with open(SB_BINARY, "wb") as f:
+        f.write(data)
+    os.chmod(SB_BINARY, 0o755)
+    print(f"    -> {SB_BINARY} ({len(data):,} B, static aarch64)")
+
+
+def fetch_tpws(version):
+    """Download zapret tpws <version> (binaries/linux-arm64/tpws) → TPWS_BINARY."""
+    import io as _io, tarfile as _tf
+    url = (f"https://github.com/{ZAPRET_REPO}/releases/download/v{version}/"
+           f"zapret-v{version}.tar.gz")
+    member_name = f"zapret-v{version}/binaries/linux-arm64/tpws"
+    print(f"  fetching tpws {version} (linux-arm64) ...")
+    with _tf.open(fileobj=_io.BytesIO(_http_get(url)), mode="r:gz") as tf:
+        m = next((x for x in tf.getmembers() if x.name == member_name), None)
+        if m is None:
+            die(f"tpws {version}: {member_name} not found in {url}")
+        data = tf.extractfile(m).read()
+    _assert_static_arm64(data, f"tpws {version}")
+    os.makedirs(os.path.dirname(TPWS_BINARY), exist_ok=True)
+    with open(TPWS_BINARY, "wb") as f:
+        f.write(data)
+    os.chmod(TPWS_BINARY, 0o755)
+    print(f"    -> {TPWS_BINARY} ({len(data):,} B, static aarch64)")
+
+
+def fetch_nfqws2_assets(rel=None, force=False):
+    """Populate NFQWS_BINARY + the 3 lua files from a zapret2 release.
 
     Binary comes from the openwrt-embedded bundle (binaries/linux-arm64/nfqws2);
     the lua scripts come from the full-source tarball (the embedded bundle ships
-    only the antidpi .gz, which is incomplete — see BYPASS_STRATEGIES.md). Cached
-    under router-backup so repeat builds skip the download."""
-    import io as _io, tarfile as _tf, urllib.request
+    only the antidpi .gz, which is incomplete — see BYPASS_STRATEGIES.md).
+    `rel` overrides the pinned release tag (e.g. "v1.0.2", driven by
+    --nfqws2-version under --fetch-upstream). `force` re-downloads even if cached.
+    Without force, cached files under router-backup are reused to skip the download."""
+    import io as _io, tarfile as _tf
+    rel = rel or ZAPRET2_REL
+    embedded = (f"https://github.com/{ZAPRET2_REPO}/releases/download/{rel}/"
+                f"zapret2-{rel}-openwrt-embedded.tar.gz")
+    source = (f"https://github.com/{ZAPRET2_REPO}/releases/download/{rel}/"
+              f"zapret2-{rel}.tar.gz")
+    arm64_bin = f"zapret2-{rel}/binaries/linux-arm64/nfqws2"
 
-    def _get(url):
-        req = urllib.request.Request(url, headers={"User-Agent": "detour-feed"})
-        return urllib.request.urlopen(req, timeout=180).read()
+    if force:
+        for p in [NFQWS_BINARY] + [os.path.join(NFQWS_LUA_DIR, n) for n in NFQWS_LUA_FILES]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
     os.makedirs(os.path.dirname(NFQWS_BINARY), exist_ok=True)
     os.makedirs(NFQWS_LUA_DIR, exist_ok=True)
 
     if not os.path.isfile(NFQWS_BINARY):
-        print(f"  fetching nfqws2 (arm64) from {ZAPRET2_REL} ...")
-        with _tf.open(fileobj=_io.BytesIO(_get(ZAPRET2_EMBEDDED)), mode="r:gz") as tf:
-            data = tf.extractfile(ZAPRET2_ARM64_BIN).read()
+        print(f"  fetching nfqws2 (arm64) from {rel} ...")
+        with _tf.open(fileobj=_io.BytesIO(_http_get(embedded)), mode="r:gz") as tf:
+            data = tf.extractfile(arm64_bin).read()
         with open(NFQWS_BINARY, "wb") as f:
             f.write(data)
         os.chmod(NFQWS_BINARY, 0o755)
@@ -253,10 +341,10 @@ def fetch_nfqws2_assets():
 
     missing = [n for n in NFQWS_LUA_FILES if not os.path.isfile(os.path.join(NFQWS_LUA_DIR, n))]
     if missing:
-        print(f"  fetching nfqws2 lua {missing} from {ZAPRET2_REL} source ...")
-        with _tf.open(fileobj=_io.BytesIO(_get(ZAPRET2_SOURCE)), mode="r:gz") as tf:
+        print(f"  fetching nfqws2 lua {missing} from {rel} source ...")
+        with _tf.open(fileobj=_io.BytesIO(_http_get(source)), mode="r:gz") as tf:
             for n in missing:
-                data = tf.extractfile(f"zapret2-{ZAPRET2_REL}/lua/{n}").read()
+                data = tf.extractfile(f"zapret2-{rel}/lua/{n}").read()
                 with open(os.path.join(NFQWS_LUA_DIR, n), "wb") as f:
                     f.write(data)
                 print(f"    -> {os.path.join(NFQWS_LUA_DIR, n)} ({len(data):,} B)")
@@ -444,16 +532,36 @@ def main():
                     help=f"opkg package revision suffix (default {DEFAULT_REVISION})")
     ap.add_argument("--publish", action="store_true",
                     help="force-push the feed tree to the `feed` branch")
+    ap.add_argument("--fetch-upstream", action="store_true",
+                    help="download each binary from its upstream GitHub release "
+                         "(sing-box -musl, tpws, nfqws2) instead of using the local "
+                         "router-backup copy — needed for headless/CI builds")
     args = ap.parse_args()
 
+    sb_ver = parse_version(args.version, "version") if args.version else None
+    tpws_ver = parse_version(args.tpws_version, "tpws-version") if args.tpws_version else None
+    nfqws2_ver = parse_version(args.nfqws2_version, "nfqws2-version") if args.nfqws2_version else None
+
+    # --fetch-upstream: pull each requested binary straight from its upstream
+    # release so a CI runner needs no router-backup checkout. The static-ELF guard
+    # in the fetchers refuses a wrong-variant (e.g. glibc sing-box) download.
+    if args.fetch_upstream:
+        if sb_ver:
+            fetch_singbox(sb_ver)
+        if tpws_ver:
+            fetch_tpws(tpws_ver)
+
     build_versions = {}
-    if args.version:
-        build_versions["sing-box"] = f"{parse_version(args.version, 'version')}-{args.revision}"
-    if args.tpws_version:
-        build_versions["tpws-zapret"] = f"{parse_version(args.tpws_version, 'tpws-version')}-{args.revision}"
-    if args.nfqws2_version:
-        fetch_nfqws2_assets()   # populate binary + lua before packaging
-        build_versions["nfqws2"] = f"{parse_version(args.nfqws2_version, 'nfqws2-version')}-{args.revision}"
+    if sb_ver:
+        build_versions["sing-box"] = f"{sb_ver}-{args.revision}"
+    if tpws_ver:
+        build_versions["tpws-zapret"] = f"{tpws_ver}-{args.revision}"
+    if nfqws2_ver:
+        # nfqws2 binary+lua always come from upstream; under --fetch-upstream pin the
+        # release tag to the requested version and force a fresh download.
+        rel = f"v{nfqws2_ver}" if args.fetch_upstream else None
+        fetch_nfqws2_assets(rel=rel, force=args.fetch_upstream)
+        build_versions["nfqws2"] = f"{nfqws2_ver}-{args.revision}"
 
     if not build_versions and not os.path.isdir(FEED_OUT):
         die("nothing to build: pass --version / --tpws-version / --nfqws2-version")

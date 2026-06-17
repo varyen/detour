@@ -43,6 +43,10 @@
 SETTINGS=/etc/sing-box/settings.json
 PROFILES=/etc/sing-box/profiles
 URLS_FILE=/etc/sing-box/health-urls.list
+# Profiles the user EXCLUDED from auto-switch (one id per line). Eligible = NOT here;
+# absent/empty file = every profile eligible (preserves the original behaviour). Kept
+# OUT of the profile JSON because subscription-refresh rebuilds those from scratch.
+AUTOSWITCH_EXCLUDE=/etc/sing-box/autoswitch-exclude.list
 SINGBOX_BIN=/usr/bin/sing-box
 API_BIN=/www/cgi-bin/detour-api
 LOG=/var/log/detour-health.log
@@ -53,6 +57,9 @@ HEALTH_DB=/tmp/detour-health.db
 SCHED=/tmp/detour-health.sched   # per-profile next-due schedule (TSV: id\tnext_due_epoch)
 SWITCH_MARK=/tmp/detour-health.switch
 UNSUPP_MARK=/tmp/detour-health.unsupported   # set when sing-box has no working clash_api
+ASTATE=/tmp/detour-health.active-state       # `active` mode: "<id>\t<ok>" of last functional result (drives push transitions)
+ALOCK=/tmp/detour-health.active.lock         # `active` mode's OWN lock (independent of the sweep/tick LOCK so a long sweep can't starve the sub-minute active check)
+PUSH_BIN=/usr/sbin/detour-push               # Web Push sender — alerts on active VPN down / auto-switch
 LOCK=/tmp/detour-health.lock
 WORK="/tmp/detour-health.work.$$"
 URLS_RESOLVED="/tmp/detour-health.urls.$$"
@@ -87,15 +94,32 @@ SB_WAIT=20                      # seconds to wait for the clash controller to bi
 INTERVAL_MIN=2700               # 45 min — soonest a profile is re-checked
 INTERVAL_MAX=3600               # 60 min — latest a profile is re-checked
 
+# `active` mode self-paces a SUB-MINUTE check of ONLY the active profile: within a
+# single cron-launched run it re-probes every random [ACTIVE_MIN,ACTIVE_MAX] seconds
+# until ACTIVE_LOOP_BUDGET is spent, then exits — the per-minute cron relaunches it
+# (ALOCK prevents overlap). This is how we get a 30–60 s cadence on a router whose
+# cron granularity is one MINUTE. Keenetic sets BUDGET=0 (one check per detour-cron
+# tick — that loop is shared/blocking and must not be held for ~a minute).
+ACTIVE_MIN=30
+ACTIVE_MAX=60
+ACTIVE_LOOP_BUDGET="${ACTIVE_LOOP_BUDGET:-55}"   # env-overridable: =0 → single check (handy for a manual test run)
+# Min seconds between two consecutive AUTO-switches (anti-ping-pong). At a 30–60 s
+# cadence a run of cache-healthy-but-dead candidates could otherwise switch+push
+# every iteration; the cooldown caps switch alerts. SWITCH_MARK carries the last ts.
+SWITCH_COOLDOWN=120
+
 # Keenetic/Entware platform shim (mirrors detour-api / detour-ping / vpn-keepalive).
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
     SETTINGS=/opt/etc/sing-box/settings.json
     PROFILES=/opt/etc/sing-box/profiles
     URLS_FILE=/opt/etc/sing-box/health-urls.list
+    AUTOSWITCH_EXCLUDE=/opt/etc/sing-box/autoswitch-exclude.list
     SINGBOX_BIN=/opt/bin/sing-box
     API_BIN=/opt/www/cgi-bin/detour-api
     LOG=/opt/var/log/detour-health.log
+    PUSH_BIN=/opt/sbin/detour-push
+    ACTIVE_LOOP_BUDGET=0   # one active check per detour-cron tick (shared loop must not block ~a minute)
 fi
 
 NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
@@ -125,24 +149,42 @@ rand_range() {
 #                      an explicit user action) and the lock. All modes use the
 #                      per-run $$-derived CLASH_ADDR set above (no fixed port), so
 #                      concurrent runs never collide nor attach to a stale orphan.
+#   active           — FOCUSED SUB-MINUTE check of ONLY the ACTIVE single profile.
+#                      One cron-launched run self-paces a loop: re-probe the active
+#                      profile every random [ACTIVE_MIN,ACTIVE_MAX] s until
+#                      ACTIVE_LOOP_BUDGET is spent, then exit (cron relaunches it next
+#                      minute). On a confirmed DOWN it tries opt-in auto-switch first
+#                      (health_auto_switch) → on a switch sends a "переключён" Web
+#                      Push; otherwise (off / no candidate / cooldown) sends a "VPN
+#                      недоступен" alert — once per down-episode, AND also when the
+#                      user just connected to an already-broken profile. Uses its OWN
+#                      lock ($ALOCK), and a DISTINCT throwaway-config name so a
+#                      concurrent tick's reap_orphans can't kill its live sing-box.
 MODE="${1:-tick}"
 ONEID="$2"
 # Background modes (cron): take the lock, gate on enabled, reap orphans, auto-switch.
 BG=0; case "$MODE" in sweep|tick) BG=1 ;; esac
 case "$MODE" in
-    sweep|tick) ;;
+    sweep|tick|active) ;;
     one)
         ONEID=$(printf '%s' "$ONEID" | tr -cd 'A-Za-z0-9_.-')
         [ -n "$ONEID" ] || { echo "usage: detour-health one <id>" >&2; exit 2; }
         [ -f "$PROFILES/$ONEID.json" ] || { echo "profile not found" >&2; exit 2; }
         ;;
-    *) echo "usage: detour-health [tick | sweep | one <id>]" >&2; exit 2 ;;
+    *) echo "usage: detour-health [tick | sweep | active | one <id>]" >&2; exit 2 ;;
 esac
 
-# Gate: the background check (tick/sweep) skips when disabled (default ON — only
-# explicit 0/off opts out). A manual `one` re-check is always allowed.
+# `active` uses a DISTINCT throwaway-config filename (".aconf." instead of ".conf.")
+# so tick/sweep's reap_orphans — which greps for ".conf." instances to kill leaked
+# orphans — can NEVER kill an active probe's live sing-box. That decoupling is what
+# lets the fast (sub-minute) active loop overlap tick freely; the old odd/even-minute
+# cron split is no longer needed. Active reaps its OWN ".aconf." orphans (below).
+[ "$MODE" = "active" ] && SB_CONF="/tmp/detour-health.aconf.$$"
+
+# Gate: the background checks (tick/sweep/active) skip when disabled (default ON —
+# only explicit 0/off opts out). A manual `one` re-check is always allowed.
 ENABLED=$(jstr health_check_enabled "$SETTINGS")
-if [ "$BG" = "1" ]; then
+if [ "$BG" = "1" ] || [ "$MODE" = "active" ]; then
     case "$ENABLED" in 0|off|false|no) exit 0 ;; esac
 fi
 AUTOSWITCH=$(jstr health_auto_switch "$SETTINGS")
@@ -154,10 +196,12 @@ command -v lua >/dev/null 2>&1 || { log "lua missing — cannot build probe conf
 SBPID=""
 LOCK_HELD=""   # set to 1 only once WE create the lock dir, so cleanup never
                # removes a concurrent sweep's lock (e.g. from a `one`-mode run).
+ALOCK_HELD=""  # same, for the `active` mode's own lock.
 cleanup() {
     [ -n "$SBPID" ] && kill "$SBPID" 2>/dev/null
     [ -n "$SBPID" ] && kill -9 "$SBPID" 2>/dev/null
     [ -n "$LOCK_HELD" ] && rm -rf "$LOCK"
+    [ -n "$ALOCK_HELD" ] && rm -rf "$ALOCK"
     rm -rf "$WORK" "$URLS_RESOLVED" "$ALL_IDS" "$SB_CONF" "$SB_MAP" \
         "$SB_DATA" "$SB_LOG" "$ALL_IDS.chunk.$$" 2>/dev/null
 }
@@ -367,6 +411,142 @@ mark_down() {
     printf '%s\t%s\t%s\t%s\t%s\n' "$pid" 0 "$NOW" -1 "$d" > "$WORK/$pid"
 }
 
+# ---- `active` mode helpers --------------------------------------------------
+# Upsert ONE profile's freshly-probed line ($WORK/<id>) into the persistent cache
+# (drops the old line for that id, appends the new one). Mirrors `one` mode's
+# inline upsert; used by `active` so the panel's active card shows the 2-min result.
+upsert_db() {
+    _id="$1"
+    _line=$(cat "$WORK/$_id" 2>/dev/null)
+    [ -n "$_line" ] || return 0
+    _tmp="$HEALTH_DB.up.$$"
+    if [ -f "$HEALTH_DB" ]; then
+        awk -F'\t' -v id="$_id" '$1!=id' "$HEALTH_DB" > "$_tmp" 2>/dev/null
+    else
+        : > "$_tmp"
+    fi
+    printf '%s\n' "$_line" >> "$_tmp"
+    mv "$_tmp" "$HEALTH_DB" 2>/dev/null || rm -f "$_tmp"
+}
+
+# Human-readable profile name (the panel's label) for a push body; falls back to id.
+profile_name() {
+    _pn=$(jstr name "$PROFILES/$1.json" 2>/dev/null)
+    [ -z "$_pn" ] && _pn="$1"
+    printf '%s' "$_pn"
+}
+
+# Fire a Web Push alert (best-effort; no-op if the sender or any subscription is
+# absent). Title + body are shown via the panel's service worker.
+push_alert() {
+    [ -x "$PUSH_BIN" ] || return 0
+    "$PUSH_BIN" send "$1" "$2" >/dev/null 2>&1
+}
+
+# Healthiest OTHER profile eligible for auto-switch: ok=1, NOT in the user's exclude
+# list (AUTOSWITCH_EXCLUDE — absent/empty = all eligible), lowest positive rtt wins.
+# Prints the id (empty if none). Shared by `active` and the tail-block auto-switch so
+# both honour the per-profile opt-out the panel manages. Reading the exclude file in
+# awk's BEGIN keeps it a single pass; a missing file just leaves `excl` empty.
+pick_switch_candidate() {
+    awk -F'\t' -v active="$1" -v exf="$AUTOSWITCH_EXCLUDE" '
+        BEGIN { while ((getline l < exf) > 0) { gsub(/[ \t\r]/, "", l); if (l != "") excl[l] = 1 } }
+        $1 != active && $2 == "1" && !($1 in excl) {
+            r = ($4 == "" || $4 < 0) ? 999999 : $4
+            if (best == "" || r < bestr) { best = $1; bestr = r }
+        } END { if (best != "") print best }' "$HEALTH_DB" 2>/dev/null
+}
+
+# Opt-in auto-switch for `active` mode: when the active profile failed (confirmed)
+# and health_auto_switch is on, activate the healthiest OTHER ELIGIBLE profile from
+# the cache via the panel's own activation path, and push a "switched" alert. Mirrors
+# the candidate pick at the end of this script.
+#
+# Return: 0 = SWITCHED (a "переключён" push was sent); 1 = NOT switched (auto-switch
+# off / no healthy candidate / on cooldown / activation failed). The caller uses this
+# to decide whether to additionally send a standalone "VPN недоступен" alert — so a
+# single down event yields exactly one push.
+autoswitch_active() {
+    _a="$1"; _aname="$2"
+    case "$AUTOSWITCH" in 1|on|true|yes) ;; *) return 1 ;; esac
+    [ -x "$API_BIN" ] || return 1
+    # Cooldown: at most one auto-switch per SWITCH_COOLDOWN. A run of cache-healthy-
+    # but-actually-dead candidates would otherwise switch+push every iteration.
+    if [ -f "$SWITCH_MARK" ]; then
+        _lastsw=$(sed -n 's/.*"ts"[^0-9]*\([0-9][0-9]*\).*/\1/p' "$SWITCH_MARK" 2>/dev/null)
+        case "$_lastsw" in ''|*[!0-9]*) _lastsw=0 ;; esac
+        if [ "$((NOW - _lastsw))" -lt "$SWITCH_COOLDOWN" ]; then
+            log "active-check: $_a down, auto-switch on cooldown ($((NOW - _lastsw))s<${SWITCH_COOLDOWN}s) — staying put"
+            return 1
+        fi
+    fi
+    _cand=$(pick_switch_candidate "$_a")
+    if [ -z "$_cand" ]; then
+        log "active-check: $_a down, no healthy ELIGIBLE candidate — staying put"
+        return 1
+    fi
+    log "active-check AUTO-SWITCH: $_a → $_cand"
+    if OUT=$("$API_BIN" activate "$_cand" 2>&1); then
+        printf '{"from":"%s","to":"%s","ts":%s}\n' "$_a" "$_cand" "$NOW" > "$SWITCH_MARK"
+        _cname=$(profile_name "$_cand")
+        push_alert "VPN переключён" "«$_aname» не работал — переключился на «$_cname»."
+        log "active-check AUTO-SWITCH ok: $_a → $_cand"
+        return 0
+    fi
+    log "active-check AUTO-SWITCH failed ($_a → $_cand): $OUT"
+    return 1
+}
+
+# One focused functional check of the CURRENT active single profile (re-resolved each
+# call so an auto-switch in a previous loop iteration is picked up). Probes through a
+# throwaway instance, confirms a failure with one re-probe, upserts the cache line,
+# then on DOWN: auto-switch (→ "переключён" push) or, if it didn't switch, a "VPN
+# недоступен" alert — fired ONCE per down-episode of a profile, INCLUDING a fresh
+# connect to an already-broken profile (PREVID != active), but suppressed while we are
+# already known-down on the same profile (no nagging). Drives transitions via $ASTATE.
+active_check_once() {
+    _A=$(jstr active_profile "$SETTINGS")
+    _ACH=$(jstr active_chain "$SETTINGS")
+    case "$_ACH" in *,*) return 0 ;; esac          # multi-hop chain → skip (ambiguous)
+    [ -n "$_A" ] || return 0
+    [ -f "$PROFILES/$_A.json" ] || return 0
+
+    printf '%s\n' "$_A" > "$WORK/.active-ids"
+    # If the throwaway instance can't even START, that's an INFRA problem, not a dead
+    # egress — do NOT push (a false "VPN down" alert is worse than silence).
+    if ! probe_idfile "$WORK/.active-ids"; then
+        log "active-check: throwaway sing-box failed to start — skipping (no false alert)"
+        return 0
+    fi
+    _NEWOK=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$_A" 2>/dev/null)
+    [ -n "$_NEWOK" ] || return 0
+    # Confirm a failure with one re-probe (kill transient flaps).
+    if [ "$_NEWOK" = "0" ] && probe_idfile "$WORK/.active-ids"; then
+        _NEWOK=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$_A" 2>/dev/null)
+    fi
+    upsert_db "$_A"
+
+    _PREVID=""; _PREVOK=""
+    if [ -f "$ASTATE" ]; then
+        _PREVID=$(cut -f1 "$ASTATE" 2>/dev/null)
+        _PREVOK=$(cut -f2 "$ASTATE" 2>/dev/null)
+    fi
+    if [ "$_NEWOK" = "0" ]; then
+        _ANAME=$(profile_name "$_A")
+        if autoswitch_active "$_A" "$_ANAME"; then
+            log "active-check: $_A down → auto-switched"
+        elif ! { [ "$_PREVID" = "$_A" ] && [ "$_PREVOK" = "0" ]; }; then
+            # Not switched (off / no candidate / cooldown) and this is a NEW down for
+            # this profile (was up, or just connected to it, or boot) → alert once.
+            push_alert "VPN недоступен" "Профиль «$_ANAME» не работает — проверочные адреса не открываются через VPN."
+            log "active-check: $_A DOWN — push sent"
+        fi
+    fi
+    # Record this run's result for the next transition check.
+    printf '%s\t%s\n' "$_A" "$_NEWOK" > "$ASTATE"
+    return 0
+}
+
 # Probe every profile id in a file through ONE throwaway instance (bounded
 # parallel). Returns 1 if the instance failed to start.
 #
@@ -451,6 +631,53 @@ if [ "$MODE" = "one" ]; then
             && mv "$SCHED.one.$$" "$SCHED" 2>/dev/null
     fi
     printf '%s\n' "$LINE"
+    exit 0
+fi
+
+# ---- ACTIVE mode: focused SUB-MINUTE functional check of ONLY the active profile.
+# Self-paced loop: re-probe every random [ACTIVE_MIN,ACTIVE_MAX]s until the budget is
+# spent (cron relaunches it next minute). Web Push on DOWN / auto-switch (see
+# active_check_once + autoswitch_active above).
+if [ "$MODE" = "active" ]; then
+    # Need a working clash_api and an established baseline: bail (no false alert)
+    # until a tick has bootstrapped the cache this boot and proven clash support.
+    [ -f "$UNSUPP_MARK" ] && exit 0
+    [ -s "$HEALTH_DB" ] || exit 0
+    # Own lock, independent of the sweep/tick LOCK (a long sweep must not delay the
+    # active beat). Steal a stale lock after 10 min (a hung active run = crash).
+    if mkdir "$ALOCK" 2>/dev/null; then
+        ALOCK_HELD=1; echo "$NOW" > "$ALOCK/ts"
+    else
+        alts=$(cat "$ALOCK/ts" 2>/dev/null); [ -z "$alts" ] && alts=0
+        if [ "$((NOW - alts))" -lt 600 ]; then exit 0; fi
+        rm -rf "$ALOCK"; mkdir "$ALOCK" 2>/dev/null || exit 0
+        ALOCK_HELD=1; echo "$NOW" > "$ALOCK/ts"
+    fi
+    # Reap any leaked active throwaway sing-box from a crashed prior active run (our
+    # own ".aconf." instances — tick's reap deliberately won't touch these). Safe
+    # here: ALOCK guarantees no sibling active run, and ours isn't started yet.
+    for opid in $(ps w 2>/dev/null | grep '[/]tmp/detour-health\.aconf\.' | awk '{print $1}'); do
+        kill -9 "$opid" 2>/dev/null
+    done
+    # Skip a chainless/empty/chain active up front (the loop's per-iteration resolve
+    # handles a mid-loop auto-switch, which is always to a SINGLE profile).
+    A=$(jstr active_profile "$SETTINGS")
+    ACH=$(jstr active_chain "$SETTINGS")
+    case "$ACH" in *,*) exit 0 ;; esac
+    [ -n "$A" ] || exit 0
+    [ -f "$PROFILES/$A.json" ] || exit 0
+
+    # Self-paced loop. ACTIVE_LOOP_BUDGET=0 (Keenetic) → exactly one check.
+    A_DEADLINE=$((NOW + ACTIVE_LOOP_BUDGET))
+    while :; do
+        NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0   # fresh ts per iteration
+        active_check_once
+        _t=$(date +%s 2>/dev/null); [ -z "$_t" ] && _t="$A_DEADLINE"
+        [ "$_t" -ge "$A_DEADLINE" ] && break                  # budget spent
+        _s=$(rand_range "$ACTIVE_MIN" "$ACTIVE_MAX")
+        [ $((_t + _s)) -ge "$A_DEADLINE" ] && break           # next check wouldn't fit
+        sleep "$_s"
+    done
     exit 0
 fi
 
@@ -594,22 +821,18 @@ if probe_idfile "$WORK/.active-ids"; then
     [ "$AOK2" = "0" ] || { log "active $ACTIVE recovered on re-probe — no switch"; exit 0; }
 fi
 
-# Pick the healthiest OTHER profile: ok=1, lowest positive rtt wins (rtt=-1 sinks).
-CAND=$(awk -F'\t' -v active="$ACTIVE" '
-    $1 != active && $2 == "1" {
-        r = ($4 == "" || $4 < 0) ? 999999 : $4
-        if (best == "" || r < bestr) { best = $1; bestr = r }
-    }
-    END { if (best != "") print best }' "$HEALTH_DB")
+# Pick the healthiest OTHER ELIGIBLE profile (ok=1, not excluded, lowest positive rtt).
+CAND=$(pick_switch_candidate "$ACTIVE")
 
 if [ -z "$CAND" ]; then
-    log "active $ACTIVE unhealthy but no healthy candidate — staying put"
+    log "active $ACTIVE unhealthy but no healthy ELIGIBLE candidate — staying put"
     exit 0
 fi
 
 log "AUTO-SWITCH: active $ACTIVE failed health check → activating $CAND"
 if OUT=$("$API_BIN" activate "$CAND" 2>&1); then
     printf '{"from":"%s","to":"%s","ts":%s}\n' "$ACTIVE" "$CAND" "$NOW" > "$SWITCH_MARK"
+    push_alert "VPN переключён" "«$(profile_name "$ACTIVE")» не работал — переключился на «$(profile_name "$CAND")»."
     log "AUTO-SWITCH ok: $ACTIVE → $CAND"
 else
     log "AUTO-SWITCH failed ($ACTIVE → $CAND): $OUT"

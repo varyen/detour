@@ -323,6 +323,11 @@ start_service() {
         ipset create $IPSET_WL hash:net maxelem 131072 -exist
         setup_domains_file "$WHITELIST_FILE" "$IPSET_WL" "/tmp/dnsmasq.d/singbox-whitelist.conf"
         setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
+        # Keep the browser's Web Push channel OFF the VPN: push endpoints resolve into the
+        # whitelist ipset (→ RETURN/direct) so a LAN/WG client still gets the "VPN down"
+        # alert when the active VPN fails. No-op unless push is enabled; --no-reload because
+        # the dnsmasq restart below loads it. (tmpfs file, regenerated each start.)
+        [ -x /usr/sbin/detour-push ] && /usr/sbin/detour-push bypass-apply --no-reload
     else
         setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
         # SINGLE mode: per-profile-routed hosts must also reach 12345 — the one
@@ -523,6 +528,7 @@ stop_service() {
     rm -f /tmp/dnsmasq.d/singbox-whitelist.conf
     rm -f /tmp/dnsmasq.d/singbox-routemap.conf
     rm -f /tmp/dnsmasq.d/singbox-singbox_t*.conf
+    rm -f /tmp/dnsmasq.d/singbox-push-bypass.conf   # whitelist ipset is destroyed below
     /etc/init.d/dnsmasq restart
 
     # Flush and destroy ipsets
@@ -548,6 +554,8 @@ reload_service() {
     if [ "$ROUTING_MODE" = "all-except" ]; then
         ipset flush $IPSET_WL 2>/dev/null
         setup_domains_file "$WHITELIST_FILE" "$IPSET_WL" "/tmp/dnsmasq.d/singbox-whitelist.conf"
+        # Re-affirm the Web Push VPN-bypass (see start_service); dnsmasq restart below loads it.
+        [ -x /usr/sbin/detour-push ] && /usr/sbin/detour-push bypass-apply --no-reload
     fi
 
     rm -f /tmp/routemap-all.list

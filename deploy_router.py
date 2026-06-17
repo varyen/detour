@@ -291,12 +291,18 @@ def step_panel(ssh):
     # is a stale on-router snapshot and must NOT be the deploy source for the panel.
     cgi = os.path.join(ROUTER_FILES, "detour-api")
     html = os.path.join(ROUTER_FILES, "index.html")
+    sw = os.path.join(ROUTER_FILES, "sw.js")
     with open(cgi, "rb") as f:
         n = upload(ssh, f.read(), "/www/cgi-bin/detour-api", "0755")
     print(f"  /www/cgi-bin/detour-api: {n} bytes")
     with open(html, "rb") as f:
         n = upload(ssh, f.read(), "/www/detour/index.html", "0644")
     print(f"  /www/detour/index.html: {n} bytes")
+    # Web Push service worker (served same-origin at /detour/sw.js).
+    if os.path.isfile(sw):
+        with open(sw, "rb") as f:
+            n = upload(ssh, f.read(), "/www/detour/sw.js", "0644")
+        print(f"  /www/detour/sw.js: {n} bytes")
 
 
 def step_hosts(ssh):
@@ -542,15 +548,39 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=True):
             print("  /etc/sing-box/health-urls.list: kept (already present)")
         # Staggered check every 2 min: each profile re-checked on its own random
         # 45-60 min cadence (tick mode), so statuses don't all update at once.
+        # PLUS a focused `active` check re-launched EVERY minute: each run self-paces
+        # a 30-60s loop over only the active profile, with a Web Push alert on DOWN
+        # (incl. connecting to a broken profile) and opt-in auto-switch.
         health_cron = "*/2 * * * * /usr/sbin/detour-health tick >/dev/null 2>&1"
+        # `active` uses a distinct throwaway-config name, so tick's reap_orphans can't
+        # kill its in-flight sing-box — the old odd/even-minute split is unnecessary.
+        active_cron = "* * * * * /usr/sbin/detour-health active >/dev/null 2>&1"
         exec_cmd(
             ssh,
             "( crontab -l 2>/dev/null | grep -v 'detour-health' ; "
-            f"echo '{health_cron}' ) | crontab -",
+            f"echo '{health_cron}' ; echo '{active_cron}' ) | crontab -",
         )
         out, _, _ = exec_cmd(ssh, "crontab -l 2>/dev/null | grep detour-health")
         print(f"  cron: {out.strip() or 'NOT INSTALLED'}")
         exec_cmd(ssh, "/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1")
+
+    # 8c. Web Push sender (VAPID, payload-less) — backs the panel's push settings
+    #     and detour-health's down/auto-switch alerts. Pre-generate the VAPID key.
+    push_local = os.path.join(ROUTER_FILES, "detour-push")
+    if os.path.isfile(push_local):
+        with open(push_local, "rb") as f:
+            n = upload(ssh, f.read(), "/usr/sbin/detour-push", "0755")
+        print(f"  /usr/sbin/detour-push: {n} bytes")
+        out, _, _ = exec_cmd(ssh, "/usr/sbin/detour-push ensure-keys 2>/dev/null")
+        print(f"  VAPID public key: {(out.strip()[:24] + '…') if out.strip() else 'FAILED'}")
+
+    # 8d. Let's Encrypt helper (acme.sh, HTTP-01 webroot) — backs the panel's HTTPS
+    #     section + auto-renewal. Issuance is user-triggered (needs a domain + open :80).
+    cert_local = os.path.join(ROUTER_FILES, "detour-cert")
+    if os.path.isfile(cert_local):
+        with open(cert_local, "rb") as f:
+            n = upload(ssh, f.read(), "/usr/sbin/detour-cert", "0755")
+        print(f"  /usr/sbin/detour-cert: {n} bytes")
 
 
 def step_hotplug_guard(ssh):

@@ -1,0 +1,375 @@
+#!/bin/sh
+# detour-cert — obtain / install / renew a Let's Encrypt cert (via acme.sh, HTTP-01
+# webroot) for an A-record domain, so the Detour panel can be served over HTTPS.
+# Web Push (the panel's push alerts) only works in a secure context, i.e. HTTPS.
+#
+# WHY acme.sh + webroot: the device has no `socat` (BusyBox), so acme.sh standalone
+# mode is impossible — webroot (write the challenge file, let the :80 web server
+# serve it) is the only viable HTTP-01 method here. DNS-01 could be a later add.
+#
+# UNIVERSAL install target (autodetected):
+#   nginx present  → cert into /etc/nginx/ssl/<domain>/, reload nginx. Routing the
+#                    domain → panel stays the user's nginx job (we don't write server
+#                    blocks). Challenge served via a managed conf.d snippet.
+#   else OpenWrt   → uhttpd: cert into /etc/detour/ssl, point uhttpd at it + listen
+#                    :443, restart. Panel then live at https://<domain>/detour/.
+#   else Keenetic  → lighttpd: combined pem + an ssl include, restart the panel.
+#
+# Subcommands: detect | issue <domain> <email> | renew | status | _lighttpd-pem
+#
+# acme.sh runs its OWN renewal (we install its cronjob on OpenWrt; Keenetic drives
+# `detour-cert renew` from detour-cron). On renewal acme.sh re-runs --install-cert,
+# which re-copies the cert into the target dir and runs the stored reloadcmd.
+
+DETOUR_DIR=/etc/detour
+CERT_CONF="$DETOUR_DIR/cert.conf"          # persisted: DOMAIN/EMAIL/TARGET_MODE/CERT_DIR/RELOAD_CMD
+STATE=/var/state/detour-cert.json          # panel-facing status
+LOG=/var/log/detour-cert.log
+ACME_WEBROOT=/var/detour-acme              # HTTP-01 challenge docroot (nginx mode)
+NGINX_CONFD=/etc/nginx/conf.d
+NGINX_SNIPPET=/etc/nginx/conf.d/detour-acme.conf
+NGINX_SSL=/etc/nginx/ssl
+DETOUR_SSL="$DETOUR_DIR/ssl"               # uhttpd/lighttpd mode cert dir
+LIGHTTPD_DOCROOT=/opt/share/www
+LIGHTTPD_SSL_CONF=/opt/etc/lighttpd/conf.d/detour-ssl.conf
+LIGHTTPD_CONF=/opt/etc/lighttpd/detour.conf
+LIGHTTPD_PORT=8080        # the Detour panel's lighttpd HTTP port (challenge is served here;
+                          # reached externally via a WAN :80 → :LIGHTTPD_PORT port-forward)
+PLATFORM=openwrt
+
+# Keenetic/Entware platform shim (mirrors detour-health / detour-push).
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    PLATFORM=keenetic
+    DETOUR_DIR=/opt/etc/detour
+    CERT_CONF="$DETOUR_DIR/cert.conf"
+    STATE=/opt/var/state/detour-cert.json
+    LOG=/opt/var/log/detour-cert.log
+    ACME_WEBROOT=/opt/var/detour-acme
+    DETOUR_SSL="$DETOUR_DIR/ssl"
+    mkdir -p /opt/var/state /opt/var/log 2>/dev/null
+    # The panel's lighttpd port (challenge is served here, reached via a WAN :80 forward).
+    _lp=$(sed -n 's/.*server\.port[^0-9]*\([0-9][0-9]*\).*/\1/p' "$LIGHTTPD_CONF" 2>/dev/null | head -1)
+    [ -n "$_lp" ] && LIGHTTPD_PORT="$_lp"
+fi
+
+# LE staging (no rate limits, fake cert) — for safe end-to-end testing.
+LE_STAGING=""
+[ "$DETOUR_CERT_STAGING" = "1" ] && LE_STAGING="--staging"
+
+log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
+
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"; }
+
+# ---- acme.sh location / install -------------------------------------------------
+find_acme() {
+    for p in /root/.acme.sh/acme.sh "$HOME/.acme.sh/acme.sh" /opt/.acme.sh/acme.sh \
+             /opt/root/.acme.sh/acme.sh /usr/lib/acme/acme.sh; do
+        [ -x "$p" ] && { echo "$p"; return 0; }
+    done
+    _c=$(command -v acme.sh 2>/dev/null) && [ -n "$_c" ] && { echo "$_c"; return 0; }
+    return 1
+}
+
+ensure_acme() {
+    _a=$(find_acme) && { echo "$_a"; return 0; }
+    log "acme.sh not found — installing"
+    if [ "$PLATFORM" = keenetic ]; then
+        opkg update >/dev/null 2>&1; opkg install acme.sh >/dev/null 2>&1
+    else
+        opkg update >/dev/null 2>&1; opkg install acme >/dev/null 2>&1
+    fi
+    _a=$(find_acme) && { echo "$_a"; return 0; }
+    # last resort: official installer (needs curl + internet)
+    if command -v curl >/dev/null 2>&1; then
+        curl -s https://get.acme.sh | sh >/dev/null 2>&1
+    fi
+    _a=$(find_acme) && { echo "$_a"; return 0; }
+    return 1
+}
+
+# ---- environment detection ------------------------------------------------------
+# Which server holds :80 (serves the HTTP-01 challenge).
+http80_server() {
+    _l=$(netstat -tlnp 2>/dev/null | grep -E '[:.]80[[:space:]]' | head -1)
+    case "$_l" in
+        *nginx*)    echo nginx ;;
+        *uhttpd*)   echo uhttpd ;;
+        *lighttpd*) echo lighttpd ;;
+        '')         echo none ;;
+        *)          echo other ;;
+    esac
+}
+
+# Where to INSTALL the cert (nginx dir if nginx is here, else the panel's own server).
+target_mode() {
+    if command -v nginx >/dev/null 2>&1 && [ -d /etc/nginx ]; then echo nginx; return; fi
+    [ "$PLATFORM" = keenetic ] && { echo lighttpd; return; }
+    echo uhttpd
+}
+
+# Best-effort public/WAN address for the UI hint (skips RFC1918 + loopback).
+wan_ip() {
+    ip addr show 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' \
+        | grep -vE '^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -1
+}
+
+cert_expiry() {  # $1 = fullchain path → "notAfter" string or empty
+    [ -f "$1" ] || return 0
+    openssl x509 -enddate -noout -in "$1" 2>/dev/null | sed 's/notAfter=//'
+}
+
+# ---- target install helpers -----------------------------------------------------
+# Probe a candidate webroot: write a token under .well-known/acme-challenge and
+# check the :80 server ACTUALLY serves it (Host-scoped to the domain, via local
+# curl). This is the reliable way to pick a webroot — e.g. GL.iNet nginx serves
+# /tmp/acme-webroot through a BUILT-IN handler that an added server block can't
+# override (verified on GL-BE9300), while generic nginx needs our snippet. The
+# probe tells us which actually works before we spend an ACME round-trip.
+probe_webroot() {  # $1 domain  $2 webroot  [$3 port=80] → 0 if the token is served
+    _port="${3:-80}"
+    mkdir -p "$2/.well-known/acme-challenge" 2>/dev/null || return 1
+    _tok="detour-probe-$$"
+    echo "$_tok" > "$2/.well-known/acme-challenge/$_tok" 2>/dev/null || return 1
+    _got=$(curl -s -m 5 -H "Host: $1" "http://127.0.0.1:$_port/.well-known/acme-challenge/$_tok" 2>/dev/null)
+    rm -f "$2/.well-known/acme-challenge/$_tok" 2>/dev/null
+    [ "$_got" = "$_tok" ]
+}
+
+# Generic-nginx fallback: add a managed, name-based :80 server block serving the
+# challenge from ACME_WEBROOT. Kept after issue so unattended renewals keep
+# validating. Guarded by `nginx -t`. (No-op win on GL — the probe picks the
+# built-in webroot first, so this is only reached on plain nginx.)
+nginx_add_snippet() {  # $1 domain
+    [ -d "$NGINX_CONFD" ] || return 1
+    mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge" 2>/dev/null
+    cat > "$NGINX_SNIPPET" <<EOF
+# Managed by detour-cert — serves the Let's Encrypt HTTP-01 challenge for $1.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $1;
+    location ^~ /.well-known/acme-challenge/ {
+        root $ACME_WEBROOT;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+}
+EOF
+    if nginx -t >/dev/null 2>&1; then
+        /etc/init.d/nginx reload >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1
+        return 0
+    fi
+    log "nginx -t failed after adding challenge snippet — reverting"
+    rm -f "$NGINX_SNIPPET"; nginx -s reload >/dev/null 2>&1
+    return 1
+}
+
+# Choose a webroot the :80 server provably serves for this domain. Echoes the path.
+prepare_webroot() {  # $1 domain  $2 http80-server → echoes webroot, or fails
+    _d="$1"; _srv="$2"
+    # Keenetic: :80 is the stock router UI we don't control. The challenge is served
+    # by OUR lighttpd on $LIGHTTPD_PORT, reached from the internet via a WAN :80 →
+    # :LIGHTTPD_PORT port-forward (set up by the owner). Probe lighttpd directly.
+    if [ "$PLATFORM" = keenetic ]; then
+        probe_webroot "$_d" "$LIGHTTPD_DOCROOT" "$LIGHTTPD_PORT" && { echo "$LIGHTTPD_DOCROOT"; return 0; }
+        return 1
+    fi
+    case "$_srv" in
+        nginx)
+            # built-in / pre-existing webroots first (GL.iNet /tmp/acme-webroot),
+            # then our own managed snippet for plain nginx.
+            for _wr in /tmp/acme-webroot "$ACME_WEBROOT"; do
+                probe_webroot "$_d" "$_wr" && { echo "$_wr"; return 0; }
+            done
+            nginx_add_snippet "$_d" && probe_webroot "$_d" "$ACME_WEBROOT" && { echo "$ACME_WEBROOT"; return 0; }
+            return 1 ;;
+        uhttpd)
+            _wr=$(uci -q get uhttpd.main.home 2>/dev/null); [ -n "$_wr" ] || _wr=/www
+            probe_webroot "$_d" "$_wr" && { echo "$_wr"; return 0; }
+            return 1 ;;
+        lighttpd)
+            probe_webroot "$_d" "$LIGHTTPD_DOCROOT" "$LIGHTTPD_PORT" && { echo "$LIGHTTPD_DOCROOT"; return 0; }
+            return 1 ;;
+        *) return 1 ;;
+    esac
+}
+
+# lighttpd reload hook (Keenetic): rebuild the combined pem from the installed
+# fullchain+key and restart the panel. Used as acme.sh --reloadcmd so renewals redeploy.
+lighttpd_pem() {
+    [ -f "$CERT_CONF" ] && . "$CERT_CONF" 2>/dev/null
+    [ -n "$CERT_DIR" ] || return 1
+    cat "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" > "$CERT_DIR/combined.pem" 2>/dev/null
+    chmod 0600 "$CERT_DIR/combined.pem" 2>/dev/null
+    [ -x /opt/etc/init.d/S51detour-panel ] && /opt/etc/init.d/S51detour-panel restart >/dev/null 2>&1
+    return 0
+}
+
+# One-time web-server TLS wiring for the uhttpd / lighttpd targets.
+configure_uhttpd() {  # $1 = cert dir
+    _cd="$1"
+    command -v uci >/dev/null 2>&1 || return 1
+    uci set uhttpd.main.cert="$_cd/fullchain.pem" 2>/dev/null
+    uci set uhttpd.main.key="$_cd/privkey.pem" 2>/dev/null
+    # ensure an HTTPS listener exists (LuCI usually already has one)
+    if ! uci -q get uhttpd.main.listen_https >/dev/null 2>&1; then
+        uci add_list uhttpd.main.listen_https='0.0.0.0:443' 2>/dev/null
+        uci add_list uhttpd.main.listen_https='[::]:443' 2>/dev/null
+    fi
+    uci commit uhttpd 2>/dev/null
+    /etc/init.d/uhttpd restart >/dev/null 2>&1
+}
+
+configure_lighttpd() {  # $1 = cert dir
+    _cd="$1"
+    mkdir -p "$(dirname "$LIGHTTPD_SSL_CONF")" 2>/dev/null
+    cat "$_cd/privkey.pem" "$_cd/fullchain.pem" > "$_cd/combined.pem" 2>/dev/null
+    chmod 0600 "$_cd/combined.pem" 2>/dev/null
+    cat > "$LIGHTTPD_SSL_CONF" <<EOF
+# Managed by detour-cert — serves the Detour panel over HTTPS on :443.
+server.modules += ( "mod_openssl" )
+\$SERVER["socket"] == ":443" {
+    ssl.engine  = "enable"
+    ssl.pemfile = "$_cd/combined.pem"
+}
+EOF
+    [ -x /opt/etc/init.d/S51detour-panel ] && /opt/etc/init.d/S51detour-panel restart >/dev/null 2>&1
+}
+
+# ---- state -----------------------------------------------------------------------
+write_state() {  # $1 result(ok|error|issuing)  $2 error-msg
+    mkdir -p "$(dirname "$STATE")" 2>/dev/null
+    _dom=""; _tgt=""; _cd=""
+    [ -f "$CERT_CONF" ] && . "$CERT_CONF" 2>/dev/null && { _dom="$DOMAIN"; _tgt="$TARGET_MODE"; _cd="$CERT_DIR"; }
+    _exp=$(cert_expiry "$_cd/fullchain.pem")
+    printf '{"ok":true,"domain":%s,"target":%s,"expiry":%s,"last_result":%s,"last_error":%s,"last_ts":%s}\n' \
+        "$(json_str "$_dom")" "$(json_str "$_tgt")" "$(json_str "$_exp")" \
+        "$(json_str "$1")" "$(json_str "$2")" "$NOW" > "$STATE"
+}
+
+ensure_renewal() {
+    if [ "$PLATFORM" = keenetic ]; then
+        return 0   # driven by detour-cron `detour-cert renew`
+    fi
+    "$ACME" --install-cronjob >/dev/null 2>&1 || true
+}
+
+valid_domain() { printf '%s' "$1" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'; }
+valid_email()  { printf '%s' "$1" | grep -qE '^[^@ ]+@[^@ ]+\.[^@ ]+$'; }
+
+# ================================ COMMANDS =======================================
+CMD="${1:-detect}"
+
+case "$CMD" in
+detect)
+    _acme=no; find_acme >/dev/null 2>&1 && _acme=yes
+    _dom=""; _exp=""; _res=""; _err=""; _ctgt=""
+    if [ -f "$CERT_CONF" ]; then
+        . "$CERT_CONF" 2>/dev/null
+        _dom="$DOMAIN"; _ctgt="$TARGET_MODE"; _exp=$(cert_expiry "$CERT_DIR/fullchain.pem")
+    fi
+    [ -f "$STATE" ] && { _res=$(sed -n 's/.*"last_result":"\([^"]*\)".*/\1/p' "$STATE"); _err=$(sed -n 's/.*"last_error":"\([^"]*\)".*/\1/p' "$STATE"); }
+    printf '{"ok":true,"acme_present":%s,"http80":%s,"target":%s,"wan_ip":%s,"platform":%s,"domain":%s,"expiry":%s,"last_result":%s,"last_error":%s}\n' \
+        "$( [ "$_acme" = yes ] && echo true || echo false )" \
+        "$(json_str "$(http80_server)")" "$(json_str "$(target_mode)")" \
+        "$(json_str "$(wan_ip)")" "$(json_str "$PLATFORM")" \
+        "$(json_str "$_dom")" "$(json_str "$_exp")" "$(json_str "$_res")" "$(json_str "$_err")"
+    ;;
+
+status)
+    if [ -f "$STATE" ]; then cat "$STATE"; else printf '{"ok":true,"domain":"","last_result":""}\n'; fi
+    ;;
+
+issue)
+    DOMAIN_IN="$2"; EMAIL_IN="$3"
+    valid_domain "$DOMAIN_IN" || { write_state error "bad domain"; echo "bad domain" >&2; exit 2; }
+    valid_email  "$EMAIL_IN"  || { write_state error "bad email";  echo "bad email"  >&2; exit 2; }
+    write_state issuing ""
+    log "issue $DOMAIN_IN ($EMAIL_IN)${LE_STAGING:+ [staging]}"
+
+    ACME=$(ensure_acme) || { write_state error "acme.sh unavailable (no openssl/curl/opkg?)"; log "acme.sh install failed"; exit 1; }
+    mkdir -p "$DETOUR_DIR" 2>/dev/null
+
+    # Register/refresh the ACME account email (idempotent, cheap).
+    "$ACME" --register-account -m "$EMAIL_IN" >/dev/null 2>&1 || \
+        "$ACME" --update-account -m "$EMAIL_IN" >/dev/null 2>&1 || true
+
+    H80=$(http80_server)
+    TGT=$(target_mode)
+
+    # --- pick a webroot the challenge server provably serves (probe-validated) ---
+    # On Keenetic the challenge is served by our lighttpd (reached via a WAN :80 →
+    # :LIGHTTPD_PORT forward), so a "no local :80 server" is fine there.
+    if [ "$H80" = none ] && [ "$PLATFORM" != keenetic ]; then
+        write_state error "no web server on :80 — open/forward port 80 to this router"
+        log "no :80 server"; exit 1
+    fi
+    WEBROOT=$(prepare_webroot "$DOMAIN_IN" "$H80") || {
+        if [ "$PLATFORM" = keenetic ]; then
+            write_state error "panel lighttpd not serving the challenge on :$LIGHTTPD_PORT — is the panel running and WAN :80 forwarded to it?"
+        else
+            write_state error "could not serve the ACME challenge on :80 for $DOMAIN_IN (is port 80 reachable / the right web server?)"
+        fi
+        log "webroot prep failed (platform=$PLATFORM http80=$H80 lighttpd_port=$LIGHTTPD_PORT)"; exit 1
+    }
+    log "webroot for $DOMAIN_IN = $WEBROOT (platform=$PLATFORM http80=$H80)"
+
+    # --- target cert dir + reload command ---
+    case "$TGT" in
+        nginx)    CERT_DIR_V="$NGINX_SSL/$DOMAIN_IN"; RELOAD_V="/etc/init.d/nginx reload 2>/dev/null || nginx -s reload" ;;
+        uhttpd)   CERT_DIR_V="$DETOUR_SSL"; RELOAD_V="/etc/init.d/uhttpd restart" ;;
+        lighttpd) CERT_DIR_V="$DETOUR_SSL"; RELOAD_V="detour-cert _lighttpd-pem" ;;
+    esac
+    mkdir -p "$CERT_DIR_V" 2>/dev/null
+
+    # --- issue (EC-256, Let's Encrypt) ---
+    if ! "$ACME" --issue $LE_STAGING --server letsencrypt -d "$DOMAIN_IN" -w "$WEBROOT" \
+            --keylength ec-256 >>"$LOG" 2>&1; then
+        write_state error "ACME issuance failed — check $LOG (port 80 reachable for $DOMAIN_IN?)"
+        log "issue FAILED for $DOMAIN_IN"; exit 1
+    fi
+
+    # --- persist config BEFORE install-cert (reloadcmd may read it, e.g. lighttpd) ---
+    cat > "$CERT_CONF" <<EOF
+DOMAIN='$DOMAIN_IN'
+EMAIL='$EMAIL_IN'
+TARGET_MODE='$TGT'
+CERT_DIR='$CERT_DIR_V'
+RELOAD_CMD='$RELOAD_V'
+EOF
+    chmod 0600 "$CERT_CONF" 2>/dev/null
+
+    # --- install cert into the target + register the reload hook for renewals ---
+    "$ACME" --install-cert --ecc -d "$DOMAIN_IN" \
+        --fullchain-file "$CERT_DIR_V/fullchain.pem" \
+        --key-file "$CERT_DIR_V/privkey.pem" \
+        --reloadcmd "$RELOAD_V" >>"$LOG" 2>&1
+
+    # --- one-time web-server TLS wiring for the self-served targets ---
+    case "$TGT" in
+        uhttpd)   configure_uhttpd  "$CERT_DIR_V" ;;
+        lighttpd) configure_lighttpd "$CERT_DIR_V" ;;
+        nginx)    /etc/init.d/nginx reload >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1 ;;
+    esac
+
+    ensure_renewal
+    write_state ok ""
+    log "issue OK for $DOMAIN_IN (target=$TGT, dir=$CERT_DIR_V)"
+    ;;
+
+renew)
+    ACME=$(find_acme) || { log "renew: acme.sh not found"; exit 1; }
+    "$ACME" --cron >>"$LOG" 2>&1
+    write_state ok ""
+    log "renew run"
+    ;;
+
+_lighttpd-pem)
+    lighttpd_pem ;;
+
+*)
+    echo "usage: detour-cert {detect | issue <domain> <email> | renew | status}" >&2
+    exit 2 ;;
+esac

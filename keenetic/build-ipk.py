@@ -53,6 +53,7 @@ FILES = [
     # Source from router_files/ (canonical) — same source as the OpenWrt build, so
     # the Keenetic package never drifts behind. (router-backup/ was the old source.)
     (os.path.join(ROUTER_FILES, "index.html"), "opt/share/www/detour/index.html", 0o644, False),
+    (os.path.join(ROUTER_FILES, "sw.js"), "opt/share/www/detour/sw.js", 0o644, False),
     (os.path.join(ROUTER_FILES, "detour-api"), "opt/share/www/cgi-bin/detour-api", 0o755, True),
     # Subscription refresh helper (Lua) + a bundled pure-Lua cjson.safe, since the
     # Entware feed has no lua-cjson. fix_shebang rewrites #!/usr/bin/lua → /opt/bin/lua.
@@ -77,6 +78,14 @@ FILES = [
     # Functional health check (shared source, /opt shim). Driven hourly by the
     # S90detour-cron loop. Self-no-ops if Entware sing-box lacks clash_api.
     (os.path.join(ROUTER_FILES, "detour-health"), "opt/sbin/detour-health", 0o755, True),
+    # Web Push (VAPID) sender (shared source, /opt shim). Backs the panel's push
+    # settings + detour-health down/auto-switch alerts. fix_shebang → /opt/bin/sh.
+    (os.path.join(ROUTER_FILES, "detour-push"), "opt/sbin/detour-push", 0o755, True),
+    # Let's Encrypt helper (acme.sh, /opt shim). Best-effort on Keenetic: :80 is the
+    # stock router UI, so HTTP-01 needs :80 forwarded to lighttpd. fix_shebang → /opt/bin/sh.
+    (os.path.join(ROUTER_FILES, "detour-cert"), "opt/sbin/detour-cert", 0o755, True),
+    # Read-only preflight for the cert flow (diagnose env + print next steps). Keenetic-only.
+    (os.path.join(HERE, "detour-cert-preflight.sh"), "opt/sbin/detour-cert-preflight", 0o755, True),
     # Standalone scheduler daemon (Keenetic-only): replaces the broken crond for
     # detour's periodic jobs — keep-alive, subscription-refresh, update auto-check.
     (os.path.join(HERE, "sbin", "detour-cron"), "opt/sbin/detour-cron", 0o755, False),

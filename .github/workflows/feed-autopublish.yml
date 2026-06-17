@@ -1,0 +1,66 @@
+# Auto-publish the detour opkg feed when an upstream binary releases a new version.
+#
+# What it does: feed_autopublish.py reads the versions the feed currently serves,
+# finds the latest upstream release for sing-box (pinned to the feed's current
+# major.minor), tpws (bol-van/zapret) and nfqws2 (bol-van/zapret2), and — if any
+# is newer — runs `build_feed.py --fetch-upstream --publish` to rebuild + force-push
+# the `feed` branch. Routers then see the new version (green chip) on their next
+# 6h check; install stays manual.
+#
+# Setup (one secret):
+#   Settings → Secrets and variables → Actions → New repository secret
+#     RELEASE_USIGN_SEC = full contents of keys/release.usign.sec (the usign
+#     private key; gitignored). Without it the feed still publishes but UNSIGNED.
+# The feed branch push uses the built-in GITHUB_TOKEN (permissions: contents:write
+# below) — no personal access token required.
+#
+# Run it: Actions → feed-autopublish → "Run workflow" (tick dry-run to preview),
+# or wait for the daily schedule.
+name: feed-autopublish
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the decision without publishing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # GITHUB_TOKEN force-pushes the `feed` branch
+
+concurrency:
+  group: feed-autopublish
+  cancel-in-progress: false
+
+jobs:
+  autopublish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Materialize usign signing key (optional)
+        env:
+          USIGN_SEC: ${{ secrets.RELEASE_USIGN_SEC }}
+        run: |
+          if [ -n "$USIGN_SEC" ]; then
+            mkdir -p keys
+            printf '%s\n' "$USIGN_SEC" > keys/release.usign.sec
+            echo "usign secret key written — feed will be signed"
+          else
+            echo "::warning::RELEASE_USIGN_SEC not set — feed will publish UNSIGNED"
+          fi
+
+      - name: Auto-publish feed if upstream is newer
+        env:
+          DETOUR_PUBLISH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DETOUR_GH_OWNER: ${{ github.repository_owner }}
+          DETOUR_GH_REPO: ${{ github.event.repository.name }}
+        run: |
+          python feed_autopublish.py ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}

@@ -362,6 +362,101 @@
         line-height: 1;
         height: 28px;
       }
+      /* System-stats chip + hover/click popover (uptime, CPU, RAM, storage, MPTCP) */
+      .sys-stats {
+        position: relative;
+        display: inline-flex;
+      }
+      .sys-stats-btn {
+        cursor: pointer;
+        gap: 7px;
+        transition:
+          color 0.15s,
+          border-color 0.15s,
+          background 0.15s;
+      }
+      .sys-stats-btn:hover,
+      .sys-stats.open .sys-stats-btn {
+        color: var(--text);
+        border-color: var(--accent);
+      }
+      .sys-stats-btn .i {
+        color: var(--accent);
+      }
+      #sys-cpu-mini {
+        font-variant-numeric: tabular-nums;
+      }
+      .sys-stats-pop {
+        position: absolute;
+        top: calc(100% + 8px);
+        right: 0;
+        min-width: 234px;
+        background: var(--bg-elev-solid);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow-pop);
+        padding: 8px;
+        z-index: 60;
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(-4px);
+        transition:
+          opacity 0.16s ease,
+          transform 0.16s ease,
+          visibility 0.16s;
+      }
+      /* Transparent bridge so the cursor can cross the gap without dismissing. */
+      .sys-stats-pop::before {
+        content: "";
+        position: absolute;
+        top: -8px;
+        left: 0;
+        right: 0;
+        height: 8px;
+      }
+      .sys-stats:hover .sys-stats-pop,
+      .sys-stats:focus-within .sys-stats-pop,
+      .sys-stats.open .sys-stats-pop {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
+      }
+      .ssp-title {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-dim);
+        padding: 3px 8px 7px;
+      }
+      .ssp-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 6px 8px;
+        border-radius: var(--radius-sm);
+        font-size: 13px;
+      }
+      .ssp-row:hover {
+        background: var(--bg-elev);
+      }
+      .ssp-ic {
+        font-size: 14px;
+        width: 18px;
+        text-align: center;
+        flex-shrink: 0;
+      }
+      .ssp-k {
+        color: var(--text-dim);
+        flex: 1;
+      }
+      .ssp-v {
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 12px;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
       .icon-btn {
         height: 32px;
         min-width: 32px;
@@ -505,10 +600,36 @@
           animation: none;
         }
       }
+      /* Amber chip — a newer version exists UPSTREAM (on GitHub) but our opkg feed
+         isn't bumped to it yet. Informational, NOT one-click installable (install
+         still needs the feed), so it does NOT blink like the green has-update. */
+      .ver-chip.has-upstream {
+        color: #1c1500 !important;
+        background: var(--yellow);
+        border-color: var(--yellow) !important;
+      }
       /* Muted state — component unavailable on this platform (e.g. zapret2 «н/д»). */
       .ver-chip.chip-na {
         opacity: 0.5;
         font-style: italic;
+      }
+      /* Inline «open project on GitHub» link inside update modals. */
+      .repo-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--accent);
+        text-decoration: none;
+      }
+      .repo-link:hover {
+        text-decoration: underline;
+      }
+      .repo-link svg {
+        width: 14px;
+        height: 14px;
+        flex: 0 0 auto;
       }
 
       /* ===== TOOLBAR (sub-header with admin actions) ===== */
@@ -647,6 +768,15 @@
         opacity: 0.6;
         font-style: italic;
       }
+      /* Auto-switch eligibility chip in the profiles list. */
+      .row-tag.as-on {
+        color: var(--green);
+        background: var(--green-soft);
+        border-color: var(--green-border);
+      }
+      .row-tag.as-off {
+        opacity: 0.5;
+      }
       /* Profiles list: the group + id chips share one cell so they can drop
          onto their own line under the name on mobile. */
       .row-tags {
@@ -714,6 +844,14 @@
         border: 1px solid var(--border);
         border-radius: var(--radius);
         margin-bottom: 4px;
+      }
+      /* Keep the two auto-switch bulk buttons together: they wrap to the next line
+         as a unit instead of one dangling alone. */
+      .bulk-as-group {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
       }
       .bulk-toolbar .count {
         font-size: 12px;
@@ -1499,10 +1637,81 @@
       .vpn-refresh-btn.spinning .health-glyph {
         animation: spin 0.7s linear infinite;
       }
+      /* Auto-switch eligibility toggle (per-VPN check). Same shell as the refresh
+         button; green/filled when the profile may be used for auto-switch, dim/hollow
+         when excluded. */
+      .vpn-as-btn {
+        width: 28px;
+        height: 28px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: var(--bg-elev-solid);
+        color: var(--text-dim);
+        opacity: 0.5;
+        cursor: pointer;
+        transition: all 0.15s;
+        flex-shrink: 0;
+      }
+      .vpn-as-btn:hover {
+        background: var(--btn-hover);
+        color: var(--text);
+        border-color: var(--border-bright);
+        opacity: 1;
+      }
+      .vpn-as-btn.on {
+        color: var(--green);
+        background: var(--green-soft);
+        border-color: var(--green-border);
+        opacity: 1;
+      }
       .vpn-activate-btn {
         height: 28px;
         padding: 0 12px;
         font-size: 12px;
+      }
+      /* Activate toggle (replaces the "Сделать активным" button). Off = grey knob
+         left; on = green knob right (= active profile, non-interactive). Clicking an
+         off toggle activates that profile. */
+      .vpn-toggle {
+        position: relative;
+        width: 46px;
+        height: 24px;
+        flex-shrink: 0;
+        padding: 0;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--bg-elev-solid);
+        cursor: pointer;
+        transition: all 0.18s;
+      }
+      .vpn-toggle::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: var(--text-dim);
+        transition: all 0.18s;
+      }
+      .vpn-toggle:not(.on):hover {
+        border-color: var(--border-bright);
+      }
+      .vpn-toggle:not(.on):hover::after {
+        background: var(--text);
+      }
+      .vpn-toggle.on {
+        background: var(--green-soft);
+        border-color: var(--green-border);
+        cursor: default;
+      }
+      .vpn-toggle.on::after {
+        left: 24px;
+        background: var(--green);
       }
       .vpn-active-badge {
         display: inline-flex;
@@ -2247,30 +2456,60 @@
         </div>
         <div class="header-right">
           <div class="header-info">
-            <span
-              class="meter"
-              id="sys-uptime"
-              title="Аптайм роутера — сколько он работает с момента загрузки"
-              >⏱ ...</span
-            >
-            <span
-              class="meter"
-              id="sys-memory"
-              title="Оперативная память: использовано / всего"
-              >🧠 ...</span
-            >
-            <span
-              class="meter"
-              id="sys-disk"
-              title="Свободное место в /overlay (хранилище конфигов и пакетов)"
-              >💿 ...</span
-            >
-            <span
-              class="meter"
-              id="sys-mptcp"
-              title="Состояние MPTCP в ядре. Должно быть Off — при On ломаются входящие TCP-соединения (sing-box)"
-              >🔒 MPTCP: ...</span
-            >
+            <div class="sys-stats" id="sys-stats">
+              <button
+                type="button"
+                class="meter sys-stats-btn"
+                id="sys-stats-btn"
+                onclick="toggleSysStats(event)"
+                title="Статистика системы — наведите для подробностей"
+                aria-haspopup="true"
+                aria-expanded="false"
+              >
+                <svg
+                  class="i"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                </svg>
+                <span id="sys-cpu-mini">ЦП …</span>
+              </button>
+              <div class="sys-stats-pop" id="sys-stats-pop" role="tooltip">
+                <div class="ssp-title">Статистика системы</div>
+                <div class="ssp-row">
+                  <span class="ssp-ic">🔥</span>
+                  <span class="ssp-k">Процессор</span>
+                  <span class="ssp-v" id="ssp-cpu">…</span>
+                </div>
+                <div class="ssp-row">
+                  <span class="ssp-ic">🧠</span>
+                  <span class="ssp-k">Оперативная память</span>
+                  <span class="ssp-v" id="ssp-memory">…</span>
+                </div>
+                <div class="ssp-row">
+                  <span class="ssp-ic">💿</span>
+                  <span class="ssp-k">Хранилище</span>
+                  <span class="ssp-v" id="ssp-disk">…</span>
+                </div>
+                <div class="ssp-row">
+                  <span class="ssp-ic">⏱</span>
+                  <span class="ssp-k">Аптайм</span>
+                  <span class="ssp-v" id="ssp-uptime">…</span>
+                </div>
+                <div class="ssp-row">
+                  <span class="ssp-ic">🔒</span>
+                  <span class="ssp-k">MPTCP</span>
+                  <span class="ssp-v" id="ssp-mptcp">…</span>
+                </div>
+              </div>
+            </div>
             <span
               class="meter"
               id="sys-keepalive"
@@ -2438,6 +2677,57 @@
                 </svg>
                 Импорт конфига
               </button>
+              <div class="hdr-menu-sep"></div>
+              <div class="hdr-menu-title">Уведомления</div>
+              <button
+                class="hdr-menu-item"
+                role="menuitem"
+                onclick="hdrMenuRun(openPushSettingsModal)"
+                title="Push-уведомления в браузер: когда активный VPN перестал работать"
+              >
+                <svg
+                  class="i"
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+                  <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+                </svg>
+                Push-уведомления
+              </button>
+              <!-- HTTPS/LE cert — OpenWrt only; hidden on Keenetic (uses KeenDNS). -->
+              <div id="hdr-https-group" style="display: contents">
+                <div class="hdr-menu-sep"></div>
+                <div class="hdr-menu-title">HTTPS</div>
+                <button
+                  class="hdr-menu-item"
+                  role="menuitem"
+                  onclick="hdrMenuRun(openCertModal)"
+                  title="Получить Let's Encrypt сертификат для домена (A-запись → роутер), чтобы открывать панель по HTTPS"
+                >
+                  <svg
+                    class="i"
+                    width="15"
+                    height="15"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                  HTTPS-сертификат
+                </button>
+              </div>
               <div class="hdr-menu-sep"></div>
               <div class="hdr-menu-title">Аккаунт</div>
               <button
@@ -2751,6 +3041,20 @@
 
           <div class="editor-section" style="margin-bottom: 14px">
             <h4 style="margin: 0 0 8px">С GitHub</h4>
+            <a
+              class="repo-link"
+              href="https://github.com/varyen/detour"
+              target="_blank"
+              rel="noopener noreferrer"
+              style="margin-bottom: 10px"
+            >
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path
+                  d="M12 .5C5.37.5 0 5.78 0 12.29c0 5.21 3.44 9.63 8.21 11.19.6.11.82-.25.82-.56 0-.28-.01-1.02-.02-2-3.34.71-4.04-1.58-4.04-1.58-.55-1.36-1.33-1.73-1.33-1.73-1.09-.73.08-.71.08-.71 1.2.08 1.84 1.21 1.84 1.21 1.07 1.8 2.81 1.28 3.5.98.11-.76.42-1.28.76-1.58-2.67-.3-5.47-1.31-5.47-5.81 0-1.28.47-2.33 1.23-3.15-.12-.3-.53-1.51.12-3.15 0 0 1-.31 3.3 1.2a11.6 11.6 0 0 1 6 0c2.3-1.51 3.3-1.2 3.3-1.2.65 1.64.24 2.85.12 3.15.77.82 1.23 1.87 1.23 3.15 0 4.51-2.81 5.5-5.49 5.79.43.36.81 1.08.81 2.18 0 1.58-.01 2.85-.01 3.24 0 .31.21.68.83.56C20.56 21.91 24 17.5 24 12.29 24 5.78 18.63.5 12 .5Z"
+                />
+              </svg>
+              Проект на GitHub (varyen/detour)
+            </a>
             <div class="flex-gap">
               <button class="btn" onclick="checkUpdate()">↻ Проверить</button>
               <button class="btn primary" onclick="applyUpdateGithub()">
@@ -2776,7 +3080,8 @@
             </label>
             <div class="helper-text" style="margin-top: 2px">
               По умолчанию выключено: панель не ходит в GitHub в фоне. Включите,
-              чтобы раз в 6 ч проверять наличие новой версии и показывать плашку
+              чтобы раз в 6 ч проверять обновления панели и бинарников (sing-box,
+              zapret, zapret2) и подсвечивать зелёным чипы с доступным обновлением
               — установка всё равно остаётся ручной.
             </div>
             <div
@@ -2866,6 +3171,32 @@
             <span id="bins-modal-title">Обновление</span>
           </h3>
           <p class="helper-text-block" id="bins-modal-desc"></p>
+          <a
+            class="repo-link"
+            id="bins-modal-repo"
+            target="_blank"
+            rel="noopener noreferrer"
+            style="display: none; margin-bottom: 12px"
+          >
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path
+                d="M12 .5C5.37.5 0 5.78 0 12.29c0 5.21 3.44 9.63 8.21 11.19.6.11.82-.25.82-.56 0-.28-.01-1.02-.02-2-3.34.71-4.04-1.58-4.04-1.58-.55-1.36-1.33-1.73-1.33-1.73-1.09-.73.08-.71.08-.71 1.2.08 1.84 1.21 1.84 1.21 1.07 1.8 2.81 1.28 3.5.98.11-.76.42-1.28.76-1.58-2.67-.3-5.47-1.31-5.47-5.81 0-1.28.47-2.33 1.23-3.15-.12-.3-.53-1.51.12-3.15 0 0 1-.31 3.3 1.2a11.6 11.6 0 0 1 6 0c2.3-1.51 3.3-1.2 3.3-1.2.65 1.64.24 2.85.12 3.15.77.82 1.23 1.87 1.23 3.15 0 4.51-2.81 5.5-5.49 5.79.43.36.81 1.08.81 2.18 0 1.58-.01 2.85-.01 3.24 0 .31.21.68.83.56C20.56 21.91 24 17.5 24 12.29 24 5.78 18.63.5 12 .5Z"
+              />
+            </svg>
+            <span id="bins-modal-repo-label"></span>
+          </a>
+          <!-- Upstream-version note: "newer on GitHub but not in our feed yet",
+               set by showBinsModal/binsModalCheck from updates_overview state. -->
+          <div
+            id="bins-upstream-note"
+            style="
+              display: none;
+              font-size: 12px;
+              margin: 0 0 12px;
+              padding: 8px 10px;
+              border-radius: 8px;
+            "
+          ></div>
 
           <!-- Entware OPKG path — sing-box on Keenetic -->
           <div
@@ -2944,6 +3275,289 @@
 
           <div class="modal-footer">
             <button class="btn" onclick="closeBinsModal()">Закрыть</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== PUSH NOTIFICATIONS (settings under the gear) ===== -->
+      <div
+        class="modal-overlay"
+        id="push-modal"
+        style="display: none"
+        onclick="if (event.target === this) closePushSettingsModal();"
+      >
+        <div class="modal" style="max-width: 520px">
+          <h3>
+            <svg
+              class="i"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+              <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+            </svg>
+            Push-уведомления
+          </h3>
+          <p class="helper-text-block">
+            Браузер получит уведомление, когда активный VPN перестанет работать
+            или окажется нерабочим сразу после подключения (функциональная
+            проверка раз в 30–60 секунд), либо произойдёт авто-переключение.
+            Работает, даже если вкладка панели закрыта.
+          </p>
+
+          <!-- shown when the page is not a secure context (push impossible) -->
+          <div
+            class="editor-section"
+            id="push-secure-warn"
+            style="display: none; margin-bottom: 14px"
+          >
+            <p class="helper-text-block" style="color: var(--red)">
+              Push-уведомления доступны только когда панель открыта по
+              <b>HTTPS</b> (например
+              <b>https://panel.example.com/detour/</b>). По адресу http://IP браузер
+              их не разрешает — откройте панель по защищённому домену.
+            </p>
+          </div>
+
+          <div
+            class="editor-section"
+            id="push-main"
+            style="margin-bottom: 14px"
+          >
+            <div class="allvpn-row">
+              <label class="allvpn-toggle">
+                <input
+                  type="checkbox"
+                  id="push-toggle"
+                  onchange="onPushToggle(this.checked)"
+                />
+                <span class="allvpn-slider"></span>
+              </label>
+              <span class="allvpn-label">Включить push в этом браузере</span>
+            </div>
+            <div
+              id="push-status"
+              style="
+                font-size: 12px;
+                color: var(--text-dim);
+                margin-top: 8px;
+                min-height: 16px;
+              "
+            ></div>
+            <div class="flex-gap" style="margin-top: 12px">
+              <button
+                class="btn"
+                id="push-test-btn"
+                onclick="sendTestPush()"
+                disabled
+              >
+                🔔 Отправить тестовый push
+              </button>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <!-- Keenetic only: how to publish the panel over HTTPS via KeenDNS. -->
+            <button
+              class="btn"
+              id="push-help-btn"
+              style="display: none"
+              onclick="openKeenHttpsHelp()"
+              title="Как открыть панель по HTTPS на Keenetic (KeenDNS)"
+            >
+              ❓ Справка (Keenetic)
+            </button>
+            <button class="btn" onclick="closePushSettingsModal()">
+              Закрыть
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== KEENETIC: HTTPS via KeenDNS — help (push settings → Справка) ===== -->
+      <div
+        class="modal-overlay"
+        id="keen-https-help-modal"
+        style="display: none"
+        onclick="if (event.target === this) closeKeenHttpsHelp();"
+      >
+        <div class="modal" style="max-width: 600px">
+          <h3>
+            <svg
+              class="i"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+            HTTPS-доступ к панели (Keenetic)
+          </h3>
+          <p class="helper-text-block">
+            Push-уведомления работают только когда панель открыта по <b>HTTPS</b>.
+            На Keenetic не нужен отдельный сертификат Let's Encrypt — проще
+            опубликовать панель через встроенный сервис <b>KeenDNS</b>: роутер сам
+            выдаёт и продлевает валидный сертификат, и панель открывается по адресу
+            вида <b>https://detour.<i>ваш-хост</i>.keenetic.pro/detour/</b>.
+          </p>
+
+          <div class="editor-section" style="margin-bottom: 14px">
+            <ol
+              style="
+                margin: 0;
+                padding-left: 20px;
+                line-height: 1.7;
+                font-size: 13px;
+              "
+            >
+              <li>
+                В веб-интерфейсе Keenetic включите <b>KeenDNS</b>
+                (Параметры&nbsp;→&nbsp;Доменное имя). Появится имя вида
+                <b>ваш-хост.keenetic.pro</b>.
+              </li>
+              <li>
+                Откройте раздел
+                <b>«Доступ к веб-приложениям домашней сети»</b> и нажмите
+                <b>«Добавить»</b>.
+              </li>
+              <li>
+                Заполните запись:
+                <ul style="margin: 4px 0; padding-left: 18px">
+                  <li>Доменное имя — поддомен, напр. <b>detour</b></li>
+                  <li>
+                    IP-адрес — адрес <b>этого роутера</b> в домашней сети (напр.
+                    <b>192.168.1.1</b>)
+                  </li>
+                  <li>Протокол — <b>HTTP</b></li>
+                  <li>
+                    Порт TCP — <b id="keen-help-port">8080</b> (порт панели
+                    Detour)
+                  </li>
+                </ul>
+              </li>
+              <li>
+                Сохраните. Через ~минуту панель станет доступна по
+                <b>https://detour.ваш-хост.keenetic.pro/detour/</b>.
+              </li>
+              <li>
+                Откройте этот HTTPS-адрес, вернитесь сюда и включите push.
+              </li>
+            </ol>
+          </div>
+
+          <p class="helper-text-block" style="color: var(--text-dim)">
+            Запись делает панель доступной из интернета — задайте надёжный
+            логин/пароль панели (⚙&nbsp;→&nbsp;Сменить&nbsp;логин/пароль). Порт
+            панели подставлен автоматически из настроек lighttpd этого роутера.
+          </p>
+
+          <div class="modal-footer">
+            <button class="btn" onclick="closeKeenHttpsHelp()">Закрыть</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== HTTPS / LET'S ENCRYPT CERTIFICATE (settings under the gear) ===== -->
+      <div
+        class="modal-overlay"
+        id="cert-modal"
+        style="display: none"
+        onclick="if (event.target === this) closeCertModal();"
+      >
+        <div class="modal" style="max-width: 560px">
+          <h3>
+            <svg
+              class="i"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+            HTTPS-сертификат (Let's Encrypt)
+          </h3>
+          <p class="helper-text-block">
+            Выпустить сертификат Let's Encrypt для домена, A-запись которого
+            указывает на этот роутер, чтобы открывать панель по HTTPS (это нужно
+            для push-уведомлений). Проверка — HTTP-01: на время выпуска
+            <b>порт&nbsp;80 роутера должен быть доступен из интернета</b> по этому домену.
+          </p>
+
+          <div
+            class="editor-section"
+            id="cert-current"
+            style="display: none; margin-bottom: 14px"
+          >
+            <p class="helper-text-block" id="cert-current-text"></p>
+          </div>
+
+          <div
+            class="editor-section"
+            id="cert-warn"
+            style="display: none; margin-bottom: 14px"
+          >
+            <p class="helper-text-block" style="color: var(--red)" id="cert-warn-text"></p>
+          </div>
+
+          <div class="editor-section" id="cert-main" style="margin-bottom: 14px">
+            <div class="form-grid">
+              <div class="full">
+                <label for="cert-domain">Домен (A-запись → роутер)</label>
+                <input
+                  type="text"
+                  id="cert-domain"
+                  placeholder="vpn.example.com"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+              <div class="full">
+                <label for="cert-email">Email (аккаунт Let's Encrypt)</label>
+                <input
+                  type="email"
+                  id="cert-email"
+                  placeholder="you@example.com"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </div>
+            </div>
+            <div class="flex-gap" style="margin-top: 12px">
+              <button class="btn primary" id="cert-issue-btn" onclick="issueCert()">
+                🔒 Получить сертификат
+              </button>
+            </div>
+            <div
+              id="cert-status"
+              style="
+                font-size: 12px;
+                color: var(--text-dim);
+                margin-top: 8px;
+                min-height: 16px;
+              "
+            ></div>
+          </div>
+
+          <div class="modal-footer">
+            <button class="btn" onclick="closeCertModal()">Закрыть</button>
           </div>
         </div>
       </div>
@@ -4045,8 +4659,11 @@
             </div>
           </div>
           <div class="helper-text-block">
-            Список всех VPN-профилей: массовый выбор, перенос между группами и
-            удаление. Фильтруйте по группе или ищите по имени.
+            Список всех VPN-профилей: массовый выбор, перенос между группами,
+            удаление и отметка «участвует в авто-переключении» (чип
+            <span class="row-tag as-on" style="padding: 1px 6px">✓ авто</span> у
+            строки). Выделите профили (Shift+клик — диапазон) и примените действие.
+            Фильтруйте по группе или ищите по имени.
           </div>
           <div class="bulk-toolbar">
             <label class="check-row">
@@ -4061,7 +4678,7 @@
             <span style="flex: 1"></span>
             <select
               id="bulk-group-filter"
-              onchange="renderBulkProfilesList()"
+              onchange="bulkLastIndex=null;renderBulkProfilesList()"
               style="
                 height: 30px;
                 padding: 0 10px;
@@ -4079,7 +4696,7 @@
               type="text"
               id="bulk-search"
               placeholder="🔍 поиск..."
-              oninput="renderBulkProfilesList()"
+              oninput="bulkLastIndex=null;renderBulkProfilesList()"
               style="
                 height: 30px;
                 padding: 0 10px;
@@ -4118,6 +4735,22 @@
             <button class="btn" onclick="bulkReassignGroup()">
               📁 Перенести в группу
             </button>
+            <span class="bulk-as-group">
+              <button
+                class="btn"
+                onclick="bulkSetAutoswitch(true)"
+                title="Разрешить выбранным профилям участвовать в авто-переключении"
+              >
+                ✓ В авто-переключение
+              </button>
+              <button
+                class="btn"
+                onclick="bulkSetAutoswitch(false)"
+                title="Исключить выбранные профили из авто-переключения"
+              >
+                ✕ Из авто-переключения
+              </button>
+            </span>
           </div>
           <div
             id="bulk-status"
@@ -5519,6 +6152,16 @@
         try {
           var d = await api("status");
           currentPlatform = d.platform || "openwrt";
+          currentPanelPort = d.panel_port || 8080;
+
+          // Keenetic gets HTTPS via its built-in KeenDNS web-app publishing (valid
+          // auto-renewed cert) — our Let's Encrypt flow doesn't apply there, so hide
+          // the «HTTPS-сертификат» menu entry. The KeenDNS how-to lives behind the
+          // «Справка» button in Push-уведомления instead.
+          var httpsGroup = document.getElementById("hdr-https-group");
+          if (httpsGroup)
+            httpsGroup.style.display =
+              currentPlatform === "keenetic" ? "none" : "contents";
 
           var sbDot = document.getElementById("sb-dot");
           sbDot.className =
@@ -5614,14 +6257,7 @@
           // reads d.zapret); just stash the full status object for it.
           lastStatus = d;
 
-          document.getElementById("sys-uptime").textContent =
-            "⏱ " + d.system.uptime;
-          document.getElementById("sys-memory").textContent =
-            "🧠 " + d.system.memory;
-          document.getElementById("sys-disk").textContent =
-            "💿 " + d.system.disk_free;
-          document.getElementById("sys-mptcp").textContent =
-            "🔒 MPTCP: " + (d.system.mptcp === "0" ? "Off ✓" : "On ⚠");
+          renderSysStats(d.system || {});
 
           // refresh the DPI-bypass engine switch alongside the rest of status
           loadBypassStatus();
@@ -6309,6 +6945,48 @@
         );
       }
 
+      // Checkmark glyph for the per-VPN auto-switch eligibility toggle.
+      function autoswitchIconSvg() {
+        return (
+          '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">' +
+          '<polyline points="20 6 9 17 4 12"/></svg>'
+        );
+      }
+
+      // Flip ONE profile's auto-switch eligibility (the VPN-view check icon). Optimistic:
+      // updates currentProfiles + the button immediately, reverts on a failed save.
+      function toggleAutoswitch(id, btn) {
+        var p = currentProfiles.find(function (x) {
+          return x.id === id;
+        });
+        var newElig = !(p ? p.autoswitch !== false : false);
+        if (p) p.autoswitch = newElig;
+        if (btn) {
+          btn.classList.toggle("on", newElig);
+          btn.title = newElig
+            ? "Участвует в авто-переключении · клик, чтобы исключить"
+            : "Исключён из авто-переключения · клик, чтобы включить";
+        }
+        return api(
+          "autoswitch_set&eligible=" + (newElig ? "1" : "0"),
+          "POST",
+          id,
+        )
+          .then(function (r) {
+            if (!r || !r.ok) throw new Error("save failed");
+          })
+          .catch(function () {
+            if (p) p.autoswitch = !newElig;
+            if (btn) {
+              btn.classList.toggle("on", !newElig);
+              btn.title = !newElig
+                ? "Участвует в авто-переключении · клик, чтобы исключить"
+                : "Исключён из авто-переключения · клик, чтобы включить";
+            }
+            toast("Не удалось сохранить флаг авто-переключения", "error");
+          });
+      }
+
       function vpnStatusRowHtml(p) {
         var info = pingInfo(p.id);
         var e = pingResults[p.id];
@@ -6342,7 +7020,19 @@
             escapeHtml(hinfo.text) +
             "</span>"
           : "—";
+        var asEligible = p.autoswitch !== false;
         var actions =
+          '<button class="vpn-as-btn' +
+          (asEligible ? " on" : "") +
+          '" title="' +
+          (asEligible
+            ? "Участвует в авто-переключении · клик, чтобы исключить"
+            : "Исключён из авто-переключения · клик, чтобы включить") +
+          "\" onclick=\"toggleAutoswitch('" +
+          escapeHtml(p.id) +
+          "', this)\">" +
+          autoswitchIconSvg() +
+          "</button>" +
           '<button class="vpn-refresh-btn" title="Обновить пинг" onclick="refreshOnePing(\'' +
           escapeHtml(p.id) +
           "', this)\">" +
@@ -6352,10 +7042,10 @@
           escapeHtml(p.id) +
           "', this)\"><span class=\"health-glyph\">⚕</span></button>" +
           (isActive
-            ? '<span class="vpn-active-badge">✓ Активен</span>'
-            : '<button class="btn primary vpn-activate-btn" onclick="activateProfileById(\'' +
+            ? '<button type="button" class="vpn-toggle on" role="switch" aria-checked="true" title="Активный профиль"></button>'
+            : '<button type="button" class="vpn-toggle" role="switch" aria-checked="false" title="Сделать активным" onclick="activateProfileById(\'' +
               escapeHtml(p.id) +
-              "')\">Сделать активным</button>");
+              "')\"></button>");
         return (
           '<tr class="' +
           (isActive ? "vpn-active" : "") +
@@ -7733,6 +8423,359 @@
         }
       }
 
+      // ===== PUSH NOTIFICATIONS (Web Push, settings under the gear) =====
+      // The router sends payload-LESS VAPID pushes; our service worker (/detour/sw.js)
+      // fetches the message text from the CGI on each push. Web Push needs a secure
+      // context (HTTPS / localhost) — on http://IP the APIs are simply absent, so we
+      // detect that and show a hint instead of a broken toggle.
+      var PUSH_SW_URL = "/detour/sw.js";
+      var PUSH_SCOPE = "/detour/";
+
+      function pushSupported() {
+        return (
+          "serviceWorker" in navigator &&
+          "PushManager" in window &&
+          typeof Notification !== "undefined" &&
+          window.isSecureContext
+        );
+      }
+
+      // VAPID public key (base64url) → Uint8Array for applicationServerKey.
+      function urlBase64ToUint8Array(base64String) {
+        var padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+        var base64 = (base64String + padding)
+          .replace(/-/g, "+")
+          .replace(/_/g, "/");
+        var raw = atob(base64);
+        var arr = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+        return arr;
+      }
+
+      async function openPushSettingsModal() {
+        document.getElementById("push-modal").style.display = "flex";
+        var warn = document.getElementById("push-secure-warn");
+        var status = document.getElementById("push-status");
+        var toggle = document.getElementById("push-toggle");
+        var testBtn = document.getElementById("push-test-btn");
+        // Keenetic: offer the KeenDNS HTTPS how-to (also when push is unavailable
+        // because the panel is opened over http:// — that's exactly when it's needed).
+        var helpBtn = document.getElementById("push-help-btn");
+        if (helpBtn)
+          helpBtn.style.display = currentPlatform === "keenetic" ? "" : "none";
+        status.textContent = "";
+        if (!pushSupported()) {
+          warn.style.display = "";
+          toggle.checked = false;
+          toggle.disabled = true;
+          testBtn.disabled = true;
+          return;
+        }
+        warn.style.display = "none";
+        toggle.disabled = false;
+        await refreshPushUI();
+      }
+
+      function closePushSettingsModal() {
+        document.getElementById("push-modal").style.display = "none";
+      }
+
+      // Keenetic-only help: how to publish the panel over HTTPS via KeenDNS.
+      function openKeenHttpsHelp() {
+        var portEl = document.getElementById("keen-help-port");
+        if (portEl) portEl.textContent = currentPanelPort || 8080;
+        document.getElementById("keen-https-help-modal").style.display = "flex";
+      }
+      function closeKeenHttpsHelp() {
+        document.getElementById("keen-https-help-modal").style.display = "none";
+      }
+
+      // Reflect the current per-browser subscription state in the modal.
+      async function refreshPushUI() {
+        var toggle = document.getElementById("push-toggle");
+        var testBtn = document.getElementById("push-test-btn");
+        var status = document.getElementById("push-status");
+        try {
+          var reg = await navigator.serviceWorker.getRegistration(PUSH_SCOPE);
+          var sub = reg ? await reg.pushManager.getSubscription() : null;
+          var on = !!sub;
+          toggle.checked = on;
+          testBtn.disabled = !on;
+          if (on) {
+            var note = "";
+            try {
+              var cfg = await api("push_config");
+              if (cfg && cfg.bypass === "active") {
+                note =
+                  '<br><span style="color:var(--text-dim)">Push-канал идёт мимо VPN — уведомление дойдёт, даже если активный VPN упал.</span>';
+              } else if (cfg && cfg.bypass === "inactive") {
+                note =
+                  '<br><span style="color:var(--text-dim)">Внимание: push-канал пока идёт через VPN; если упадёт активный VPN за этим роутером — уведомление может не дойти.</span>';
+              }
+            } catch (e) {
+              /* ignore */
+            }
+            status.innerHTML =
+              '<span style="color:var(--green)">Включено для этого браузера.</span>' +
+              note;
+          } else {
+            status.textContent = "Выключено для этого браузера.";
+          }
+        } catch (e) {
+          status.innerHTML =
+            '<span style="color:var(--red)">' + (e.message || e) + "</span>";
+        }
+      }
+
+      async function onPushToggle(checked) {
+        var toggle = document.getElementById("push-toggle");
+        toggle.disabled = true;
+        try {
+          if (checked) await pushEnable();
+          else await pushDisable();
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast(e.message || "Ошибка push", "error");
+        }
+        toggle.disabled = false;
+        await refreshPushUI();
+      }
+
+      async function pushEnable() {
+        var status = document.getElementById("push-status");
+        status.textContent = "Запрос разрешения…";
+        var cfg = await api("push_config");
+        if (!cfg.available || !cfg.vapid_public) {
+          throw new Error("Push недоступен на роутере (нет openssl/ключа VAPID)");
+        }
+        var perm = Notification.permission;
+        if (perm === "default") perm = await Notification.requestPermission();
+        if (perm !== "granted")
+          throw new Error("Разрешение на уведомления не выдано в браузере");
+        var reg = await navigator.serviceWorker.register(PUSH_SW_URL, {
+          scope: PUSH_SCOPE,
+        });
+        await navigator.serviceWorker.ready;
+        var key = urlBase64ToUint8Array(cfg.vapid_public);
+        var sub;
+        try {
+          sub = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: key,
+          });
+        } catch (e) {
+          // An old subscription with a different VAPID key blocks a new one — drop & retry.
+          var old = await reg.pushManager.getSubscription();
+          if (old) await old.unsubscribe();
+          sub = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: key,
+          });
+        }
+        var resp = await api("push_subscribe", "POST", JSON.stringify(sub));
+        if (!resp.ok) throw new Error(resp.error || "Не удалось сохранить подписку");
+        toast("Push включён для этого браузера", "success");
+      }
+
+      async function pushDisable() {
+        var reg = await navigator.serviceWorker.getRegistration(PUSH_SCOPE);
+        if (reg) {
+          var sub = await reg.pushManager.getSubscription();
+          if (sub) {
+            try {
+              await api(
+                "push_unsubscribe",
+                "POST",
+                JSON.stringify({ endpoint: sub.endpoint }),
+              );
+            } catch (e) {
+              /* ignore — still unsubscribe locally */
+            }
+            await sub.unsubscribe();
+          }
+        }
+        toast("Push выключен для этого браузера", "success");
+      }
+
+      async function sendTestPush() {
+        var btn = document.getElementById("push-test-btn");
+        btn.disabled = true;
+        try {
+          // Non-empty body so api() issues a POST (it treats "" as a GET).
+          var resp = await api("push_test", "POST", "{}");
+          if (resp.ok)
+            toast(
+              "Тестовый push отправлен (" + (resp.sent || 0) + ")",
+              "success",
+            );
+          else toast(resp.error || "Не удалось отправить", "error");
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast(e.message || "Ошибка", "error");
+        }
+        btn.disabled = false;
+      }
+
+      // ===== HTTPS / LET'S ENCRYPT CERTIFICATE (settings under the gear) =====
+      // Issue an LE cert (acme.sh, HTTP-01 webroot) for an A-record domain so the
+      // panel can be served over HTTPS (required for Web Push). Backend: detour-cert.
+      var certPollTimer = null;
+
+      async function openCertModal() {
+        document.getElementById("cert-modal").style.display = "flex";
+        var status = document.getElementById("cert-status");
+        status.textContent = "";
+        await certRefresh();
+      }
+
+      function closeCertModal() {
+        document.getElementById("cert-modal").style.display = "none";
+        if (certPollTimer) {
+          clearTimeout(certPollTimer);
+          certPollTimer = null;
+        }
+      }
+
+      // Pull capabilities + current state and render the hints / current-cert blocks.
+      async function certRefresh() {
+        var curBox = document.getElementById("cert-current");
+        var curText = document.getElementById("cert-current-text");
+        var warnBox = document.getElementById("cert-warn");
+        var warnText = document.getElementById("cert-warn-text");
+        try {
+          var d = await api("cert_detect");
+          // current cert
+          if (d.domain) {
+            curText.innerHTML =
+              "Текущий: <b>" +
+              escapeHtml(d.domain) +
+              "</b>" +
+              (d.expiry ? " — действует до " + escapeHtml(d.expiry) : "") +
+              (d.last_result === "error" && d.last_error
+                ? '<br><span style="color:var(--red)">Последняя ошибка: ' +
+                  escapeHtml(d.last_error) +
+                  "</span>"
+                : "");
+            curBox.style.display = "";
+            if (!document.getElementById("cert-domain").value)
+              document.getElementById("cert-domain").value = d.domain;
+          } else {
+            curBox.style.display = "none";
+          }
+          // capability / port-80 hints
+          var warn = "";
+          if (d.http80 === "none") {
+            warn =
+              "На порту 80 роутера нет веб-сервера — выпуск по HTTP-01 невозможен. Откройте/пробросьте порт 80.";
+          } else if (d.platform === "keenetic") {
+            warn =
+              "Keenetic: порт 80 занят веб-интерфейсом роутера. Для HTTP-01 проброс порта 80 должен вести на панель Detour (lighttpd :8080).";
+          }
+          if (warn) {
+            warnText.textContent = warn;
+            warnBox.style.display = "";
+          } else {
+            warnBox.style.display = "none";
+          }
+          var note = [];
+          if (!d.acme_present)
+            note.push("acme.sh будет установлен автоматически при первом выпуске.");
+          if (d.wan_ip)
+            note.push(
+              "Порт 80 (WAN " +
+                escapeHtml(d.wan_ip) +
+                ") должен быть доступен из интернета по вашему домену.",
+            );
+          document.getElementById("cert-status").innerHTML = note.length
+            ? '<span style="color:var(--text-dim)">' + note.join(" ") + "</span>"
+            : "";
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            document.getElementById("cert-status").innerHTML =
+              '<span style="color:var(--red)">' + escapeHtml(e.message || e) + "</span>";
+        }
+      }
+
+      async function issueCert() {
+        var domain = document.getElementById("cert-domain").value.trim();
+        var email = document.getElementById("cert-email").value.trim();
+        var btn = document.getElementById("cert-issue-btn");
+        var status = document.getElementById("cert-status");
+        if (!/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
+          status.innerHTML = '<span style="color:var(--red)">Введите корректный домен</span>';
+          return;
+        }
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+          status.innerHTML = '<span style="color:var(--red)">Введите корректный email</span>';
+          return;
+        }
+        btn.disabled = true;
+        status.innerHTML =
+          '<span style="color:var(--text-dim)">Выпуск сертификата… порт 80 должен быть доступен извне. Это 10–40 секунд.</span>';
+        try {
+          var resp = await api(
+            "cert_issue",
+            "POST",
+            JSON.stringify({ domain: domain, email: email }),
+          );
+          if (!resp.ok || !resp.started) {
+            btn.disabled = false;
+            status.innerHTML =
+              '<span style="color:var(--red)">' +
+              escapeHtml(resp.error || "Не удалось запустить выпуск") +
+              "</span>";
+            return;
+          }
+          pollCertStatus(0);
+        } catch (e) {
+          btn.disabled = false;
+          if (e.message !== "Not authenticated")
+            status.innerHTML =
+              '<span style="color:var(--red)">' + escapeHtml(e.message || e) + "</span>";
+        }
+      }
+
+      // Poll cert_status until issuance finishes (ok/error) or times out (~75s).
+      async function pollCertStatus(attempt) {
+        var status = document.getElementById("cert-status");
+        var btn = document.getElementById("cert-issue-btn");
+        if (attempt > 25) {
+          btn.disabled = false;
+          status.innerHTML =
+            '<span style="color:var(--red)">Тайм-аут ожидания. Проверьте статус позже / лог detour-cert.</span>';
+          return;
+        }
+        try {
+          var s = await api("cert_status");
+          if (s.last_result === "ok") {
+            btn.disabled = false;
+            status.innerHTML =
+              '<span style="color:var(--green)">Сертификат выпущен' +
+              (s.expiry ? " (до " + escapeHtml(s.expiry) + ")" : "") +
+              ". Откройте панель по https://" +
+              escapeHtml(s.domain || "вашему-домену") +
+              "/detour/</span>";
+            toast("HTTPS-сертификат выпущен", "success");
+            await certRefresh();
+            return;
+          }
+          if (s.last_result === "error") {
+            btn.disabled = false;
+            status.innerHTML =
+              '<span style="color:var(--red)">Ошибка: ' +
+              escapeHtml(s.last_error || "см. лог detour-cert") +
+              "</span>";
+            return;
+          }
+        } catch (e) {
+          /* keep polling unless auth */
+          if (e.message === "Not authenticated") return;
+        }
+        certPollTimer = setTimeout(function () {
+          pollCertStatus(attempt + 1);
+        }, 3000);
+      }
+
       // ===== GROUPS MODAL =====
       // Groups are just a per-profile `group` string. UI ops translate to bulk
       // profile_save calls (rename / clear). Plus a small "empty groups" set
@@ -8333,11 +9376,16 @@
 
       // ===== ALL PROFILES (bulk management) PAGE =====
       var bulkSelected = new Set();
+      // Index (in the current VISIBLE list) of the last checkbox toggled — anchor for
+      // shift-click range selection. Reset whenever the visible set changes (filter,
+      // search, view enter) so the anchor never points at a stale row.
+      var bulkLastIndex = null;
       // Populate the "Все профили" page (group filter, regroup target, list).
       // Called by showView('profiles'); the view toggle itself lives in showView.
       function enterProfilesView() {
         loadEmptyGroupsFromSession();
         bulkSelected = new Set();
+        bulkLastIndex = null;
         document.getElementById("bulk-search").value = "";
         document.getElementById("bulk-select-all").checked = false;
         // group filter
@@ -8423,20 +9471,27 @@
             var groupTag = g
               ? '<span class="row-tag">' + escapeHtml(g) + "</span>"
               : '<span class="row-tag empty">без группы</span>';
+            var asElig = p.autoswitch !== false;
+            var asTag = asElig
+              ? '<span class="row-tag as-on" title="Участвует в авто-переключении">✓ авто</span>'
+              : '<span class="row-tag as-off" title="Исключён из авто-переключения">✕ авто</span>';
             var idAttr = encodeURIComponent(p.id);
             return [
-              '<label class="row-item' + sel + '" style="cursor:pointer;">',
+              '<label class="row-item' +
+                sel +
+                '" style="cursor:pointer;user-select:none;-webkit-user-select:none;">',
               '<input type="checkbox" ' +
                 checked +
-                ' onchange="bulkToggleOne(decodeURIComponent(&quot;' +
+                ' onclick="bulkRowCheckboxClick(event, &quot;' +
                 idAttr +
-                '&quot;), this.checked)" />',
+                '&quot;, this.checked)" />',
               '<div class="row-title">' +
                 escapeHtml(p.name) +
                 " <small>" +
                 escapeHtml(p.type) +
                 "</small></div>",
               '<div class="row-tags">' +
+                asTag +
                 groupTag +
                 '<span class="row-tag">' +
                 escapeHtml(p.id) +
@@ -8463,7 +9518,43 @@
         // visual highlight on parent row
         renderBulkProfilesList();
       }
+      // Checkbox click with SHIFT-range support: shift+click toggles every row between
+      // the last-clicked anchor and this one to the just-set state. Without shift it
+      // toggles just this row and becomes the new anchor.
+      function bulkRowCheckboxClick(ev, idEnc, nowChecked) {
+        var id = decodeURIComponent(idEnc);
+        var visible = bulkVisibleProfiles();
+        var idx = -1;
+        for (var i = 0; i < visible.length; i++) {
+          if (visible[i].id === id) {
+            idx = i;
+            break;
+          }
+        }
+        if (
+          ev &&
+          ev.shiftKey &&
+          bulkLastIndex !== null &&
+          bulkLastIndex >= 0 &&
+          idx >= 0
+        ) {
+          var lo = Math.min(bulkLastIndex, idx),
+            hi = Math.max(bulkLastIndex, idx);
+          for (var j = lo; j <= hi; j++) {
+            if (nowChecked) bulkSelected.add(visible[j].id);
+            else bulkSelected.delete(visible[j].id);
+          }
+        } else if (nowChecked) {
+          bulkSelected.add(id);
+        } else {
+          bulkSelected.delete(id);
+        }
+        bulkLastIndex = idx;
+        updateBulkCount();
+        renderBulkProfilesList();
+      }
       function bulkToggleAll(on) {
+        bulkLastIndex = null;
         bulkVisibleProfiles().forEach(function (p) {
           if (on) bulkSelected.add(p.id);
           else bulkSelected.delete(p.id);
@@ -8539,6 +9630,44 @@
             (newGroup ? ' → "' + newGroup + '"' : " → без группы"),
           ok === ids.length ? "success" : "info",
         );
+      }
+      // Mass set/unset auto-switch eligibility for the SELECTED profiles in one call
+      // (the CGI takes a batch). eligible=true → may be used for auto-switch.
+      async function bulkSetAutoswitch(eligible) {
+        if (!bulkSelected.size) {
+          toast("Не выбрано ни одного профиля", "error");
+          return;
+        }
+        var status = document.getElementById("bulk-status");
+        var ids = Array.from(bulkSelected);
+        status.textContent = eligible
+          ? "Включаю в авто-переключение..."
+          : "Исключаю из авто-переключения...";
+        try {
+          var r = await api(
+            "autoswitch_set&eligible=" + (eligible ? "1" : "0"),
+            "POST",
+            ids.join("\n"),
+          );
+          if (!r || !r.ok) throw new Error("save failed");
+          for (var i = 0; i < ids.length; i++) {
+            var p = currentProfiles.find(function (x) {
+              return x.id === ids[i];
+            });
+            if (p) p.autoswitch = !!eligible;
+          }
+          renderBulkProfilesList();
+          status.textContent = "";
+          toast(
+            (eligible
+              ? "В авто-переключении: +"
+              : "Исключено из авто-переключения: ") + ids.length,
+            "success",
+          );
+        } catch (e) {
+          status.textContent = "";
+          toast("Не удалось сохранить флаг авто-переключения", "error");
+        }
       }
 
       async function importProfilesFromFile(input) {
@@ -10687,6 +11816,59 @@
 
       // ===== PANEL SELF-UPDATE =====
       // ===== HEADER SETTINGS (gear) MENU =====
+      // ===== SYSTEM STATS POPOVER =====
+      // Live CPU load rides the chip itself; the rest (RAM/storage/uptime/MPTCP)
+      // shows on hover/click. Fed from the same status poll as everything else.
+      function _sspSet(id, txt, color) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = txt;
+        el.style.color = color || "";
+      }
+      function renderSysStats(sys) {
+        sys = sys || {};
+        // CPU — the always-visible load indicator on the chip + a popover row.
+        var raw = sys.cpu;
+        var pct = parseInt(raw, 10);
+        var has = !(raw === undefined || raw === null || raw === "" || isNaN(pct));
+        var cpuTxt = has ? pct + "%" : "—";
+        var cpuColor = !has
+          ? ""
+          : pct >= 85
+            ? "var(--red)"
+            : pct >= 60
+              ? "var(--yellow)"
+              : "var(--green)";
+        _sspSet("sys-cpu-mini", "ЦП " + cpuTxt, cpuColor);
+        var cores = sys.cpu_cores ? " · " + sys.cpu_cores + " ядр." : "";
+        _sspSet("ssp-cpu", cpuTxt + (has ? cores : ""), cpuColor);
+        _sspSet("ssp-memory", sys.memory || "—");
+        _sspSet("ssp-disk", sys.disk_free || "—");
+        _sspSet("ssp-uptime", sys.uptime || "—");
+        var mptcpOff = sys.mptcp === "0";
+        var mptcpUnknown =
+          sys.mptcp == null || sys.mptcp === "unknown" || sys.mptcp === "";
+        _sspSet(
+          "ssp-mptcp",
+          mptcpUnknown ? "—" : mptcpOff ? "Off ✓" : "On ⚠",
+          mptcpUnknown ? "" : mptcpOff ? "var(--green)" : "var(--red)",
+        );
+      }
+      function toggleSysStats(ev) {
+        if (ev) ev.stopPropagation();
+        var s = document.getElementById("sys-stats");
+        if (!s) return;
+        var open = s.classList.toggle("open");
+        var btn = document.getElementById("sys-stats-btn");
+        if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+      }
+      function closeSysStats() {
+        var s = document.getElementById("sys-stats");
+        if (s) s.classList.remove("open");
+        var btn = document.getElementById("sys-stats-btn");
+        if (btn) btn.setAttribute("aria-expanded", "false");
+      }
+
       function toggleHdrMenu(ev) {
         if (ev) ev.stopPropagation();
         var m = document.getElementById("hdr-settings-menu");
@@ -10715,9 +11897,15 @@
         var m = document.getElementById("hdr-settings-menu");
         if (m && m.classList.contains("open") && !m.contains(e.target))
           closeHdrMenu();
+        var s = document.getElementById("sys-stats");
+        if (s && s.classList.contains("open") && !s.contains(e.target))
+          closeSysStats();
       });
       document.addEventListener("keydown", function (e) {
-        if (e.key === "Escape") closeHdrMenu();
+        if (e.key === "Escape") {
+          closeHdrMenu();
+          closeSysStats();
+        }
       });
 
       // Show the header «Обновить панель» CTA + accent the version chip ONLY when a
@@ -10737,6 +11925,7 @@
         var btn = document.getElementById("hdr-update-btn");
         try {
           var d = await api("updates_overview");
+          window.lastUpdatesOverview = d; // reused by showBinsModal for upstream info
           var panel = (d && d.panel) || {};
           var avail = !!panel.update_available;
           if (btn) {
@@ -10752,17 +11941,28 @@
           Object.keys(UPDATE_CHIP_IDS).forEach(function (key) {
             var el = document.getElementById(UPDATE_CHIP_IDS[key]);
             if (!el) return;
-            el.classList.toggle(
-              "has-update",
-              !!(d && d[key] && d[key].update_available),
-            );
+            var info = (d && d[key]) || {};
+            var feedUpd = !!info.update_available; // installable now (green, blinks)
+            var upNew = !!info.upstream_newer; // newer on GitHub, feed not bumped (amber)
+            el.classList.toggle("has-update", feedUpd);
+            el.classList.toggle("has-upstream", !feedUpd && upNew);
+            if (feedUpd) {
+              el.title = "Доступно обновление — нажмите, чтобы установить";
+            } else if (upNew) {
+              el.title =
+                "Новая версия на GitHub: v" +
+                (info.upstream || "?") +
+                " — ещё не в фиде detour";
+            } else {
+              el.title = "";
+            }
           });
         } catch (e) {
           // offline / not authed — keep the CTA hidden, never block the UI.
           if (btn) btn.style.display = "none";
           Object.keys(UPDATE_CHIP_IDS).forEach(function (key) {
             var el = document.getElementById(UPDATE_CHIP_IDS[key]);
-            if (el) el.classList.remove("has-update");
+            if (el) el.classList.remove("has-update", "has-upstream");
           });
         }
       }
@@ -10990,6 +12190,7 @@
       // ===== BINARIES (sing-box + tpws-zapret) UPDATE =====
       var lastBinaries = null;
       var currentPlatform = "openwrt"; // "keenetic" → sing-box comes from opkg
+      var currentPanelPort = 8080; // panel HTTP port (status.panel_port); KeenDNS help
 
       // Engine config shared by the header version chips + the update modal.
       // Each maps to an opkg feed package; detour-update / detour-api expose the
@@ -10997,6 +12198,8 @@
       var BINS_ENGINES = {
         singbox: {
           label: "sing-box",
+          repo: "https://github.com/SagerNet/sing-box",
+          overviewKey: "singbox",
           chipId: "bins-version",
           chipPrefix: "sb ",
           presentKey: "singbox_present",
@@ -11012,6 +12215,8 @@
         },
         zapret: {
           label: "zapret (tpws)",
+          repo: "https://github.com/bol-van/zapret",
+          overviewKey: "tpws",
           chipId: "chip-zapret",
           chipPrefix: "zapret ",
           presentKey: "tpws_present",
@@ -11027,6 +12232,8 @@
         },
         zapret2: {
           label: "zapret2 (nfqws2)",
+          repo: "https://github.com/bol-van/zapret2",
+          overviewKey: "nfqws2",
           chipId: "chip-zapret2",
           chipPrefix: "zapret2 ",
           presentKey: "nfqws2_present",
@@ -11084,7 +12291,7 @@
             var el = document.getElementById(id);
             if (el) {
               el.textContent = "";
-              el.classList.remove("chip-na", "has-update");
+              el.classList.remove("chip-na", "has-update", "has-upstream");
             }
           });
           return;
@@ -11092,6 +12299,44 @@
         renderEngineChip("singbox", b);
         renderEngineChip("zapret", b);
         renderEngineChip("zapret2", b);
+      }
+
+      // Render the "upstream version" note in the bins modal. `info` may come from
+      // updates_overview ({upstream, upstream_newer, update_available}) or from a
+      // fresh <engine>_update_check response ({current, available, upstream,
+      // upstream_newer}). Amber when a newer version is out on GitHub but our feed
+      // hasn't caught up; otherwise a muted "last on GitHub" line.
+      function renderUpstreamNote(info) {
+        var el = document.getElementById("bins-upstream-note");
+        if (!el) return;
+        info = info || {};
+        var up = info.upstream || "";
+        if (!up) {
+          el.style.display = "none";
+          return;
+        }
+        var feedHas = !!info.update_available;
+        var newer = !!info.upstream_newer && !feedHas;
+        el.style.display = "block";
+        if (newer) {
+          el.style.background = "rgba(224, 167, 64, 0.14)";
+          el.style.color = "var(--yellow)";
+          el.style.padding = "8px 10px";
+          el.innerHTML =
+            "🟡 Новая версия вышла на GitHub: <strong>v" +
+            escapeHtml(up) +
+            "</strong>. В нашем фиде её пока нет — появится автоматически " +
+            "(авто-публикация) или соберите фид вручную (build_feed.py).";
+        } else {
+          el.style.background = "transparent";
+          el.style.color = "var(--text-muted)";
+          el.style.padding = "0 0 4px";
+          el.innerHTML =
+            "Последняя на GitHub: <strong>v" +
+            escapeHtml(up) +
+            "</strong>" +
+            (feedHas ? " — доступна в фиде, можно установить." : " — актуально.");
+        }
       }
 
       // Open the generalized update modal scoped to one engine.
@@ -11109,6 +12354,26 @@
         var ver = present ? b[cfg.verKey] || "?" : "не установлен";
         document.getElementById("bins-modal-desc").innerHTML =
           "<strong>" + escapeHtml(cfg.label) + ":</strong> " + escapeHtml(ver) + ".";
+
+        // Link to the upstream project on GitHub (sing-box / zapret / zapret2).
+        var repoLink = document.getElementById("bins-modal-repo");
+        if (repoLink) {
+          if (cfg.repo) {
+            repoLink.href = cfg.repo;
+            document.getElementById("bins-modal-repo-label").textContent =
+              "Проект на GitHub (" +
+              cfg.repo.replace(/^https?:\/\/github\.com\//, "") +
+              ")";
+            repoLink.style.display = "inline-flex";
+          } else {
+            repoLink.style.display = "none";
+          }
+        }
+
+        // Upstream-version note from the cached overview (overviewKey: singbox/tpws/nfqws2).
+        renderUpstreamNote(
+          (window.lastUpdatesOverview || {})[cfg.overviewKey] || {},
+        );
 
         var opkgSec = document.getElementById("bins-opkg-section");
         var feedSec = document.getElementById("bins-feed-section");
@@ -11154,6 +12419,7 @@
         el.textContent = "Проверка…";
         try {
           var d = await api(cfg.checkAction, "POST", "");
+          renderUpstreamNote(d || {}); // refresh the GitHub-version note inline
           if (d && d.current && d.available) {
             var has =
               d.available !== d.current &&
@@ -11520,6 +12786,10 @@
         refreshUpdateIndicator();
         if (window._statusInterval) clearInterval(window._statusInterval);
         window._statusInterval = setInterval(loadStatus, 10000);
+        // Re-poll the cached update overview so chips reflect the 6h check-all
+        // cron (panel + sing-box + zapret + zapret2) without a page reload.
+        if (window._updIndicatorInterval) clearInterval(window._updIndicatorInterval);
+        window._updIndicatorInterval = setInterval(refreshUpdateIndicator, 300000);
       }
       init();
     </script>

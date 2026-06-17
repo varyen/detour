@@ -10,6 +10,9 @@ SINGBOX_LOG="/var/log/sing-box.log"
 SINGBOX_INITD="/etc/init.d/sing-box"
 SINGBOX_SETTINGS="/etc/sing-box/settings.json"
 SINGBOX_PROFILES_DIR="/etc/sing-box/profiles"
+# Profiles EXCLUDED from auto-switch (one id per line; absent/empty = all eligible).
+# Read by detour-health's candidate pick; managed by the autoswitch_set action below.
+AUTOSWITCH_EXCLUDE="/etc/sing-box/autoswitch-exclude.list"
 SINGBOX_WHITELIST="/etc/sing-box/whitelist-domains.list"
 ZAPRET_INITD="/etc/init.d/zapret-tpws"
 ZAPRET_CONF="/etc/zapret-tpws.conf"
@@ -31,6 +34,10 @@ HEALTH_SWITCH="/tmp/detour-health.switch"   # last auto-switch event marker (JSO
 HEALTH_UNSUPP="/tmp/detour-health.unsupported" # set by detour-health when sing-box lacks clash_api
 HEALTH_URLS="/etc/sing-box/health-urls.list" # health-check targets: "label|url" per line (panel-editable)
 HEALTH_BIN="/usr/sbin/detour-health"
+PUSH_BIN="/usr/sbin/detour-push"            # Web Push (VAPID) sender — backs the push_* actions
+PUSH_MSG="/tmp/detour-push.msg"             # latest push message JSON (read by the service worker; tmpfs, not remapped)
+CERT_BIN="/usr/sbin/detour-cert"            # Let's Encrypt helper (acme.sh) — backs the cert_* actions
+CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written by detour-cert)
 
 AUTH_FILE="/etc/detour.auth"
 SESSION_DIR="/tmp/detour-sessions"
@@ -65,6 +72,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_INITD="$OPT/etc/init.d/S52detour-singbox"
     SINGBOX_SETTINGS="$OPT/etc/sing-box/settings.json"
     SINGBOX_PROFILES_DIR="$OPT/etc/sing-box/profiles"
+    AUTOSWITCH_EXCLUDE="$OPT/etc/sing-box/autoswitch-exclude.list"
     SINGBOX_WHITELIST="$OPT/etc/sing-box/whitelist-domains.list"
     ZAPRET_INITD="$OPT/etc/init.d/S53detour-zapret"
     ZAPRET_CONF="$OPT/etc/zapret-tpws.conf"
@@ -91,6 +99,9 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     HOSTS_BIN="$OPT/sbin/detour-hosts"
     HEALTH_URLS="$OPT/etc/sing-box/health-urls.list"  # HEALTH_DB/SWITCH stay /tmp (not remapped, like PING_DB)
     HEALTH_BIN="$OPT/sbin/detour-health"
+    PUSH_BIN="$OPT/sbin/detour-push"   # PUSH_MSG stays /tmp (not remapped, like HEALTH_DB)
+    CERT_BIN="$OPT/sbin/detour-cert"
+    CERT_STATE="$OPT/var/state/detour-cert.json"
     # LAN bridge from detour.conf (assumed br0); "Все через VPN" uses iptables (no nft fw4).
     LAN_IF="br0"
     SVC_START="force-start"   # Keenetic boot-`start` is autostart-gated; manual start bypasses it
@@ -1118,6 +1129,28 @@ status)
     MEM_FREE=$(free | awk '/Mem:/{printf "%dMB/%dMB", ($3)/1024, ($2)/1024}')
     DISK_FREE=$(df /overlay 2>/dev/null | awk 'NR==2{printf "%d", $4/1024}')
 
+    # CPU utilisation % over the interval since the previous status poll.
+    # /proc/stat aggregate-line deltas are cached in /tmp, so this never blocks
+    # the request with a sleep. First poll after a cache miss has no baseline →
+    # CPU_PCT stays "?" (the panel shows «—»); the next poll is a real number.
+    CPU_PCT="?"
+    _cpu_now=$(awk '/^cpu /{idle=$5+$6; tot=0; for(n=2;n<=NF;n++)tot+=$n; print tot, idle; exit}' /proc/stat 2>/dev/null)
+    if [ -n "$_cpu_now" ]; then
+        _cpu_t=${_cpu_now% *}; _cpu_i=${_cpu_now#* }
+        if [ -f /tmp/detour-cpustat ]; then
+            read _cpu_pt _cpu_pi < /tmp/detour-cpustat
+            _cpu_dt=$((_cpu_t - _cpu_pt)); _cpu_di=$((_cpu_i - _cpu_pi))
+            if [ "$_cpu_dt" -gt 0 ] && [ "$_cpu_di" -ge 0 ]; then
+                CPU_PCT=$(( (100 * (_cpu_dt - _cpu_di) + _cpu_dt / 2) / _cpu_dt ))
+                [ "$CPU_PCT" -lt 0 ] && CPU_PCT=0
+                [ "$CPU_PCT" -gt 100 ] && CPU_PCT=100
+            fi
+        fi
+        echo "$_cpu_t $_cpu_i" > /tmp/detour-cpustat
+    fi
+    CPU_CORES=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
+    { [ -n "$CPU_CORES" ] && [ "$CPU_CORES" -ge 1 ]; } 2>/dev/null || CPU_CORES=1
+
     SB_PROFILE=$(get_active_profile)
     SB_CHAIN=$(get_active_chain)
     SB_ROUTING=$(get_routing_mode)
@@ -1156,9 +1189,19 @@ status)
     # The panel uses this to show the zapret2 chip as «н/д» where unsupported.
     NFQWS_SUPPORTED=true; [ "$PLATFORM" = keenetic ] && NFQWS_SUPPORTED=false
 
+    # Panel HTTP port — on Keenetic the panel is a dedicated lighttpd; read its
+    # server.port (default 8080). The UI's KeenDNS help shows this so the owner
+    # forwards the right port. OpenWrt rides uhttpd → not surfaced there, keep 8080.
+    PANEL_PORT=8080
+    if [ "$PLATFORM" = "keenetic" ]; then
+        _PP=$(sed -n 's/.*server\.port[^0-9]*\([0-9][0-9]*\).*/\1/p' "$OPT/etc/lighttpd/detour.conf" 2>/dev/null | head -1)
+        [ -n "$_PP" ] && PANEL_PORT="$_PP"
+    fi
+
     cat <<EOF
 {
   "platform": "$PLATFORM",
+  "panel_port": $PANEL_PORT,
   "version": "$PA_VERSION",
   "binaries": {
     "bins_version": "$BINS_VERSION",
@@ -1202,7 +1245,9 @@ status)
     "mptcp": "$MPTCP",
     "uptime": "$UPTIME",
     "memory": "$MEM_FREE",
-    "disk_free": "${DISK_FREE}MB"
+    "disk_free": "${DISK_FREE}MB",
+    "cpu": "$CPU_PCT",
+    "cpu_cores": $CPU_CORES
   }
 }
 EOF
@@ -1707,12 +1752,31 @@ updates_overview)
         P_STATUS=$(json_val status "$UPDATE_STATE")
         P_AVAIL=$(json_val available_version "$UPDATE_STATE")
     fi
+    # up_ver  → latest upstream version string (detour-update's GitHub probe).
+    # up_new  → "true"/"false": upstream is newer than installed AND the feed has
+    #           NOT caught up yet (so it's an info-only "вышла на GitHub" signal,
+    #           distinct from feed update_available). upstream_newer is an UNQUOTED
+    #           JSON bool, so json_val (quoted-only) can't read it — match it directly.
+    up_ver() { [ -f "$1" ] && json_val upstream "$1" || true; }
+    up_new() {
+        local v
+        [ -f "$1" ] || { echo false; return; }
+        v=$(sed -n 's/.*"upstream_newer"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$1" | head -1)
+        # Suppress when the feed already offers the upgrade — green chip wins.
+        if [ "$v" = true ] && [ "$(feed_upd "$1")" != true ]; then echo true; else echo false; fi
+    }
     P_UPD=false; [ "$P_STATUS" = "update_available" ] && P_UPD=true
     SB_UPD=$(feed_upd "$BINS_STATE")
     TPWS_UPD=$(feed_upd "$TPWS_STATE")
     NFQWS2_UPD=$(feed_upd "$NFQWS2_STATE")
-    printf '{"panel":{"update_available":%s,"available_version":"%s"},"singbox":{"update_available":%s},"tpws":{"update_available":%s},"nfqws2":{"update_available":%s}}\n' \
-        "$P_UPD" "$P_AVAIL" "$SB_UPD" "$TPWS_UPD" "$NFQWS2_UPD"
+    SB_UPV=$(up_ver "$BINS_STATE");   SB_UPN=$(up_new "$BINS_STATE")
+    TPWS_UPV=$(up_ver "$TPWS_STATE"); TPWS_UPN=$(up_new "$TPWS_STATE")
+    NFQWS2_UPV=$(up_ver "$NFQWS2_STATE"); NFQWS2_UPN=$(up_new "$NFQWS2_STATE")
+    printf '{"panel":{"update_available":%s,"available_version":"%s"},"singbox":{"update_available":%s,"upstream":"%s","upstream_newer":%s},"tpws":{"update_available":%s,"upstream":"%s","upstream_newer":%s},"nfqws2":{"update_available":%s,"upstream":"%s","upstream_newer":%s}}\n' \
+        "$P_UPD" "$P_AVAIL" \
+        "$SB_UPD" "$SB_UPV" "$SB_UPN" \
+        "$TPWS_UPD" "$TPWS_UPV" "$TPWS_UPN" \
+        "$NFQWS2_UPD" "$NFQWS2_UPV" "$NFQWS2_UPN"
     ;;
 
 # ==================== DPI-BYPASS ENGINE SWITCH (zapret | zapret2 | off) ====================
@@ -1934,16 +1998,55 @@ profiles_list)
         PDESC=$(json_val "name" "$f")
         PGROUP=$(json_val "group" "$f")
         PRMODE=$(json_val "routing_mode" "$f")
+        # auto-switch eligible = id is NOT in the exclude list (absent file = eligible).
+        if [ -f "$AUTOSWITCH_EXCLUDE" ] && grep -qxF "$PNAME" "$AUTOSWITCH_EXCLUDE" 2>/dev/null; then
+            PAS=false
+        else
+            PAS=true
+        fi
         if [ "$FIRST" = "1" ]; then FIRST=0; else printf ','; fi
-        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s"}' \
+        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s","autoswitch":%s}' \
             "$PNAME" "$PTYPE" \
             "$(echo "$PDESC" | json_escape)" \
             "$(echo "$PGROUP" | json_escape)" \
-            "$PRMODE"
+            "$PRMODE" "$PAS"
     done
     printf '],"active":"%s","active_chain":' "$(get_active_profile)"
     print_csv_json_array "$(get_active_chain)"
     printf '}'
+    ;;
+
+autoswitch_set)
+    # Mark profiles eligible/ineligible for auto-switch. ?eligible=1|0 + POST body =
+    # profile ids (newline- or comma-separated). eligible=1 → remove from the exclude
+    # list; 0 → add. The exclude LIST (not the profile JSON) is the store, because
+    # subscription-refresh rebuilds profile JSON from scratch and would drop a flag.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    AS_ELIG=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]eligible=\([^&]*\).*/\1/p' | head -1)
+    mkdir -p "$(dirname "$AUTOSWITCH_EXCLUDE")" 2>/dev/null
+    touch "$AUTOSWITCH_EXCLUDE" 2>/dev/null
+    AS_IDS="/tmp/detour-autoswitch-ids.$$"
+    # `|| [ -n "$_l" ]` so the FINAL id is processed even when the body has no
+    # trailing newline — the panel sends ids.join("\n") (and a single id has none).
+    printf '%s' "$POST_DATA" | tr ',\r' '\n\n' | while IFS= read -r _l || [ -n "$_l" ]; do
+        _s=$(printf '%s' "$_l" | tr -cd 'a-zA-Z0-9_-')
+        [ -n "$_s" ] && echo "$_s"
+    done | sort -u > "$AS_IDS"
+    if [ -s "$AS_IDS" ]; then
+        if [ "$AS_ELIG" = "1" ]; then
+            # eligible → drop these ids from the exclude list
+            awk 'NR==FNR{rm[$0]=1; next} !($0 in rm)' "$AS_IDS" "$AUTOSWITCH_EXCLUDE" \
+                > "$AUTOSWITCH_EXCLUDE.new" 2>/dev/null
+        else
+            # ineligible → union the ids into the exclude list (dedup, drop blanks)
+            awk 'NF && !seen[$0]++' "$AUTOSWITCH_EXCLUDE" "$AS_IDS" \
+                > "$AUTOSWITCH_EXCLUDE.new" 2>/dev/null
+        fi
+        mv "$AUTOSWITCH_EXCLUDE.new" "$AUTOSWITCH_EXCLUDE" 2>/dev/null
+    fi
+    rm -f "$AS_IDS"
+    AS_CNT=$(grep -c . "$AUTOSWITCH_EXCLUDE" 2>/dev/null); [ -z "$AS_CNT" ] && AS_CNT=0
+    printf '{"ok":true,"excluded":%s}' "$AS_CNT"
     ;;
 
 profile_get)
@@ -2533,6 +2636,103 @@ panel_change_password)
         done
         json_ok
     fi
+    ;;
+
+# ==================== WEB PUSH (VAPID, payload-less) ====================
+# The heavy lifting (VAPID keypair, JWT, curl to push services, subscription
+# store) lives in /usr/sbin/detour-push; these actions are a thin CGI front.
+# All are behind the auth gate above. The service worker fetches push_message
+# with the session cookie (same-origin) to render the notification text.
+push_config)
+    # What the panel needs to subscribe: the VAPID public key (applicationServerKey)
+    # and whether push is available on this box at all (needs openssl + the sender).
+    if [ ! -x "$PUSH_BIN" ] || ! command -v openssl >/dev/null 2>&1; then
+        printf '{"ok":true,"available":false,"vapid_public":"","sub_count":0}'
+    else
+        PUB=$("$PUSH_BIN" pubkey 2>/dev/null)
+        CNT=$("$PUSH_BIN" count 2>/dev/null); case "$CNT" in ''|*[!0-9]*) CNT=0 ;; esac
+        BP=$("$PUSH_BIN" bypass-status 2>/dev/null); case "$BP" in active|inactive) ;; *) BP="n/a" ;; esac
+        if [ -n "$PUB" ]; then
+            printf '{"ok":true,"available":true,"vapid_public":"%s","sub_count":%s,"bypass":"%s"}' "$PUB" "$CNT" "$BP"
+        else
+            printf '{"ok":true,"available":false,"vapid_public":"","sub_count":0,"bypass":"%s"}' "$BP"
+        fi
+    fi
+    ;;
+
+push_subscribe)
+    # Body = PushSubscription.toJSON() (endpoint + keys). Stored, deduped by endpoint.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$PUSH_BIN" ] || { json_err "push sender not installed"; exit 0; }
+    if printf '%s' "$POST_DATA" | "$PUSH_BIN" add >/dev/null 2>&1; then
+        json_ok
+    else
+        json_err "invalid subscription"
+    fi
+    ;;
+
+push_unsubscribe)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$PUSH_BIN" ] || { json_err "push sender not installed"; exit 0; }
+    EP=$(printf '%s' "$POST_DATA" | lua -e 'local c=require("cjson.safe"); local o=c.decode(io.read("*a")); io.write((type(o)=="table" and type(o.endpoint)=="string") and o.endpoint or "")' 2>/dev/null)
+    [ -n "$EP" ] || { json_err "endpoint required"; exit 0; }
+    "$PUSH_BIN" remove "$EP" >/dev/null 2>&1
+    json_ok
+    ;;
+
+push_test)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$PUSH_BIN" ] || { json_err "push sender not installed"; exit 0; }
+    SENT=$("$PUSH_BIN" test 2>/dev/null); case "$SENT" in ''|*[!0-9]*) SENT=0 ;; esac
+    printf '{"ok":true,"sent":%s}' "$SENT"
+    ;;
+
+push_message)
+    # Read by the service worker on each push to render the notification text.
+    if [ -f "$PUSH_MSG" ]; then
+        cat "$PUSH_MSG"
+    else
+        printf '{"title":"Detour VPN","body":"Состояние VPN изменилось"}'
+    fi
+    ;;
+
+# ==================== HTTPS / LET'S ENCRYPT (acme.sh) ====================
+# Thin front over /usr/sbin/detour-cert (issue/install/renew an LE cert so the panel
+# can be served over HTTPS — required for Web Push). All behind the auth gate above.
+cert_detect)
+    # Capabilities + current cert state for the UI (acme present?, :80 server, target,
+    # WAN IP, current domain/expiry).
+    if [ -x "$CERT_BIN" ]; then
+        "$CERT_BIN" detect
+    else
+        printf '{"ok":true,"acme_present":false,"http80":"none","target":"none","wan_ip":"","domain":"","expiry":""}'
+    fi
+    ;;
+
+cert_status)
+    if [ -x "$CERT_BIN" ]; then
+        "$CERT_BIN" status
+    elif [ -f "$CERT_STATE" ]; then
+        cat "$CERT_STATE"
+    else
+        printf '{"ok":true,"domain":"","last_result":""}'
+    fi
+    ;;
+
+cert_issue)
+    # Body = {"domain":"...","email":"..."}. Issuance takes 10-40s, so run it
+    # detached and let the panel poll cert_status.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$CERT_BIN" ] || { json_err "detour-cert not installed"; exit 0; }
+    CINFO=$(printf '%s' "$POST_DATA" | lua -e 'local c=require("cjson.safe"); local o=c.decode(io.read("*a")) or {}; io.write((type(o.domain)=="string" and o.domain or "").."\t"..(type(o.email)=="string" and o.email or ""))' 2>/dev/null)
+    CDOM=$(printf '%s' "$CINFO" | cut -f1)
+    CEML=$(printf '%s' "$CINFO" | cut -f2)
+    # Strict charset guard — these are interpolated into detach_bg's `sh -c` string,
+    # so reject anything outside a safe set (no spaces / shell metacharacters).
+    case "$CDOM" in ''|*[!a-zA-Z0-9.-]*) json_err "bad domain"; exit 0 ;; esac
+    case "$CEML" in ''|*[!a-zA-Z0-9.@_+-]*) json_err "bad email"; exit 0 ;; esac
+    detach_bg "/tmp/detour-cert-bg.log" "$CERT_BIN" issue "$CDOM" "$CEML"
+    printf '{"ok":true,"started":true}'
     ;;
 
 *) json_err "unknown action: $ACTION" ;;

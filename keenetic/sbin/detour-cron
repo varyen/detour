@@ -55,6 +55,15 @@ while :; do
     [ -x /opt/sbin/detour-ping ] && \
         /opt/sbin/detour-ping >"$LOGDIR/detour-ping.log" 2>&1
 
+    # Focused functional check of ONLY the active profile — every tick (~5 min;
+    # coarser than OpenWrt's per-minute self-paced loop, but Keenetic is secondary —
+    # the shim sets ACTIVE_LOOP_BUDGET=0 so this does ONE check per tick instead of
+    # blocking this shared loop for ~a minute). Sends a Web Push alert on DOWN (incl.
+    # connecting to a broken profile) / auto-switch. Self-no-ops if the Entware
+    # sing-box lacks clash_api (no functional check possible there).
+    [ -x /opt/sbin/detour-health ] && \
+        /opt/sbin/detour-health active >>"$LOGDIR/detour-health.log" 2>&1
+
     # Subscription refresh — hourly.
     if [ $((n % 12)) -eq 0 ] && [ -x /opt/sbin/subscription-refresh ]; then
         /opt/sbin/subscription-refresh >"$LOGDIR/subscription-refresh.log" 2>&1
@@ -74,6 +83,12 @@ while :; do
     # Update auto-check (panel + sing-box + tpws) — every ~6 h, unless AUTO_CHECK=0.
     if [ $((n % 72)) -eq 0 ] && [ -x /opt/sbin/detour-update ] && update_enabled; then
         /opt/sbin/detour-update check-all >"$LOGDIR/detour-update.log" 2>&1
+    fi
+
+    # Let's Encrypt renewal — once a day (acme.sh --cron renews only what's due).
+    # No-op until a cert was issued (detour-cert renew exits if acme.sh/cert absent).
+    if [ $((n % 72)) -eq 0 ] && [ -x /opt/sbin/detour-cert ]; then
+        /opt/sbin/detour-cert renew >"$LOGDIR/detour-cert.log" 2>&1
     fi
 
     n=$(((n + 1) % 72))

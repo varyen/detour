@@ -18,7 +18,8 @@
 # detour-bins package.
 #
 # Subcommands:
-#   check                  — query GH for latest PANEL tag; write state file
+#   check                  — query GH for latest PANEL tag; write state file; on a
+#                            newly-available version, Web Push once (deduped)
 #   check-all              — one tick: panel + sing-box + tpws + nfqws2 checks (cron)
 #   autocheck on|off|status — toggle the unattended 6h auto-check cron (default on)
 #   apply                  — ensure feed+sing-box, then install latest panel release
@@ -61,6 +62,15 @@ NFQWS2_PKG=nfqws2
 BINS_STATE_FILE=/var/state/detour-bins.json     # sing-box update state (panel reads this path)
 TPWS_STATE_FILE=/var/state/detour-tpws.json     # tpws-zapret update state (panel reads this path)
 NFQWS2_STATE_FILE=/var/state/detour-nfqws2.json # nfqws2 (zapret2) update state (panel reads this)
+# Upstream project repos — the "a newer version is out on GitHub" signal, checked
+# INDEPENDENTLY of our opkg feed. Detection only: install still goes through the
+# feed (so opkg keeps the version registry / postinst / sysupgrade keeplist). The
+# panel lights an amber chip when upstream > installed but the feed isn't bumped yet.
+SINGBOX_UPSTREAM_REPO="SagerNet/sing-box"
+TPWS_UPSTREAM_REPO="bol-van/zapret"
+NFQWS2_UPSTREAM_REPO="bol-van/zapret2"
+PUSH_BIN=/usr/sbin/detour-push                  # Web Push sender — alert when a new panel version appears
+NOTIFIED_FILE=/var/state/detour-update-notified # last panel version we pushed about (dedup the 6h cron)
 # Self-hosted opkg feed serving sing-box. Keep in sync with build_release.py
 # (FEED_LINE) and deploy_router.py.
 FEED_NAME=detour
@@ -103,6 +113,8 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     BINS_STATE_FILE=/opt/var/state/detour-bins.json
     TPWS_STATE_FILE=/opt/var/state/detour-tpws.json
     NFQWS2_STATE_FILE=/opt/var/state/detour-nfqws2.json
+    PUSH_BIN=/opt/sbin/detour-push
+    NOTIFIED_FILE=/opt/var/state/detour-update-notified
     PACKAGE_NAME=detour-keenetic
     ASSET_RE='^detour-keenetic_.*\.ipk$'
     ASSET_SIG_RE='^detour-keenetic_.*\.ipk\.sig$'
@@ -152,6 +164,14 @@ version_gt() {
 
 json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r//g' | tr '\n' ' '
+}
+
+# prev_field <state-file> <key> → value of "key":"value" in a flat JSON state file
+# ("" if absent). Used to keep the last-known upstream version when a GitHub query
+# fails (censored / throttled link), so a transient miss never clears the chip.
+prev_field() {
+    [ -f "$1" ] || return 0
+    sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -1
 }
 
 write_state() {
@@ -233,6 +253,35 @@ LUA
     [ "$rc" = "0" ] || die "failed to parse GH API response"
 }
 
+# gh_latest_tag <owner/repo> → latest non-prerelease release tag (v-stripped) on
+# stdout; returns 1 on network/parse failure so the caller can fall back to the
+# last-known value. Reuses the gh_curl retry wrapper + lua-cjson parser. This is
+# the upstream-version probe for the binary chips (sing-box / zapret / zapret2),
+# separate from gh_assets (which is hardwired to our own GH_OWNER/GH_REPO).
+gh_latest_tag() {
+    local repo="$1" tmp tag
+    tmp=$(mktemp 2>/dev/null) || return 1
+    if ! gh_curl_retry -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            --max-time 30 -o "$tmp" \
+            "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null; then
+        rm -f "$tmp"; return 1
+    fi
+    tag=$(lua - "$tmp" 2>/dev/null <<'LUA'
+package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); if not f then os.exit(1) end
+local raw = f:read("*a"); f:close()
+local doc = cjson.decode(raw); if not doc then os.exit(1) end
+print(doc.tag_name or "")
+LUA
+)
+    rm -f "$tmp"
+    [ -n "$tag" ] || return 1
+    printf '%s' "${tag#v}"
+}
+
 # select_url "<assets>" "<name-regex>" → URL of first asset whose name matches.
 select_url()  { printf '%s\n' "$1" | awk -F '\t' -v re="$2" 'NR>1 && $1 ~ re { print $2; exit }'; }
 select_name() { printf '%s\n' "$1" | awk -F '\t' -v re="$2" 'NR>1 && $1 ~ re { print $1; exit }'; }
@@ -274,6 +323,26 @@ sb_upgrade_version() {
     opkg list-upgradable 2>/dev/null | awk -v p="$SINGBOX_PKG" '$1==p {print $NF; exit}'
 }
 
+# Fire a Web Push when a NEW panel version becomes available. Deduped via a marker
+# file so the unattended 6h cron alerts only ONCE per version (not every tick) — the
+# panel chip already shows the update persistently; the push is just the one-time
+# nudge, and it also reaches devices other than the one watching the panel. The same
+# detour-push sender the health checker uses; best-effort — no-op if the sender is
+# absent or there are no subscriptions. The marker is set regardless of how many
+# pushes actually went out, so we never re-alert for the same version (a reboot
+# clears /var/state and may re-nudge once, which is acceptable).
+notify_update_available() {
+    local newver="$1" cur="$2" last=""
+    [ -x "$PUSH_BIN" ] || return 0
+    [ -f "$NOTIFIED_FILE" ] && last=$(cat "$NOTIFIED_FILE" 2>/dev/null)
+    [ "$last" = "$newver" ] && return 0
+    "$PUSH_BIN" send "Detour: новая версия" \
+        "Доступно обновление панели: v$cur → v$newver. Откройте панель, чтобы установить." \
+        >/dev/null 2>&1
+    mkdir -p "$(dirname "$NOTIFIED_FILE")" 2>/dev/null
+    printf '%s' "$newver" > "$NOTIFIED_FILE"
+}
+
 cmd_check() {
     log "checking GitHub for latest release..."
     local assets tag ipk_url cur newver
@@ -287,6 +356,7 @@ cmd_check() {
     if version_gt "$newver" "$cur"; then
         log "update available: $cur -> $newver"
         write_state "update_available" "v$cur -> v$newver" "$newver"
+        notify_update_available "$newver" "$cur"
     else
         log "up to date (current=$cur, latest=$newver)"
         write_state "up_to_date" "v$cur is the latest" "$newver"
@@ -345,11 +415,11 @@ verify_and_install_ipk() {
 # Write the sing-box update-state file the panel reads. Keeps the legacy keys
 # (current/available) so the CGI + UI need no schema change.
 write_bins_state() {
-    local cur="$1" avail="$2" now
+    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" now
     now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
     mkdir -p "$(dirname "$BINS_STATE_FILE")"
     cat > "$BINS_STATE_FILE" <<EOF
-{"current":"$cur","available":"$avail","asset":"$SINGBOX_PKG","last_check":"$now"}
+{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$SINGBOX_PKG","last_check":"$now"}
 EOF
 }
 
@@ -357,12 +427,17 @@ cmd_bins_check() {
     log "checking the opkg feed for a newer sing-box..."
     ensure_feed
     opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
-    local cur avail
+    local cur avail upstream upnew
     cur=$(sb_installed_version); [ -n "$cur" ] || cur="0.0.0"
     avail=$(sb_upgrade_version); [ -n "$avail" ] || avail="$cur"
-    write_bins_state "$cur" "$avail"
+    upstream=$(gh_latest_tag "$SINGBOX_UPSTREAM_REPO") || upstream=$(prev_field "$BINS_STATE_FILE" upstream)
+    upnew=false
+    [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
+    write_bins_state "$cur" "$avail" "$upstream" "$upnew"
     if [ "$cur" != "$avail" ]; then
-        log "sing-box update available: $cur -> $avail"
+        log "sing-box update available (feed): $cur -> $avail"
+    elif [ "$upnew" = true ]; then
+        log "sing-box: newer upstream on GitHub ${cur%-*} -> $upstream (not in feed yet)"
     else
         log "sing-box up to date ($cur)"
     fi
@@ -422,11 +497,11 @@ ensure_tpws() {
 
 # Write the tpws update-state file the panel reads (same shape as bins state).
 write_tpws_state() {
-    local cur="$1" avail="$2" now
+    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" now
     now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
     mkdir -p "$(dirname "$TPWS_STATE_FILE")"
     cat > "$TPWS_STATE_FILE" <<EOF
-{"current":"$cur","available":"$avail","asset":"$TPWS_PKG","last_check":"$now"}
+{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$TPWS_PKG","last_check":"$now"}
 EOF
 }
 
@@ -440,12 +515,17 @@ cmd_tpws_check() {
     log "checking the opkg feed for a newer tpws-zapret..."
     ensure_feed
     opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
-    local cur avail
+    local cur avail upstream upnew
     cur=$(tpws_installed_version); [ -n "$cur" ] || cur="0.0.0"
     avail=$(tpws_upgrade_version); [ -n "$avail" ] || avail="$cur"
-    write_tpws_state "$cur" "$avail"
+    upstream=$(gh_latest_tag "$TPWS_UPSTREAM_REPO") || upstream=$(prev_field "$TPWS_STATE_FILE" upstream)
+    upnew=false
+    [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
+    write_tpws_state "$cur" "$avail" "$upstream" "$upnew"
     if [ "$cur" != "$avail" ]; then
-        log "tpws-zapret update available: $cur -> $avail"
+        log "tpws-zapret update available (feed): $cur -> $avail"
+    elif [ "$upnew" = true ]; then
+        log "tpws-zapret: newer upstream on GitHub ${cur%-*} -> $upstream (not in feed yet)"
     else
         log "tpws-zapret up to date ($cur)"
     fi
@@ -490,11 +570,11 @@ nfqws2_upgrade_version() {
 
 # Write the nfqws2 update-state file the panel reads (same shape as bins/tpws).
 write_nfqws2_state() {
-    local cur="$1" avail="$2" now
+    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" now
     now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
     mkdir -p "$(dirname "$NFQWS2_STATE_FILE")"
     cat > "$NFQWS2_STATE_FILE" <<EOF
-{"current":"$cur","available":"$avail","asset":"$NFQWS2_PKG","last_check":"$now"}
+{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$NFQWS2_PKG","last_check":"$now"}
 EOF
 }
 
@@ -507,12 +587,17 @@ cmd_nfqws2_check() {
     log "checking the opkg feed for a newer nfqws2 (zapret2)..."
     ensure_feed
     opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
-    local cur avail
+    local cur avail upstream upnew
     cur=$(nfqws2_installed_version); [ -n "$cur" ] || cur="0.0.0"
     avail=$(nfqws2_upgrade_version); [ -n "$avail" ] || avail="$cur"
-    write_nfqws2_state "$cur" "$avail"
+    upstream=$(gh_latest_tag "$NFQWS2_UPSTREAM_REPO") || upstream=$(prev_field "$NFQWS2_STATE_FILE" upstream)
+    upnew=false
+    [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
+    write_nfqws2_state "$cur" "$avail" "$upstream" "$upnew"
     if [ "$cur" != "$avail" ]; then
-        log "nfqws2 update available: $cur -> $avail"
+        log "nfqws2 update available (feed): $cur -> $avail"
+    elif [ "$upnew" = true ]; then
+        log "nfqws2: newer upstream on GitHub ${cur%-*} -> $upstream (not in feed yet)"
     else
         log "nfqws2 up to date ($cur)"
     fi
@@ -747,7 +832,7 @@ case "$ACTION" in
     status)            cmd_status ;;
     selftest)          cmd_selftest ;;
     help|--help|-h)
-        sed -n '2,33p' "$0"
+        sed -n '2,34p' "$0"
         ;;
     *) echo "unknown subcommand: $ACTION" >&2
        echo "try: $0 help" >&2
