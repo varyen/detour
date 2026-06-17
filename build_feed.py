@@ -133,8 +133,12 @@ exit 0
 _NFQWS_PRERM = """#!/bin/sh
 set +e
 # Stop zapret2 before replacing the busy binary; detour-bypass re-applies in postinst.
+# Use `stop` (NOT `set off`): `set off` PERSISTS bypass.mode=off, after which the
+# postinst's `if bypass.mode == zapret2` check fails and zapret2 is left disabled
+# after every upgrade. `stop` halts the engine without touching the persisted mode,
+# so the postinst restores it.
 if [ -x /usr/sbin/detour-bypass ] && [ "$(/usr/sbin/detour-bypass mode 2>/dev/null)" = zapret2 ]; then
-    /usr/sbin/detour-bypass set off >/dev/null 2>&1
+    /usr/sbin/detour-bypass stop >/dev/null 2>&1
 fi
 exit 0
 """
