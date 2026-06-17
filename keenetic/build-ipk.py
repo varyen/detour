@@ -104,6 +104,10 @@ FILES = [
     (os.path.join(HERE, "init.d", "S90detour-cron"), "opt/etc/init.d/S90detour-cron", 0o755, False),
     (os.path.join(HERE, "ndm", "netfilter.d", "50-detour.sh"), "opt/etc/ndm/netfilter.d/50-detour.sh", 0o755, False),
     (os.path.join(HERE, "lighttpd", "detour.conf"), "opt/etc/lighttpd/detour.conf", 0o644, False),
+    # TLS-overlay shim for detour.conf's include_shell. MUST stay 0755 and keep its
+    # #!/opt/bin/sh shebang (fix=False — fix_shebang would turn it into /opt/opt/bin/sh).
+    # See lighttpd/detour-ssl-helper.sh for why the inline `cat … 2>/dev/null` crashed lighttpd.
+    (os.path.join(HERE, "lighttpd", "detour-ssl-helper.sh"), "opt/etc/lighttpd/conf.d/detour-ssl-helper.sh", 0o755, False),
     (os.path.join(HERE, "etc", "detour.conf"), "opt/etc/detour/detour.conf", 0o644, False),
 ]
 
@@ -170,7 +174,7 @@ chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update 
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
     /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
-    /opt/etc/init.d/S90detour-cron \\
+    /opt/etc/init.d/S90detour-cron /opt/etc/lighttpd/conf.d/detour-ssl-helper.sh \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
 # Seed the health-check target list on first install (preserved on upgrade).
 if [ ! -f /opt/etc/sing-box/health-urls.list ]; then

@@ -5,6 +5,69 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.15.0] — 2026-06-17
+
+### Исправлено
+
+- **Keenetic: панель не стартовала («panel stopped») из-за TLS-include.**
+  В `detour.conf` строка `include_shell "cat … 2>/dev/null …"` падала: lighttpd
+  выполняет «простую» include_shell-команду НАПРЯМУЮ через `execve`, минуя shell,
+  поэтому `2>/dev/null`, `||` и `:` доставались `cat` как имена файлов — он не
+  находил их, выходил с кодом 1, а ненулевой код include_shell lighttpd считает
+  фатальной ошибкой конфига и не поднимал панель (особенно пока серт ещё не
+  выпущен и оверлея нет). Теперь include_shell указывает на один голый путь —
+  `/opt/etc/lighttpd/conf.d/detour-ssl-helper.sh` (шебанг `#!/opt/bin/sh`): какой
+  бы путь lighttpd ни выбрал (execve или `/bin/sh -c`), ядро уважает шебанг,
+  настоящий shell гасит `cat … 2>/dev/null || true` и команда всегда возвращает
+  0. Затрагивает только Keenetic/Entware (lighttpd); OpenWrt/GL.iNet — без
+  изменений.
+- **Keenetic: чип sing-box вечно горел амбером «новая версия на GitHub», sing-box
+  «не обновлялся».** `detour-update` не переопределял `SINGBOX_PKG` на
+  `sing-box-go` (пакет Entware), поэтому `sb_installed_version` ничего не находил →
+  `current=0.0.0`, а `cmd_bins_check` сравнивал с последним тегом SagerNet на
+  GitHub → `upstream_newer=true` навсегда (любая версия > 0.0.0), и снять амбер
+  было нечем (Entware-пакет в принципе отстаёт от upstream). Теперь на Keenetic
+  `SINGBOX_PKG=sing-box-go` (верная версия в чипе) и проверка upstream на Keenetic
+  отключена — «есть обновление» только когда `opkg upgrade sing-box-go` реально
+  что-то поставит. После установки этой панели чип сразу пересчитывается
+  (`cmd_apply`/`cmd_apply_local` гонят `bins-check` на Keenetic). OpenWrt — без
+  изменений.
+- **Keenetic: не было живого лога при обновлении панели и sing-box.** На Keenetic
+  обновление sing-box (`singbox_opkg_upgrade`) шло синхронно и показывало лишь 3
+  последние строки, а установка панели — детачем в отдельный файл без вывода в
+  браузер (стрим `apply_log` был только на OpenWrt-фид-апплаях). Теперь оба пути
+  гонят вывод в общий `apply_log` с сентинелом: панель стримит лог опкг вживую
+  (`streamApplyLog`) — у sing-box в модалке «Обновление», у панели в модалке
+  «Версия панели» (детачный воркер переживает рестарт lighttpd и дописывает лог).
+
+### Добавлено
+
+- **Keenetic: Web Push в обход упавшего VPN (паритет с OpenWrt).** Раньше
+  `detour-push bypass_applicable` возвращал `n/a` на Keenetic, и push-канал мог
+  не дойти, когда активный VPN лёг. Теперь push-эндпоинты (mtalk.google.com и пр.)
+  попадают в `singbox_whitelist` через conf Entware-dnsmasq
+  (`/opt/etc/detour/dnsmasq.d/singbox-push-bypass.conf`), а firewall-хук уже
+  RETURN'ит whitelist напрямую в режиме all-except → уведомление о падении VPN
+  доходит. `S50detour-dns` пере-генерит этот conf при каждом старте.
+
+### Изменено
+
+- **Keenetic: функц. health-проверка активного VPN теперь с каданс 30–60 с
+  (паритет с OpenWrt).** `detour-cron` запускает `detour-health active` в фоне с
+  само-планируемым бюджетом на ~тик (ALOCK не даёт перекрытия), вместо одной
+  проверки раз в 5 мин — падение активного VPN/авто-переключение/пуш реагируют
+  быстрее. Тюнится `DETOUR_HEALTH_ACTIVE_BUDGET` (0 = старое поведение для слабых
+  коробок).
+- **`deploy_keenetic.py` теперь собирает и ставит канонический `.ipk`** (через
+  `keenetic/build-ipk.py`) вместо ручного копирования урезанного набора файлов.
+  Старая версия тянула панель из устаревшего `router-backup/` и заливала bundled
+  sing-box, которого в slim-`.ipk` уже нет, и не доставляла половину сервисов
+  (S50-DNS, S90-cron, health/push/cert…). Один манифест — `build-ipk.py` FILES;
+  postinst делает seed/старт. Добавлен флаг `--ipk <файл>` для готового пакета.
+- **CLAUDE.md: правило кросс-платформенности (ОБЯЗАТЕЛЬНО).** Любая фича под
+  OpenWrt должна сразу портироваться на Keenetic — зафиксировано в инструкциях
+  проекта.
+
 ## [1.14.2] — 2026-06-17
 
 ### Исправлено

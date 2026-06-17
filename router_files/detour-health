@@ -102,6 +102,11 @@ INTERVAL_MAX=3600               # 60 min — latest a profile is re-checked
 # tick — that loop is shared/blocking and must not be held for ~a minute).
 ACTIVE_MIN=30
 ACTIVE_MAX=60
+# "1" iff the caller explicitly set ACTIVE_LOOP_BUDGET (captured BEFORE the default
+# below collapses unset→55). The Keenetic shim uses it to honor an explicit budget
+# from detour-cron (which now runs `active` backgrounded with a full-tick budget for a
+# 30–60 s cadence) instead of forcing the single-check default.
+_ALB_FROM_ENV="${ACTIVE_LOOP_BUDGET:+1}"
 ACTIVE_LOOP_BUDGET="${ACTIVE_LOOP_BUDGET:-55}"   # env-overridable: =0 → single check (handy for a manual test run)
 # Min seconds between two consecutive AUTO-switches (anti-ping-pong). At a 30–60 s
 # cadence a run of cache-healthy-but-dead candidates could otherwise switch+push
@@ -119,7 +124,10 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     API_BIN=/opt/www/cgi-bin/detour-api
     LOG=/opt/var/log/detour-health.log
     PUSH_BIN=/opt/sbin/detour-push
-    ACTIVE_LOOP_BUDGET=0   # one active check per detour-cron tick (shared loop must not block ~a minute)
+    # Default to a single check per invocation, BUT honor an explicit budget from the
+    # caller: detour-cron now launches `active` BACKGROUNDED with a ~full-tick budget so
+    # it self-paces at 30–60 s (parity with OpenWrt) without blocking the shared loop.
+    [ -n "$_ALB_FROM_ENV" ] || ACTIVE_LOOP_BUDGET=0
 fi
 
 NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0

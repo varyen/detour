@@ -3133,6 +3133,27 @@
             ></div>
           </div>
 
+          <!-- Live install log (streamed from apply_log on Keenetic, where the panel
+               install runs detached). Shared by the GitHub + local-file panel updates. -->
+          <pre
+            id="upd-apply-log"
+            style="
+              display: none;
+              max-height: 240px;
+              overflow: auto;
+              background: var(--bg-elev-solid);
+              color: var(--text-dim);
+              font-size: 11px;
+              line-height: 1.45;
+              padding: 8px 10px;
+              border: 1px solid var(--border);
+              border-radius: 8px;
+              white-space: pre-wrap;
+              word-break: break-word;
+              margin: 12px 0 0;
+            "
+          ></pre>
+
           <div class="modal-footer">
             <button class="btn" onclick="closeUpdateModal()">Закрыть</button>
           </div>
@@ -11996,6 +12017,11 @@
         document.getElementById("upd-github-status").textContent = "";
         document.getElementById("upd-local-status").textContent = "";
         document.getElementById("upd-autocheck-status").textContent = "";
+        var updLog = document.getElementById("upd-apply-log");
+        if (updLog) {
+          updLog.style.display = "none";
+          updLog.textContent = "";
+        }
         loadAutoCheckStatus();
       }
 
@@ -12118,6 +12144,20 @@
         }
         tick();
       }
+      // Keenetic panel update: drive completion/reload from the state file
+      // (pollPanelUpdate) AND stream the detached install's live log into the modal
+      // for display. The detached worker survives the lighttpd restart and keeps
+      // writing apply_log, so the log fills in across the restart gap; streamApplyLog
+      // tolerates the connection drop. Display-only — the state-file poll owns reload.
+      function startPanelUpdatePolling(statusEl) {
+        var logPre = document.getElementById("upd-apply-log");
+        if (logPre) {
+          logPre.style.display = "none";
+          logPre.textContent = "";
+        }
+        streamApplyLog(logPre, function () {});
+        pollPanelUpdate(statusEl);
+      }
       async function applyUpdateGithub() {
         if (
           !confirm(
@@ -12140,7 +12180,7 @@
               // web server. No synchronous result — poll the state file for
               // progress and auto-reload once the new version is live.
               toast("Обновление запущено", "success");
-              pollPanelUpdate(el);
+              startPanelUpdatePolling(el);
             } else {
               el.textContent = "Установлено. Перезагрузите страницу.";
               toast("Панель обновлена", "success");
@@ -12150,7 +12190,7 @@
           // A connection reset mid-restart lands here — the install is already
           // running detached. Poll the state file instead of showing a raw error.
           toast("Обновление, вероятно, запущено", "success");
-          pollPanelUpdate(el);
+          startPanelUpdatePolling(el);
         }
       }
       async function applyUpdateLocal() {
@@ -12194,7 +12234,7 @@
           if (d.ok) {
             if (d.status === "updating") {
               toast("Обновление запущено", "success");
-              pollPanelUpdate(el);
+              startPanelUpdatePolling(el);
             } else {
               el.textContent = "Установлено. Перезагрузите страницу.";
               toast("Панель обновлена из файла", "success");
@@ -12562,50 +12602,6 @@
         tick();
       }
 
-      // Poll `status` until the engine's installed version changes — used when the
-      // apply response was truncated by a CGI/proxy timeout but `opkg upgrade` keeps
-      // running server-side (the «Unexpected end of JSON input» case). Mirrors
-      // pollPanelUpdate, but watches binaries[verKey] rather than the panel version.
-      function pollBinsApply(cfg, preVer, el, btn) {
-        var tries = 0;
-        var maxTries = 60; // ~4 min at 4s — opkg over a throttled feed link
-        function finish(msg) {
-          el.textContent = msg;
-          if (btn) btn.disabled = false;
-        }
-        function tick() {
-          tries++;
-          fetch(API + "?action=status")
-            .then(function (r) {
-              if (!r.ok) throw new Error("http " + r.status);
-              return r.json();
-            })
-            .then(function (d) {
-              var b = (d && d.binaries) || {};
-              var cur = b[cfg.verKey] || "";
-              if (cur && cur !== preVer) {
-                lastBinaries = b;
-                renderBinariesChip(b);
-                refreshUpdateIndicator();
-                toast(cfg.label + " обновлён до " + cur, "success");
-                finish("✅ Обновлено: " + cur);
-                return;
-              }
-              el.textContent = "⏳ Обновление… (" + tries + ")";
-              if (tries < maxTries) setTimeout(tick, 4000);
-              else
-                finish(
-                  "Долго нет ответа — обновите страницу (Ctrl+Shift+R) и проверьте версию.",
-                );
-            })
-            .catch(function () {
-              if (tries < maxTries) setTimeout(tick, 4000);
-              else finish("Обновите страницу и проверьте версию.");
-            });
-        }
-        tick();
-      }
-
       async function singboxOpkgUpgrade() {
         if (
           !confirm(
@@ -12615,44 +12611,38 @@
           return;
         var el = document.getElementById("bins-opkg-status");
         var btn = document.getElementById("bins-opkg-btn");
+        var pre = document.getElementById("bins-apply-log");
         btn.disabled = true;
-        el.textContent = "opkg update + upgrade… (может занять минуту)";
-        var preVer = (lastBinaries || {}).singbox_version || "";
+        el.textContent = "Запуск обновления…";
         try {
-          // Tolerant, like binsModalApply: the Entware opkg upgrade + sing-box
-          // restart can outrun the CGI/proxy timeout and truncate the body, which
-          // api()'s r.json() would surface as «Unexpected end of JSON input».
-          var r = await fetch(API + "?action=singbox_opkg_upgrade", {
-            method: "POST",
-            headers: { "Content-Type": "text/plain" },
-            body: "",
-          });
-          if (r.status === 401) {
-            showLogin();
+          // The opkg upgrade now runs DETACHED on the router (returns {status:"started"}
+          // immediately) and streams output to apply_log — so the body can't truncate
+          // («Unexpected end of JSON input») and the operator sees what opkg does, live.
+          var d = await api("singbox_opkg_upgrade", "POST", "");
+          if (!d || !d.ok) {
+            el.textContent =
+              "Ошибка: " + ((d && d.error) || "не удалось запустить обновление");
             btn.disabled = false;
             return;
           }
-          var d = await readApplyResponse(r);
-          if (d && d.ok && d.status === "updating") {
-            el.textContent = "⏳ Обновление продолжается на роутере…";
-            pollBinsApply(BINS_ENGINES.singbox, preVer, el, btn);
-            return;
-          }
-          if (d && d.ok) {
-            el.textContent = (d.output || "Готово.")
-              .split("\n")
-              .filter(Boolean)
-              .slice(-3)
-              .join(" · ");
-            toast("sing-box обновлён из OPKG", "success");
-            loadStatus();
-          } else {
-            el.textContent = "Ошибка: " + (d.error || "");
-          }
-          btn.disabled = false;
+          el.textContent = "⏳ Выполняется — лог ниже…";
+          streamApplyLog(pre, function (rc) {
+            if (rc === "0" || rc === 0) {
+              el.textContent = "✅ Готово.";
+              toast("sing-box обновлён из OPKG", "success");
+              loadStatus();
+              refreshUpdateIndicator();
+            } else if (rc === null) {
+              el.textContent =
+                "Долго нет ответа — см. лог; при необходимости обновите страницу.";
+            } else {
+              el.textContent = "Ошибка обновления (код " + rc + ") — см. лог ниже.";
+            }
+            btn.disabled = false;
+          });
         } catch (e) {
-          el.textContent = "⏳ Обновление продолжается на роутере…";
-          pollBinsApply(BINS_ENGINES.singbox, preVer, el, btn);
+          el.textContent = "Ошибка: " + e.message;
+          btn.disabled = false;
         }
       }
       function closeBinsModal() {

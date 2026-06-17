@@ -1570,8 +1570,11 @@ panel_update_apply)
         # The detour-keenetic install restarts S51detour-panel (the lighttpd that
         # hosts this CGI), which would kill the in-flight opkg mid-install. Run it
         # detached and answer "updating" right away; the UI polls panel_update_check
-        # (state file) and the user reloads once the panel is back.
-        detach_bg "$OPT/var/log/detour-update.log" "\"$UPDATE_BIN\" apply"
+        # (state file) and the user reloads once the panel is back. Stream to the live
+        # apply log (apply_log) too — the detached worker survives the lighttpd restart
+        # and keeps writing, so the UI can show opkg's output across the gap.
+        : > "$APPLY_LOG" 2>/dev/null
+        detach_bg "$APPLY_LOG" "\"$UPDATE_BIN\" apply; echo \"$APPLY_DONE_MARK rc=\$?\""
         printf '{"ok":true,"status":"updating"}'
     else
         # OpenWrt: the panel rides the system uhttpd, which the install does NOT
@@ -1635,8 +1638,10 @@ panel_update_local)
     if [ "$PLATFORM" = "keenetic" ]; then
         # Installing the panel package restarts the lighttpd hosting this CGI
         # (see panel_update_apply) — detach so it can't kill the install mid-way.
-        # The .ipk is already fully on disk; clean it up inside the worker.
-        detach_bg "$OPT/var/log/detour-update.log" "$INSTALL_CMD; rm -f \"$IPK\" \"$SIG\""
+        # The .ipk is already fully on disk; clean it up inside the worker. Stream to
+        # the live apply log (apply_log) so the UI can show the install output.
+        : > "$APPLY_LOG" 2>/dev/null
+        detach_bg "$APPLY_LOG" "$INSTALL_CMD; _rc=\$?; rm -f \"$IPK\" \"$SIG\"; echo \"$APPLY_DONE_MARK rc=\$_rc\""
         printf '{"ok":true,"status":"updating"}'
     else
         if [ -x "$UPDATE_BIN" ] && [ -s "$SIG" ]; then
@@ -1871,23 +1876,19 @@ bypass_strategy)
     ;;
 
 singbox_opkg_upgrade)
-    # Keenetic/Entware: pull the latest sing-box from the opkg feed (sing-box-go),
-    # re-disable the package's own auto-start, then restart our service.
+    # Keenetic/Entware: pull the latest sing-box from Entware (sing-box-go), re-disable
+    # the package's own auto-start, then restart our service. Runs DETACHED with a live
+    # log (apply_log) so the panel streams opkg output in real time — same UX as the
+    # OpenWrt feed applies. sing-box's restart doesn't touch the panel's lighttpd, so
+    # this CGI survives; detaching also keeps a slow opkg run off the HTTP timeout
+    # (previously the synchronous run could truncate as «Unexpected end of JSON input»).
+    # The sentinel rc reflects `opkg upgrade`, not the trailing restart/bins-check.
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     command -v opkg >/dev/null 2>&1 || { json_err "opkg not available"; exit 0; }
-    OUT=$(opkg update 2>&1; echo '---'; opkg upgrade sing-box-go 2>&1)
-    RC=$?
-    if [ -f /opt/etc/init.d/S99sing-box ]; then
-        /opt/etc/init.d/S99sing-box stop 2>/dev/null
-        chmod 0644 /opt/etc/init.d/S99sing-box 2>/dev/null
-    fi
-    $SINGBOX_INITD restart >/dev/null 2>&1
-    sleep 2
-    if [ "$RC" -eq 0 ]; then
-        printf '{"ok":true,"output":"%s"}' "$(printf '%s' "$OUT" | tail -12 | json_escape)"
-    else
-        json_err "$(printf '%s' "$OUT" | tail -12 | json_escape)"
-    fi
+    SB_CMD="opkg update; echo '--- opkg upgrade sing-box-go ---'; opkg upgrade sing-box-go; SB_RC=\$?;"
+    SB_CMD="$SB_CMD if [ -f /opt/etc/init.d/S99sing-box ]; then /opt/etc/init.d/S99sing-box stop 2>/dev/null; chmod 0644 /opt/etc/init.d/S99sing-box 2>/dev/null; fi;"
+    SB_CMD="$SB_CMD $SINGBOX_INITD restart >/dev/null 2>&1; \"$UPDATE_BIN\" bins-check >/dev/null 2>&1; [ \"\$SB_RC\" = 0 ]"
+    start_apply "$SB_CMD"
     ;;
 
 singbox_config)

@@ -119,6 +119,11 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     ASSET_RE='^detour-keenetic_.*\.ipk$'
     ASSET_SIG_RE='^detour-keenetic_.*\.ipk\.sig$'
     STASH_IPK=/opt/etc/detour/installed.ipk
+    # sing-box on Keenetic is Entware's `sing-box-go`, NOT our `sing-box` feed pkg.
+    # Without this override sb_installed_version/sb_upgrade_version query the wrong
+    # package, find nothing, report current="0.0.0", and the bins chip stays amber
+    # forever (every GitHub upstream beats 0.0.0). See cmd_bins_check.
+    SINGBOX_PKG=sing-box-go
     # GH_OWNER/GH_REPO inherit the varyen/detour defaults set above.
 fi
 [ -f "$CONFIG" ] && . "$CONFIG"
@@ -430,9 +435,19 @@ cmd_bins_check() {
     local cur avail upstream upnew
     cur=$(sb_installed_version); [ -n "$cur" ] || cur="0.0.0"
     avail=$(sb_upgrade_version); [ -n "$avail" ] || avail="$cur"
-    upstream=$(gh_latest_tag "$SINGBOX_UPSTREAM_REPO") || upstream=$(prev_field "$BINS_STATE_FILE" upstream)
-    upnew=false
-    [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
+    if [ "$KEENETIC" = 1 ]; then
+        # Keenetic: sing-box is Entware's `sing-box-go`, which we don't control and
+        # which always lags SagerNet's GitHub latest. The "newer upstream on GitHub"
+        # signal (amber chip) is meaningful only on OpenWrt, where WE own the feed and
+        # can bump it. Here the only actionable update is what `opkg upgrade
+        # sing-box-go` can install (cur != avail), so suppress the upstream probe —
+        # otherwise the chip is pinned amber permanently with nothing to install.
+        upstream=""; upnew=false
+    else
+        upstream=$(gh_latest_tag "$SINGBOX_UPSTREAM_REPO") || upstream=$(prev_field "$BINS_STATE_FILE" upstream)
+        upnew=false
+        [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
+    fi
     write_bins_state "$cur" "$avail" "$upstream" "$upnew"
     if [ "$cur" != "$avail" ]; then
         log "sing-box update available (feed): $cur -> $avail"
@@ -467,7 +482,7 @@ cmd_bins_apply() {
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
     ensure_feed
     log "opkg update + upgrade sing-box from the feed..."
-    opkg_update_retry || die "opkg update failed после 4 попыток (feed unreachable?)"
+    opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
     if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG "; then
         # `opkg upgrade` no-ops if already newest; fall back to a forced install.
         opkg upgrade "$SINGBOX_PKG" 2>&1 \
@@ -556,7 +571,7 @@ cmd_tpws_apply() {
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
     ensure_feed
     log "opkg update + upgrade tpws-zapret from the feed..."
-    opkg_update_retry || die "opkg update failed после 4 попыток (feed unreachable?)"
+    opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
     if opkg list-installed "$TPWS_PKG" 2>/dev/null | grep -q "^$TPWS_PKG "; then
         # `opkg upgrade` no-ops if already newest; fall back to a forced install.
         opkg upgrade "$TPWS_PKG" 2>&1 \
@@ -628,7 +643,7 @@ cmd_nfqws2_apply() {
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
     ensure_feed
     log "opkg update + upgrade nfqws2 from the feed..."
-    opkg_update_retry || die "opkg update failed после 4 попыток (feed unreachable?)"
+    opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
     if opkg list-installed "$NFQWS2_PKG" 2>/dev/null | grep -q "^$NFQWS2_PKG "; then
         # `opkg upgrade` no-ops if already newest; fall back to a forced install.
         opkg upgrade "$NFQWS2_PKG" 2>&1 \
@@ -710,6 +725,14 @@ cmd_apply() {
     rm -rf "$tmp"
     write_state "applied" "installed v$newver via opkg" "$newver"
     log "installed v$newver successfully"
+    # Keenetic only: refresh the sing-box chip state with THIS (just-installed) updater
+    # so a fixed detour-bins.json replaces the stale one an older buggy bins-check left
+    # (current=0.0.0 → chip pinned amber). Safe here because the Keenetic apply runs
+    # DETACHED — on OpenWrt cmd_apply is synchronous and the extra opkg update + GitHub
+    # probe could push the response past the proxy timeout (and the chip is already
+    # correct there). Cheap + non-fatal.
+    if [ "$KEENETIC" = 1 ]; then cmd_bins_check >/dev/null 2>&1 || true; fi
+    return 0   # never let the trailing refresh flip cmd_apply's success status
 }
 
 cmd_apply_local() {
@@ -728,6 +751,9 @@ cmd_apply_local() {
     local cur
     cur=$(current_version)
     write_state "applied" "installed v$cur via local ipk" "$cur"
+    # Keenetic only: refresh the sing-box chip state (see cmd_apply for the rationale).
+    if [ "$KEENETIC" = 1 ]; then cmd_bins_check >/dev/null 2>&1 || true; fi
+    return 0   # never let the trailing refresh flip cmd_apply_local's success status
 }
 
 cmd_rollback() {

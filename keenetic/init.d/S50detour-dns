@@ -86,6 +86,11 @@ regen() {
     else
         : > "$DNSMASQ_CONF_DIR/singbox-routemap.conf"
     fi
+
+    # Keep the Web-Push VPN-bypass conf fresh (push endpoints → singbox_whitelist so
+    # the push channel rides the WAN when the active VPN is down). --no-reload: we are
+    # about to (re)start dnsmasq ourselves, which loads the conf-dir. Best-effort.
+    [ -x /opt/sbin/detour-push ] && /opt/sbin/detour-push bypass-apply --no-reload >/dev/null 2>&1
 }
 
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; }

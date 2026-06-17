@@ -56,6 +56,10 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     VAPID_KEY="$DETOUR_DIR/vapid.pem"
     VAPID_PUB="$DETOUR_DIR/vapid.pub"
     PUSH_CONF="$DETOUR_DIR/push.conf"
+    # VPN-bypass works here too: the Keenetic firewall hook RETURNs $IPSET_WL direct
+    # in all-except mode (50-detour.sh), and the detour Entware dnsmasq (S50detour-dns)
+    # loads this conf-dir + supports `ipset=`. Write the bypass file there.
+    PUSH_BYPASS_CONF=/opt/etc/detour/dnsmasq.d/singbox-push-bypass.conf
 fi
 [ -f "$PUSH_CONF" ] && . "$PUSH_CONF" 2>/dev/null
 
@@ -232,15 +236,22 @@ LUA
 }
 
 reload_dnsmasq() {
-    # ipset= directives are config (not hosts) → need a restart, not a SIGHUP reload.
+    # ipset= directives are config (not hosts) → need a restart, not a SIGHUP reload
+    # (dnsmasq doesn't re-read --conf-dir on SIGHUP).
+    if [ "$PLATFORM" = keenetic ]; then
+        # The detour Entware dnsmasq owns the conf-dir; S50detour-dns restarts it.
+        [ -x /opt/etc/init.d/S50detour-dns ] && /opt/etc/init.d/S50detour-dns restart >/dev/null 2>&1
+        return 0
+    fi
     /etc/init.d/dnsmasq restart >/dev/null 2>&1
 }
 
-# Whether the VPN-bypass is meaningfully applicable here: OpenWrt + all-except mode
-# (the singbox_whitelist ipset exists). In other modes / on Keenetic, push hosts already
-# go direct (or routing differs), so the bypass is a no-op.
+# Whether the VPN-bypass is meaningfully applicable here: the singbox_whitelist ipset
+# exists (all-except mode), so the firewall RETURNs whitelisted dst direct. Works on
+# both OpenWrt (system dnsmasq) and Keenetic (detour Entware dnsmasq tags ipset on
+# resolution, 50-detour.sh RETURNs the WL ipset). In proxy-list mode the ipset still
+# exists but push hosts aren't redirected anyway, so writing the conf is a harmless no-op.
 bypass_applicable() {
-    [ "$PLATFORM" = keenetic ] && return 1
     command -v ipset >/dev/null 2>&1 || return 1
     ipset list "$IPSET_WL" >/dev/null 2>&1
 }

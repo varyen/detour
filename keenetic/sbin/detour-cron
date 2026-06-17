@@ -25,6 +25,9 @@ LOGDIR=/opt/var/log
 UPDATE_CONF=/opt/etc/detour/update.conf
 TICK="${DETOUR_CRON_TICK:-300}"               # base loop period, seconds
 BOOT_DELAY="${DETOUR_CRON_BOOT_DELAY:-120}"   # settle (let LAN/DNS come up) before the first pass
+# Self-paced budget for the backgrounded active-VPN health check (see below). Default
+# TICK-30 → ~30–60 s probe cadence like OpenWrt; set 0 to do one check per tick.
+: "${DETOUR_HEALTH_ACTIVE_BUDGET:=$((TICK - 30))}"; export DETOUR_HEALTH_ACTIVE_BUDGET
 
 mkdir -p "$LOGDIR"
 
@@ -55,14 +58,18 @@ while :; do
     [ -x /opt/sbin/detour-ping ] && \
         /opt/sbin/detour-ping >"$LOGDIR/detour-ping.log" 2>&1
 
-    # Focused functional check of ONLY the active profile — every tick (~5 min;
-    # coarser than OpenWrt's per-minute self-paced loop, but Keenetic is secondary —
-    # the shim sets ACTIVE_LOOP_BUDGET=0 so this does ONE check per tick instead of
-    # blocking this shared loop for ~a minute). Sends a Web Push alert on DOWN (incl.
-    # connecting to a broken profile) / auto-switch. Self-no-ops if the Entware
-    # sing-box lacks clash_api (no functional check possible there).
-    [ -x /opt/sbin/detour-health ] && \
-        /opt/sbin/detour-health active >>"$LOGDIR/detour-health.log" 2>&1
+    # Focused functional check of ONLY the active profile. Run it BACKGROUNDED with a
+    # self-paced budget (~one tick) so detour-health re-probes every 30–60 s — PARITY
+    # with OpenWrt's per-minute cadence — WITHOUT blocking this shared sequential loop.
+    # detour-health's ALOCK prevents overlap if the prior tick's run is still going
+    # (budget < TICK leaves a margin). Sends a Web Push alert on DOWN (incl. connecting
+    # to a broken profile) / auto-switch. Self-no-ops if the Entware sing-box lacks
+    # clash_api. Budget tunable via DETOUR_HEALTH_ACTIVE_BUDGET (default TICK-30; set 0
+    # to revert to one check per tick on a constrained box).
+    if [ -x /opt/sbin/detour-health ]; then
+        ACTIVE_LOOP_BUDGET="$DETOUR_HEALTH_ACTIVE_BUDGET" \
+            /opt/sbin/detour-health active >>"$LOGDIR/detour-health.log" 2>&1 &
+    fi
 
     # Subscription refresh — hourly.
     if [ $((n % 12)) -eq 0 ] && [ -x /opt/sbin/subscription-refresh ]; then
