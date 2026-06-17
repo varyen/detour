@@ -12144,19 +12144,45 @@
         }
         tick();
       }
-      // Keenetic panel update: drive completion/reload from the state file
-      // (pollPanelUpdate) AND stream the detached install's live log into the modal
-      // for display. The detached worker survives the lighttpd restart and keeps
-      // writing apply_log, so the log fills in across the restart gap; streamApplyLog
-      // tolerates the connection drop. Display-only — the state-file poll owns reload.
+      // Panel self-update progress: the install runs DETACHED on both platforms and
+      // streams its output to apply_log, so we show that live log in the modal (the
+      // `upd-apply-log` <pre>) — same UX as the binary updates. How completion/reload
+      // is detected differs per platform:
+      //   - Keenetic: the install restarts the panel's own lighttpd, so the live log
+      //     goes briefly unreachable and there's no synchronous result. The updater's
+      //     state file (pollPanelUpdate) is the authority for completion/reload;
+      //     streamApplyLog is display-only and fills in across the restart gap.
+      //   - OpenWrt: the panel rides the system uhttpd (NOT restarted by the install),
+      //     so this CGI stays reachable — drive completion straight from the live
+      //     log's exit-code sentinel, exactly like the binary updates.
       function startPanelUpdatePolling(statusEl) {
         var logPre = document.getElementById("upd-apply-log");
         if (logPre) {
           logPre.style.display = "none";
           logPre.textContent = "";
         }
-        streamApplyLog(logPre, function () {});
-        pollPanelUpdate(statusEl);
+        if (currentPlatform === "keenetic") {
+          streamApplyLog(logPre, function () {});
+          pollPanelUpdate(statusEl);
+        } else {
+          statusEl.textContent = "⏳ Установка — лог ниже…";
+          streamApplyLog(logPre, function (rc) {
+            if (rc === "0" || rc === 0) {
+              statusEl.textContent = "✅ Обновлено. Перезагрузка…";
+              toast("Панель обновлена", "success");
+              setTimeout(function () {
+                location.reload();
+              }, 1500);
+            } else if (rc === null) {
+              statusEl.textContent =
+                "Долго нет ответа — см. лог; обновите страницу и проверьте версию.";
+            } else {
+              statusEl.textContent =
+                "Ошибка обновления (код " + rc + ") — см. лог ниже.";
+              toast("Обновление не удалось", "error");
+            }
+          });
+        }
       }
       async function applyUpdateGithub() {
         if (
@@ -12176,9 +12202,9 @@
           var d = await readApplyResponse(r);
           if (d.ok) {
             if (d.status === "updating") {
-              // Keenetic: install runs detached because it restarts the panel's
-              // web server. No synchronous result — poll the state file for
-              // progress and auto-reload once the new version is live.
+              // Install runs detached on both platforms — stream the live installer
+              // log and drive completion/reload from it (OpenWrt) or the updater's
+              // state file (Keenetic). See startPanelUpdatePolling.
               toast("Обновление запущено", "success");
               startPanelUpdatePolling(el);
             } else {
