@@ -3273,6 +3273,26 @@
             <p class="helper-text-block" id="bins-unavail-text"></p>
           </div>
 
+          <!-- Live apply log (streamed from apply_log while an update runs). -->
+          <pre
+            id="bins-apply-log"
+            style="
+              display: none;
+              max-height: 240px;
+              overflow: auto;
+              background: var(--bg-elev-solid);
+              color: var(--text-dim);
+              font-size: 11px;
+              line-height: 1.45;
+              padding: 8px 10px;
+              border: 1px solid var(--border);
+              border-radius: 8px;
+              white-space: pre-wrap;
+              word-break: break-word;
+              margin: 0 0 12px;
+            "
+          ></pre>
+
           <div class="modal-footer">
             <button class="btn" onclick="closeBinsModal()">Закрыть</button>
           </div>
@@ -12384,6 +12404,11 @@
         document.getElementById("bins-modal-status").textContent = "";
         var os = document.getElementById("bins-opkg-status");
         if (os) os.textContent = "";
+        var applyLog = document.getElementById("bins-apply-log");
+        if (applyLog) {
+          applyLog.style.display = "none";
+          applyLog.textContent = "";
+        }
 
         // zapret2 where NFQUEUE is unavailable → unsupported note, no actions.
         if (engine === "zapret2" && !zapret2Supported(b)) {
@@ -12455,23 +12480,119 @@
           return;
         var el = document.getElementById("bins-modal-status");
         var btn = document.getElementById("bins-modal-apply-btn");
+        var pre = document.getElementById("bins-apply-log");
         if (btn) btn.disabled = true;
-        el.textContent = "opkg update + upgrade… (может занять минуту)";
+        el.textContent = "Запуск обновления…";
         try {
+          // The apply now runs DETACHED on the router (returns {status:"started"}
+          // immediately) and streams output to a log — so no truncated response,
+          // and the operator sees exactly what opkg does, live.
           var d = await api(cfg.applyAction, "POST", "");
-          if (d && d.ok) {
-            el.textContent = "Установлено.";
-            toast(cfg.label + " обновлён", "success");
-            await loadStatus();
-            refreshUpdateIndicator();
-          } else {
-            el.textContent = "Ошибка: " + ((d && d.error) || "не удалось обновить");
+          if (!d || !d.ok) {
+            el.textContent =
+              "Ошибка: " + ((d && d.error) || "не удалось запустить обновление");
+            if (btn) btn.disabled = false;
+            return;
           }
+          el.textContent = "⏳ Выполняется — лог ниже…";
+          streamApplyLog(pre, function (rc) {
+            if (rc === "0" || rc === 0) {
+              el.textContent = "✅ Готово.";
+              toast(cfg.label + " обновлён", "success");
+              loadStatus();
+              refreshUpdateIndicator();
+            } else if (rc === null) {
+              el.textContent =
+                "Долго нет ответа — см. лог; при необходимости обновите страницу.";
+            } else {
+              el.textContent = "Ошибка обновления (код " + rc + ") — см. лог ниже.";
+            }
+            if (btn) btn.disabled = false;
+          });
         } catch (e) {
           el.textContent = "Ошибка: " + e.message;
-        } finally {
           if (btn) btn.disabled = false;
         }
+      }
+
+      // Poll the detached apply's live log (apply_log) into `pre`, scrolling to the
+      // tail, until the completion sentinel appears. Calls onDone(rc) — rc is the
+      // exit code string, or null on timeout. Used by the binary (feed) applies.
+      function streamApplyLog(pre, onDone) {
+        var tries = 0;
+        var maxTries = 150; // ~5 min at 2s
+        if (pre) {
+          pre.style.display = "block";
+          pre.textContent = "…";
+        }
+        function tick() {
+          tries++;
+          fetch(API + "?action=apply_log")
+            .then(function (r) {
+              return r.json();
+            })
+            .then(function (d) {
+              if (pre && d && typeof d.log === "string") {
+                pre.textContent = d.log || "…";
+                pre.scrollTop = pre.scrollHeight;
+              }
+              if (d && d.done) {
+                onDone(d.rc);
+                return;
+              }
+              if (tries < maxTries) setTimeout(tick, 2000);
+              else onDone(null);
+            })
+            .catch(function () {
+              if (tries < maxTries) setTimeout(tick, 2000);
+              else onDone(null);
+            });
+        }
+        tick();
+      }
+
+      // Poll `status` until the engine's installed version changes — used when the
+      // apply response was truncated by a CGI/proxy timeout but `opkg upgrade` keeps
+      // running server-side (the «Unexpected end of JSON input» case). Mirrors
+      // pollPanelUpdate, but watches binaries[verKey] rather than the panel version.
+      function pollBinsApply(cfg, preVer, el, btn) {
+        var tries = 0;
+        var maxTries = 60; // ~4 min at 4s — opkg over a throttled feed link
+        function finish(msg) {
+          el.textContent = msg;
+          if (btn) btn.disabled = false;
+        }
+        function tick() {
+          tries++;
+          fetch(API + "?action=status")
+            .then(function (r) {
+              if (!r.ok) throw new Error("http " + r.status);
+              return r.json();
+            })
+            .then(function (d) {
+              var b = (d && d.binaries) || {};
+              var cur = b[cfg.verKey] || "";
+              if (cur && cur !== preVer) {
+                lastBinaries = b;
+                renderBinariesChip(b);
+                refreshUpdateIndicator();
+                toast(cfg.label + " обновлён до " + cur, "success");
+                finish("✅ Обновлено: " + cur);
+                return;
+              }
+              el.textContent = "⏳ Обновление… (" + tries + ")";
+              if (tries < maxTries) setTimeout(tick, 4000);
+              else
+                finish(
+                  "Долго нет ответа — обновите страницу (Ctrl+Shift+R) и проверьте версию.",
+                );
+            })
+            .catch(function () {
+              if (tries < maxTries) setTimeout(tick, 4000);
+              else finish("Обновите страницу и проверьте версию.");
+            });
+        }
+        tick();
       }
 
       async function singboxOpkgUpgrade() {
@@ -12485,9 +12606,28 @@
         var btn = document.getElementById("bins-opkg-btn");
         btn.disabled = true;
         el.textContent = "opkg update + upgrade… (может занять минуту)";
+        var preVer = (lastBinaries || {}).singbox_version || "";
         try {
-          var d = await api("singbox_opkg_upgrade", "POST", "");
-          if (d.ok) {
+          // Tolerant, like binsModalApply: the Entware opkg upgrade + sing-box
+          // restart can outrun the CGI/proxy timeout and truncate the body, which
+          // api()'s r.json() would surface as «Unexpected end of JSON input».
+          var r = await fetch(API + "?action=singbox_opkg_upgrade", {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: "",
+          });
+          if (r.status === 401) {
+            showLogin();
+            btn.disabled = false;
+            return;
+          }
+          var d = await readApplyResponse(r);
+          if (d && d.ok && d.status === "updating") {
+            el.textContent = "⏳ Обновление продолжается на роутере…";
+            pollBinsApply(BINS_ENGINES.singbox, preVer, el, btn);
+            return;
+          }
+          if (d && d.ok) {
             el.textContent = (d.output || "Готово.")
               .split("\n")
               .filter(Boolean)
@@ -12498,10 +12638,10 @@
           } else {
             el.textContent = "Ошибка: " + (d.error || "");
           }
-        } catch (e) {
-          el.textContent = "Ошибка: " + e.message;
-        } finally {
           btn.disabled = false;
+        } catch (e) {
+          el.textContent = "⏳ Обновление продолжается на роутере…";
+          pollBinsApply(BINS_ENGINES.singbox, preVer, el, btn);
         }
       }
       function closeBinsModal() {
