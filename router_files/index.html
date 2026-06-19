@@ -12146,43 +12146,47 @@
       }
       // Panel self-update progress: the install runs DETACHED on both platforms and
       // streams its output to apply_log, so we show that live log in the modal (the
-      // `upd-apply-log` <pre>) — same UX as the binary updates. How completion/reload
-      // is detected differs per platform:
-      //   - Keenetic: the install restarts the panel's own lighttpd, so the live log
-      //     goes briefly unreachable and there's no synchronous result. The updater's
-      //     state file (pollPanelUpdate) is the authority for completion/reload;
-      //     streamApplyLog is display-only and fills in across the restart gap.
+      // `upd-apply-log` <pre>) and drive completion/reload straight from the log's
+      // exit-code sentinel — same UX as the binary updates, on BOTH platforms now.
       //   - OpenWrt: the panel rides the system uhttpd (NOT restarted by the install),
-      //     so this CGI stays reachable — drive completion straight from the live
-      //     log's exit-code sentinel, exactly like the binary updates.
+      //     so this CGI stays reachable and streams the whole install live.
+      //   - Keenetic: the panel is a dedicated lighttpd. The package prerm/postinst now
+      //     KEEP it serving across the install (SELFUPDATE_MARK) and restart it only at
+      //     the very end, so apply_log streams live too. The FIRST upgrade to such a
+      //     build is the exception — the OLD (already-installed) prerm still stops the
+      //     lighttpd, so the log goes dark mid-install and only fills in once the new
+      //     panel is back; if streamApplyLog never reaches the sentinel (rc === null),
+      //     we fall back to the updater's state file (pollPanelUpdate) to confirm+reload.
       function startPanelUpdatePolling(statusEl) {
         var logPre = document.getElementById("upd-apply-log");
         if (logPre) {
           logPre.style.display = "none";
           logPre.textContent = "";
         }
-        if (currentPlatform === "keenetic") {
-          streamApplyLog(logPre, function () {});
-          pollPanelUpdate(statusEl);
-        } else {
-          statusEl.textContent = "⏳ Установка — лог ниже…";
-          streamApplyLog(logPre, function (rc) {
-            if (rc === "0" || rc === 0) {
-              statusEl.textContent = "✅ Обновлено. Перезагрузка…";
-              toast("Панель обновлена", "success");
-              setTimeout(function () {
-                location.reload();
-              }, 1500);
-            } else if (rc === null) {
-              statusEl.textContent =
-                "Долго нет ответа — см. лог; обновите страницу и проверьте версию.";
+        statusEl.textContent = "⏳ Установка — лог ниже…";
+        streamApplyLog(logPre, function (rc) {
+          if (rc === "0" || rc === 0) {
+            statusEl.textContent = "✅ Обновлено. Перезагрузка…";
+            toast("Панель обновлена", "success");
+            setTimeout(function () {
+              location.reload();
+            }, 1500);
+          } else if (rc === null) {
+            // No completion sentinel — on Keenetic this is the first-upgrade case above
+            // (the panel's lighttpd was down for the whole install). Confirm via the
+            // updater's state file instead. OpenWrt has no such gap → just advise reload.
+            if (currentPlatform === "keenetic") {
+              pollPanelUpdate(statusEl);
             } else {
               statusEl.textContent =
-                "Ошибка обновления (код " + rc + ") — см. лог ниже.";
-              toast("Обновление не удалось", "error");
+                "Долго нет ответа — см. лог; обновите страницу и проверьте версию.";
             }
-          });
-        }
+          } else {
+            statusEl.textContent =
+              "Ошибка обновления (код " + rc + ") — см. лог ниже.";
+            toast("Обновление не удалось", "error");
+          }
+        });
       }
       async function applyUpdateGithub() {
         if (

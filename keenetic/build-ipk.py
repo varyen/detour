@@ -214,8 +214,12 @@ if [ ! -f /opt/etc/detour.auth ]; then
     H=$(printf '%s' 'detour' | openssl passwd -6 -stdin 2>/dev/null)
     [ -n "$H" ] && {{ printf 'admin:%s\\n' "$H" > /opt/etc/detour.auth; chmod 600 /opt/etc/detour.auth; }}
 fi
-# Start now (Entware rc.unslung auto-starts /opt/etc/init.d/S* on boot).
-/opt/etc/init.d/S51detour-panel start 2>/dev/null
+# Start now (Entware rc.unslung auto-starts /opt/etc/init.d/S* on boot). On a panel
+# SELF-UPDATE the old lighttpd is still serving (prerm kept it up to stream this install's
+# log) — skip the early start here and restart it at the very END of this postinst (below),
+# so apply_log stays reachable for as long as possible. Fresh/manual install (no marker) →
+# start it now, before the proxies, so the UI is up to control them.
+[ -f /tmp/detour-panel-selfupdate ] || /opt/etc/init.d/S51detour-panel start 2>/dev/null
 /opt/etc/init.d/S52detour-singbox start 2>/dev/null
 # The DPI-bypass switch (detour-bypass) OWNS the zapret engine lifecycle. Only fall
 # back to the standalone zapret autostart when the switch was never used (no
@@ -232,6 +236,14 @@ echo "  Panel:  http://<router-ip>:8080/detour/"
 echo "  Login:  admin / detour   (CHANGE the password in the panel!)"
 echo "  Note: domain-based routing needs DNS+ipset wiring (not in this build) —"
 echo "        for now add explicit IPs/CIDRs, or test with an added VPN profile."
+# Panel SELF-UPDATE: everything is in place — restart the kept-alive lighttpd LAST so it
+# loads any new config/CGI, then drop the marker. This is the only moment the live log
+# blips; the detached worker writes the apply_log completion sentinel right after opkg
+# returns, so the browser reconnects, shows the final log and reloads.
+if [ -f /tmp/detour-panel-selfupdate ]; then
+    rm -f /tmp/detour-panel-selfupdate
+    /opt/etc/init.d/S51detour-panel restart 2>/dev/null
+fi
 exit 0
 """
     prerm = """#!/bin/sh
@@ -243,7 +255,14 @@ set +e
 [ -x /opt/sbin/detour-bypass ] && /opt/sbin/detour-bypass stop 2>/dev/null
 /opt/etc/init.d/S53detour-zapret stop 2>/dev/null
 /opt/etc/init.d/S52detour-singbox stop 2>/dev/null
-/opt/etc/init.d/S51detour-panel stop 2>/dev/null
+# Panel web server: on a panel-driven SELF-UPDATE (marker set by the panel CGI) KEEP it
+# running so the browser can stream this install's log live (apply_log) — the new postinst
+# restarts it at the very end. The CGI/HTML are re-read per request, so serving from the
+# old process during the swap is safe; only a changed lighttpd config needs the restart.
+# On a real removal / manual op (no marker) stop it normally so we don't orphan it.
+if [ ! -f /tmp/detour-panel-selfupdate ]; then
+    /opt/etc/init.d/S51detour-panel stop 2>/dev/null
+fi
 exit 0
 """
     postrm = """#!/bin/sh

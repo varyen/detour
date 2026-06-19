@@ -202,6 +202,14 @@ detach_bg() {
 # response that surfaced as «Unexpected end of JSON input» can no longer happen.
 APPLY_LOG=/tmp/detour-apply.log
 APPLY_DONE_MARK="===DETOUR_APPLY_DONE"
+# Keenetic only: a panel self-install restarts the panel's OWN lighttpd (S51detour-panel),
+# which serves this CGI and the apply_log stream — so the live log would go dark for the
+# whole install (the OpenWrt panel rides the system uhttpd and has no such gap). The
+# Keenetic package prerm/postinst key off this marker to KEEP lighttpd serving during the
+# install and restart it only at the very end, so the browser streams the install log live
+# (apply_log) — OpenWrt parity. Set right before the detached opkg starts; the new postinst
+# removes it. (Harmless/ignored on OpenWrt, where nothing reads it.)
+SELFUPDATE_MARK=/tmp/detour-panel-selfupdate
 
 # start_apply <full-shell-command> — truncate the log, run the command detached
 # (stdout+stderr → APPLY_LOG) with a completion sentinel carrying the exit code,
@@ -1659,14 +1667,17 @@ panel_update_apply)
     # so the panel shows the installer log in real time — same UX as the binary
     # updates (bins/tpws/nfqws2). The detached worker survives even the panel's own
     # restart, so the .ipk install can never be killed by an HTTP/proxy timeout.
-    #   - Keenetic: detaching is mandatory — the install restarts S51detour-panel
-    #     (the lighttpd hosting this CGI); the worker keeps writing apply_log across
-    #     the gap and the UI drives completion/reload from the updater's state file.
+    #   - Keenetic: detaching is mandatory — the install would otherwise be killed when
+    #     S51detour-panel (the lighttpd hosting this CGI) restarts. The SELFUPDATE_MARK
+    #     tells the package prerm/postinst to keep that lighttpd serving for the whole
+    #     install and restart it only at the very end, so apply_log streams live.
     #   - OpenWrt: the panel rides the system uhttpd (NOT restarted by the install —
-    #     see postinst), so this CGI stays reachable and the UI drives completion
-    #     straight from the log's exit-code sentinel.
+    #     see postinst), so this CGI stays reachable throughout.
+    # Both platforms then drive completion/reload straight from the log's exit-code
+    # sentinel (the state-file poll is only a Keenetic fallback — see index.html).
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    [ "$PLATFORM" = keenetic ] && : > "$SELFUPDATE_MARK" 2>/dev/null
     : > "$APPLY_LOG" 2>/dev/null
     detach_bg "$APPLY_LOG" "\"$UPDATE_BIN\" apply; echo \"$APPLY_DONE_MARK rc=\$?\""
     printf '{"ok":true,"status":"updating"}'
@@ -1723,6 +1734,8 @@ panel_update_local)
     else
         INSTALL_CMD="opkg install --force-reinstall \"$IPK\""
     fi
+    # Keenetic: keep the panel's lighttpd serving across the install (see panel_update_apply).
+    [ "$PLATFORM" = keenetic ] && : > "$SELFUPDATE_MARK" 2>/dev/null
     : > "$APPLY_LOG" 2>/dev/null
     detach_bg "$APPLY_LOG" "$INSTALL_CMD; _rc=\$?; rm -f \"$IPK\" \"$SIG\"; echo \"$APPLY_DONE_MARK rc=\$_rc\""
     printf '{"ok":true,"status":"updating"}'
