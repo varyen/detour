@@ -4556,7 +4556,7 @@
             <div class="form-grid">
               <div>
                 <label>ID (slug)</label>
-                <input type="text" id="sub-id" placeholder="liberty" />
+                <input type="text" id="sub-id" placeholder="example-vpn" />
                 <div class="helper-text">
                   Только a-z, 0-9, ._-. Автоподставится из группы.
                 </div>
@@ -8584,15 +8584,22 @@
 
       async function pushEnable() {
         var status = document.getElementById("push-status");
+        // Safari (macOS/iOS) only shows the permission prompt when
+        // Notification.requestPermission() runs synchronously inside the user
+        // gesture (transient activation). ANY await before it — e.g. fetching
+        // push_config — consumes the activation, and Safari then resolves the
+        // request back to "default" WITHOUT ever showing the dialog (Chrome/FF
+        // are lenient, which is why it only broke on Safari). So request
+        // permission FIRST, before any network round-trip.
+        var perm = Notification.permission;
+        if (perm === "default") perm = await Notification.requestPermission();
+        if (perm !== "granted")
+          throw new Error("Разрешение на уведомления не выдано в браузере");
         status.textContent = "Запрос разрешения…";
         var cfg = await api("push_config");
         if (!cfg.available || !cfg.vapid_public) {
           throw new Error("Push недоступен на роутере (нет openssl/ключа VAPID)");
         }
-        var perm = Notification.permission;
-        if (perm === "default") perm = await Notification.requestPermission();
-        if (perm !== "granted")
-          throw new Error("Разрешение на уведомления не выдано в браузере");
         var reg = await navigator.serviceWorker.register(PUSH_SW_URL, {
           scope: PUSH_SCOPE,
         });
