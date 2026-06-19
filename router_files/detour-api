@@ -41,6 +41,7 @@ CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written b
 
 AUTH_FILE="/etc/detour.auth"
 SESSION_DIR="/tmp/detour-sessions"
+LOGIN_THROTTLE_DIR="/tmp/detour-login"   # per-IP login brute-force state (tmpfs; cleared on reboot). Not remapped on Keenetic (like SESSION_DIR).
 SINGBOX_BIN="/usr/bin/sing-box"
 TPWS_BIN="/usr/bin/tpws-zapret"
 NFQWS_BIN="/usr/bin/nfqws2"
@@ -894,9 +895,13 @@ check_auth() {
 
 verify_password() {
     [ ! -f "$AUTH_FILE" ] && return 1
-    local stored_line=$(grep "^${1}:" "$AUTH_FILE" | head -1)
-    [ -z "$stored_line" ] && return 1
-    local stored_hash=$(echo "$stored_line" | cut -d':' -f2-)
+    # EXACT username match (awk field compare, not a grep regex) — the supplied
+    # username is attacker-controlled and must never be interpreted as a pattern.
+    # Rejoin fields 2..NF in case a hash ever contains ':' (crypt $6$ doesn't, but
+    # be safe), matching the old `cut -f2-` semantics.
+    local stored_hash
+    stored_hash=$(awk -F: -v u="$1" '$1==u{h=$2; for(i=3;i<=NF;i++) h=h":"$i; print h; exit}' "$AUTH_FILE")
+    [ -z "$stored_hash" ] && return 1
     local salt=$(echo "$stored_hash" | cut -d'$' -f3)
     local computed=$(printf '%s' "$2" | openssl passwd -6 -salt "$salt" -stdin 2>/dev/null)
     [ "$computed" = "$stored_hash" ]
@@ -906,6 +911,78 @@ gen_token() {
     local a=$(cat /proc/sys/kernel/random/uuid | tr -d '-')
     local b=$(cat /proc/sys/kernel/random/uuid | tr -d '-')
     printf '%s%s' "$a" "$b"
+}
+
+# ---- Login brute-force throttle (per source IP) ---------------------------
+# State: $LOGIN_THROTTLE_DIR/<ip> holds "failcount lastfail_epoch" (tmpfs — a
+# reboot clearing a lockout is acceptable). Keyed on the source IP; when the
+# request arrives through a LOCAL reverse proxy (REMOTE_ADDR is loopback, e.g.
+# nginx-on-router → uhttpd) the real client is taken from the first
+# X-Forwarded-For hop (the proxy is trusted because it's on this host).
+# Identical on OpenWrt (uhttpd) and Keenetic (lighttpd) — both set REMOTE_ADDR.
+LOGIN_FAIL_WINDOW=900     # sliding window (s): fails older than this are forgotten
+LOGIN_MAX_FAILS=8         # consecutive fails within the window before lockout starts
+
+login_throttle_key() {
+    local ip="${REMOTE_ADDR:-}"
+    case "$ip" in
+        ""|127.0.0.1|::1|::ffff:127.0.0.1)
+            [ -n "$HTTP_X_FORWARDED_FOR" ] && \
+                ip=$(printf '%s' "$HTTP_X_FORWARDED_FOR" | cut -d, -f1 | tr -d ' ') ;;
+    esac
+    [ -n "$ip" ] || ip="unknown"
+    # Map every non-hex char (dots/colons) to '_' → a safe, collision-free filename.
+    printf '%s' "$ip" | tr -c 'a-fA-F0-9' '_' | head -c 64
+}
+
+# Escalating lockout duration (s) by how far the fail count is over the threshold.
+login_lock_secs() {
+    local over=$(( $1 - LOGIN_MAX_FAILS ))
+    if   [ "$over" -lt 2 ];  then echo 30
+    elif [ "$over" -lt 5 ];  then echo 120
+    elif [ "$over" -lt 10 ]; then echo 600
+    else echo 1800
+    fi
+}
+
+# Sets LOGIN_LOCK_LEFT = seconds remaining; returns 1 if this IP is locked NOW.
+login_check_lock() {
+    LOGIN_LOCK_LEFT=0
+    local f="$LOGIN_THROTTLE_DIR/$(login_throttle_key)"
+    [ -f "$f" ] || return 0
+    local count last now lock left
+    read count last < "$f" 2>/dev/null
+    case "$count" in ''|*[!0-9]*) return 0 ;; esac
+    case "$last"  in ''|*[!0-9]*) last=0 ;; esac
+    now=$(date +%s 2>/dev/null); case "$now" in ''|*[!0-9]*) return 0 ;; esac
+    if [ $((now - last)) -gt "$LOGIN_FAIL_WINDOW" ]; then
+        rm -f "$f" 2>/dev/null; return 0   # stale window → forget
+    fi
+    if [ "$count" -ge "$LOGIN_MAX_FAILS" ]; then
+        lock=$(login_lock_secs "$count")
+        left=$(( last + lock - now ))
+        [ "$left" -gt 0 ] && { LOGIN_LOCK_LEFT=$left; return 1; }
+    fi
+    return 0
+}
+
+login_record_fail() {
+    mkdir -p "$LOGIN_THROTTLE_DIR" 2>/dev/null
+    local f="$LOGIN_THROTTLE_DIR/$(login_throttle_key)"
+    local count=0 last=0 now
+    now=$(date +%s 2>/dev/null); case "$now" in ''|*[!0-9]*) now=0 ;; esac
+    if [ -f "$f" ]; then
+        read count last < "$f" 2>/dev/null
+        case "$count" in ''|*[!0-9]*) count=0 ;; esac
+        case "$last"  in ''|*[!0-9]*) last=0 ;; esac
+        [ $((now - last)) -gt "$LOGIN_FAIL_WINDOW" ] && count=0   # window expired → fresh count
+    fi
+    count=$((count + 1))
+    printf '%s %s\n' "$count" "$now" > "$f" 2>/dev/null
+}
+
+login_record_success() {
+    rm -f "$LOGIN_THROTTLE_DIR/$(login_throttle_key)" 2>/dev/null
 }
 # =================================================
 
@@ -948,6 +1025,9 @@ fi
 
 # Clean expired sessions (>7 days)
 find "$SESSION_DIR" -type f -mmin +10080 -delete 2>/dev/null
+# Drop stale login-throttle records (>60 min — well past the 15-min window and the
+# 30-min max lockout, both measured from the last failed attempt).
+find "$LOGIN_THROTTLE_DIR" -type f -mmin +60 -delete 2>/dev/null
 
 # ==================== SETUP STATUS (no auth) ====================
 # UI loads this once on the login page. If auth is unconfigured the UI shows
@@ -1007,22 +1087,33 @@ fi
 
 # ==================== LOGIN (no auth) ====================
 if [ "$ACTION" = "login" ]; then
-    reply_json
     if [ "$REQUEST_METHOD" != "POST" ]; then
+        reply_json; echo ""; json_err "POST required"; exit 0
+    fi
+    # Brute-force throttle: while this source IP is locked out, refuse with HTTP
+    # 429 WITHOUT touching the password — so a flood of guesses never reaches the
+    # check and the lockout simply rides out its escalating timer.
+    if ! login_check_lock; then
+        echo "Status: 429 Too Many Requests"
+        reply_json
+        echo "Retry-After: $LOGIN_LOCK_LEFT"
         echo ""
-        json_err "POST required"
+        printf '{"ok":false,"error":"Слишком много попыток входа. Повторите через %s с.","locked":true,"retry_after":%s}' "$LOGIN_LOCK_LEFT" "$LOGIN_LOCK_LEFT"
         exit 0
     fi
+    reply_json
     DECODED=$(printf '%s' "$POST_DATA" | base64 -d 2>/dev/null)
     LOGIN_USER=$(printf '%s' "$DECODED" | head -1)
     LOGIN_PASS=$(printf '%s' "$DECODED" | tail -n +2)
     if verify_password "$LOGIN_USER" "$LOGIN_PASS"; then
+        login_record_success
         TOKEN=$(gen_token)
         echo "$LOGIN_USER" > "$SESSION_DIR/$TOKEN"
         echo "Set-Cookie: detour_session=$TOKEN; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
         echo ""
         json_ok
     else
+        login_record_fail
         sleep 2
         echo ""
         json_err "Invalid credentials"
