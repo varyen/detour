@@ -121,7 +121,10 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     URLS_FILE=/opt/etc/sing-box/health-urls.list
     AUTOSWITCH_EXCLUDE=/opt/etc/sing-box/autoswitch-exclude.list
     SINGBOX_BIN=/opt/bin/sing-box
-    API_BIN=/opt/www/cgi-bin/detour-api
+    # lighttpd doc-root is /opt/share/www (see keenetic/lighttpd/detour.conf and
+    # the build-ipk.py install path) — NOT /opt/www. A wrong path here makes the
+    # `[ -x "$API_BIN" ]` guard below fail and auto-switch silently no-op.
+    API_BIN=/opt/share/www/cgi-bin/detour-api
     LOG=/opt/var/log/detour-health.log
     PUSH_BIN=/opt/sbin/detour-push
     # Default to a single check per invocation, BUT honor an explicit budget from the
@@ -465,6 +468,23 @@ pick_switch_candidate() {
         } END { if (best != "") print best }' "$HEALTH_DB" 2>/dev/null
 }
 
+# Activate a profile through detour-api's internal `activate` CLI AND verify it
+# actually took effect. detour-api is a CGI: its auth-failure path prints
+# "401 Unauthorized" and still `exit 0` (CGI convention), so a stale/mismatched/
+# mislocated binary — or any future regression that misses the argv CLI block —
+# could exit 0 without switching anything, and a bare `if $API_BIN activate` would
+# wrongly report success and fire a "переключён" push. Trust the settings file,
+# not the exit code: success == settings.active_profile is now the target.
+# Sets OUT to the activator output (or a diagnostic) for the caller's log.
+api_activate() {
+    _tgt="$1"
+    OUT=$("$API_BIN" activate "$_tgt" 2>&1); _rc=$?
+    _now=$(jstr active_profile "$SETTINGS")
+    [ "$_now" = "$_tgt" ] && return 0
+    OUT="activate did not take effect (rc=$_rc, active_profile='$_now'): $OUT"
+    return 1
+}
+
 # Opt-in auto-switch for `active` mode: when the active profile failed (confirmed)
 # and health_auto_switch is on, activate the healthiest OTHER ELIGIBLE profile from
 # the cache via the panel's own activation path, and push a "switched" alert. Mirrors
@@ -494,7 +514,7 @@ autoswitch_active() {
         return 1
     fi
     log "active-check AUTO-SWITCH: $_a → $_cand"
-    if OUT=$("$API_BIN" activate "$_cand" 2>&1); then
+    if api_activate "$_cand"; then
         printf '{"from":"%s","to":"%s","ts":%s}\n' "$_a" "$_cand" "$NOW" > "$SWITCH_MARK"
         _cname=$(profile_name "$_cand")
         push_alert "VPN переключён" "«$_aname» не работал — переключился на «$_cname»."
@@ -838,7 +858,7 @@ if [ -z "$CAND" ]; then
 fi
 
 log "AUTO-SWITCH: active $ACTIVE failed health check → activating $CAND"
-if OUT=$("$API_BIN" activate "$CAND" 2>&1); then
+if api_activate "$CAND"; then
     printf '{"from":"%s","to":"%s","ts":%s}\n' "$ACTIVE" "$CAND" "$NOW" > "$SWITCH_MARK"
     push_alert "VPN переключён" "«$(profile_name "$ACTIVE")» не работал — переключился на «$(profile_name "$CAND")»."
     log "AUTO-SWITCH ok: $ACTIVE → $CAND"
