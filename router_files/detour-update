@@ -203,9 +203,16 @@ EOF
 # curl wrapper: add a Bearer auth header only when GH_TOKEN is set. The repo is
 # PUBLIC, so unauthenticated requests work (just a lower rate limit) — self-update
 # needs no PAT. A token only raises the limit / allows a private repo.
+#
+# --connect-timeout 15 caps the TCP+TLS handshake. WITHOUT it, a stalled handshake
+# to the asset CDN on a throttled/censored RU link hangs for curl's *300s* default
+# (surfaces as "curl: (28) SSL connection timeout") — i.e. FIVE MINUTES of a frozen
+# apply log with no output before gh_curl_retry can even log the failure and retry.
+# 15s makes a dead connection fail fast so the live log keeps ticking attempt→attempt.
+# Transfer time is still bounded separately by each caller's --max-time.
 gh_curl() {
-    if [ -n "$GH_TOKEN" ]; then curl -H "Authorization: Bearer $GH_TOKEN" "$@"
-    else curl "$@"; fi
+    if [ -n "$GH_TOKEN" ]; then curl --connect-timeout 15 -H "Authorization: Bearer $GH_TOKEN" "$@"
+    else curl --connect-timeout 15 "$@"; fi
 }
 
 # Retry wrapper around gh_curl. api.github.com and especially the asset CDN
