@@ -4066,6 +4066,27 @@
               </div>
             </div>
             <div class="log-view" id="singbox-log-view">Загрузка...</div>
+            <!-- Mirror Detour's logs into the system syslog (→ remote log server,
+                 e.g. Keenetic «Отправлять логи на удалённый сервер»). Files still
+                 written, so this viewer is unaffected — it only ADDS a syslog copy. -->
+            <div class="health-controls" id="syslog-controls" style="margin-top: 12px">
+              <label class="health-toggle" title="Дублировать логи Detour (health, cert, nfqws2, tpws) в системный syslog. Если в прошивке роутера включена отправка логов на удалённый сервер (Synology и т.п.) — туда полетят и логи Detour. Сами файлы логов остаются, просмотрщик выше работает как прежде.">
+                <input type="checkbox" id="syslog-enabled" onchange="saveLogConfig()" />
+                Дублировать логи Detour в syslog
+              </label>
+              <label class="health-toggle" title="Слать в syslog и подробный лог sing-box (самый объёмный — пишет про каждое соединение). Нужно для диагностики зависаний/утечки RAM на удалённом сервере. Без верхнего тумблера не действует.">
+                <input type="checkbox" id="syslog-singbox" onchange="saveLogConfig()" />
+                Включать подробный лог sing-box
+              </label>
+            </div>
+            <p class="helper-text-block" id="syslog-help" style="margin-top: 6px">
+              Логи дублируются в системный журнал через <code>logger</code>. Файлы
+              логов при этом сохраняются — этот просмотрщик не меняется. Чтобы они
+              ушли на внешний сервер, включите отправку логов в самой прошивке
+              роутера. <strong>На Keenetic не проверено на «живом» железе</strong> —
+              убедитесь, что <code>logger</code> Entware попадает в пересылаемый
+              журнал.
+            </p>
           </div>
         </div>
 
@@ -6827,6 +6848,51 @@
           toast("Ошибка сохранения настроек", "error");
         }
       }
+      // ---- Syslog log-bridge toggles (Лог sing-box tab) -------------------
+      // The sing-box sub-toggle is meaningless when the master is off, so we grey
+      // it out to match the router-side gating (sources() only mirrors sing-box
+      // when both are on).
+      function applyLogConfigUi(en, sb) {
+        var m = document.getElementById("syslog-enabled");
+        var s = document.getElementById("syslog-singbox");
+        if (m) m.checked = !!en;
+        if (s) {
+          s.checked = !!sb;
+          s.disabled = !en;
+          s.closest(".health-toggle").style.opacity = en ? "" : "0.5";
+        }
+      }
+      function loadLogConfig() {
+        return api("log_config")
+          .then(function (d) {
+            if (d) applyLogConfigUi(d.enabled, d.singbox);
+          })
+          .catch(function () {});
+      }
+      async function saveLogConfig() {
+        var en = document.getElementById("syslog-enabled").checked ? 1 : 0;
+        var sb = document.getElementById("syslog-singbox").checked ? 1 : 0;
+        applyLogConfigUi(en, sb); // reflect the disabled state immediately
+        try {
+          var d = await api(
+            "log_config",
+            "POST",
+            JSON.stringify({ enabled: en, singbox: sb }),
+          );
+          if (d && d.ok) {
+            toast(
+              en
+                ? "Пересылка логов в syslog включена"
+                : "Пересылка логов в syslog выключена",
+              "success",
+            );
+          } else {
+            toast("Не удалось сохранить настройку", "error");
+          }
+        } catch (e) {
+          toast("Ошибка сохранения настройки", "error");
+        }
+      }
       function toggleHealthUrlsBox() {
         var box = document.getElementById("health-urls-box");
         if (!box) return;
@@ -6889,12 +6955,18 @@
         if (!healthMeta.supported) return line1;
         var hAgo = h && h.ts ? fmtPingAgo(h.ts) : "—";
         var sp = h ? fmtSpeed(h.dl) : "";
+        // Speed goes on its OWN line (appending it to the VPN line widened the
+        // «Проверен» column and broke the table layout).
         return (
           line1 +
           '<div class="vc-line"><span class="vc-lbl">VPN</span> ' +
           hAgo +
-          (sp ? " · ↓ " + escapeHtml(sp) : "") +
-          "</div>"
+          "</div>" +
+          (sp
+            ? '<div class="vc-line"><span class="vc-lbl">↓</span> ' +
+              escapeHtml(sp) +
+              "</div>"
+            : "")
         );
       }
       async function refreshOneHealth(id, btn) {
@@ -12946,7 +13018,10 @@
             loadRouteMap();
             loadKeepalive();
           }
-          if (tab.dataset.tab === "singbox-log") loadSingboxLog();
+          if (tab.dataset.tab === "singbox-log") {
+            loadSingboxLog();
+            loadLogConfig();
+          }
           if (tab.dataset.tab === "singbox-cfg") loadSingboxConfig();
           if (tab.dataset.tab === "zapret-domains") loadZapretDomains();
           if (tab.dataset.tab === "hosts-dns") loadHostsDns();

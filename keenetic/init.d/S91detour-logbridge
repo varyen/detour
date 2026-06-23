@@ -1,0 +1,54 @@
+#!/opt/bin/sh
+# Detour / Keenetic — syslog log-bridge service.
+#
+# rc.unslung boot-starts every executable /opt/etc/init.d/S* with `start`. S91 runs
+# LAST (after the proxies S52/S53, bypass S54 and cron S90) so the log files it
+# mirrors already exist. It supervises /opt/sbin/detour-logbridge, which tails those
+# files and re-emits each line to the system syslog via `logger` — so when KeeneticOS
+# «Отправлять логи на удалённый сервер» is on, Detour's output goes there too.
+#
+# Gated by the log_to_syslog setting: `start` no-ops when the master toggle is off,
+# so the always-present S91 is harmless until the operator enables it in the panel.
+# The panel's log_config action calls `restart` to start/stop on toggle.
+
+export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+
+DAEMON=/opt/sbin/detour-logbridge
+PIDF=/opt/var/run/detour-logbridge.pid
+NAME=detour-logbridge
+SETTINGS=/opt/etc/sing-box/settings.json
+
+running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; }
+
+syslog_enabled() {
+    [ -f "$SETTINGS" ] || return 1
+    [ "$(sed -n 's/.*"log_to_syslog"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' "$SETTINGS" | head -1)" = "1" ]
+}
+
+start() {
+    [ -x "$DAEMON" ] || { echo "$NAME: missing $DAEMON"; exit 1; }
+    syslog_enabled || { echo "$NAME: log_to_syslog off — not starting"; exit 0; }
+    running && { echo "$NAME already running (pid $(cat "$PIDF"))"; exit 0; }
+    rm -f "$PIDF"          # clear any stale pidfile so -m records the new PID cleanly
+    mkdir -p /opt/var/run /opt/var/log
+    echo "Starting $NAME ..."
+    # -b daemonize (fork + own session), -m writes the forked PID to the pidfile.
+    # $DAEMON is a UNIQUE path so -x cannot false-match other shells (see S90detour-cron).
+    start-stop-daemon -S -q -b -m -p "$PIDF" -x "$DAEMON" -- run
+}
+
+stop() {
+    # -K sends SIGTERM to the daemon; detour-logbridge's trap tears down its
+    # tail|logger pipelines before exiting.
+    echo "Stopping $NAME ..."
+    start-stop-daemon -K -q -p "$PIDF" 2>/dev/null
+    rm -f "$PIDF"
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; sleep 1; start ;;
+    status)  running && echo "$NAME running (pid $(cat "$PIDF"))" || echo "$NAME stopped" ;;
+    *) echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

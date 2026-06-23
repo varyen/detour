@@ -26,12 +26,18 @@ start() {
     # shellcheck disable=SC1090
     ARGS=""
     [ -f "$TPWS_CONF" ] && . "$TPWS_CONF" 2>/dev/null
-    mkdir -p /opt/var/run
+    mkdir -p /opt/var/run /opt/var/log
     touch "$MARK"
     echo "Starting $NAME ..."
+    # Capture tpws stdout/stderr to a log file (parity with S52detour-singbox): it
+    # feeds the panel's log viewer AND the syslog log-bridge (S91detour-logbridge),
+    # which tails this file. Truncate on each start so it can't grow unbounded.
+    ZLOG=/opt/var/log/zapret-tpws.log
+    : > "$ZLOG"
     # tpws runs transparent on $ZAPRET_PORT; --user nobody to drop privileges.
     start-stop-daemon -S -q -b -m -p "$PIDF" \
-        -x "$TPWS_BIN" -- --bind-addr=0.0.0.0 --port="$ZAPRET_PORT" --user=nobody $ARGS
+        -x "$TPWS_BIN" -- --bind-addr=0.0.0.0 --port="$ZAPRET_PORT" --user=nobody $ARGS \
+        >>"$ZLOG" 2>&1
     sleep 1
     dns_up          # ensure zapret_domains ipset is populated via the detour dnsmasq
     apply_fw

@@ -1,0 +1,151 @@
+#!/bin/sh
+# Detour — syslog log-bridge.
+#
+# Mirrors Detour's file logs into the SYSTEM syslog via `logger`, so a
+# remote-syslog setup (e.g. Keenetic «Отправлять логи на удалённый сервер» →
+# Synology, or an OpenWrt remote-log target) captures Detour's output next to the
+# router's own log. The log FILES keep being written, so the panel's built-in log
+# viewer is unaffected — this only ADDS a syslog copy.
+#
+# Gated by settings.json:
+#   "log_to_syslog"          "1"/"0"  master on/off            (default 0)
+#   "log_to_syslog_singbox"  "1"/"0"  also mirror sing-box's   (default 0)
+#                                     (verbose) log — separate toggle
+#
+# IMPORTANT: this does NOT touch the sing-box/tpws launch paths or their
+# fail-closed REDIRECT invariants. It only `tail`s the log files the
+# daemons/scripts already write and re-emits each new line with
+# `logger -t <component>`. That keeps the security-sensitive launch code untouched.
+#
+# Cross-platform: OpenWrt (procd `detour-logbridge` service) + Keenetic/Entware
+# (S91detour-logbridge via start-stop-daemon). ⚠ VALIDATE on a live Keenetic that
+# Entware `logger` output actually reaches the forwarded system log.
+
+SETTINGS=/etc/sing-box/settings.json
+LOGDIR=/var/log
+PIDDIR=/var/run
+KEENETIC=0
+
+# ---- Keenetic/Entware platform shim (mirrors detour-api / detour-health) ----
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    KEENETIC=1
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    SETTINGS=/opt/etc/sing-box/settings.json
+    LOGDIR=/opt/var/log
+    PIDDIR=/opt/var/run
+fi
+
+# Tracks the follower PIDs we spawn so stop/restart can take down their whole
+# tail|logger pipelines (otherwise a toggle-OFF would orphan them and keep
+# forwarding). tmpfs on both platforms — cleared on reboot.
+CHILDREN_FILE=/tmp/detour-logbridge.children
+
+# Read a "key":"val" (or bareword) scalar out of settings.json. The closing-quote
+# in the pattern keeps "log_to_syslog" from also matching "log_to_syslog_singbox".
+setting() {
+    [ -f "$SETTINGS" ] || return 0
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$SETTINGS" 2>/dev/null | head -1
+}
+
+enabled()    { [ "$(setting log_to_syslog)" = "1" ]; }
+sb_enabled() { [ "$(setting log_to_syslog_singbox)" = "1" ]; }
+
+# tag|logfile lines to mirror. sing-box is mirrored ONLY when its own sub-toggle is
+# on — it's by far the most verbose stream (one line per connection at info level),
+# so the operator opts into shipping it to the remote server separately. tpws is
+# mirrored ONLY on Keenetic: on OpenWrt procd already routes tpws stdout/stderr to
+# syslog, so a second copy would duplicate.
+sources() {
+    sb_enabled && echo "sing-box|$LOGDIR/sing-box.log"
+    echo "detour-health|$LOGDIR/detour-health.log"
+    echo "detour-cert|$LOGDIR/detour-cert.log"
+    echo "nfqws2|$LOGDIR/nfqws2.log"
+    [ "$KEENETIC" = 1 ] && echo "zapret-tpws|$LOGDIR/zapret-tpws.log"
+}
+
+# Follow one logfile forever, re-emitting each new line to syslog under <tag>.
+# Plain `-f` is deliberate (not `-F`): busybox `tail -f` already survives the
+# `> $LOG` truncation the init scripts do on (re)start, and the retry loop below
+# re-attaches a log that doesn't exist yet (e.g. nfqws2.log before zapret2 runs).
+# Detour TRUNCATES its logs, it never ROTATES them (rename + fresh inode) — the one
+# case plain `-f` wouldn't follow — so `-F` would buy nothing here while adding a
+# busybox-version dependency we'd have to probe for.
+follow() {
+    _tag="$1"; _file="$2"
+    [ -n "$_file" ] || return
+    while :; do
+        tail -n0 -f "$_file" 2>/dev/null | logger -t "$_tag"
+        # Pipeline ended (tail couldn't open the file yet, or it vanished) — back
+        # off briefly and re-attach so a later-created log still gets picked up.
+        sleep 5
+    done
+}
+
+# Kill PIDs and all their descendants (each follow subshell + its tail|logger
+# pipeline). Pure-sh /proc PPID walk — no pgrep/pkill on the router. A comm
+# whitelist guards against killing an unrelated process if a PID was reused.
+kill_tree() {
+    _all="$1"
+    _frontier="$1"
+    while [ -n "$_frontier" ]; do
+        _next=""
+        for _d in /proc/[0-9]*; do
+            _pid="${_d#/proc/}"
+            _ppid=$(sed 's/^.*) //' "$_d/stat" 2>/dev/null | cut -d' ' -f2)
+            for _f in $_frontier; do
+                if [ "$_ppid" = "$_f" ]; then
+                    _next="$_next $_pid"
+                    _all="$_all $_pid"
+                fi
+            done
+        done
+        _frontier="$_next"
+    done
+    for _p in $_all; do
+        case "$(cat "/proc/$_p/comm" 2>/dev/null)" in
+            sh|ash|bash|busybox|tail|logger|detour-logbridge) kill "$_p" 2>/dev/null ;;
+        esac
+    done
+}
+
+cleanup() {
+    if [ -f "$CHILDREN_FILE" ]; then
+        kill_tree "$(tr '\n' ' ' < "$CHILDREN_FILE")"
+        rm -f "$CHILDREN_FILE"
+    fi
+    exit 0
+}
+
+run() {
+    enabled || { echo "detour-logbridge: log_to_syslog is off — nothing to do"; exit 0; }
+    command -v logger >/dev/null 2>&1 || { echo "detour-logbridge: no 'logger' utility" >&2; exit 1; }
+    mkdir -p "$LOGDIR" "$PIDDIR" 2>/dev/null
+
+    # Reap any followers left over from a previous run killed with SIGKILL (trap
+    # didn't fire) so we never end up double-forwarding.
+    [ -f "$CHILDREN_FILE" ] && kill_tree "$(tr '\n' ' ' < "$CHILDREN_FILE")"
+    : > "$CHILDREN_FILE"
+
+    trap cleanup TERM INT
+
+    # Read from a FILE (not a pipe) so the loop runs in THIS shell and $! is the
+    # follower we just backgrounded (a `... | while read` loop would run in a
+    # subshell and lose the PIDs).
+    _src="/tmp/.detour-logbridge.src.$$"
+    sources > "$_src"
+    while IFS='|' read -r _tag _file; do
+        [ -n "$_tag" ] || continue
+        follow "$_tag" "$_file" &
+        echo "$!" >> "$CHILDREN_FILE"
+    done < "$_src"
+    rm -f "$_src"
+
+    # Supervise: followers loop forever, so wait only returns on a signal
+    # (trap → cleanup, which exits). `wait` with no args reaps all children.
+    wait
+}
+
+case "$1" in
+    run) run ;;
+    *) echo "usage: $0 run   (managed by the detour-logbridge service / S91detour-logbridge)"; exit 1 ;;
+esac

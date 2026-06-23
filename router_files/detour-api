@@ -17,6 +17,7 @@ SINGBOX_WHITELIST="/etc/sing-box/whitelist-domains.list"
 ZAPRET_INITD="/etc/init.d/zapret-tpws"
 ZAPRET_CONF="/etc/zapret-tpws.conf"
 ZAPRET_DOMAINS="/etc/zapret-tpws/domains.list"
+LOGBRIDGE_INITD="/etc/init.d/detour-logbridge"   # syslog log-bridge service (gated by log_to_syslog)
 
 KEEPALIVE_STATE="/var/state/vpn-keepalive.json"
 KEEPALIVE_BIN="/usr/sbin/vpn-keepalive"
@@ -78,6 +79,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     ZAPRET_INITD="$OPT/etc/init.d/S53detour-zapret"
     ZAPRET_CONF="$OPT/etc/zapret-tpws.conf"
     ZAPRET_DOMAINS="$OPT/etc/zapret-tpws/domains.list"
+    LOGBRIDGE_INITD="$OPT/etc/init.d/S91detour-logbridge"
     KEEPALIVE_STATE="$OPT/var/state/vpn-keepalive.json"
     KEEPALIVE_BIN="$OPT/sbin/vpn-keepalive"
     UPDATE_BIN="$OPT/sbin/detour-update"
@@ -438,6 +440,15 @@ write_settings() {
     local health_speed_url
     health_speed_url=$(get_settings_val "health_speed_url")
 
+    # Syslog log-bridge flags (default OFF). Same preserve-or-override dance:
+    # the log_config action sets them via env before calling us; every other
+    # settings rewrite re-reads them from the current file so they survive.
+    local log_syslog log_syslog_sb
+    log_syslog=${LOG_SYSLOG_OVERRIDE:-$(get_settings_val "log_to_syslog")}
+    [ -z "$log_syslog" ] && log_syslog="0"
+    log_syslog_sb=${LOG_SYSLOG_SB_OVERRIDE:-$(get_settings_val "log_to_syslog_singbox")}
+    [ -z "$log_syslog_sb" ] && log_syslog_sb="0"
+
     cat > "$SINGBOX_SETTINGS" <<EOF
 {
   "active_profile": "$active_profile",
@@ -449,7 +460,9 @@ write_settings() {
   "health_check_enabled": "$health_enabled",
   "health_auto_switch": "$health_autoswitch",
   "health_speed_enabled": "$health_speed",
-  "health_speed_url": "$health_speed_url"
+  "health_speed_url": "$health_speed_url",
+  "log_to_syslog": "$log_syslog",
+  "log_to_syslog_singbox": "$log_syslog_sb"
 }
 EOF
 }
@@ -1656,6 +1669,40 @@ health_config)
         "$([ "$NEW_EN" = "1" ] && echo true || echo false)" \
         "$([ "$NEW_AS" = "1" ] && echo true || echo false)" \
         "$([ "$NEW_SP" = "1" ] && echo true || echo false)"
+    ;;
+
+# Syslog log-bridge toggles. GET → current state; POST {"enabled":0|1,"singbox":0|1}
+# (missing key keeps its current value). write_settings re-emits the whole settings
+# file with our overrides, then we (re)start/stop the bridge to match. No proxy
+# restart — this only governs the decoupled tail→logger forwarder.
+log_config)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        NEW_EN=$(printf '%s' "$POST_DATA" | sed -n 's/.*"enabled"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
+        NEW_SB=$(printf '%s' "$POST_DATA" | sed -n 's/.*"singbox"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
+        CUR_EN=$(get_settings_val log_to_syslog);         [ -z "$CUR_EN" ] && CUR_EN=0
+        CUR_SB=$(get_settings_val log_to_syslog_singbox); [ -z "$CUR_SB" ] && CUR_SB=0
+        [ -z "$NEW_EN" ] && NEW_EN="$CUR_EN"
+        [ -z "$NEW_SB" ] && NEW_SB="$CUR_SB"
+        ACHAIN=$(get_active_chain)
+        RMODE=$(get_routing_mode)
+        UPSTREAM=$(get_settings_val upstream_ips)
+        SBMODE=$(get_singbox_mode)
+        LOG_SYSLOG_OVERRIDE="$NEW_EN" LOG_SYSLOG_SB_OVERRIDE="$NEW_SB" \
+            write_settings "$ACHAIN" "$RMODE" "$UPSTREAM" "$SBMODE"
+        # restart picks up the freshly-written settings: starts the bridge (master
+        # on) or no-ops/stops it (master off). Backgrounded so the toggle response
+        # isn't held by start-stop-daemon. Init is always present (enabled at install).
+        [ -x "$LOGBRIDGE_INITD" ] && "$LOGBRIDGE_INITD" restart >/dev/null 2>&1 &
+        printf '{"ok":true,"enabled":%s,"singbox":%s}' \
+            "$([ "$NEW_EN" = "1" ] && echo true || echo false)" \
+            "$([ "$NEW_SB" = "1" ] && echo true || echo false)"
+    else
+        CUR_EN=$(get_settings_val log_to_syslog);         [ -z "$CUR_EN" ] && CUR_EN=0
+        CUR_SB=$(get_settings_val log_to_syslog_singbox); [ -z "$CUR_SB" ] && CUR_SB=0
+        printf '{"enabled":%s,"singbox":%s}' \
+            "$([ "$CUR_EN" = "1" ] && echo true || echo false)" \
+            "$([ "$CUR_SB" = "1" ] && echo true || echo false)"
+    fi
     ;;
 
 # ==================== PANEL SELF-UPDATE ====================

@@ -89,6 +89,10 @@ FILES = [
     # Standalone scheduler daemon (Keenetic-only): replaces the broken crond for
     # detour's periodic jobs — keep-alive, subscription-refresh, update auto-check.
     (os.path.join(HERE, "sbin", "detour-cron"), "opt/sbin/detour-cron", 0o755, False),
+    # Syslog log-bridge (shared source, /opt shim): tails Detour's log files →
+    # `logger` so KeeneticOS remote-log forwarding picks them up. Gated by the
+    # log_to_syslog setting (off by default). fix_shebang → /opt/bin/sh.
+    (os.path.join(ROUTER_FILES, "detour-logbridge"), "opt/sbin/detour-logbridge", 0o755, True),
     # Pinned usign public key (used by detour-update if usign is present on Entware).
     (os.path.join(ROOT, "keys", "release.usign.pub"), "opt/etc/detour/release.usign.pub", 0o644, False),
     (os.path.join(HERE, "init.d", "S51detour-panel"), "opt/etc/init.d/S51detour-panel", 0o755, False),
@@ -102,6 +106,9 @@ FILES = [
     # Scheduler daemon launcher (rc.unslung boot-start). S90 = last, after the
     # panel/proxies are up. Drives /opt/sbin/detour-cron — the crond replacement.
     (os.path.join(HERE, "init.d", "S90detour-cron"), "opt/etc/init.d/S90detour-cron", 0o755, False),
+    # Syslog log-bridge launcher (rc.unslung boot-start). S91 = after the proxies/
+    # cron so the log files it tails exist. Self-gates on the log_to_syslog setting.
+    (os.path.join(HERE, "init.d", "S91detour-logbridge"), "opt/etc/init.d/S91detour-logbridge", 0o755, False),
     (os.path.join(HERE, "ndm", "netfilter.d", "50-detour.sh"), "opt/etc/ndm/netfilter.d/50-detour.sh", 0o755, False),
     (os.path.join(HERE, "lighttpd", "detour.conf"), "opt/etc/lighttpd/detour.conf", 0o644, False),
     # TLS-overlay shim for detour.conf's include_shell. MUST stay 0755 and keep its
@@ -174,7 +181,8 @@ chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update 
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
     /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
-    /opt/etc/init.d/S90detour-cron /opt/etc/lighttpd/conf.d/detour-ssl-helper.sh \\
+    /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\
+    /opt/etc/lighttpd/conf.d/detour-ssl-helper.sh \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
 # Seed the health-check target list on first install (preserved on upgrade).
 if [ ! -f /opt/etc/sing-box/health-urls.list ]; then
@@ -230,6 +238,10 @@ fi
 # Re-apply the persisted bypass mode now (no-op unless bypass.autostart=1) so an
 # upgrade restores the active engine.
 [ -x /opt/sbin/detour-bypass ] && /opt/sbin/detour-bypass boot 2>/dev/null
+# Syslog log-bridge: (re)start it. It self-gates on the log_to_syslog setting, so
+# this is a no-op until the operator enables it in the panel; rc.unslung also
+# boot-starts it via S91. On upgrade restart re-loads the new script.
+/opt/etc/init.d/S91detour-logbridge restart 2>/dev/null
 echo ""
 echo "detour-keenetic {version} installed."
 echo "  Panel:  http://<router-ip>:8080/detour/"
@@ -250,6 +262,8 @@ exit 0
 set +e
 # Stop the scheduler daemon first so a periodic task can't fire mid-upgrade.
 [ -x /opt/etc/init.d/S90detour-cron ] && /opt/etc/init.d/S90detour-cron stop 2>/dev/null
+# Stop the syslog log-bridge so its tail|logger followers don't linger across the swap.
+[ -x /opt/etc/init.d/S91detour-logbridge ] && /opt/etc/init.d/S91detour-logbridge stop 2>/dev/null
 # Stop the bypass-managed engine (tpws + its rules) WITHOUT changing the persisted
 # mode — the new postinst's `detour-bypass boot` re-applies it. Falls back to S53.
 [ -x /opt/sbin/detour-bypass ] && /opt/sbin/detour-bypass stop 2>/dev/null

@@ -143,6 +143,10 @@ PANEL_FILES = [
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
     (("router_files", "detour-bypass"), "usr/sbin/detour-bypass", 0o755),
     (("router_files", "detour-bypass.initd"), "etc/init.d/detour-bypass", 0o755),
+    # Syslog log-bridge: tails Detour's log files → `logger` so a remote-log
+    # target captures them. Gated by the log_to_syslog setting (off by default).
+    (("router_files", "detour-logbridge"), "usr/sbin/detour-logbridge", 0o755),
+    (("router_files", "detour-logbridge.initd"), "etc/init.d/detour-logbridge", 0o755),
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
     (("router_files", "index.html"), "www/detour/index.html", 0o644),
     (("router_files", "sw.js"), "www/detour/sw.js", 0o644),
@@ -336,6 +340,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
     /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
+    /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
     /www/cgi-bin/detour-api 2>/dev/null
 
 # 2b) Seed the health-check target list on first install (preserved on upgrade
@@ -389,6 +394,12 @@ fi
 # touches dnsmasq when its config (preserved in /etc/detour) was left enabled.
 /etc/init.d/detour-hosts enable >/dev/null 2>&1
 /etc/init.d/detour-hosts start >/dev/null 2>&1
+# Syslog log-bridge: always register the boot symlink (so the choice survives a
+# reboot), but its start_service self-gates on the log_to_syslog setting — so this
+# is a no-op until the operator enables it in the panel. restart picks up the new
+# script on upgrade and re-starts only if the (keeplist-preserved) setting is on.
+/etc/init.d/detour-logbridge enable >/dev/null 2>&1
+/etc/init.d/detour-logbridge restart >/dev/null 2>&1
 
 # 4) Install/refresh cron entries for self-update + subscription-refresh.
 # subscription-refresh ticks hourly; the script itself decides which subscriptions
@@ -432,6 +443,8 @@ set +e
 
 # Stop services so opkg can replace the binaries cleanly.
 /etc/init.d/sing-box stop >/dev/null 2>&1
+# Stop the syslog log-bridge (tail|logger followers) so they don't linger.
+[ -x /etc/init.d/detour-logbridge ] && /etc/init.d/detour-logbridge stop >/dev/null 2>&1
 # Stop the bypass engine (nfqws2/tpws + its firewall) WITHOUT changing the
 # persisted mode — postinst re-applies it. Falls back to a direct tpws stop.
 [ -x /usr/sbin/detour-bypass ] && /usr/sbin/detour-bypass stop >/dev/null 2>&1
