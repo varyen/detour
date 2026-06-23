@@ -4385,6 +4385,10 @@
               <input type="checkbox" id="health-autoswitch" onchange="saveHealthConfig()" />
               Авто-переключение на рабочий
             </label>
+            <label class="health-toggle" title="Заодно с проверкой раз в час замерять реальную скорость скачивания (~8 МБ) активного профиля; у остальных — по кнопке ⚕. Качает реальный трафик через VPN.">
+              <input type="checkbox" id="health-speed" onchange="saveHealthConfig()" />
+              Замер скорости активного
+            </label>
             <button class="btn" type="button" onclick="toggleHealthUrlsBox()" id="health-urls-toggle-btn">
               🎯 Цели проверки
             </button>
@@ -6614,10 +6618,20 @@
       var healthMeta = {
         enabled: true,
         auto_switch: false,
+        speed: true,
         supported: true,
         urls: [],
         switch: null,
       };
+      // kbit/s (as stored by detour-health) → short human string, or "" if unmeasured.
+      function fmtSpeed(kbps) {
+        if (kbps == null || kbps < 0) return "";
+        var mbps = kbps / 1000; // kbit/s → Мбит/с
+        if (mbps >= 100) return Math.round(mbps) + " Мбит/с";
+        if (mbps >= 10) return mbps.toFixed(0) + " Мбит/с";
+        if (mbps >= 1) return mbps.toFixed(1) + " Мбит/с";
+        return Math.round(kbps) + " Кбит/с";
+      }
       var healthTimer = null;
       var HEALTH_POLL_MS = 60000; // hourly probe → a 1-min reader poll is ample
       var HEALTH_COLORS = {
@@ -6650,7 +6664,11 @@
           parts.push(lbl + " " + (okd ? "✓ " + dl[i] + "ms" : "✗"));
         }
         var ago = e.ts ? " · " + fmtPingAgo(e.ts) : "";
-        var title = (parts.join(" · ") || "нет данных") + ago;
+        var sp = fmtSpeed(e.dl);
+        var title =
+          (parts.join(" · ") || "нет данных") +
+          (sp ? " · ↓ " + sp : "") +
+          ago;
         if (e.ok && total > 0)
           return { cls: "health-good", text: "✓", title: title };
         if (pass > 0) return { cls: "health-bad", text: "✕", title: title };
@@ -6698,6 +6716,11 @@
         if (info.text === "·") el.textContent = "проверка…";
         else if (info.cls === "health-good") el.textContent = "✓ работает";
         else el.textContent = "✕ не работает";
+        // Append the measured download speed to the active VPN line, when we have it.
+        var e = healthResults[id];
+        var sp = e ? fmtSpeed(e.dl) : "";
+        if (info.cls === "health-good" && sp)
+          el.textContent += " · ↓ " + sp;
         el.style.color = HEALTH_COLORS[info.cls] || "";
         el.title = info.title;
       }
@@ -6731,6 +6754,7 @@
         if (!d) return;
         healthMeta.enabled = !!d.enabled;
         healthMeta.auto_switch = !!d.auto_switch;
+        healthMeta.speed = d.speed !== false;
         healthMeta.supported = d.supported !== false;
         healthMeta.urls = d.urls || [];
         healthMeta.switch = d.switch || null;
@@ -6738,6 +6762,8 @@
         if (en) en.checked = healthMeta.enabled;
         var as = document.getElementById("health-autoswitch");
         if (as) as.checked = healthMeta.auto_switch;
+        var spc = document.getElementById("health-speed");
+        if (spc) spc.checked = healthMeta.speed;
         var box = document.getElementById("health-controls");
         if (box) box.style.display = healthMeta.supported ? "" : "none";
       }
@@ -6754,6 +6780,7 @@
                   ok: !!r.ok,
                   ts: r.ts || 0,
                   rtt: r.rtt,
+                  dl: r.dl == null ? -1 : r.dl,
                   delays: r.delays || [],
                 };
               });
@@ -6780,15 +6807,18 @@
       async function saveHealthConfig() {
         var en = document.getElementById("health-enabled").checked ? 1 : 0;
         var as = document.getElementById("health-autoswitch").checked ? 1 : 0;
+        var spc = document.getElementById("health-speed");
+        var sp = spc && spc.checked ? 1 : 0;
         try {
           var d = await api(
             "health_config",
             "POST",
-            JSON.stringify({ enabled: en, auto_switch: as }),
+            JSON.stringify({ enabled: en, auto_switch: as, speed: sp }),
           );
           if (d && d.ok) {
             healthMeta.enabled = !!en;
             healthMeta.auto_switch = !!as;
+            healthMeta.speed = !!sp;
             toast("Настройки проверки сохранены", "success");
           } else {
             toast("Не удалось сохранить настройки", "error");
@@ -6858,10 +6888,12 @@
           "</div>";
         if (!healthMeta.supported) return line1;
         var hAgo = h && h.ts ? fmtPingAgo(h.ts) : "—";
+        var sp = h ? fmtSpeed(h.dl) : "";
         return (
           line1 +
           '<div class="vc-line"><span class="vc-lbl">VPN</span> ' +
           hAgo +
+          (sp ? " · ↓ " + escapeHtml(sp) : "") +
           "</div>"
         );
       }
@@ -6881,6 +6913,7 @@
               ok: !!d.result.ok,
               ts: d.result.ts || 0,
               rtt: d.result.rtt,
+              dl: d.result.dl == null ? -1 : d.result.dl,
               delays: d.result.delays || [],
             };
             updateHealthBadgesAll();

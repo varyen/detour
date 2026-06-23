@@ -200,6 +200,27 @@ if [ "$BG" = "1" ] || [ "$MODE" = "active" ]; then
 fi
 AUTOSWITCH=$(jstr health_auto_switch "$SETTINGS")
 
+# ---- Download-speed measurement (functional check + real throughput) ----------
+# Measured ONLY for the ACTIVE profile on its hourly functional cadence (tick/sweep)
+# and for a manual `one` re-check (the panel's per-row button = "speed for any other
+# profile, on demand"). NEVER in the sub-minute `active` loop — repeating a real
+# download every 30-60 s would saturate the link.
+#
+# HOW: a one-off `mixed` inbound is bound on loopback and route.final → the single
+# profile's outbound, so `curl --proxy socks5h://…` pulls a sized file THROUGH that
+# VPN. curl's own %{speed_download} (bytes/s) is the measurement — no shell timing,
+# so the router's nanosecond-less `date` is irrelevant. Bounded by BOTH the URL's
+# byte count (~8 MB) AND SPEED_M seconds: a -m cutoff still yields a valid rate, so
+# the data spent per measurement is ≈8 MB / ≤5 s at most.
+SPEED_ENABLED=$(jstr health_speed_enabled "$SETTINGS"); [ -z "$SPEED_ENABLED" ] && SPEED_ENABLED=1
+# Default target: Cloudflare's sized download endpoint (globally reachable, no auth;
+# `bytes=` IS the size cap). Panel-overridable via settings.health_speed_url.
+SPEED_URL=$(jstr health_speed_url "$SETTINGS")
+[ -z "$SPEED_URL" ] && SPEED_URL="https://speed.cloudflare.com/__down?bytes=8000000"
+SPEED_M=5                                  # wall timeout (s) per measurement
+SPEED_INPORT=$((18080 + $$ % 1000))        # per-run loopback mixed-inbound port (can't
+                                           # collide with CLASH_ADDR's 19390+ range)
+
 [ -d "$PROFILES" ] || exit 0
 [ -x "$SINGBOX_BIN" ] || exit 0
 command -v lua >/dev/null 2>&1 || { log "lua missing — cannot build probe config"; exit 0; }
@@ -377,6 +398,51 @@ stop_sb() {
     SBPID=""
 }
 
+# Build a throwaway config that proxies a loopback `mixed` inbound straight to ONE
+# profile's outbound, so curl can pull bytes THROUGH that VPN. Kept SEPARATE from
+# build_cfg (clash-delay only, no inbound) so the hot functional path is untouched.
+# Writes $SB_CONF; exits non-zero (no file) if the profile has no usable outbound.
+build_speed_cfg() { # $1 = profile id
+    lua - "$PROFILES" "$1" "$CLASH_ADDR" "$SPEED_INPORT" "$SB_CONF" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local pdir, id, clash, inport, cout = arg[1], arg[2], arg[3], tonumber(arg[4]), arg[5]
+local h = io.open(pdir .. "/" .. id .. ".json", "r")
+if not h then os.exit(1) end
+local obj = cjson.decode(h:read("*a") or ""); h:close()
+if not (obj and obj.outbound) then os.exit(1) end
+local ob = obj.outbound; ob.tag = "vpn"
+local conf = {
+  log = { level = "error", timestamp = false },
+  experimental = { clash_api = { external_controller = clash } },
+  inbounds = { { type = "mixed", tag = "in", listen = "127.0.0.1", listen_port = inport } },
+  outbounds = { ob, { type = "direct", tag = "direct" } },
+  route = { final = "vpn" },
+}
+local cf = io.open(cout, "w"); cf:write(cjson.encode(conf)); cf:close()
+LUA
+    [ -s "$SB_CONF" ]
+}
+
+# Measure download throughput of ONE profile's outbound by pulling a sized file
+# through a one-off mixed inbound. Echoes an integer kbit/s, or NOTHING on failure
+# (disabled / no curl / instance won't start / zero bytes). curl computes the rate
+# itself (%{speed_download}, bytes/s), bounded by SPEED_M; a -m cutoff (curl exit
+# 28) still prints a valid rate, so we ignore curl's exit code on purpose.
+measure_speed() { # $1 = profile id  ->  echoes kbit/s (integer) or nothing
+    case "$SPEED_ENABLED" in 0|off|false|no) return 0 ;; esac
+    command -v curl >/dev/null 2>&1 || return 0
+    build_speed_cfg "$1" || return 0
+    if ! start_sb; then stop_sb; return 0; fi
+    _bps=$(curl -s -m "$SPEED_M" -x "socks5h://127.0.0.1:$SPEED_INPORT" \
+        -o /dev/null -w '%{speed_download}' "$SPEED_URL" 2>/dev/null)
+    stop_sb
+    # bytes/s -> kbit/s = bytes*8/1000. awk coerces curl's possible "1.2e6"/"1234.0".
+    _kbps=$(printf '%s' "$_bps" | awk 'NR==1{ v=$1+0; if (v>0) printf "%d", v*8/1000 }' 2>/dev/null)
+    case "$_kbps" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$_kbps" -gt 0 ] 2>/dev/null || return 0
+    printf '%s' "$_kbps"
+}
+
 # Run the clash delay test for one outbound+URL; echo the ms delay, or nothing on
 # failure ({"message":...} / no response). The delay test does a real HTTP GET of
 # the URL THROUGH the named outbound — this is what makes the check "functional".
@@ -430,6 +496,12 @@ upsert_db() {
     _id="$1"
     _line=$(cat "$WORK/$_id" 2>/dev/null)
     [ -n "$_line" ] || return 0
+    # Preserve any previously-measured download speed (field 6): the active loop
+    # re-probes fields 1-5 every 30-60 s and must NOT wipe the hourly speed number.
+    _olddl=""
+    [ -f "$HEALTH_DB" ] && _olddl=$(awk -F'\t' -v id="$_id" '$1==id{print $6; exit}' "$HEALTH_DB" 2>/dev/null)
+    case "$_olddl" in ''|*[!0-9-]*) _olddl="" ;; esac
+    [ -n "$_olddl" ] && _line=$(printf '%s\t%s' "$_line" "$_olddl")
     _tmp="$HEALTH_DB.up.$$"
     if [ -f "$HEALTH_DB" ]; then
         awk -F'\t' -v id="$_id" '$1!=id' "$HEALTH_DB" > "$_tmp" 2>/dev/null
@@ -438,6 +510,19 @@ upsert_db() {
     fi
     printf '%s\n' "$_line" >> "$_tmp"
     mv "$_tmp" "$HEALTH_DB" 2>/dev/null || rm -f "$_tmp"
+}
+
+# Set (or append) the OPTIONAL 6th TSV field — download kbit/s — of ONE profile's
+# cache line in place, leaving fields 1-5 verbatim. Older lines carry 5 fields; the
+# CGI defaults a missing field to -1, so this stays backward-compatible.
+set_dl() { # $1 = id, $2 = kbit/s
+    _sid="$1"; _sdl="$2"
+    [ -f "$HEALTH_DB" ] || return 0
+    case "$_sdl" in ''|*[!0-9-]*) return 0 ;; esac
+    _stmp="$HEALTH_DB.dl.$$"
+    awk -F'\t' -v id="$_sid" -v dl="$_sdl" 'BEGIN{OFS="\t"}
+        $1==id { $6=dl; print; next } { print }' "$HEALTH_DB" > "$_stmp" 2>/dev/null \
+        && mv "$_stmp" "$HEALTH_DB" 2>/dev/null || rm -f "$_stmp"
 }
 
 # Human-readable profile name (the panel's label) for a push body; falls back to id.
@@ -642,6 +727,14 @@ if [ "$MODE" = "one" ]; then
     if ! probe_idfile "$WORK/.one-ids"; then mark_down "$ONEID"; fi
     LINE=$(cat "$WORK/$ONEID" 2>/dev/null)
     [ -n "$LINE" ] || { mark_down "$ONEID"; LINE=$(cat "$WORK/$ONEID"); }
+    # On-demand download speed for THIS profile (the panel's per-row button — this is
+    # how a NON-active profile gets a speed number). Only when it passed the check.
+    _ONEOK=$(printf '%s' "$LINE" | awk -F'\t' '{print $2}')
+    _ONEDL=-1
+    if [ "$_ONEOK" = "1" ]; then
+        _ONEDL=$(measure_speed "$ONEID"); [ -z "$_ONEDL" ] && _ONEDL=-1
+    fi
+    LINE=$(printf '%s\t%s' "$LINE" "$_ONEDL")
     TMPDB="$HEALTH_DB.one.$$"
     if [ -f "$HEALTH_DB" ]; then
         awk -F'\t' -v id="$ONEID" '$1!=id' "$HEALTH_DB" > "$TMPDB" 2>/dev/null
@@ -825,6 +918,26 @@ elif [ -s "$PROBED" ]; then
         END { for (id in nd) print id "\t" nd[id] }
     ' "$SCHED" "$PROBED" > "$SCHED.new" 2>/dev/null
     mv "$SCHED.new" "$SCHED" 2>/dev/null
+fi
+
+# ---- Download speed of the ACTIVE profile (hourly). Measured only when the active
+# profile was actually (re)probed THIS round and passed — so the speed rides the
+# same 45-60 min functional cadence as its status, exactly like the user asked.
+# Other profiles get speed on demand (panel per-row button → `one` mode). The active
+# sub-minute loop never measures speed (too costly to repeat). A multi-hop chain
+# active is ambiguous → skipped. set_dl preserves fields 1-5, so this just annotates
+# the freshly-written cache line with field 6.
+if [ -n "$ACTIVE" ] && [ -f "$WORK/$ACTIVE" ]; then
+    ASPEED_OK=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$ACTIVE" 2>/dev/null)
+    ACHAIN_S=$(jstr active_chain "$SETTINGS")
+    case "$ACHAIN_S" in *,*) ASPEED_OK=0 ;; esac      # chain → skip speed
+    if [ "$ASPEED_OK" = "1" ]; then
+        ADLK=$(measure_speed "$ACTIVE")
+        if [ -n "$ADLK" ]; then
+            set_dl "$ACTIVE" "$ADLK"
+            log "$MODE active speed: $ACTIVE = $ADLK kbit/s"
+        fi
+    fi
 fi
 
 # ==================== OPT-IN AUTO-SWITCH ====================

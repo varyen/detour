@@ -424,11 +424,19 @@ write_settings() {
     # switch / settings POST doesn't wipe them; callers (health_config action)
     # change a value by exporting an override before calling us. Defaults: the
     # functional check is ON, auto-switch is OFF.
-    local health_enabled health_autoswitch
+    local health_enabled health_autoswitch health_speed
     health_enabled=${HEALTH_ENABLED_OVERRIDE:-$(get_settings_val "health_check_enabled")}
     [ -z "$health_enabled" ] && health_enabled="1"
     health_autoswitch=${HEALTH_AUTOSWITCH_OVERRIDE:-$(get_settings_val "health_auto_switch")}
     [ -z "$health_autoswitch" ] && health_autoswitch="0"
+    # Speed measurement: ON by default; measured only for the active profile hourly
+    # (+ on-demand per row) by detour-health, so it adds little traffic. Preserve a
+    # custom health_speed_url across rewrites the same way (this fn emits a fixed key
+    # set, so a key not re-read here would be lost on the next settings POST).
+    health_speed=${HEALTH_SPEED_OVERRIDE:-$(get_settings_val "health_speed_enabled")}
+    [ -z "$health_speed" ] && health_speed="1"
+    local health_speed_url
+    health_speed_url=$(get_settings_val "health_speed_url")
 
     cat > "$SINGBOX_SETTINGS" <<EOF
 {
@@ -439,7 +447,9 @@ write_settings() {
   "singbox_mode": "$singbox_mode",
   "vpn_redirect_ifaces": "$vpn_ifaces",
   "health_check_enabled": "$health_enabled",
-  "health_auto_switch": "$health_autoswitch"
+  "health_auto_switch": "$health_autoswitch",
+  "health_speed_enabled": "$health_speed",
+  "health_speed_url": "$health_speed_url"
 }
 EOF
 }
@@ -1537,24 +1547,28 @@ health_status)
     NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
     HEN=$(get_settings_val health_check_enabled); [ -z "$HEN" ] && HEN=1
     HAS=$(get_settings_val health_auto_switch);   [ -z "$HAS" ] && HAS=0
+    HSP=$(get_settings_val health_speed_enabled); [ -z "$HSP" ] && HSP=1
     EN_J=true;  case "$HEN" in 0|off|false|no) EN_J=false ;; esac
     AS_J=false; case "$HAS" in 1|on|true|yes) AS_J=true ;; esac
+    SP_J=true;  case "$HSP" in 0|off|false|no) SP_J=false ;; esac
     URLS_J=$(health_urls_json); [ -z "$URLS_J" ] && URLS_J='[]'
     SW_J=null; [ -f "$HEALTH_SWITCH" ] && SW_J=$(cat "$HEALTH_SWITCH" 2>/dev/null)
     [ -z "$SW_J" ] && SW_J=null
     HEALTHY_J=false; [ -x "$HEALTH_BIN" ] && [ ! -f "$HEALTH_UNSUPP" ] && HEALTHY_J=true
-    printf '{"now":%s,"supported":%s,"enabled":%s,"auto_switch":%s,"urls":%s,"switch":%s,"results":{' \
-        "$NOW" "$HEALTHY_J" "$EN_J" "$AS_J" "$URLS_J" "$SW_J"
+    printf '{"now":%s,"supported":%s,"enabled":%s,"auto_switch":%s,"speed":%s,"urls":%s,"switch":%s,"results":{' \
+        "$NOW" "$HEALTHY_J" "$EN_J" "$AS_J" "$SP_J" "$URLS_J" "$SW_J"
     if [ -f "$HEALTH_DB" ]; then
-        # TSV: id \t ok \t ts \t rtt \t delays(csv of ms|-1). $5 has no tabs, so
-        # wrapping it in [] yields a JSON array; rebuild it to normalise blanks.
+        # TSV: id \t ok \t ts \t rtt \t delays(csv ms|-1) \t dl_kbits(optional). $5
+        # has no tabs, so wrapping it in [] yields a JSON array; rebuild it to
+        # normalise blanks. Field 6 (download kbit/s) is optional → default -1.
         awk -F'\t' 'BEGIN{first=1}
             NF>=5 {
                 if(!first)printf ","; first=0;
                 n=split($5,a,","); d="";
                 for(i=1;i<=n;i++){ if(i>1)d=d","; v=a[i]; if(v=="")v="-1"; d=d v }
-                printf "\"%s\":{\"ok\":%s,\"ts\":%s,\"rtt\":%s,\"delays\":[%s]}",
-                    $1, ($2=="1"?"true":"false"), ($3==""?0:$3), ($4==""?-1:$4), d;
+                dl=(NF>=6)?$6:"-1"; if(dl=="" || dl !~ /^-?[0-9]+$/) dl="-1";
+                printf "\"%s\":{\"ok\":%s,\"ts\":%s,\"rtt\":%s,\"dl\":%s,\"delays\":[%s]}",
+                    $1, ($2=="1"?"true":"false"), ($3==""?0:$3), ($4==""?-1:$4), dl, d;
             }' "$HEALTH_DB"
     fi
     printf '}}'
@@ -1575,13 +1589,15 @@ health_check)
         TSV=$(printf '%s' "$LINE" | awk -F'\t' '{print $3}')
         RTTV=$(printf '%s' "$LINE" | awk -F'\t' '{print $4}')
         DLS=$(printf '%s' "$LINE" | awk -F'\t' '{print $5}')
+        DLK=$(printf '%s' "$LINE" | awk -F'\t' '{print $6}')   # download kbit/s (optional)
         [ -z "$OKV" ] && OKV=0
         [ -z "$TSV" ] && TSV=0
         [ -z "$RTTV" ] && RTTV=-1
         [ -z "$DLS" ] && DLS=-1
+        case "$DLK" in ''|*[!0-9-]*) DLK=-1 ;; esac
         OKJ=false; [ "$OKV" = "1" ] && OKJ=true
-        printf '{"ok":true,"id":"%s","result":{"ok":%s,"ts":%s,"rtt":%s,"delays":[%s]}}' \
-            "$HID" "$OKJ" "$TSV" "$RTTV" "$DLS"
+        printf '{"ok":true,"id":"%s","result":{"ok":%s,"ts":%s,"rtt":%s,"dl":%s,"delays":[%s]}}' \
+            "$HID" "$OKJ" "$TSV" "$RTTV" "$DLK" "$DLS"
     else
         # Detach the full sweep so the request returns at once AND the sweep keeps
         # running after uhttpd reaps the CGI. A bare `&` is NOT enough: the child
@@ -1622,19 +1638,24 @@ health_config)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     NEW_EN=$(printf '%s' "$POST_DATA" | sed -n 's/.*"enabled"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
     NEW_AS=$(printf '%s' "$POST_DATA" | sed -n 's/.*"auto_switch"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
+    NEW_SP=$(printf '%s' "$POST_DATA" | sed -n 's/.*"speed"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
     CUR_EN=$(get_settings_val health_check_enabled); [ -z "$CUR_EN" ] && CUR_EN=1
     CUR_AS=$(get_settings_val health_auto_switch);   [ -z "$CUR_AS" ] && CUR_AS=0
+    CUR_SP=$(get_settings_val health_speed_enabled); [ -z "$CUR_SP" ] && CUR_SP=1
     [ -z "$NEW_EN" ] && NEW_EN="$CUR_EN"
     [ -z "$NEW_AS" ] && NEW_AS="$CUR_AS"
+    [ -z "$NEW_SP" ] && NEW_SP="$CUR_SP"
     ACHAIN=$(get_active_chain)
     RMODE=$(get_routing_mode)
     UPSTREAM=$(get_settings_val upstream_ips)
     SBMODE=$(get_singbox_mode)
     HEALTH_ENABLED_OVERRIDE="$NEW_EN" HEALTH_AUTOSWITCH_OVERRIDE="$NEW_AS" \
+        HEALTH_SPEED_OVERRIDE="$NEW_SP" \
         write_settings "$ACHAIN" "$RMODE" "$UPSTREAM" "$SBMODE"
-    printf '{"ok":true,"enabled":%s,"auto_switch":%s}' \
+    printf '{"ok":true,"enabled":%s,"auto_switch":%s,"speed":%s}' \
         "$([ "$NEW_EN" = "1" ] && echo true || echo false)" \
-        "$([ "$NEW_AS" = "1" ] && echo true || echo false)"
+        "$([ "$NEW_AS" = "1" ] && echo true || echo false)" \
+        "$([ "$NEW_SP" = "1" ] && echo true || echo false)"
     ;;
 
 # ==================== PANEL SELF-UPDATE ====================
