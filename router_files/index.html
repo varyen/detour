@@ -1603,6 +1603,24 @@
         text-transform: uppercase;
         letter-spacing: 0.03em;
       }
+      .vpn-speed-cell {
+        white-space: nowrap;
+      }
+      .vc-health-ago {
+        margin-top: 2px;
+        font-size: 10.5px;
+        color: var(--text-muted);
+        opacity: 0.75;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .vc-speed-val {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .vc-speed-none {
+        opacity: 0.5;
+      }
       .vpn-cell-actions {
         display: flex;
         gap: 6px;
@@ -3630,6 +3648,8 @@
               ><span class="value" id="sb-ping">—</span>
               <span class="label">Работает</span
               ><span class="value" id="sb-health" title="функциональная проверка через VPN (раз в час)">—</span>
+              <span class="label">Скорость</span
+              ><span class="value" id="sb-speed" title="измеренная скорость скачивания активного VPN (раз в час)">—</span>
               <span class="label">Режим</span
               ><span class="value" id="sb-routing-mode">—</span>
               <span class="label">Записей</span
@@ -4449,13 +4469,13 @@
                   </th>
                   <th
                     class="vpn-th-sort"
-                    data-sort="checked"
-                    onclick="setVpnSort('checked')"
-                    title="Сортировать по времени последней проверки"
+                    data-sort="speed"
+                    onclick="setVpnSort('speed')"
+                    title="Сортировать по измеренной скорости скачивания"
                   >
-                    Проверен<span
+                    Скорость<span
                       class="vpn-sort-ind"
-                      data-sortind="checked"
+                      data-sortind="speed"
                     ></span>
                   </th>
                   <th>Действия</th>
@@ -6710,6 +6730,27 @@
           "</span>"
         );
       }
+      // "Работает" cell for the VPN table: the functional badge PLUS when the VPN
+      // check last ran, so the last-checked time is visible in the table without a
+      // dedicated column (it used to live in the old «Проверен» column).
+      function vpnHealthCellHtml(id) {
+        if (!healthMeta.supported) return "—";
+        var hinfo = healthInfo(id);
+        var h = healthResults[id];
+        var ago = h && h.ts ? fmtPingAgo(h.ts) : "";
+        return (
+          '<span class="pdi-health ' +
+          hinfo.cls +
+          '" title="' +
+          escapeHtml(hinfo.title) +
+          '">' +
+          escapeHtml(hinfo.text) +
+          "</span>" +
+          (ago
+            ? '<div class="vc-health-ago">' + escapeHtml(ago) + "</div>"
+            : "")
+        );
+      }
       function updateHealthBadgesAll() {
         var dd = document.getElementById("sb-profile-dropdown");
         if (!dd) return;
@@ -6722,28 +6763,35 @@
           spans[i].title = info.title;
         }
       }
-      // Active VPN's functional status in the sing-box card (word + colour).
+      // Active VPN's functional status + measured download speed in the sing-box
+      // card (the main page). "Работает" = word+colour; "Скорость" = the measured
+      // download speed of the active profile (its own dedicated field).
       function updateActiveHealth() {
         var el = document.getElementById("sb-health");
-        if (!el) return;
+        var spEl = document.getElementById("sb-speed");
         var id = currentActiveProfileId;
-        if (!id || !healthMeta.supported) {
-          el.textContent = "—";
-          el.style.color = "";
-          el.title = "";
-          return;
+        if (el) {
+          if (!id || !healthMeta.supported) {
+            el.textContent = "—";
+            el.style.color = "";
+            el.title = "";
+          } else {
+            var info = healthInfo(id);
+            if (info.text === "·") el.textContent = "проверка…";
+            else if (info.cls === "health-good") el.textContent = "✓ работает";
+            else el.textContent = "✕ не работает";
+            el.style.color = HEALTH_COLORS[info.cls] || "";
+            el.title = info.title;
+          }
         }
-        var info = healthInfo(id);
-        if (info.text === "·") el.textContent = "проверка…";
-        else if (info.cls === "health-good") el.textContent = "✓ работает";
-        else el.textContent = "✕ не работает";
-        // Append the measured download speed to the active VPN line, when we have it.
-        var e = healthResults[id];
-        var sp = e ? fmtSpeed(e.dl) : "";
-        if (info.cls === "health-good" && sp)
-          el.textContent += " · ↓ " + sp;
-        el.style.color = HEALTH_COLORS[info.cls] || "";
-        el.title = info.title;
+        if (spEl) {
+          var e = id ? healthResults[id] : null;
+          var sp = e && healthMeta.supported ? fmtSpeed(e.dl) : "";
+          spEl.textContent = sp ? "↓ " + sp : "—";
+          spEl.title = sp
+            ? "измеренная скорость скачивания активного VPN"
+            : "скорость ещё не измерена";
+        }
       }
       function profileNameById(id) {
         for (var i = 0; i < currentProfiles.length; i++)
@@ -6941,32 +6989,33 @@
           seedHealthStatus();
         }, 8000);
       }
-      // Synchronous single-profile re-check (the per-row ⚕ button).
-      // "Проверен" column: two lines — when ping was last checked, and when the
-      // functional (VPN) check last ran. Used by the row builder + live updates.
-      function vpnCheckedHtml(id) {
+      // "Скорость" column cell (replaces the old "Проверен" column). Shows the
+      // measured download speed; the last-checked times (ping / VPN) move into the
+      // cell tooltip so that info isn't lost. The speed is measured in the BACKGROUND
+      // by detour-health alongside each profile's functional check (and on the per-row
+      // ⚕ button), so it's already populated when the page opens.
+      function vpnSpeedHtml(id) {
         var p = pingResults[id],
           h = healthResults[id];
         var pingAgo = p && p.ts ? fmtPingAgo(p.ts) : "—";
-        var line1 =
-          '<div class="vc-line"><span class="vc-lbl">пинг</span> ' +
+        var vpnAgo = h && h.ts ? fmtPingAgo(h.ts) : "—";
+        var title =
+          "пинг проверен: " +
           pingAgo +
-          "</div>";
-        if (!healthMeta.supported) return line1;
-        var hAgo = h && h.ts ? fmtPingAgo(h.ts) : "—";
+          (healthMeta.supported ? " · VPN: " + vpnAgo : "");
         var sp = h ? fmtSpeed(h.dl) : "";
-        // Speed goes on its OWN line (appending it to the VPN line widened the
-        // «Проверен» column and broke the table layout).
+        if (sp)
+          return (
+            '<span class="vc-speed-val" title="' +
+            escapeHtml(title) +
+            '">↓ ' +
+            escapeHtml(sp) +
+            "</span>"
+          );
         return (
-          line1 +
-          '<div class="vc-line"><span class="vc-lbl">VPN</span> ' +
-          hAgo +
-          "</div>" +
-          (sp
-            ? '<div class="vc-line"><span class="vc-lbl">↓</span> ' +
-              escapeHtml(sp) +
-              "</div>"
-            : "")
+          '<span class="vc-speed-none" title="' +
+          escapeHtml(title + " · скорость ещё не измерена") +
+          '">—</span>'
         );
       }
       async function refreshOneHealth(id, btn) {
@@ -7048,6 +7097,19 @@
           if (ta !== tb) return (ta - tb) * dir;
           return (a.name || "").localeCompare(b.name || "");
         }
+        if (vpnSort.col === "speed") {
+          // Higher speed first by default (dir=-1). Unmeasured (dl≤0 / no result)
+          // always sinks to the bottom regardless of direction.
+          var ha = healthResults[a.id],
+            hb = healthResults[b.id];
+          var da = ha && ha.dl > 0 ? ha.dl : -1;
+          var db = hb && hb.dl > 0 ? hb.dl : -1;
+          if (da < 0 && db < 0) return (a.name || "").localeCompare(b.name || "");
+          if (da < 0) return 1;
+          if (db < 0) return -1;
+          if (da !== db) return (da - db) * dir;
+          return (a.name || "").localeCompare(b.name || "");
+        }
         var ka = vpnPingSortKey(a.id),
           kb = vpnPingSortKey(b.id);
         if (ka[0] !== kb[0]) return ka[0] - kb[0]; // reachable grouped ahead of dead/unknown
@@ -7062,7 +7124,8 @@
           vpnSort.dir = -vpnSort.dir;
         } else {
           vpnSort.col = col;
-          vpnSort.dir = col === "checked" ? -1 : 1;
+          // Most-recent-first / fastest-first feel more natural as the default.
+          vpnSort.dir = col === "checked" || col === "speed" ? -1 : 1;
         }
         renderVpnStatusTable();
       }
@@ -7156,16 +7219,7 @@
           '">' +
           escapeHtml(info.text) +
           "</span>";
-        var hinfo = healthInfo(p.id);
-        var healthHtml = healthMeta.supported
-          ? '<span class="pdi-health ' +
-            hinfo.cls +
-            '" title="' +
-            escapeHtml(hinfo.title) +
-            '">' +
-            escapeHtml(hinfo.text) +
-            "</span>"
-          : "—";
+        var healthHtml = vpnHealthCellHtml(p.id);
         var asEligible = p.autoswitch !== false;
         var actions =
           '<button class="vpn-as-btn' +
@@ -7221,10 +7275,10 @@
           '">' +
           healthHtml +
           "</td>" +
-          '<td class="vpn-checked" data-label="Проверен" data-vpn-checked="' +
+          '<td class="vpn-checked vpn-speed-cell" data-label="Скорость" data-vpn-speed="' +
           escapeHtml(p.id) +
           '">' +
-          vpnCheckedHtml(p.id) +
+          vpnSpeedHtml(p.id) +
           "</td>" +
           '<td><div class="vpn-cell-actions">' +
           actions +
@@ -7268,23 +7322,9 @@
             "</span>";
         }
         var healthTd = tbody.querySelector('td[data-vpn-health="' + id + '"]');
-        if (healthTd) {
-          if (!healthMeta.supported) {
-            healthTd.textContent = "—";
-          } else {
-            var hinfo = healthInfo(id);
-            healthTd.innerHTML =
-              '<span class="pdi-health ' +
-              hinfo.cls +
-              '" title="' +
-              escapeHtml(hinfo.title) +
-              '">' +
-              escapeHtml(hinfo.text) +
-              "</span>";
-          }
-        }
-        var chkTd = tbody.querySelector('td[data-vpn-checked="' + id + '"]');
-        if (chkTd) chkTd.innerHTML = vpnCheckedHtml(id);
+        if (healthTd) healthTd.innerHTML = vpnHealthCellHtml(id);
+        var spTd = tbody.querySelector('td[data-vpn-speed="' + id + '"]');
+        if (spTd) spTd.innerHTML = vpnSpeedHtml(id);
         return found;
       }
       // Single-row update (per-row re-check buttons).
@@ -7445,8 +7485,9 @@
         }
       }
 
-      // Keep the relative "проверен" column fresh even for rows the scheduler
-      // isn't actively probing (one cheap tick while the tab is visible).
+      // Keep the speed cell's last-checked tooltip fresh even for rows the scheduler
+      // isn't actively probing (one cheap tick while the tab is visible). The visible
+      // value (Мбит/с) is stable between polls, so this only refreshes the title.
       function ensureVpnAgoTimer() {
         if (vpnAgoTimerStarted) return;
         vpnAgoTimerStarted = true;
@@ -7455,12 +7496,16 @@
           if (!view || view.style.display === "none") return;
           var tbody = document.getElementById("vpn-status-tbody");
           if (!tbody) return;
-          var cells = tbody.querySelectorAll("[data-vpn-checked]");
+          var cells = tbody.querySelectorAll("[data-vpn-speed]");
           for (var i = 0; i < cells.length; i++) {
-            var id = cells[i].getAttribute("data-vpn-checked");
-            // Use the SAME full two-line "пинг / VPN" renderer — a bare
-            // textContent here would clobber the VPN line every tick (flicker).
-            cells[i].innerHTML = vpnCheckedHtml(id);
+            var id = cells[i].getAttribute("data-vpn-speed");
+            cells[i].innerHTML = vpnSpeedHtml(id);
+          }
+          // Keep the "Работает" cell's "X назад" sub-line fresh too.
+          var hcells = tbody.querySelectorAll("[data-vpn-health]");
+          for (var k = 0; k < hcells.length; k++) {
+            var hid = hcells[k].getAttribute("data-vpn-health");
+            hcells[k].innerHTML = vpnHealthCellHtml(hid);
           }
         }, 15000);
       }

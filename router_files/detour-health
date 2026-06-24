@@ -920,25 +920,36 @@ elif [ -s "$PROBED" ]; then
     mv "$SCHED.new" "$SCHED" 2>/dev/null
 fi
 
-# ---- Download speed of the ACTIVE profile (hourly). Measured only when the active
-# profile was actually (re)probed THIS round and passed — so the speed rides the
-# same 45-60 min functional cadence as its status, exactly like the user asked.
-# Other profiles get speed on demand (panel per-row button → `one` mode). The active
-# sub-minute loop never measures speed (too costly to repeat). A multi-hop chain
-# active is ambiguous → skipped. set_dl preserves fields 1-5, so this just annotates
-# the freshly-written cache line with field 6.
-if [ -n "$ACTIVE" ] && [ -f "$WORK/$ACTIVE" ]; then
-    ASPEED_OK=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$ACTIVE" 2>/dev/null)
-    ACHAIN_S=$(jstr active_chain "$SETTINGS")
-    case "$ACHAIN_S" in *,*) ASPEED_OK=0 ;; esac      # chain → skip speed
-    if [ "$ASPEED_OK" = "1" ]; then
-        ADLK=$(measure_speed "$ACTIVE")
-        if [ -n "$ADLK" ]; then
-            set_dl "$ACTIVE" "$ADLK"
-            log "$MODE active speed: $ACTIVE = $ADLK kbit/s"
+# ---- Download speed of EVERY HEALTHY profile checked THIS round (background +
+# persisted). This is the whole point: when a profile's functional check runs, its
+# speed is measured at the same time and remembered in the cache, so the panel shows
+# it without the user sitting on the page. Profiles are checked on their staggered
+# 45-60 min cadence, so a steady `tick` measures only the few profiles due that
+# minute — the speed-test traffic spreads over time instead of one big burst; a
+# manual `sweep` («Проверить работу всех») measures all healthy serially.
+#
+# Runs in tick/sweep ONLY — NEVER in the sub-minute `active` loop (that would pull a
+# real download every 30-60 s). Per-profile speed tests are serial (parallel ones
+# would contend for bandwidth and lie). set_dl preserves fields 1-5, so each just
+# annotates the freshly-written cache line with field 6. On-demand single-profile
+# speed (panel per-row ⚕ button → `one` mode) still works independently.
+case "$SPEED_ENABLED" in
+    0|off|false|no) : ;;
+    *)
+        if [ -s "$PROBED" ]; then
+            _spn=0
+            while IFS= read -r _spid; do
+                [ -n "$_spid" ] || continue
+                [ -f "$WORK/$_spid" ] || continue
+                _spok=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$_spid" 2>/dev/null)
+                [ "$_spok" = "1" ] || continue          # only healthy profiles
+                _spk=$(measure_speed "$_spid")
+                [ -n "$_spk" ] && { set_dl "$_spid" "$_spk"; _spn=$((_spn + 1)); }
+            done < "$PROBED"
+            [ "$_spn" -gt 0 ] && log "$MODE measured download speed for $_spn healthy profile(s)"
         fi
-    fi
-fi
+        ;;
+esac
 
 # ==================== OPT-IN AUTO-SWITCH ====================
 # Only when enabled AND the active profile is a SINGLE profile (auto-switching a
