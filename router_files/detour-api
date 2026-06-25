@@ -39,6 +39,11 @@ PUSH_BIN="/usr/sbin/detour-push"            # Web Push (VAPID) sender — backs 
 PUSH_MSG="/tmp/detour-push.msg"             # latest push message JSON (read by the service worker; tmpfs, not remapped)
 CERT_BIN="/usr/sbin/detour-cert"            # Let's Encrypt helper (acme.sh) — backs the cert_* actions
 CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written by detour-cert)
+# Swap file (Keenetic/Entware only — /opt on a USB flash needs swap or the stack
+# gets OOM-killed). Managed via the S05swap init script; backs the swap_* actions.
+SWAPFILE="/opt/swapfile"
+SWAP_INITD="/etc/init.d/S05swap"
+SWAP_STATE="/var/state/detour-swap.json"
 
 AUTH_FILE="/etc/detour.auth"
 SESSION_DIR="/tmp/detour-sessions"
@@ -105,6 +110,9 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PUSH_BIN="$OPT/sbin/detour-push"   # PUSH_MSG stays /tmp (not remapped, like HEALTH_DB)
     CERT_BIN="$OPT/sbin/detour-cert"
     CERT_STATE="$OPT/var/state/detour-cert.json"
+    SWAPFILE="$OPT/swapfile"
+    SWAP_INITD="$OPT/etc/init.d/S05swap"
+    SWAP_STATE="$OPT/var/state/detour-swap.json"
     # LAN bridge from detour.conf (assumed br0); "Все через VPN" uses iptables (no nft fw4).
     LAN_IF="br0"
     SVC_START="force-start"   # Keenetic boot-`start` is autostart-gated; manual start bypasses it
@@ -2921,6 +2929,76 @@ cert_issue)
     case "$CEML" in ''|*[!a-zA-Z0-9.@_+-]*) json_err "bad email"; exit 0 ;; esac
     detach_bg "/tmp/detour-cert-bg.log" "$CERT_BIN" issue "$CDOM" "$CEML"
     printf '{"ok":true,"started":true}'
+    ;;
+
+# ==================== SWAP FILE (Keenetic/Entware flash) ====================
+# /opt lives on a USB flash with little RAM behind it — without a swap file the
+# stack gets OOM-killed and the panel is unstable. These actions drive the S05swap
+# init script's create/remove from the panel modal. Keenetic-only (the UI hides the
+# menu elsewhere); the actions also guard on PLATFORM so OpenWrt returns «н/д».
+swap_status)
+    if [ "$PLATFORM" != "keenetic" ]; then
+        printf '{"ok":true,"supported":false}'
+        exit 0
+    fi
+    EXISTS=false;  [ -f "$SWAPFILE" ] && EXISTS=true
+    ACTIVE=false
+    swapon -s 2>/dev/null | awk -v f="$SWAPFILE" '$1==f{found=1} END{exit !found}' && ACTIVE=true
+    # file size in MB (cheap: ls byte size, not du which walks the file)
+    SIZE_MB=0
+    if [ -f "$SWAPFILE" ]; then
+        SIZE_MB=$(ls -l "$SWAPFILE" 2>/dev/null | awk '{printf "%d", $5/1048576}')
+        case "$SIZE_MB" in ''|*[!0-9]*) SIZE_MB=0 ;; esac
+    fi
+    FREE_MB=$(df -m /opt 2>/dev/null | tail -n 1 | awk '{print $4}')
+    case "$FREE_MB" in ''|*[!0-9]*) FREE_MB=0 ;; esac
+    SWAPPINESS=$(cat /proc/sys/vm/swappiness 2>/dev/null)
+    case "$SWAPPINESS" in ''|*[!0-9]*) SWAPPINESS=-1 ;; esac
+    TOOLS=false
+    command -v mkswap >/dev/null 2>&1 && command -v swapon >/dev/null 2>&1 && TOOLS=true
+    BUSY=false; [ -f /tmp/detour-swap.busy ] && BUSY=true
+    LAST_RESULT=""; LAST_MSG=""
+    if [ -f "$SWAP_STATE" ]; then
+        LAST_RESULT=$(sed -n 's/.*"result"[^"]*"\([^"]*\)".*/\1/p' "$SWAP_STATE" 2>/dev/null)
+        LAST_MSG=$(sed -n 's/.*"message"[^"]*"\([^"]*\)".*/\1/p' "$SWAP_STATE" 2>/dev/null)
+    fi
+    printf '{"ok":true,"supported":true,"exists":%s,"active":%s,"size_mb":%s,"free_mb":%s,"swappiness":%s,"tools":%s,"busy":%s,"last_result":"%s","last_message":"%s"}' \
+        "$EXISTS" "$ACTIVE" "$SIZE_MB" "$FREE_MB" "$SWAPPINESS" "$TOOLS" "$BUSY" \
+        "$LAST_RESULT" "$(printf '%s' "$LAST_MSG" | json_escape)"
+    ;;
+
+swap_create)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    if [ "$PLATFORM" != "keenetic" ]; then json_err "swap доступен только на Keenetic"; exit 0; fi
+    command -v mkswap >/dev/null 2>&1 || { json_err "swap-utils не установлен (opkg install swap-utils)"; exit 0; }
+    [ -x "$SWAP_INITD" ] || { json_err "S05swap не установлен"; exit 0; }
+    [ -f /tmp/detour-swap.busy ] && { json_err "Создание уже выполняется"; exit 0; }
+    SZ=$(printf '%s' "$POST_DATA" | sed -n 's/.*"size_mb"[^0-9]*\([0-9][0-9]*\).*/\1/p')
+    case "$SZ" in ''|*[!0-9]*) SZ=512 ;; esac
+    [ "$SZ" -lt 64 ]   && SZ=64
+    [ "$SZ" -gt 4096 ] && SZ=4096
+    FREE_MB=$(df -m /opt 2>/dev/null | tail -n 1 | awk '{print $4}')
+    case "$FREE_MB" in ''|*[!0-9]*) FREE_MB=0 ;; esac
+    if [ "$FREE_MB" -lt $((SZ + 32)) ]; then
+        json_err "Недостаточно места на /opt: свободно ${FREE_MB}MB, нужно $((SZ + 32))MB"; exit 0
+    fi
+    : > "$SWAP_STATE" 2>/dev/null
+    # Mark busy SYNCHRONOUSLY (before detach_bg's 1s settle), so a poll arriving in
+    # the gap before the worker starts still sees busy=true and keeps waiting instead
+    # of reading the just-truncated empty state and stopping early. The worker clears
+    # it on every exit path.
+    : > /tmp/detour-swap.busy 2>/dev/null
+    # dd of up to 4GB on USB flash is slow → run detached; panel polls swap_status.
+    detach_bg "/tmp/detour-swap-bg.log" "$SWAP_INITD" create "$SZ"
+    printf '{"ok":true,"started":true,"size_mb":%s}' "$SZ"
+    ;;
+
+swap_remove)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    if [ "$PLATFORM" != "keenetic" ]; then json_err "swap доступен только на Keenetic"; exit 0; fi
+    [ -x "$SWAP_INITD" ] || { json_err "S05swap не установлен"; exit 0; }
+    "$SWAP_INITD" remove >/dev/null 2>&1
+    printf '{"ok":true}'
     ;;
 
 *) json_err "unknown action: $ACTION" ;;

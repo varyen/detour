@@ -2746,6 +2746,34 @@
                   HTTPS-сертификат
                 </button>
               </div>
+              <!-- SWAP-файл — Keenetic only; shown on Keenetic (см. loadStatus). -->
+              <div id="hdr-swap-group" style="display: none">
+                <div class="hdr-menu-sep"></div>
+                <div class="hdr-menu-title">Накопитель</div>
+                <button
+                  class="hdr-menu-item"
+                  role="menuitem"
+                  onclick="hdrMenuRun(openSwapModal)"
+                  title="Создать/удалить файл подкачки (SWAP) на флешке — без него панель ведёт себя нестабильно"
+                >
+                  <svg
+                    class="i"
+                    width="15"
+                    height="15"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <ellipse cx="12" cy="5" rx="9" ry="3" />
+                    <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+                    <path d="M3 12a9 3 0 0 0 18 0" />
+                  </svg>
+                  SWAP-файл
+                </button>
+              </div>
               <div class="hdr-menu-sep"></div>
               <div class="hdr-menu-title">Аккаунт</div>
               <button
@@ -3617,6 +3645,105 @@
 
           <div class="modal-footer">
             <button class="btn" onclick="closeCertModal()">Закрыть</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== SWAP-файл (Keenetic) ===== -->
+      <div
+        class="modal-overlay"
+        id="swap-modal"
+        style="display: none"
+        onclick="if (event.target === this) closeSwapModal();"
+      >
+        <div class="modal" style="max-width: 560px">
+          <h3>
+            <svg
+              class="i"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <ellipse cx="12" cy="5" rx="9" ry="3" />
+              <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+              <path d="M3 12a9 3 0 0 0 18 0" />
+            </svg>
+            Файл подкачки (SWAP)
+          </h3>
+          <p class="helper-text-block">
+            На Keenetic панель и её сервисы (sing-box, lighttpd, dnsmasq) живут на
+            USB-флешке, а оперативной памяти мало. Без файла подкачки стек под
+            нагрузкой убивается по нехватке памяти — панель «ведёт себя
+            нестабильно». Здесь можно создать SWAP-файл на флешке (он сам
+            подключается при каждой загрузке) или удалить его.
+          </p>
+
+          <div
+            class="editor-section"
+            id="swap-current"
+            style="margin-bottom: 14px"
+          >
+            <p class="helper-text-block" id="swap-current-text">Загрузка…</p>
+          </div>
+
+          <div
+            class="editor-section"
+            id="swap-warn"
+            style="display: none; margin-bottom: 14px"
+          >
+            <p
+              class="helper-text-block"
+              style="color: var(--red)"
+              id="swap-warn-text"
+            ></p>
+          </div>
+
+          <div class="editor-section" id="swap-main" style="margin-bottom: 14px">
+            <div class="form-grid">
+              <div>
+                <label for="swap-size">Размер файла подкачки</label>
+                <select id="swap-size">
+                  <option value="512">512 МБ</option>
+                  <option value="1024" selected>1 ГБ (рекомендуется)</option>
+                  <option value="2048">2 ГБ</option>
+                </select>
+              </div>
+            </div>
+            <div class="flex-gap" style="margin-top: 12px">
+              <button
+                class="btn primary"
+                id="swap-create-btn"
+                onclick="createSwap()"
+              >
+                💾 Создать SWAP
+              </button>
+              <button
+                class="btn danger"
+                id="swap-remove-btn"
+                style="display: none"
+                onclick="removeSwap()"
+              >
+                Удалить SWAP
+              </button>
+            </div>
+            <div
+              id="swap-status"
+              style="
+                font-size: 12px;
+                color: var(--text-dim);
+                margin-top: 8px;
+                min-height: 16px;
+              "
+            ></div>
+          </div>
+
+          <div class="modal-footer">
+            <button class="btn" onclick="closeSwapModal()">Закрыть</button>
           </div>
         </div>
       </div>
@@ -6248,6 +6375,12 @@
           if (httpsGroup)
             httpsGroup.style.display =
               currentPlatform === "keenetic" ? "none" : "contents";
+
+          // SWAP-файл — обратная логика: только Keenetic (/opt на флешке).
+          var swapGroup = document.getElementById("hdr-swap-group");
+          if (swapGroup)
+            swapGroup.style.display =
+              currentPlatform === "keenetic" ? "contents" : "none";
 
           var sbDot = document.getElementById("sb-dot");
           sbDot.className =
@@ -8972,6 +9105,223 @@
         certPollTimer = setTimeout(function () {
           pollCertStatus(attempt + 1);
         }, 3000);
+      }
+
+      // ===== SWAP-файл MODAL (Keenetic) =====
+      var swapPollTimer = null;
+
+      async function openSwapModal() {
+        document.getElementById("swap-modal").style.display = "flex";
+        document.getElementById("swap-status").textContent = "";
+        await swapRefresh();
+      }
+
+      function closeSwapModal() {
+        document.getElementById("swap-modal").style.display = "none";
+        if (swapPollTimer) {
+          clearTimeout(swapPollTimer);
+          swapPollTimer = null;
+        }
+      }
+
+      // Pull current swap state and render the summary + button states.
+      async function swapRefresh() {
+        var curText = document.getElementById("swap-current-text");
+        var warnBox = document.getElementById("swap-warn");
+        var warnText = document.getElementById("swap-warn-text");
+        var createBtn = document.getElementById("swap-create-btn");
+        var removeBtn = document.getElementById("swap-remove-btn");
+        var sizeSel = document.getElementById("swap-size");
+        try {
+          var d = await api("swap_status");
+          if (!d.supported) {
+            curText.textContent = "Файл подкачки доступен только на Keenetic.";
+            createBtn.disabled = true;
+            removeBtn.style.display = "none";
+            return;
+          }
+          // current state line
+          if (d.active) {
+            curText.innerHTML =
+              '<span style="color:var(--green)">SWAP активен</span> — ' +
+              escapeHtml(String(d.size_mb)) +
+              " МБ" +
+              (d.swappiness >= 0
+                ? ", swappiness " + escapeHtml(String(d.swappiness))
+                : "") +
+              ". Свободно на флешке: <b>" +
+              escapeHtml(String(d.free_mb)) +
+              "</b> МБ.";
+          } else if (d.exists) {
+            curText.innerHTML =
+              "Файл SWAP есть (" +
+              escapeHtml(String(d.size_mb)) +
+              " МБ), но <b>не подключён</b>. Свободно на флешке: <b>" +
+              escapeHtml(String(d.free_mb)) +
+              "</b> МБ.";
+          } else {
+            curText.innerHTML =
+              '<span style="color:var(--amber,#d08700)">SWAP не создан.</span> Свободно на флешке: <b>' +
+              escapeHtml(String(d.free_mb)) +
+              "</b> МБ.";
+          }
+
+          // warnings: missing tools or last error
+          var warn = "";
+          if (!d.tools)
+            warn =
+              "Не найдены утилиты swap (mkswap/swapon). Установите: opkg install swap-utils.";
+          else if (d.last_result === "error" && d.last_message)
+            warn = "Последняя ошибка: " + d.last_message;
+          if (warn) {
+            warnText.textContent = warn;
+            warnBox.style.display = "";
+          } else {
+            warnBox.style.display = "none";
+          }
+
+          // remove button only when a swap file exists
+          removeBtn.style.display = d.exists ? "" : "none";
+
+          // disable size options that won't fit in free space (+32 MB margin)
+          var free = Number(d.free_mb) || 0;
+          for (var i = 0; i < sizeSel.options.length; i++) {
+            var opt = sizeSel.options[i];
+            opt.disabled = Number(opt.value) + 32 > free;
+          }
+          // default the selection to the largest option that fits (cap at 1 GB)
+          if (!d.busy) {
+            var pick = "";
+            for (var j = 0; j < sizeSel.options.length; j++) {
+              var v = Number(sizeSel.options[j].value);
+              if (v + 32 <= free && v <= 1024) pick = sizeSel.options[j].value;
+            }
+            if (pick) sizeSel.value = pick;
+          }
+
+          if (d.busy) {
+            createBtn.disabled = true;
+            removeBtn.disabled = true;
+            document.getElementById("swap-status").innerHTML =
+              '<span style="color:var(--text-dim)">Создание файла подкачки… это может занять до минуты.</span>';
+            pollSwapStatus(0);
+          } else {
+            createBtn.disabled = !d.tools;
+            removeBtn.disabled = false;
+          }
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            document.getElementById("swap-status").innerHTML =
+              '<span style="color:var(--red)">' +
+              escapeHtml(e.message || e) +
+              "</span>";
+        }
+      }
+
+      async function createSwap() {
+        var size = parseInt(
+          document.getElementById("swap-size").value,
+          10,
+        );
+        var btn = document.getElementById("swap-create-btn");
+        var rmBtn = document.getElementById("swap-remove-btn");
+        var status = document.getElementById("swap-status");
+        if (!size || size < 64) {
+          status.innerHTML =
+            '<span style="color:var(--red)">Выберите размер</span>';
+          return;
+        }
+        btn.disabled = true;
+        rmBtn.disabled = true;
+        status.innerHTML =
+          '<span style="color:var(--text-dim)">Создание файла подкачки… это может занять до минуты. Не закрывайте панель.</span>';
+        try {
+          var resp = await api(
+            "swap_create",
+            "POST",
+            JSON.stringify({ size_mb: size }),
+          );
+          if (!resp.ok || !resp.started) {
+            btn.disabled = false;
+            rmBtn.disabled = false;
+            status.innerHTML =
+              '<span style="color:var(--red)">' +
+              escapeHtml(resp.error || "Не удалось запустить создание") +
+              "</span>";
+            return;
+          }
+          pollSwapStatus(0);
+        } catch (e) {
+          btn.disabled = false;
+          rmBtn.disabled = false;
+          if (e.message !== "Not authenticated")
+            status.innerHTML =
+              '<span style="color:var(--red)">' +
+              escapeHtml(e.message || e) +
+              "</span>";
+        }
+      }
+
+      async function removeSwap() {
+        if (!confirm("Отключить и удалить файл подкачки?")) return;
+        var status = document.getElementById("swap-status");
+        var rmBtn = document.getElementById("swap-remove-btn");
+        rmBtn.disabled = true;
+        try {
+          var resp = await api("swap_remove", "POST", "{}");
+          if (!resp.ok) {
+            rmBtn.disabled = false;
+            status.innerHTML =
+              '<span style="color:var(--red)">' +
+              escapeHtml(resp.error || "Не удалось удалить") +
+              "</span>";
+            return;
+          }
+          toast("SWAP удалён", "success");
+          await swapRefresh();
+        } catch (e) {
+          rmBtn.disabled = false;
+          if (e.message !== "Not authenticated")
+            status.innerHTML =
+              '<span style="color:var(--red)">' +
+              escapeHtml(e.message || e) +
+              "</span>";
+        }
+      }
+
+      // Poll swap_status until the create job finishes (busy clears) or times out.
+      async function pollSwapStatus(attempt) {
+        var status = document.getElementById("swap-status");
+        var btn = document.getElementById("swap-create-btn");
+        if (attempt > 40) {
+          btn.disabled = false;
+          status.innerHTML =
+            '<span style="color:var(--red)">Тайм-аут ожидания. Проверьте статус позже.</span>';
+          return;
+        }
+        try {
+          var d = await api("swap_status");
+          if (d.supported && !d.busy) {
+            btn.disabled = !d.tools;
+            if (d.last_result === "ok" || d.active) {
+              status.innerHTML =
+                '<span style="color:var(--green)">Готово: SWAP создан и подключён.</span>';
+              toast("SWAP создан", "success");
+            } else if (d.last_result === "error") {
+              status.innerHTML =
+                '<span style="color:var(--red)">' +
+                escapeHtml(d.last_message || "Ошибка создания SWAP") +
+                "</span>";
+            }
+            await swapRefresh();
+            return;
+          }
+        } catch (e) {
+          if (e.message === "Not authenticated") return;
+        }
+        swapPollTimer = setTimeout(function () {
+          pollSwapStatus(attempt + 1);
+        }, 2000);
       }
 
       // ===== GROUPS MODAL =====

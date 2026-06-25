@@ -185,23 +185,10 @@ chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update 
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\
     /opt/etc/lighttpd/conf.d/detour-ssl-helper.sh \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
-# Auto-create swap file if not active and doesn't exist
-if ! swapon -s | grep -q '/opt/swapfile' && [ ! -f /opt/swapfile ]; then
-    FREE_MB=$(df -m /opt | tail -n 1 | awk '{{print $4}}')
-    if [ "$FREE_MB" -gt 2048 ]; then
-        echo "[detour] Creating 1GB swap file..."
-        dd if=/dev/zero of=/opt/swapfile bs=1M count=1024 2>/dev/null
-        chmod 600 /opt/swapfile
-        mkswap /opt/swapfile >/dev/null
-    elif [ "$FREE_MB" -gt 1024 ]; then
-        echo "[detour] Disk space is limited. Creating 512MB swap file..."
-        dd if=/dev/zero of=/opt/swapfile bs=1M count=512 2>/dev/null
-        chmod 600 /opt/swapfile
-        mkswap /opt/swapfile >/dev/null
-    else
-        echo "[detour] Warning: Not enough disk space on /opt to create swap file (needs >1GB free)."
-    fi
-fi
+# Swap file is NO LONGER created automatically — the operator creates it on demand
+# from the panel's SWAP modal (Detour → меню → «SWAP-файл»). Here we only ACTIVATE
+# an already-existing swap file (no-op on a fresh install); S05swap also re-activates
+# it on every boot.
 [ -x /opt/etc/init.d/S05swap ] && /opt/etc/init.d/S05swap start 2>/dev/null
 # Seed the health-check target list on first install (preserved on upgrade).
 if [ ! -f /opt/etc/sing-box/health-urls.list ]; then
@@ -306,7 +293,7 @@ case "$1" in remove|purge)
     rm -f /opt/etc/detour/platform /opt/etc/detour/version
     # Deactivate and remove the swap file
     swapoff /opt/swapfile 2>/dev/null
-    rm -f /opt/swapfile /opt/etc/init.d/S05swap
+    rm -f /opt/swapfile /opt/etc/init.d/S05swap /opt/var/state/detour-swap.json
     ;;
 esac
 exit 0

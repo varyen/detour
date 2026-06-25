@@ -1,30 +1,93 @@
 #!/bin/sh
-# Start-stop script for swap file on Keenetic (Entware)
+# Swap-file manager for Detour on Keenetic/Entware.
+#
+# /opt usually lives on a USB flash, and Keenetic boxes have little RAM — without
+# a swap file the stack (sing-box + lighttpd + dnsmasq) gets OOM-killed under load
+# and the panel "ведёт себя нестабильно". This script does two jobs:
+#   • boot:  `start` activates an EXISTING swap file (no-op if absent).
+#   • panel: `create <MB>` / `remove` are driven from the panel's SWAP modal
+#            (detour-api swap_create/swap_remove → detached call here). They write
+#            a JSON result to $STATE that the panel polls via `swap_status`.
+# Nothing is created automatically anymore — the operator decides via the modal.
 SWAPFILE=/opt/swapfile
 SWAPPINESS=10
+STATE=/opt/var/state/detour-swap.json
+BUSY=/tmp/detour-swap.busy
+
+log() { logger -t detour-swap "$1" 2>/dev/null; }
+
+# write_state <result: ok|error|removed> <message> [size_mb]
+write_state() {
+    mkdir -p /opt/var/state 2>/dev/null
+    _ts=$(date +%s 2>/dev/null); case "$_ts" in ''|*[!0-9]*) _ts=0 ;; esac
+    printf '{"result":"%s","message":"%s","size_mb":%s,"ts":%s}\n' \
+        "$1" "$2" "${3:-0}" "$_ts" > "$STATE" 2>/dev/null
+}
 
 case "$1" in
   start)
     if [ -f "$SWAPFILE" ]; then
       swapon "$SWAPFILE" 2>/dev/null
       echo "$SWAPPINESS" > /proc/sys/vm/swappiness 2>/dev/null
-      logger -t detour-swap "Swap activated successfully."
+      log "Swap activated."
     fi
     ;;
   stop)
     swapoff "$SWAPFILE" 2>/dev/null
-    logger -t detour-swap "Swap deactivated."
+    log "Swap deactivated."
     ;;
   restart)
-    $0 stop
-    $0 start
+    "$0" stop
+    "$0" start
+    ;;
+  create)
+    # create <size_mb>: (re)build the swap file and activate it. Long-running (dd
+    # of ~1GB on USB flash), so detour-api calls this DETACHED and polls the state.
+    SZ=$2
+    case "$SZ" in ''|*[!0-9]*) SZ=512 ;; esac
+    [ "$SZ" -lt 64 ]   && SZ=64
+    [ "$SZ" -gt 4096 ] && SZ=4096
+    : > "$BUSY"
+    FREE=$(df -m /opt 2>/dev/null | tail -n 1 | awk '{print $4}')
+    case "$FREE" in ''|*[!0-9]*) FREE=0 ;; esac
+    if [ "$FREE" -lt $((SZ + 32)) ]; then
+        write_state error "Недостаточно места на /opt (свободно ${FREE}MB)" "$SZ"
+        rm -f "$BUSY"
+        exit 1
+    fi
+    swapoff "$SWAPFILE" 2>/dev/null
+    rm -f "$SWAPFILE"
+    log "Creating ${SZ}MB swap file..."
+    if dd if=/dev/zero of="$SWAPFILE" bs=1M count="$SZ" 2>/dev/null; then
+        chmod 600 "$SWAPFILE"
+        if mkswap "$SWAPFILE" >/dev/null 2>&1 && swapon "$SWAPFILE" 2>/dev/null; then
+            echo "$SWAPPINESS" > /proc/sys/vm/swappiness 2>/dev/null
+            write_state ok "Swap создан и активирован" "$SZ"
+            log "Swap created and activated (${SZ}MB)."
+        else
+            rm -f "$SWAPFILE"
+            write_state error "Не удалось разметить/активировать swap (mkswap/swapon)" "$SZ"
+            log "mkswap/swapon failed."
+        fi
+    else
+        rm -f "$SWAPFILE"
+        write_state error "Не удалось записать файл swap (dd)" "$SZ"
+        log "dd failed."
+    fi
+    rm -f "$BUSY"
+    ;;
+  remove)
+    swapoff "$SWAPFILE" 2>/dev/null
+    rm -f "$SWAPFILE"
+    write_state removed "Swap отключён и удалён" 0
+    log "Swap removed."
     ;;
   status)
-    swapon -s
-    cat /proc/sys/vm/swappiness
+    swapon -s 2>/dev/null
+    cat /proc/sys/vm/swappiness 2>/dev/null
     ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status}"
+    echo "Usage: $0 {start|stop|restart|create <MB>|remove|status}"
     exit 1
     ;;
 esac
