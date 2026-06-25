@@ -1,0 +1,31 @@
+#!/bin/sh
+# Start-stop script for swap file on Keenetic (Entware)
+SWAPFILE=/opt/swapfile
+SWAPPINESS=10
+
+case "$1" in
+  start)
+    if [ -f "$SWAPFILE" ]; then
+      swapon "$SWAPFILE" 2>/dev/null
+      echo "$SWAPPINESS" > /proc/sys/vm/swappiness 2>/dev/null
+      logger -t detour-swap "Swap activated successfully."
+    fi
+    ;;
+  stop)
+    swapoff "$SWAPFILE" 2>/dev/null
+    logger -t detour-swap "Swap deactivated."
+    ;;
+  restart)
+    $0 stop
+    $0 start
+    ;;
+  status)
+    swapon -s
+    cat /proc/sys/vm/swappiness
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+exit 0

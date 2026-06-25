@@ -44,7 +44,7 @@ ARCH = "all"
 #   * start-stop-daemon — a busybox applet (busybox is Essential, already present).
 #   * lua-cjson — absent from the feed (only the C `cJSON`); shell CGI doesn't need it.
 DEPENDS = ("sing-box, iptables, ipset, dnsmasq-full, lighttpd, lighttpd-mod-cgi, "
-           "lighttpd-mod-setenv, lua, coreutils-base64, openssl-util, curl")
+           "lighttpd-mod-setenv, lua, coreutils-base64, openssl-util, curl, swap-utils")
 
 # (source_path, archive_path_under_opt, mode, fix_shebang)
 # sing-box is NOT here — it is pulled from opkg (Depends: sing-box).
@@ -95,6 +95,7 @@ FILES = [
     (os.path.join(ROUTER_FILES, "detour-logbridge"), "opt/sbin/detour-logbridge", 0o755, True),
     # Pinned usign public key (used by detour-update if usign is present on Entware).
     (os.path.join(ROOT, "keys", "release.usign.pub"), "opt/etc/detour/release.usign.pub", 0o644, False),
+    (os.path.join(HERE, "init.d", "S05swap"), "opt/etc/init.d/S05swap", 0o755, False),
     (os.path.join(HERE, "init.d", "S51detour-panel"), "opt/etc/init.d/S51detour-panel", 0o755, False),
     # Domain→ipset DNS (Entware dnsmasq + transparent :53 redirect) — domain routing.
     (os.path.join(HERE, "init.d", "S50detour-dns"), "opt/etc/init.d/S50detour-dns", 0o755, False),
@@ -179,11 +180,29 @@ echo "{version}" > /opt/etc/detour/version
 touch /opt/etc/detour/platform            # the panel CGI's platform shim keys off this
 chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
-    /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
+    /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\
     /opt/etc/lighttpd/conf.d/detour-ssl-helper.sh \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
+# Auto-create swap file if not active and doesn't exist
+if ! swapon -s | grep -q '/opt/swapfile' && [ ! -f /opt/swapfile ]; then
+    FREE_MB=$(df -m /opt | tail -n 1 | awk '{{print $4}}')
+    if [ "$FREE_MB" -gt 2048 ]; then
+        echo "[detour] Creating 1GB swap file..."
+        dd if=/dev/zero of=/opt/swapfile bs=1M count=1024 2>/dev/null
+        chmod 600 /opt/swapfile
+        mkswap /opt/swapfile >/dev/null
+    elif [ "$FREE_MB" -gt 1024 ]; then
+        echo "[detour] Disk space is limited. Creating 512MB swap file..."
+        dd if=/dev/zero of=/opt/swapfile bs=1M count=512 2>/dev/null
+        chmod 600 /opt/swapfile
+        mkswap /opt/swapfile >/dev/null
+    else
+        echo "[detour] Warning: Not enough disk space on /opt to create swap file (needs >1GB free)."
+    fi
+fi
+[ -x /opt/etc/init.d/S05swap ] && /opt/etc/init.d/S05swap start 2>/dev/null
 # Seed the health-check target list on first install (preserved on upgrade).
 if [ ! -f /opt/etc/sing-box/health-urls.list ]; then
     printf '# Цели проверки: "Название|https://адрес" на строку. Профиль рабочий, только если открылись ВСЕ.\\nYouTube|https://www.youtube.com/generate_204\\nYouTube видео|https://redirector.googlevideo.com/generate_204\\nGoogle|https://www.google.com/generate_204\\n' > /opt/etc/sing-box/health-urls.list
@@ -260,6 +279,8 @@ exit 0
 """
     prerm = """#!/bin/sh
 set +e
+# Stop the swap service first
+[ -x /opt/etc/init.d/S05swap ] && /opt/etc/init.d/S05swap stop 2>/dev/null
 # Stop the scheduler daemon first so a periodic task can't fire mid-upgrade.
 [ -x /opt/etc/init.d/S90detour-cron ] && /opt/etc/init.d/S90detour-cron stop 2>/dev/null
 # Stop the syslog log-bridge so its tail|logger followers don't linger across the swap.
@@ -281,7 +302,13 @@ exit 0
 """
     postrm = """#!/bin/sh
 set +e
-case "$1" in remove|purge) rm -f /opt/etc/detour/platform /opt/etc/detour/version ;; esac
+case "$1" in remove|purge)
+    rm -f /opt/etc/detour/platform /opt/etc/detour/version
+    # Deactivate and remove the swap file
+    swapoff /opt/swapfile 2>/dev/null
+    rm -f /opt/swapfile /opt/etc/init.d/S05swap
+    ;;
+esac
 exit 0
 """
     buf = io.BytesIO()
