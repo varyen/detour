@@ -2003,6 +2003,15 @@ bypass_set)
     fi
     ;;
 
+bypass_stop)
+    # Stop the running engine but KEEP the persisted mode (selected engine), so
+    # the UI shows the sing-box-style Старт/Стоп toggle (stopped → ▶ Старт).
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$BYPASS_BIN" ] || { json_err "detour-bypass not installed"; exit 0; }
+    OUT=$("$BYPASS_BIN" stop 2>&1)
+    if [ $? -eq 0 ]; then json_ok; else json_err "$(printf '%s' "$OUT" | tail -8 | json_escape)"; fi
+    ;;
+
 bypass_autostart)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$BYPASS_BIN" ] || { json_err "detour-bypass not installed"; exit 0; }

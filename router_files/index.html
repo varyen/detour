@@ -3888,13 +3888,19 @@
               <button class="btn" onclick="sbAction('singbox_restart')">
                 ↻ Рестарт
               </button>
-              <button
-                class="btn"
-                onclick="sbAction('singbox_enable')"
-                id="sb-enable-btn"
+              <span style="flex: 1"></span>
+              <label
+                class="check-row"
+                style="display: inline-flex; align-items: center; gap: 6px"
+                title="Запускать sing-box при загрузке роутера"
               >
-                Автозапуск ✓
-              </button>
+                <input
+                  type="checkbox"
+                  id="sb-autostart"
+                  onchange="setSingboxAutostart(this.checked)"
+                />
+                Автозапуск
+              </label>
             </div>
           </div>
 
@@ -3911,11 +3917,8 @@
               </div>
             </div>
 
-            <!-- движок: тумблер + автозапуск -->
+            <!-- движок: селектор техники (как профиль у sing-box) -->
             <div class="card-actions" style="margin-bottom: 4px">
-              <button class="btn" id="bypass-btn-off" onclick="setBypass('off')">
-                ⏹ Выкл
-              </button>
               <button
                 class="btn"
                 id="bypass-btn-zapret"
@@ -3929,6 +3932,24 @@
                 onclick="setBypass('zapret2')"
               >
                 zapret2 (nfqws2)
+              </button>
+            </div>
+
+            <!-- жизненный цикл: Старт/Стоп + Рестарт + Автозапуск, как у sing-box -->
+            <div class="card-actions" style="margin-bottom: 4px">
+              <button
+                class="btn primary"
+                id="bypass-toggle-btn"
+                onclick="bypassStart()"
+              >
+                ▶ Старт
+              </button>
+              <button
+                class="btn"
+                id="bypass-restart-btn"
+                onclick="bypassRestart()"
+              >
+                ↻ Рестарт
               </button>
               <span style="flex: 1"></span>
               <label
@@ -6442,18 +6463,8 @@
           // Все через VPN
           updateAllvpnUI(d.singbox.allvpn);
 
-          var sbEnBtn = document.getElementById("sb-enable-btn");
-          if (d.singbox.enabled) {
-            sbEnBtn.textContent = "Автозапуск ✓";
-            sbEnBtn.onclick = function () {
-              sbAction("singbox_disable");
-            };
-          } else {
-            sbEnBtn.textContent = "Автозапуск ✗";
-            sbEnBtn.onclick = function () {
-              sbAction("singbox_enable");
-            };
-          }
+          var sbAuto = document.getElementById("sb-autostart");
+          if (sbAuto) sbAuto.checked = !!d.singbox.enabled;
 
           var sbToggle = document.getElementById("sb-toggle-btn");
           if (sbToggle) {
@@ -6514,6 +6525,22 @@
       }
       function zpAction(action) {
         serviceAction(action, event.target);
+      }
+      // Автозапуск sing-box — чекбокс (унифицировано с DPI-обходом).
+      async function setSingboxAutostart(on) {
+        try {
+          var d = await api(
+            on ? "singbox_enable" : "singbox_disable",
+            "POST",
+            "",
+          );
+          if (d.ok)
+            toast(on ? "Автозапуск включён" : "Автозапуск выключен", "success");
+          else toast("Ошибка: " + (d.error || ""), "error");
+        } catch (e) {
+          toast("Ошибка: " + e.message, "error");
+        }
+        await loadStatus();
       }
 
       // Все через VPN
@@ -13213,10 +13240,43 @@
         var sup = !!b.zapret2_supported;
         dpiMode = mode;
 
-        ["off", "zapret", "zapret2"].forEach(function (m) {
+        // Engine selector (zapret / zapret2) — highlight the chosen technique.
+        ["zapret", "zapret2"].forEach(function (m) {
           var btn = document.getElementById("bypass-btn-" + m);
           if (btn) btn.classList.toggle("primary", m === mode);
         });
+
+        // Старт/Стоп toggle — mirrors sing-box's lifecycle button: red «⏹ Стоп»
+        // while an engine runs, green «▶ Старт» when stopped (disabled until an
+        // engine is picked). «Off» = stopped; persistence is governed by Автозапуск.
+        var tgl = document.getElementById("bypass-toggle-btn");
+        if (tgl) {
+          if (running !== "none") {
+            tgl.textContent = "⏹ Стоп";
+            tgl.className = "btn danger";
+            tgl.disabled = false;
+            tgl.style.opacity = "";
+            tgl.onclick = bypassStop;
+            tgl.title = "Остановить DPI-обход";
+          } else {
+            var canStart = mode !== "off";
+            tgl.textContent = "▶ Старт";
+            tgl.className = "btn primary";
+            tgl.disabled = !canStart;
+            tgl.style.opacity = canStart ? "" : "0.5";
+            tgl.onclick = canStart ? bypassStart : null;
+            tgl.title = canStart
+              ? "Запустить выбранный движок"
+              : "Сначала выберите движок: zapret или zapret2";
+          }
+        }
+        // Рестарт — only meaningful while an engine is running.
+        var rb = document.getElementById("bypass-restart-btn");
+        if (rb) {
+          rb.disabled = running === "none";
+          rb.style.opacity = running === "none" ? "0.5" : "";
+        }
+
         var z2btn = document.getElementById("bypass-btn-zapret2");
         if (z2btn) {
           z2btn.disabled = !sup;
@@ -13347,22 +13407,9 @@
         if (ta)
           ta.value = dpiMode === "zapret" ? TPWS_DEFAULT_ARGS : Z2_DEFAULT_STRATEGY;
       }
-      async function setBypass(mode) {
-        // The active mode's button is highlighted (primary); a click on it is a
-        // no-op — don't prompt/POST to re-apply the engine that's already selected.
-        if (mode === dpiMode) return;
-        var label =
-          mode === "off"
-            ? "выключить DPI-обход"
-            : "переключить движок на «" + mode + "»";
-        if (
-          !confirm(
-            "Точно " +
-              label +
-              "?\n\nПереключение остановит другой движок и изменит правила фаервола для доменов zapret.",
-          )
-        )
-          return;
+      // Apply (select + start) an engine, then refresh. Shared by the selector,
+      // Старт and Рестарт.
+      async function bypassApply(mode) {
         try {
           var d = await api(
             "bypass_set&mode=" + encodeURIComponent(mode),
@@ -13370,6 +13417,54 @@
             "",
           );
           if (d.ok) toast("Движок DPI-обхода: " + mode, "success");
+          else toast("Ошибка: " + (d.error || ""), "error");
+        } catch (e) {
+          toast("Ошибка: " + e.message, "error");
+        }
+        await loadBypassStatus();
+        await loadStatus();
+      }
+
+      // Engine selector (zapret / zapret2). Clicking the engine that's already
+      // running is a no-op (use Стоп/Рестарт); switching away from a different
+      // RUNNING engine asks for confirmation (it changes the firewall rules).
+      async function setBypass(mode) {
+        var run = (lastBypass && lastBypass.running) || "none";
+        if (mode === dpiMode && run !== "none") return;
+        if (
+          run !== "none" &&
+          mode !== run &&
+          !confirm(
+            "Переключить движок на «" +
+              mode +
+              "»?\n\nТекущий движок будет остановлен; правила фаервола для доменов zapret изменятся.",
+          )
+        )
+          return;
+        await bypassApply(mode);
+      }
+
+      // ▶ Старт — start the selected engine (sing-box-style).
+      async function bypassStart() {
+        if (dpiMode === "off") {
+          toast("Сначала выберите движок: zapret или zapret2", "info");
+          return;
+        }
+        await bypassApply(dpiMode);
+      }
+
+      // ↻ Рестарт — re-apply the selected engine.
+      async function bypassRestart() {
+        if (dpiMode === "off") return;
+        await bypassApply(dpiMode);
+      }
+
+      // ⏹ Стоп — stop the engine but keep it selected (mode persists), so the
+      // toggle flips back to ▶ Старт. «Off» here means «stopped», like sing-box.
+      async function bypassStop() {
+        try {
+          var d = await api("bypass_stop", "POST", "");
+          if (d.ok) toast("DPI-обход остановлен", "success");
           else toast("Ошибка: " + (d.error || ""), "error");
         } catch (e) {
           toast("Ошибка: " + e.message, "error");
