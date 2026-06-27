@@ -447,6 +447,12 @@ write_settings() {
     [ -z "$health_speed" ] && health_speed="1"
     local health_speed_url
     health_speed_url=$(get_settings_val "health_speed_url")
+    # Download size (bytes) for the speed measurement. Preserve-or-override, same as
+    # the flags above; default 8 MB = historical behaviour. detour-health derives the
+    # curl byte-cap AND the wall timeout from it.
+    local health_speed_bytes
+    health_speed_bytes=${HEALTH_SPEED_BYTES_OVERRIDE:-$(get_settings_val "health_speed_bytes")}
+    case "$health_speed_bytes" in ''|*[!0-9]*) health_speed_bytes="8000000" ;; esac
 
     # Syslog log-bridge flags (default OFF). Same preserve-or-override dance:
     # the log_config action sets them via env before calling us; every other
@@ -469,6 +475,7 @@ write_settings() {
   "health_auto_switch": "$health_autoswitch",
   "health_speed_enabled": "$health_speed",
   "health_speed_url": "$health_speed_url",
+  "health_speed_bytes": "$health_speed_bytes",
   "log_to_syslog": "$log_syslog",
   "log_to_syslog_singbox": "$log_syslog_sb"
 }
@@ -1576,6 +1583,7 @@ health_status)
     HEN=$(get_settings_val health_check_enabled); [ -z "$HEN" ] && HEN=1
     HAS=$(get_settings_val health_auto_switch);   [ -z "$HAS" ] && HAS=0
     HSP=$(get_settings_val health_speed_enabled); [ -z "$HSP" ] && HSP=1
+    HSB=$(get_settings_val health_speed_bytes); case "$HSB" in ''|*[!0-9]*) HSB=8000000 ;; esac
     EN_J=true;  case "$HEN" in 0|off|false|no) EN_J=false ;; esac
     AS_J=false; case "$HAS" in 1|on|true|yes) AS_J=true ;; esac
     SP_J=true;  case "$HSP" in 0|off|false|no) SP_J=false ;; esac
@@ -1583,8 +1591,8 @@ health_status)
     SW_J=null; [ -f "$HEALTH_SWITCH" ] && SW_J=$(cat "$HEALTH_SWITCH" 2>/dev/null)
     [ -z "$SW_J" ] && SW_J=null
     HEALTHY_J=false; [ -x "$HEALTH_BIN" ] && [ ! -f "$HEALTH_UNSUPP" ] && HEALTHY_J=true
-    printf '{"now":%s,"supported":%s,"enabled":%s,"auto_switch":%s,"speed":%s,"urls":%s,"switch":%s,"results":{' \
-        "$NOW" "$HEALTHY_J" "$EN_J" "$AS_J" "$SP_J" "$URLS_J" "$SW_J"
+    printf '{"now":%s,"supported":%s,"enabled":%s,"auto_switch":%s,"speed":%s,"speed_bytes":%s,"urls":%s,"switch":%s,"results":{' \
+        "$NOW" "$HEALTHY_J" "$EN_J" "$AS_J" "$SP_J" "$HSB" "$URLS_J" "$SW_J"
     if [ -f "$HEALTH_DB" ]; then
         # TSV: id \t ok \t ts \t rtt \t delays(csv ms|-1) \t dl_kbits(optional). $5
         # has no tabs, so wrapping it in [] yields a JSON array; rebuild it to
@@ -1667,23 +1675,32 @@ health_config)
     NEW_EN=$(printf '%s' "$POST_DATA" | sed -n 's/.*"enabled"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
     NEW_AS=$(printf '%s' "$POST_DATA" | sed -n 's/.*"auto_switch"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
     NEW_SP=$(printf '%s' "$POST_DATA" | sed -n 's/.*"speed"[[:space:]]*:[[:space:]]*"\{0,1\}\([01]\)"\{0,1\}.*/\1/p' | head -1)
+    NEW_SB=$(printf '%s' "$POST_DATA" | sed -n 's/.*"speed_bytes"[[:space:]]*:[[:space:]]*"\{0,1\}\([0-9]\{1,\}\)"\{0,1\}.*/\1/p' | head -1)
     CUR_EN=$(get_settings_val health_check_enabled); [ -z "$CUR_EN" ] && CUR_EN=1
     CUR_AS=$(get_settings_val health_auto_switch);   [ -z "$CUR_AS" ] && CUR_AS=0
     CUR_SP=$(get_settings_val health_speed_enabled); [ -z "$CUR_SP" ] && CUR_SP=1
+    CUR_SB=$(get_settings_val health_speed_bytes); case "$CUR_SB" in ''|*[!0-9]*) CUR_SB=8000000 ;; esac
     [ -z "$NEW_EN" ] && NEW_EN="$CUR_EN"
     [ -z "$NEW_AS" ] && NEW_AS="$CUR_AS"
     [ -z "$NEW_SP" ] && NEW_SP="$CUR_SP"
+    # Speed download size: keep current if absent/non-numeric, then clamp to a sane
+    # 1 MB–300 MB band (the UI offers 8/30/75/150 MB presets; this just fences off a
+    # hand-crafted POST). A bigger cap risks a runaway real-traffic burst per probe.
+    case "$NEW_SB" in ''|*[!0-9]*) NEW_SB="$CUR_SB" ;; esac
+    [ "$NEW_SB" -lt 1000000 ]   2>/dev/null && NEW_SB=1000000
+    [ "$NEW_SB" -gt 300000000 ] 2>/dev/null && NEW_SB=300000000
     ACHAIN=$(get_active_chain)
     RMODE=$(get_routing_mode)
     UPSTREAM=$(get_settings_val upstream_ips)
     SBMODE=$(get_singbox_mode)
     HEALTH_ENABLED_OVERRIDE="$NEW_EN" HEALTH_AUTOSWITCH_OVERRIDE="$NEW_AS" \
-        HEALTH_SPEED_OVERRIDE="$NEW_SP" \
+        HEALTH_SPEED_OVERRIDE="$NEW_SP" HEALTH_SPEED_BYTES_OVERRIDE="$NEW_SB" \
         write_settings "$ACHAIN" "$RMODE" "$UPSTREAM" "$SBMODE"
-    printf '{"ok":true,"enabled":%s,"auto_switch":%s,"speed":%s}' \
+    printf '{"ok":true,"enabled":%s,"auto_switch":%s,"speed":%s,"speed_bytes":%s}' \
         "$([ "$NEW_EN" = "1" ] && echo true || echo false)" \
         "$([ "$NEW_AS" = "1" ] && echo true || echo false)" \
-        "$([ "$NEW_SP" = "1" ] && echo true || echo false)"
+        "$([ "$NEW_SP" = "1" ] && echo true || echo false)" \
+        "$NEW_SB"
     ;;
 
 # Syslog log-bridge toggles. GET → current state; POST {"enabled":0|1,"singbox":0|1}

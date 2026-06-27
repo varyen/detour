@@ -1257,6 +1257,20 @@
         font-size: 13px;
         cursor: pointer;
       }
+      .health-controls #health-speed-size {
+        height: 30px;
+        padding: 0 8px;
+        font-size: 13px;
+        border-radius: 6px;
+        background: var(--bg-elev-solid);
+        color: var(--text, inherit);
+        border: 1px solid var(--border, #30363d);
+        cursor: pointer;
+      }
+      .health-controls #health-speed-size:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
       .health-switch-note {
         font-size: 12px;
         color: var(--ping-bad, #d29922);
@@ -4574,9 +4588,18 @@
               <input type="checkbox" id="health-autoswitch" onchange="saveHealthConfig()" />
               Авто-переключение на рабочий
             </label>
-            <label class="health-toggle" title="Заодно с проверкой раз в час замерять реальную скорость скачивания (~8 МБ) активного профиля; у остальных — по кнопке ⚕. Качает реальный трафик через VPN.">
+            <label class="health-toggle" title="Заодно с проверкой раз в час замерять реальную скорость скачивания активного профиля; у остальных — по кнопке ⚕. Качает реальный трафик через VPN (объём — в селекторе справа).">
               <input type="checkbox" id="health-speed" onchange="saveHealthConfig()" />
               Замер скорости активного
+            </label>
+            <label class="health-toggle" id="health-speed-size-wrap" title="Размер файла, который скачивается через VPN при замере. Больше файл — точнее на быстрых каналах (маленький 8 МБ упирается в ~50–60 Мбит/с из-за TLS-рукопожатия и разгона TCP), но больше реального трафика через VPN за один замер.">
+              Объём замера:
+              <select id="health-speed-size" onchange="saveHealthConfig()">
+                <option value="8000000">8 МБ — эконом (как сейчас)</option>
+                <option value="30000000">30 МБ — стандарт (≈ до 150 Мбит/с)</option>
+                <option value="75000000">75 МБ — точный (≈ до 350 Мбит/с)</option>
+                <option value="150000000">150 МБ — максимум (≈ до 600 Мбит/с)</option>
+              </select>
             </label>
             <button class="btn" type="button" onclick="toggleHealthUrlsBox()" id="health-urls-toggle-btn">
               🎯 Цели проверки
@@ -6820,6 +6843,7 @@
         enabled: true,
         auto_switch: false,
         speed: true,
+        speed_bytes: 8000000,
         supported: true,
         urls: [],
         switch: null,
@@ -6993,6 +7017,13 @@
         if (as) as.checked = healthMeta.auto_switch;
         var spc = document.getElementById("health-speed");
         if (spc) spc.checked = healthMeta.speed;
+        healthMeta.speed_bytes = d.speed_bytes || 8000000;
+        var spsz = document.getElementById("health-speed-size");
+        if (spsz) {
+          spsz.value = String(healthMeta.speed_bytes);
+          if (spsz.selectedIndex < 0) spsz.value = "8000000";
+          spsz.disabled = !healthMeta.speed;
+        }
         var box = document.getElementById("health-controls");
         if (box) box.style.display = healthMeta.supported ? "" : "none";
       }
@@ -7038,16 +7069,20 @@
         var as = document.getElementById("health-autoswitch").checked ? 1 : 0;
         var spc = document.getElementById("health-speed");
         var sp = spc && spc.checked ? 1 : 0;
+        var spsz = document.getElementById("health-speed-size");
+        var sb = spsz ? parseInt(spsz.value, 10) || 8000000 : 8000000;
+        if (spsz) spsz.disabled = !sp;
         try {
           var d = await api(
             "health_config",
             "POST",
-            JSON.stringify({ enabled: en, auto_switch: as, speed: sp }),
+            JSON.stringify({ enabled: en, auto_switch: as, speed: sp, speed_bytes: sb }),
           );
           if (d && d.ok) {
             healthMeta.enabled = !!en;
             healthMeta.auto_switch = !!as;
             healthMeta.speed = !!sp;
+            healthMeta.speed_bytes = d.speed_bytes || sb;
             toast("Настройки проверки сохранены", "success");
           } else {
             toast("Не удалось сохранить настройки", "error");

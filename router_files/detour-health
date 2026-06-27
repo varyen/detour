@@ -210,14 +210,29 @@ AUTOSWITCH=$(jstr health_auto_switch "$SETTINGS")
 # profile's outbound, so `curl --proxy socks5h://…` pulls a sized file THROUGH that
 # VPN. curl's own %{speed_download} (bytes/s) is the measurement — no shell timing,
 # so the router's nanosecond-less `date` is irrelevant. Bounded by BOTH the URL's
-# byte count (~8 MB) AND SPEED_M seconds: a -m cutoff still yields a valid rate, so
-# the data spent per measurement is ≈8 MB / ≤5 s at most.
+# byte count AND SPEED_M seconds: a -m cutoff still yields a valid rate. The byte
+# cap (download size) is panel-configurable — a bigger file measures fast links
+# more accurately (an 8 MB file finishes in a sub-second window dominated by TLS
+# setup + TCP slow-start, capping the reading at ~50-60 Mbit/s); SPEED_M scales
+# with the size so the transfer has time to reach steady state on a moderate link.
 SPEED_ENABLED=$(jstr health_speed_enabled "$SETTINGS"); [ -z "$SPEED_ENABLED" ] && SPEED_ENABLED=1
+# Download size (bytes) for the measurement. Panel preset (settings.health_speed_bytes);
+# default 8 MB = the historical behaviour. Validated numeric.
+SPEED_BYTES=$(jstr health_speed_bytes "$SETTINGS")
+case "$SPEED_BYTES" in ''|*[!0-9]*) SPEED_BYTES=8000000 ;; esac
 # Default target: Cloudflare's sized download endpoint (globally reachable, no auth;
-# `bytes=` IS the size cap). Panel-overridable via settings.health_speed_url.
+# `bytes=` IS the size cap). Advanced override: settings.health_speed_url (wins, but
+# SPEED_BYTES still drives the timeout below).
 SPEED_URL=$(jstr health_speed_url "$SETTINGS")
-[ -z "$SPEED_URL" ] && SPEED_URL="https://speed.cloudflare.com/__down?bytes=8000000"
-SPEED_M=5                                  # wall timeout (s) per measurement
+[ -z "$SPEED_URL" ] && SPEED_URL="https://speed.cloudflare.com/__down?bytes=$SPEED_BYTES"
+# Wall timeout (s) per measurement — grows with the download size so a bigger file
+# has time to reach steady state on a moderate link (traffic per run stays bounded
+# by min(SPEED_BYTES, link_speed × SPEED_M)).
+if   [ "$SPEED_BYTES" -le 8000000 ];  then SPEED_M=5
+elif [ "$SPEED_BYTES" -le 30000000 ]; then SPEED_M=8
+elif [ "$SPEED_BYTES" -le 75000000 ]; then SPEED_M=12
+else                                       SPEED_M=15
+fi
 SPEED_INPORT=$((18080 + $$ % 1000))        # per-run loopback mixed-inbound port (can't
                                            # collide with CLASH_ADDR's 19390+ range)
 
