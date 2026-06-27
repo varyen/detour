@@ -39,17 +39,31 @@ _PKALG_ED = b"Ed"
 
 
 def _read_usign_file(path: str | Path) -> tuple[str, bytes]:
-    """Return (comment, raw_payload) for a usign key/signature file."""
+    """Return (comment, raw_payload) for a usign key/signature file.
+
+    Canonical form is two lines (`untrusted comment: ...\\n<base64>`). We also
+    tolerate the whole thing collapsed onto ONE line — which happens when the file
+    is materialized from a CI/secret store that dropped the embedded newline (e.g.
+    GitHub Actions' RELEASE_USIGN_SEC). A usign base64 payload never contains
+    whitespace, so the payload is always the last whitespace-delimited token and
+    any preamble is the (optional) comment; a truncated/garbled blob is still caught
+    downstream by the length + SHA512 checksum checks in load_secret_key/public_key.
+    """
     text = Path(path).read_text(encoding="utf-8")
     lines = [ln for ln in text.splitlines() if ln.strip()]
-    if len(lines) < 2:
-        raise ValueError(f"{path}: expected `comment\\n<base64>` (got {len(lines)} lines)")
-    comment_line = lines[0]
+    if not lines:
+        raise ValueError(f"{path}: empty usign file (expected `comment\\n<base64>`)")
+    if len(lines) >= 2:
+        comment_line, b64_line = lines[0], lines[1]
+    else:
+        parts = lines[0].split()
+        b64_line = parts[-1]
+        comment_line = " ".join(parts[:-1])
     if comment_line.startswith("untrusted comment:"):
         comment = comment_line[len("untrusted comment:"):].strip()
     else:
         comment = comment_line.strip()
-    payload = base64.b64decode(lines[1])
+    payload = base64.b64decode(b64_line)
     return comment, payload
 
 
