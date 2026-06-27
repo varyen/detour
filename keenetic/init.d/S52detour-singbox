@@ -27,6 +27,11 @@ start() {
     [ -x "$SINGBOX_BIN" ] || { echo "$NAME: missing $SINGBOX_BIN"; exit 1; }
     [ -f "$SINGBOX_CONF" ] || { echo "$NAME: missing $SINGBOX_CONF"; exit 1; }
     mkdir -p /opt/var/run "$(dirname "$SINGBOX_LOG")"
+    # Truncate-on-start (parity with the OpenWrt init's `> $LOG`): keeps the
+    # persistent /opt/var/log sing-box log bounded per session. Truncate-in-place
+    # (not rename) so detour-logbridge's `tail -f` survives it. The daemon redirect
+    # below + sing-box's own log.output re-fill it from empty.
+    : > "$SINGBOX_LOG"
     touch "$MARK"
     echo "Starting $NAME ..."
     # -b background, -m make pidfile, -d chdir for relative config paths.

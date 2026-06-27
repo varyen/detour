@@ -782,11 +782,18 @@ render_chain_config() {
 "
     fi
 
+    # log: WARN, not "info" — at info sing-box emits a line per connection
+    # (~40-50 MB/day). On Keenetic /var/log is tmpfs (~124 MB total): an info log
+    # filled it in ~3 days and cascaded (curl/lighttpd/sessions/health all failed
+    # to write — see the v1.19.2 bug report). output uses $SINGBOX_LOG so Keenetic
+    # writes to /opt/var/log (persistent USB, OFF tmpfs) — the path the panel log
+    # viewer + detour-logbridge already expect; on OpenWrt it stays /var/log
+    # (unchanged, the init truncates it on each (re)start).
     cat <<EOF
 {
   "log": {
-    "level": "info",
-    "output": "/var/log/sing-box.log",
+    "level": "warn",
+    "output": "$SINGBOX_LOG",
     "timestamp": true
   },
   "inbounds": [

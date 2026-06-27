@@ -224,10 +224,16 @@ gh_curl() {
 # couple of tries. Passes all args through unchanged; logs attempts to stderr
 # (never stdout, so captured output stays clean).
 gh_curl_retry() {
-    local _n=0
+    local _n=0 _rc
     while [ "$_n" -lt 4 ]; do
         _n=$((_n + 1))
-        if gh_curl "$@"; then return 0; fi
+        gh_curl "$@"
+        _rc=$?
+        [ "$_rc" -eq 0 ] && return 0
+        # curl 23 = "failure writing output to destination" → the FS is full (on
+        # Keenetic /tmp is a ~124 MB tmpfs the sing-box log can fill). Retrying
+        # can't help and just spams the log — bail now with a clear reason.
+        [ "$_rc" -eq 23 ] && { log "GitHub request failed: cannot write output (disk full? check /tmp)"; return 1; }
         [ "$_n" -lt 4 ] && { log "GitHub request attempt $_n/4 failed — retrying in 3s..."; sleep 3; }
     done
     return 1

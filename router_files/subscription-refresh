@@ -624,13 +624,35 @@ local function refresh_subscription(sub)
     local ua = sub.user_agent
     if not ua or ua == "" then ua = "sing-box/1.13.2" end
 
+    -- Capture the HTTP status via -w so a 502/HTML error page is reported clearly
+    -- ("server returned HTTP 502…") instead of the opaque "no profiles parsed
+    -- (skipped=N)". -L follows redirects, so %{http_code} is the FINAL response's
+    -- code. The marker rides on its own trailing line (leading \n separates it from
+    -- the body); we split it off before parsing.
     local cmd = string.format(
-        "curl -sS -L --max-time 30 -A %s -H 'Accept: */*' %s 2>/dev/null",
+        "curl -sS -L --max-time 30 -A %s -H 'Accept: */*' -w '\\nDETOUR_HTTP:%%{http_code}' %s 2>/dev/null",
         shell_quote(ua), shell_quote(sub.url))
     local h = io.popen(cmd, "r")
     if not h then return false, "popen failed" end
-    local body = h:read("*a"); h:close()
+    local out = h:read("*a"); h:close()
+    if not out or out == "" then return false, "empty response (network error?)" end
+
+    -- Split the "DETOUR_HTTP:NNN" status marker off the tail (greedy %s match grabs
+    -- the LAST occurrence). If -w didn't fire (very old curl), fall back to raw out.
+    local body, http_code = out:match("^(.*)\nDETOUR_HTTP:(%d+)%s*$")
+    if not http_code then body = out end
+    if http_code == "000" then
+        return false, "network error — curl could not complete the request"
+    end
+    if http_code and tonumber(http_code) >= 400 then
+        return false, "server returned HTTP " .. http_code .. ", not a subscription feed"
+    end
     if not body or body == "" then return false, "empty response" end
+    -- An HTML body (e.g. an nginx 5xx page, or a 200 captive/landing page) is never
+    -- a subscription feed — say so instead of letting the parser reject every line.
+    if body:lower():match("<html") then
+        return false, "server returned an HTML page, not a subscription feed"
+    end
 
     local profiles, bypass_domains, skipped, source_kind = parse_body_into_profiles(body, sub)
     if #profiles == 0 then

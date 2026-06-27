@@ -39,3 +39,4 @@ _*.txt
 # AI-assistant / editor tooling — kept locally, never committed.
 .claude/
 CLAUDE.md
+_tmp/
