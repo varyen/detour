@@ -492,10 +492,25 @@ opkg_update_retry() {
 cmd_bins_apply() {
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
-    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    # Hold the sing-box init's fail-closed flag across the opkg upgrade so the feed
+    # package's prerm `stop` skips its firewall teardown: the REDIRECT rules stay up
+    # across the binary swap → the daemon gap fails CLOSED (LAN → :12345 → refused),
+    # never direct. postinst's `restart` clears the flag once the new daemon is up;
+    # the trap is the safety net if opkg aborts mid-upgrade. This wraps the upgrade
+    # from the PANEL side, so it protects even an already-installed feed package
+    # whose own prerm predates the fix. OpenWrt only — on Keenetic sing-box is
+    # Entware's `sing-box-go`, whose pkg never touches detour's iptables, and the
+    # init uses a marker (not this flag); see action `singbox_opkg_upgrade`.
+    SB_KEEPFW=/tmp/.singbox-keepfw
+    [ "$KEENETIC" = 1 ] && SB_KEEPFW=""
+    trap 'rm -f "$LOCKFILE"; [ -n "$SB_KEEPFW" ] && rm -f "$SB_KEEPFW"' EXIT INT TERM
     ensure_feed
     log "opkg update + upgrade sing-box from the feed..."
     opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
+    # Set the flag NOW — right before the upgrade, AFTER the (possibly slow, flaky-
+    # network) opkg update — so it is still fresh (< the 2-min staleness window) when
+    # the prerm's `stop` runs. postinst's `restart` re-touches and then clears it.
+    [ -n "$SB_KEEPFW" ] && : > "$SB_KEEPFW"
     if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG "; then
         # `opkg upgrade` no-ops if already newest; fall back to a forced install.
         opkg upgrade "$SINGBOX_PKG" 2>&1 \

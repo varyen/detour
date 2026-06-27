@@ -104,6 +104,14 @@ exit 0
 """
 _SINGBOX_PRERM = """#!/bin/sh
 set +e
+# Hold the init's fail-closed flag while we stop the busy daemon for the binary
+# swap: stop_service then leaves the REDIRECT rules up, so the gap fails CLOSED
+# (LAN -> :12345 -> refused), never direct. postinst's `restart` clears the flag.
+# This protects a manual `opkg upgrade sing-box` over SSH; the panel's
+# `detour-update bins-apply` also holds it. A stale flag (killed upgrade) is auto-
+# expired by stop_service after 2 min, so a leftover can't block a manual «Выкл».
+# (Feed pkg is OpenWrt-only; the marker-based Keenetic init never sees this flag.)
+: > /tmp/.singbox-keepfw
 # Stop the service so the busy binary can be replaced cleanly on upgrade.
 [ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box stop >/dev/null 2>&1
 exit 0

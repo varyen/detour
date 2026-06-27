@@ -14,8 +14,13 @@ SETTINGS_FILE=/etc/sing-box/settings.json
 IPSET_NAME=singbox_domains
 IPSET_WL=singbox_whitelist
 LOG=/var/log/sing-box.log
-# Set by restart() for the duration of a reconfigure bounce: tells stop_service to
-# leave the REDIRECT rules in place so the daemon gap fails CLOSED (never direct).
+# Set by restart()/reconfigure() for the duration of a daemon bounce — and held by
+# `detour-update bins-apply` + the feed package's prerm across an `opkg upgrade
+# sing-box` — to tell stop_service to leave the REDIRECT rules in place so the
+# daemon gap fails CLOSED (never direct). The ONLY path to direct traffic is a
+# manual «Выкл» (stop with no flag). stop_service treats a flag older than 2 min as
+# stale (orphaned by a killed upgrade) and tears down anyway, so a leftover can
+# never permanently block a manual stop.
 KEEPFW_FLAG=/tmp/.singbox-keepfw
 # Set by reconfigure() for a PROFILE/CHAIN switch: only the upstream server changes,
 # domains/ipsets/dnsmasq do NOT. Tells start_service to skip the heavy domain warm-up
@@ -467,17 +472,24 @@ start_service() {
 }
 
 stop_service() {
-    # Reconfigure bounce (set by restart()): leave EVERY REDIRECT rule in place so
-    # the daemon gap fails CLOSED — LAN hits :12345 and is refused, never routed
-    # direct. start_service re-asserts the rules idempotently right after. We only
-    # purge conntrack so existing flows re-pin to the freshly started daemon. A
-    # real (manual) stop has no flag and falls through to the full teardown below,
-    # which removes the rules and lets traffic flow direct — the only intended path
-    # to direct traffic.
-    if [ -f "$KEEPFW_FLAG" ]; then
+    # Reconfigure bounce (restart()/reconfigure()) OR a feed binary upgrade
+    # (`opkg upgrade sing-box` — bins-apply + the package prerm hold the flag):
+    # leave EVERY REDIRECT rule in place so the daemon gap fails CLOSED — LAN hits
+    # :12345 and is refused, never routed direct. start_service re-asserts the rules
+    # idempotently right after. We only purge conntrack so existing flows re-pin to
+    # the freshly started daemon. A real (manual) stop has no flag and falls through
+    # to the full teardown below, which removes the rules and lets traffic flow
+    # direct — the only intended path to direct traffic.
+    #
+    # SAFETY: restart/reconfigure create and clear the flag within ~2 s. A flag
+    # OLDER than 2 min is stale — an `opkg upgrade` was SIGKILLed after the prerm set
+    # it but before postinst could clear it. Ignore a stale flag and fall through to
+    # the teardown, so a leftover can never permanently block a manual «Выкл».
+    if [ -f "$KEEPFW_FLAG" ] && ! find "$KEEPFW_FLAG" -mmin +2 2>/dev/null | grep -q .; then
         command -v conntrack >/dev/null 2>&1 && conntrack -D -p tcp --reply-port-src 12345 >/dev/null 2>&1
         return 0
     fi
+    rm -f "$KEEPFW_FLAG" 2>/dev/null   # clear a stale/leftover flag before tearing down
 
     # Remove "Все через VPN" (all-traffic redirect) chain if active
     iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_ALLVPN 2>/dev/null
