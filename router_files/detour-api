@@ -18,6 +18,11 @@ ZAPRET_INITD="/etc/init.d/zapret-tpws"
 ZAPRET_CONF="/etc/zapret-tpws.conf"
 ZAPRET_DOMAINS="/etc/zapret-tpws/domains.list"
 LOGBRIDGE_INITD="/etc/init.d/detour-logbridge"   # syslog log-bridge service (gated by log_to_syslog)
+# Log files surfaced by the panel «Логи» viewer (logs_view/logs_clear). APPLY_LOG
+# (last opkg/operation) is defined further down; it's tmpfs and identical on both.
+ZAPRET_LOG="/var/log/zapret-tpws.log"
+UPDATE_LOG="/var/log/detour-update.log"      # self-update / bins cron output
+HEALTH_LOG="/var/log/detour-health.log"      # functional VPN health checker
 
 KEEPALIVE_STATE="/var/state/vpn-keepalive.json"
 KEEPALIVE_BIN="/usr/sbin/vpn-keepalive"
@@ -85,6 +90,9 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     ZAPRET_CONF="$OPT/etc/zapret-tpws.conf"
     ZAPRET_DOMAINS="$OPT/etc/zapret-tpws/domains.list"
     LOGBRIDGE_INITD="$OPT/etc/init.d/S91detour-logbridge"
+    ZAPRET_LOG="$OPT/var/log/zapret-tpws.log"
+    UPDATE_LOG="$OPT/var/log/detour-update.log"
+    HEALTH_LOG="$OPT/var/log/detour-health.log"
     KEEPALIVE_STATE="$OPT/var/state/vpn-keepalive.json"
     KEEPALIVE_BIN="$OPT/sbin/vpn-keepalive"
     UPDATE_BIN="$OPT/sbin/detour-update"
@@ -2075,7 +2083,17 @@ singbox_opkg_upgrade)
     # The sentinel rc reflects `opkg upgrade`, not the trailing restart/bins-check.
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     command -v opkg >/dev/null 2>&1 || { json_err "opkg not available"; exit 0; }
-    SB_CMD="opkg update; echo '--- opkg upgrade sing-box-go ---'; opkg upgrade sing-box-go; SB_RC=\$?;"
+    # Installed version BEFORE the upgrade (computed here, in the CGI) so the detached
+    # worker can echo a clear before→after verdict. Without this the live log ends on a
+    # silent `opkg upgrade` no-op and the operator reads "ничего не произошло" as a bug,
+    # when Entware simply has nothing newer (the common case — see check button).
+    SB_BEFORE=$(opkg list-installed sing-box-go 2>/dev/null | awk '{print $3; exit}')
+    SB_CMD="echo 'sing-box на Keenetic ставится из фида Entware (пакет sing-box-go), НЕ из фида detour.';"
+    SB_CMD="$SB_CMD echo \"Текущая версия: ${SB_BEFORE:-неизвестна}\";"
+    SB_CMD="$SB_CMD echo '--- opkg update ---'; opkg update;"
+    SB_CMD="$SB_CMD echo '--- opkg upgrade sing-box-go ---'; opkg upgrade sing-box-go; SB_RC=\$?;"
+    SB_CMD="$SB_CMD SB_AFTER=\$(opkg list-installed sing-box-go 2>/dev/null | awk '{print \$3; exit}');"
+    SB_CMD="$SB_CMD if [ \"\$SB_AFTER\" = \"$SB_BEFORE\" ]; then echo \"Версия не изменилась (\${SB_AFTER:-?}) — в фиде Entware нет более новой.\"; else echo \"Обновлено: ${SB_BEFORE:-?} -> \${SB_AFTER:-?}\"; fi;"
     SB_CMD="$SB_CMD if [ -f /opt/etc/init.d/S99sing-box ]; then /opt/etc/init.d/S99sing-box stop 2>/dev/null; chmod 0644 /opt/etc/init.d/S99sing-box 2>/dev/null; fi;"
     SB_CMD="$SB_CMD $SINGBOX_INITD restart >/dev/null 2>&1; \"$UPDATE_BIN\" bins-check >/dev/null 2>&1; [ \"\$SB_RC\" = 0 ]"
     start_apply "$SB_CMD"
@@ -2112,6 +2130,45 @@ singbox_log)
     ;;
 
 singbox_log_clear) > "$SINGBOX_LOG" 2>/dev/null; json_ok ;;
+
+# ==================== GENERIC LOG VIEWER ====================
+# Panel «Логи» tab: tail/clear one of a SAFELISTED set of log files (no arbitrary
+# path — `name` maps through a fixed case, so no traversal). Paths are the platform-
+# aware vars set in the shim, so this works unchanged on OpenWrt and Keenetic.
+logs_view)
+    LNAME=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]name=\([^&]*\).*/\1/p' | head -1)
+    case "$LNAME" in
+        singbox) LF="$SINGBOX_LOG" ;;
+        zapret)  LF="$ZAPRET_LOG" ;;
+        health)  LF="$HEALTH_LOG" ;;
+        update)  LF="$UPDATE_LOG" ;;
+        apply)   LF="$APPLY_LOG" ;;
+        *) json_err "unknown log"; exit 0 ;;
+    esac
+    if [ -f "$LF" ]; then
+        LOG=$(tail -300 "$LF" | json_escape)
+        printf '{"ok":true,"name":"%s","path":"%s","log":"%s"}' \
+            "$LNAME" "$(printf '%s' "$LF" | json_escape)" "$LOG"
+    else
+        printf '{"ok":true,"name":"%s","path":"%s","log":"","missing":true}' \
+            "$LNAME" "$(printf '%s' "$LF" | json_escape)"
+    fi
+    ;;
+
+logs_clear)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    LNAME=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]name=\([^&]*\).*/\1/p' | head -1)
+    case "$LNAME" in
+        singbox) LF="$SINGBOX_LOG" ;;
+        zapret)  LF="$ZAPRET_LOG" ;;
+        health)  LF="$HEALTH_LOG" ;;
+        update)  LF="$UPDATE_LOG" ;;
+        apply)   LF="$APPLY_LOG" ;;
+        *) json_err "unknown log"; exit 0 ;;
+    esac
+    > "$LF" 2>/dev/null
+    json_ok
+    ;;
 
 # ==================== ZAPRET-TPWS ====================
 zapret_start)   $ZAPRET_INITD $SVC_START >/dev/null 2>&1; sleep 2; json_ok ;;

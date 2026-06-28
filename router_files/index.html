@@ -3292,6 +3292,13 @@
             </p>
             <div class="flex-gap">
               <button
+                class="btn"
+                id="bins-opkg-check-btn"
+                onclick="singboxOpkgCheck()"
+              >
+                ↻ Проверить версию
+              </button>
+              <button
                 class="btn primary"
                 id="bins-opkg-btn"
                 onclick="singboxOpkgUpgrade()"
@@ -4060,7 +4067,7 @@
           <button class="tab" data-tab="route-map">🧭 Маршрутизация</button>
           <button class="tab" data-tab="hosts-dns">🧩 Hosts-DNS</button>
           <button class="tab" data-tab="singbox-cfg">⚙ Конфиг sing-box</button>
-          <button class="tab" data-tab="singbox-log">📜 Лог sing-box</button>
+          <button class="tab" data-tab="singbox-log">📜 Логи</button>
           <button class="tab" data-tab="firewall">🛡 Файрвол</button>
         </div>
 
@@ -4229,12 +4236,31 @@
           </div>
         </div>
 
-        <!-- Tab: sing-box log -->
+        <!-- Tab: logs (sing-box + zapret + health + self-update + last operation) -->
         <div class="tab-content" id="tab-singbox-log">
           <div class="editor-section">
             <div class="editor-header">
-              <h3>Лог sing-box</h3>
+              <h3>Логи</h3>
               <div class="flex-gap">
+                <select
+                  id="log-select"
+                  onchange="onLogSelectChange()"
+                  title="Какой лог показать"
+                  style="
+                    padding: 6px 8px;
+                    border-radius: 8px;
+                    border: 1px solid var(--border);
+                    background: var(--bg-elev-solid);
+                    color: var(--text);
+                    font-size: 13px;
+                  "
+                >
+                  <option value="singbox">sing-box</option>
+                  <option value="zapret">zapret (tpws)</option>
+                  <option value="health">Проверка здоровья VPN</option>
+                  <option value="update">Обновление панели</option>
+                  <option value="apply">Последняя операция</option>
+                </select>
                 <label class="auto-refresh-toggle">
                   <input type="checkbox" id="log-auto-refresh" checked />
                   Обновлять каждые 5с
@@ -9481,6 +9507,7 @@
                   : sub.last_status === "error"
                     ? "var(--red)"
                     : "var(--text-dim)";
+              var errMsg = sub.last_error ? String(sub.last_error) : "";
               var statusTxt =
                 sub.last_status === "ok"
                   ? "ok · " + (sub.last_saved || 0) + " проф."
@@ -9503,7 +9530,9 @@
                 '<div style="font-size:11px;color:var(--text-muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
                 '🔗 <span style="color:' +
                 statusColor +
-                '">' +
+                '"' +
+                (errMsg ? ' title="' + escapeHtml(errMsg) + '"' : "") +
+                ">" +
                 escapeHtml(statusTxt) +
                 "</span>" +
                 " · след: " +
@@ -9514,6 +9543,15 @@
                 escapeHtml(sub.url || "") +
                 "</span>" +
                 "</div>";
+              // Show the actual refresh error on its own wrapping line — the status
+              // line above is nowrap+ellipsis, so a bare "ошибка" hid the reason
+              // (curl/HTTP/parse). last_error is written by subscription-refresh.
+              if (sub.last_status === "error" && errMsg) {
+                subDetail +=
+                  '<div style="font-size:11px;color:var(--red);margin-top:2px;white-space:normal;word-break:break-word;">⚠ ' +
+                  escapeHtml(errMsg) +
+                  "</div>";
+              }
               subBtns =
                 '<button class="btn sm" onclick="refreshSubscriptionById(decodeURIComponent(&quot;' +
                 idAttr +
@@ -11887,21 +11925,35 @@
         }
       }
 
-      // sing-box log
+      // Logs viewer — sing-box / zapret / health / self-update / last operation.
+      // The selected log is fetched via the generic logs_view action (a safelisted
+      // name → file map in detour-api, platform-aware on OpenWrt and Keenetic).
+      var currentLogName = "singbox";
+      function onLogSelectChange() {
+        var sel = document.getElementById("log-select");
+        currentLogName = sel ? sel.value : "singbox";
+        loadSingboxLog();
+      }
+      // Name kept as loadSingboxLog() so the tab-switch + auto-refresh callers are
+      // unchanged; it now loads whichever log is selected.
       async function loadSingboxLog() {
+        var el = document.getElementById("singbox-log-view");
         try {
-          var d = await api("singbox_log");
-          var el = document.getElementById("singbox-log-view");
-          el.textContent = d.log || "(пусто)";
+          var d = await api(
+            "logs_view&name=" + encodeURIComponent(currentLogName),
+          );
+          el.textContent = d.missing
+            ? "(файл лога ещё не создан)"
+            : d.log || "(пусто)";
           el.scrollTop = el.scrollHeight;
         } catch (e) {
           if (e.message !== "Not authenticated")
-            document.getElementById("singbox-log-view").textContent =
-              "Ошибка: " + e.message;
+            el.textContent = "Ошибка: " + e.message;
         }
       }
       async function clearSingboxLog() {
-        await api("singbox_log_clear", "POST");
+        if (!confirm("Очистить выбранный лог?")) return;
+        await api("logs_clear&name=" + encodeURIComponent(currentLogName), "POST");
         toast("Лог очищен", "success");
         loadSingboxLog();
       }
@@ -13199,6 +13251,43 @@
             });
         }
         tick();
+      }
+
+      // Keenetic: check the Entware feed for a newer sing-box-go. Reuses the same
+      // bins_update_check action as OpenWrt (detour-update's bins-check is overridden
+      // to query sing-box-go there), and renders the result into the OPKG section's
+      // own status line. The common outcome is "актуально" — Entware lags upstream, so
+      // there's often nothing newer; the button makes that explicit instead of leaving
+      // the operator guessing why «Обновить» seems to do nothing.
+      async function singboxOpkgCheck() {
+        var el = document.getElementById("bins-opkg-status");
+        var btn = document.getElementById("bins-opkg-check-btn");
+        if (btn) btn.disabled = true;
+        if (el) el.textContent = "Проверка…";
+        try {
+          var d = await api("bins_update_check", "POST", "");
+          renderUpstreamNote(d || {});
+          if (d && d.current && d.available) {
+            var has =
+              d.available !== d.current &&
+              d.available !== "?" &&
+              d.available !== "n/a";
+            el.textContent =
+              "Текущая: " +
+              d.current +
+              " · доступна: " +
+              d.available +
+              (has ? " — есть обновление" : " — актуально");
+          } else {
+            el.textContent =
+              (d && d.status ? d.status + ": " : "") +
+              ((d && (d.message || d.error)) || JSON.stringify(d));
+          }
+        } catch (e) {
+          el.textContent = "Ошибка: " + e.message;
+        } finally {
+          if (btn) btn.disabled = false;
+        }
       }
 
       async function singboxOpkgUpgrade() {
