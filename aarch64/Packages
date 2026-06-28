@@ -1,0 +1,45 @@
+Package: nfqws2
+Version: 1.0.2-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 482924
+Description: zapret2 nfqws2 NFQUEUE DPI-bypass engine + LuaJIT desync scripts (bol-van/zapret2). Optional — used by zapret2 mode. (1.0.2-1)
+Filename: nfqws2_1.0.2-1_all.ipk
+Size: 356584
+MD5Sum: 2de3f96a8913b1289adf4512a7b400e5
+SHA256sum: 81ab45b52d7d009c76ead8629f5408946377c92af56d6cfdb95497b33db0c5f7
+
+Package: sing-box
+Version: 1.13.14-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 64410040
+Description: sing-box universal proxy platform. Detour feed build for OpenWrt/GL.iNet (the distro feed is stuck on 1.8.x). (1.13.14-1)
+Filename: sing-box_1.13.14-1_all.ipk
+Size: 22401462
+MD5Sum: 4fda9531ba73a44496e467abd0f0a2c6
+SHA256sum: 3b10e4f638e2771bb8fc67527ebcb751f5cc28d6c08876e3c9a584e13c0d30e3
+
+Package: tpws-zapret
+Version: 72.12-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 110488
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build — zapret is in no opkg feed. (72.12-1)
+Filename: tpws-zapret_72.12-1_all.ipk
+Size: 110743
+MD5Sum: 1fdaf026eb8d0cfbc7734bc935244d18
+SHA256sum: ced92b9f7102cf788ea8b91c4875f2575ee622351d1a010456a886fac8adf035
+
