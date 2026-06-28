@@ -5,6 +5,50 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.22.0] — 2026-06-28
+
+### Добавлено
+
+- **Свой mipsel opkg-фид для Keenetic — sing-box и tpws теперь свежие.** Раньше на
+  Keenetic sing-box приходил из Entware-пакета `sing-box-go`, который ведут
+  мейнтейнеры Entware и который сильно отстаёт (на устройстве было `1.13.3-2`,
+  когда вышла `1.13.14`). Теперь `build_feed.py --arch mipsel` собирает наш
+  **собственный фид** `feed/mipsel` из upstream-релизов: sing-box —
+  ассет `-linux-mipsle-softfloat-musl` (32-бит LE MIPS, soft-float, полностью
+  статический musl — исключает `Error relocating`), tpws — `binaries/linux-mipsel`
+  из bol-van/zapret. Панель ставит их через `Depends: sing-box, tpws-zapret`, как
+  на OpenWrt, и обновляет кнопками в шапке. Entware `sing-box-go` остаётся
+  фолбэком для `Depends: sing-box`, если наш фид недоступен; `ensure_singbox`
+  мигрирует на наш пакет и снимает `sing-box-go`. _Keenetic (паритет с OpenWrt)._
+- **Авто-публикация фида расширена на mipsel.** `feed_autopublish.py` и
+  CI-воркфлоу теперь публикуют ОБА фида — `aarch64` (OpenWrt, с nfqws2) и `mipsel`
+  (Keenetic, sing-box + tpws). `publish_feed` стал мульти-арх-безопасным: подтягивает
+  текущую ветку `feed` и сохраняет соседнюю арх-папку (публикация mipsel не сносит
+  aarch64, и наоборот), оставаясь одним squash-коммитом.
+
+### Изменено
+
+- **Keenetic-пакет панели больше не несёт бинарников.** Bundled-`tpws` убран —
+  оба бинарника (sing-box + tpws) теперь из фида. `deploy_keenetic.py` и
+  `entware-bootstrap.sh` прописывают mipsel-фид и ставят оба пакета ДО установки
+  панели. UI обновления sing-box/tpws на Keenetic переключён на единый
+  фид-флоу (как OpenWrt); амбер-чип «вышла новее на GitHub» снова активен на
+  Keenetic (мы теперь владеем фидом и можем бампнуть). Старый action
+  `singbox_opkg_upgrade` оставлен алиасом на `bins-apply` для окна апгрейда.
+
+> ⚠ **Не проверено на живом Keenetic-железе.** Сборка фида и `.ipk` (ELF, раскладка
+> пакета, пути `/opt`) проверены локально, мульти-арх-публикация проверена на
+> локальном фейк-remote. Но поведение на устройстве — что opkg ставит наши
+> `Architecture: all` mipsel-пакеты, sing-box реально стартует, миграция с
+> `sing-box-go`, fail-closed рестарт — **требует валидации удалённым владельцем
+> Keenetic**. **Первая** установка фид-панели должна добавить mipsel-фид ДО
+> `opkg install` (это делают `deploy_keenetic.py` / `entware-bootstrap.sh`); кнопка
+> самообновления в панели НЕ перекидывает с дофидовой версии на фидовую.
+>
+> ⚠ **zapret2 (nfqws2) для Keenetic невозможен** и НЕ портирован: KeeneticOS не
+> предоставляет NFQUEUE — движок физически не запустится. Это единственная
+> легальная причина не делать паритет; в UI zapret2 на Keenetic уже задизейблен.
+
 ## [1.21.0] — 2026-06-28
 
 ### Добавлено

@@ -60,6 +60,10 @@ ARCH = "all"  # static binaries, portable across the aarch64 opkg-arch family
               # (the fleet reports aarch64_cortex-a53_neon-vfpv4, etc.). `all`
               # so a single .ipk installs on every aarch64 router.
 FEED_ARCH_DIR = "aarch64"  # logical feed sub-dir (one per binary arch family)
+MIPSEL_FEED_ARCH_DIR = "mipsel"  # Keenetic/Entware (KeeneticOS, MT7621) sub-dir.
+              # Same Architecture: all (path-segregated by sub-dir), but the
+              # binaries are 32-bit little-endian MIPS soft-float musl-static
+              # (sing-box `-mipsle-softfloat-musl`, tpws `binaries/linux-mipsel`).
 FEED_BRANCH = "feed"
 DEFAULT_REVISION = "1"
 
@@ -75,6 +79,12 @@ TPWS_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "tpws-zapret")
 NFQWS_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "nfqws2")
 NFQWS_LUA_DIR = os.path.join(BACKUP_HOME, "usr", "share", "detour", "lua")
 NFQWS_LUA_FILES = ("zapret-lib.lua", "zapret-antidpi.lua", "zapret-auto.lua")
+
+# mipsel (Keenetic/Entware) binary cache. Distinct paths so --fetch-upstream for
+# the mipsel feed never clobbers the aarch64 binaries above. router-backup is
+# gitignored. Populated by fetch_singbox_mipsel / fetch_tpws_mipsel.
+SB_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "sing-box")
+TPWS_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "sbin", "tpws-zapret")
 
 # Upstream source repos for --fetch-upstream (CI auto-publish needs no
 # router-backup). sing-box ships the binary in a per-libc tarball; zapret/zapret2
@@ -180,6 +190,65 @@ PKG_SPECS = {
     },
 }
 
+# ---- mipsel (Keenetic/Entware) package specs ----------------------------------
+# Entware's opkg root is /opt, so the binaries live under opt/* (NOT usr/*) and the
+# maintainer scripts drive the detour Keenetic init.d (S52/S53), not the OpenWrt
+# procd services. No keepfw flag: opkg replaces the binary by unlink+rename, so the
+# running daemon keeps its old inode and only the postinst `restart` swaps it — and
+# S52detour-singbox's restart is fail-closed (it keeps the REDIRECT marker up), so
+# there is no direct-leak window. nfqws2 is intentionally absent (no NFQUEUE on
+# KeeneticOS → the engine can't run; zapret2 stays OpenWrt-only).
+_SINGBOX_POSTINST_MIPSEL = """#!/bin/sh
+set +e
+chmod 0755 /opt/bin/sing-box 2>/dev/null
+# Only bounce sing-box if it was RUNNING (enabled marker present). Skipping the
+# restart when the operator has it manually «Выкл» means a binary upgrade can't
+# silently turn the VPN back on. When it IS running, S52's `restart` keeps the
+# REDIRECT marker up, so the swap stays fail-closed (gap refuses, never direct).
+if [ -f /opt/etc/detour/singbox.enabled ] && [ -x /opt/etc/init.d/S52detour-singbox ]; then
+    /opt/etc/init.d/S52detour-singbox restart >/dev/null 2>&1
+fi
+exit 0
+"""
+_SINGBOX_PRERM_MIPSEL = """#!/bin/sh
+set +e
+# Do NOT stop sing-box here: opkg swaps the binary file underneath the running
+# daemon (old inode stays live), and the postinst `restart` brings up the new one
+# fail-closed. Stopping would risk a teardown/leak window for no benefit.
+exit 0
+"""
+_TPWS_POSTINST_MIPSEL = """#!/bin/sh
+set +e
+chmod 0755 /opt/sbin/tpws-zapret 2>/dev/null
+# Only cycle tpws if it is currently running (zapret mode active) - a blind restart
+# would START tpws even when the DPI switch is off. detour-bypass owns the lifecycle;
+# this just lets a live engine pick up the freshly-installed binary.
+if pgrep -f /opt/sbin/tpws-zapret >/dev/null 2>&1; then
+    [ -x /opt/etc/init.d/S53detour-zapret ] && /opt/etc/init.d/S53detour-zapret restart >/dev/null 2>&1
+fi
+exit 0
+"""
+_TPWS_PRERM_MIPSEL = """#!/bin/sh
+set +e
+exit 0
+"""
+PKG_SPECS_MIPSEL = {
+    "sing-box": {
+        "files": [(SB_BINARY_MIPSEL, "opt/bin/sing-box", 0o755)],
+        "postinst": _SINGBOX_POSTINST_MIPSEL,
+        "prerm": _SINGBOX_PRERM_MIPSEL,
+        "description": ("sing-box universal proxy platform. Detour feed build for "
+                        "Keenetic/Entware (mipsel soft-float, musl-static)."),
+    },
+    "tpws-zapret": {
+        "files": [(TPWS_BINARY_MIPSEL, "opt/sbin/tpws-zapret", 0o755)],
+        "postinst": _TPWS_POSTINST_MIPSEL,
+        "prerm": _TPWS_PRERM_MIPSEL,
+        "description": ("zapret tpws transparent DPI-bypass proxy (bol-van/zapret). "
+                        "Detour feed build for Keenetic/Entware (mipsel)."),
+    },
+}
+
 
 def _control_text(pkg, version, installed_size, description):
     return (
@@ -274,6 +343,38 @@ def _assert_static_arm64(data, label):
     return True
 
 
+def _assert_static_mipsel(data, label):
+    """Guard the Keenetic/MT7621 target: a 32-bit (ELFCLASS32) little-endian
+    (ELFDATA2LSB) MIPS ELF with NO PT_INTERP (fully static). Catches a wrong-variant
+    download (glibc/dynamic, big-endian `mips`, or 64-bit `mips64`) before it reaches
+    a router. Soft-float is guaranteed by the asset name we fetch (`-softfloat-musl`
+    / bol-van's `linux-mipsel`), not parsed here — a reliable FP-ABI read needs the
+    .MIPS.abiflags section; the on-device `sing-box version` smoke test is the
+    backstop for the float ABI."""
+    import struct
+    if data[:4] != b"\x7fELF":
+        die(f"{label}: not an ELF binary")
+    ei_class, ei_data = data[4], data[5]
+    if ei_class != 1:
+        die(f"{label}: not ELF32 (class={ei_class}) — Keenetic mipsel is 32-bit")
+    if ei_data != 1:
+        die(f"{label}: not little-endian (data={ei_data}) — need mipsle, not big-endian mips")
+    e = "<"
+    mach = struct.unpack(e + "H", data[0x12:0x14])[0]
+    if mach != 0x08:  # EM_MIPS
+        die(f"{label}: not MIPS (machine=0x{mach:x})")
+    phoff = struct.unpack(e + "I", data[0x1c:0x20])[0]       # ELF32 e_phoff
+    phentsize = struct.unpack(e + "H", data[0x2a:0x2c])[0]   # ELF32 e_phentsize
+    phnum = struct.unpack(e + "H", data[0x2c:0x2e])[0]       # ELF32 e_phnum
+    interp = any(
+        struct.unpack(e + "I", data[phoff + i * phentsize: phoff + i * phentsize + 4])[0] == 3
+        for i in range(phnum)
+    )
+    if interp:
+        die(f"{label}: dynamically linked (PT_INTERP present) — needs the static/musl build")
+    return True
+
+
 def fetch_singbox(version):
     """Download sing-box <version> (linux-arm64 MUSL = fully static) → SB_BINARY.
     Overwrites any existing copy. The plain `-linux-arm64` asset is glibc-dynamic
@@ -313,6 +414,50 @@ def fetch_tpws(version):
         f.write(data)
     os.chmod(TPWS_BINARY, 0o755)
     print(f"    -> {TPWS_BINARY} ({len(data):,} B, static aarch64)")
+
+
+def fetch_singbox_mipsel(version):
+    """Download sing-box <version> for Keenetic/MT7621 → SB_BINARY_MIPSEL.
+    The `-linux-mipsle-softfloat-musl` asset is 32-bit little-endian MIPS,
+    soft-float, fully static (musl) — the right ABI for Entware mipselsf and
+    immune to the `Error relocating` the dynamic builds would hit."""
+    import io as _io, tarfile as _tf
+    url = (f"https://github.com/{SINGBOX_REPO}/releases/download/v{version}/"
+           f"sing-box-{version}-linux-mipsle-softfloat-musl.tar.gz")
+    print(f"  fetching sing-box {version} (linux-mipsle-softfloat-musl) ...")
+    with _tf.open(fileobj=_io.BytesIO(_http_get(url)), mode="r:gz") as tf:
+        member = next((m for m in tf.getmembers() if m.name.endswith("/sing-box")), None)
+        if member is None:
+            die(f"sing-box {version}: no sing-box binary in {url}")
+        data = tf.extractfile(member).read()
+    _assert_static_mipsel(data, f"sing-box {version} (mipsel)")
+    os.makedirs(os.path.dirname(SB_BINARY_MIPSEL), exist_ok=True)
+    with open(SB_BINARY_MIPSEL, "wb") as f:
+        f.write(data)
+    os.chmod(SB_BINARY_MIPSEL, 0o755)
+    print(f"    -> {SB_BINARY_MIPSEL} ({len(data):,} B, static mipsel)")
+
+
+def fetch_tpws_mipsel(version):
+    """Download zapret tpws <version> (binaries/linux-mipsel/tpws) → TPWS_BINARY_MIPSEL.
+    bol-van ships a static mipsel tpws prebuilt inside the release tarball — the same
+    one the panel used to bundle, now served from the feed so it upgrades on its own."""
+    import io as _io, tarfile as _tf
+    url = (f"https://github.com/{ZAPRET_REPO}/releases/download/v{version}/"
+           f"zapret-v{version}.tar.gz")
+    member_name = f"zapret-v{version}/binaries/linux-mipsel/tpws"
+    print(f"  fetching tpws {version} (linux-mipsel) ...")
+    with _tf.open(fileobj=_io.BytesIO(_http_get(url)), mode="r:gz") as tf:
+        m = next((x for x in tf.getmembers() if x.name == member_name), None)
+        if m is None:
+            die(f"tpws {version}: {member_name} not found in {url}")
+        data = tf.extractfile(m).read()
+    _assert_static_mipsel(data, f"tpws {version} (mipsel)")
+    os.makedirs(os.path.dirname(TPWS_BINARY_MIPSEL), exist_ok=True)
+    with open(TPWS_BINARY_MIPSEL, "wb") as f:
+        f.write(data)
+    os.chmod(TPWS_BINARY_MIPSEL, 0o755)
+    print(f"    -> {TPWS_BINARY_MIPSEL} ({len(data):,} B, static mipsel)")
 
 
 def fetch_nfqws2_assets(rel=None, force=False):
@@ -475,9 +620,14 @@ def _run(cmd, cwd=None, check=True, quiet_url=None):
 def publish_feed(commit_msg, feed_arch_dir):
     """Force-push the local feed tree to the orphan `feed` branch as one commit.
 
-    Uses a throwaway git repo in releases/feed/.git-publish so the working tree
-    (on `main`) is never touched, and a single squashed commit so the large
-    blobs do not accumulate across releases."""
+    Multi-arch safe: the branch can carry several arch sub-dirs (aarch64, mipsel,
+    ...). We fetch the CURRENT branch first and carry its other arch dirs over
+    unchanged, then overlay only the arch we just built — so publishing mipsel never
+    drops the aarch64 feed the whole OpenWrt fleet depends on (and vice versa).
+
+    Uses a throwaway git repo in releases/feed/.git-publish so the working tree (on
+    `main`) is never touched, and a single squashed ORPHAN root commit (no parent)
+    so the large blobs do not accumulate across releases."""
     owner, repo, token = _load_github_config()
     remote = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
 
@@ -493,25 +643,43 @@ def publish_feed(commit_msg, feed_arch_dir):
         shutil.rmtree(stage, onerror=_chmod_retry)
     os.makedirs(stage)
 
-    # Lay the feed tree under <stage>/<arch>/...
-    dst_arch = os.path.join(stage, FEED_ARCH_DIR)
-    shutil.copytree(feed_arch_dir, dst_arch)
-    # A tiny landing file so the branch root isn't empty / 404 on humans.
-    with open(os.path.join(stage, "README.md"), "w", encoding="utf-8", newline="\n") as f:
-        f.write(
-            "# detour opkg feed\n\n"
-            "Auto-generated by `build_feed.py`. Serves sing-box + tpws-zapret for "
-            "the detour panel.\n\n"
-            "```\n"
-            f"src/gz detour https://raw.githubusercontent.com/{owner}/{repo}/"
-            f"{FEED_BRANCH}/{FEED_ARCH_DIR}\n"
-            "```\n"
-        )
-
-    print(f"\n[publish] force-pushing feed tree -> {owner}/{repo}@{FEED_BRANCH}")
     _run(["git", "init", "-q", "-b", FEED_BRANCH], cwd=stage)
     _run(["git", "config", "user.name", "detour-feed"], cwd=stage)
     _run(["git", "config", "user.email", "feed@detour.local"], cwd=stage)
+
+    # Seed the stage with the CURRENT feed branch so sibling arch dirs survive.
+    # Best-effort: the very first publish has no branch yet (fetch returns non-zero).
+    # We load the fetched tree via read-tree+checkout-index (NOT `git checkout`) so
+    # HEAD stays the unborn `feed` branch → the commit below is a parentless root.
+    fetched = _run(["git", "fetch", "-q", "--depth", "1", remote, FEED_BRANCH],
+                   cwd=stage, check=False, quiet_url=remote).returncode == 0
+    if fetched:
+        _run(["git", "read-tree", "FETCH_HEAD"], cwd=stage)
+        _run(["git", "checkout-index", "-a", "-f"], cwd=stage)
+        print(f"[publish] carried over existing feed branch ({owner}/{repo}@{FEED_BRANCH})")
+    else:
+        print(f"[publish] no existing {FEED_BRANCH} branch — creating it fresh")
+
+    # Overlay ONLY the arch we just built (replace just this arch's sub-dir).
+    dst_arch = os.path.join(stage, FEED_ARCH_DIR)
+    if os.path.isdir(dst_arch):
+        shutil.rmtree(dst_arch, onerror=lambda f, p, _e: (os.chmod(p, stat.S_IWRITE), f(p)))
+    shutil.copytree(feed_arch_dir, dst_arch)
+
+    arch_dirs = sorted(d for d in os.listdir(stage)
+                       if os.path.isdir(os.path.join(stage, d)) and not d.startswith("."))
+    # A tiny landing file so the branch root isn't empty / 404 on humans — one opkg
+    # line per arch sub-dir present.
+    with open(os.path.join(stage, "README.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("# detour opkg feed\n\n"
+                "Auto-generated by `build_feed.py`. Serves sing-box (+ tpws-zapret) "
+                "for the detour panel.\n\n")
+        for a in arch_dirs:
+            f.write(f"```\nsrc/gz detour https://raw.githubusercontent.com/{owner}/{repo}/"
+                    f"{FEED_BRANCH}/{a}\n```\n\n")
+
+    print(f"[publish] arch dirs on the feed after this push: {', '.join(arch_dirs)}")
+    print(f"[publish] force-pushing feed tree -> {owner}/{repo}@{FEED_BRANCH}")
     _run(["git", "add", "-A"], cwd=stage)
     _run(["git", "commit", "-q", "-m", commit_msg], cwd=stage)
     _run(["git", "push", "--force", remote, f"{FEED_BRANCH}:{FEED_BRANCH}"],
@@ -534,6 +702,23 @@ def parse_version(v, label):
     return v
 
 
+def select_arch(arch):
+    """Repoint the module-level feed globals at the requested arch. `aarch64`
+    (OpenWrt/GL.iNet) is the default and leaves everything as-is; `mipsel`
+    (Keenetic/Entware) swaps in the /opt package specs and the mipsel feed dir.
+    The Architecture field stays `all` for both — the feed is path-segregated by
+    sub-dir, and `all` side-loads on every router regardless of its exact opkg arch."""
+    global FEED_ARCH_DIR, FEED_OUT, PKG_SPECS
+    if arch == "aarch64":
+        return
+    if arch == "mipsel":
+        FEED_ARCH_DIR = MIPSEL_FEED_ARCH_DIR
+        FEED_OUT = os.path.join(HERE, "releases", "feed", FEED_ARCH_DIR)
+        PKG_SPECS = PKG_SPECS_MIPSEL
+        return
+    die(f"unknown --arch {arch!r} (expected aarch64 or mipsel)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--version", help="sing-box version to build, e.g. 1.13.2")
@@ -548,20 +733,30 @@ def main():
                     help="download each binary from its upstream GitHub release "
                          "(sing-box -musl, tpws, nfqws2) instead of using the local "
                          "router-backup copy — needed for headless/CI builds")
+    ap.add_argument("--arch", choices=("aarch64", "mipsel"), default="aarch64",
+                    help="target feed arch family: aarch64 = OpenWrt/GL.iNet (default), "
+                         "mipsel = Keenetic/Entware (MT7621, soft-float musl). Publishes "
+                         "to feed/<arch>/; nfqws2 is aarch64-only (no NFQUEUE on Keenetic)")
     args = ap.parse_args()
+
+    select_arch(args.arch)
 
     sb_ver = parse_version(args.version, "version") if args.version else None
     tpws_ver = parse_version(args.tpws_version, "tpws-version") if args.tpws_version else None
     nfqws2_ver = parse_version(args.nfqws2_version, "nfqws2-version") if args.nfqws2_version else None
+
+    if nfqws2_ver and args.arch == "mipsel":
+        die("nfqws2 (zapret2) is OpenWrt-only: KeeneticOS has no NFQUEUE, so the engine "
+            "cannot run on mipsel. Build it for --arch aarch64 only.")
 
     # --fetch-upstream: pull each requested binary straight from its upstream
     # release so a CI runner needs no router-backup checkout. The static-ELF guard
     # in the fetchers refuses a wrong-variant (e.g. glibc sing-box) download.
     if args.fetch_upstream:
         if sb_ver:
-            fetch_singbox(sb_ver)
+            (fetch_singbox_mipsel if args.arch == "mipsel" else fetch_singbox)(sb_ver)
         if tpws_ver:
-            fetch_tpws(tpws_ver)
+            (fetch_tpws_mipsel if args.arch == "mipsel" else fetch_tpws)(tpws_ver)
 
     build_versions = {}
     if sb_ver:
@@ -570,7 +765,7 @@ def main():
         build_versions["tpws-zapret"] = f"{tpws_ver}-{args.revision}"
     if nfqws2_ver:
         # nfqws2 binary+lua always come from upstream; under --fetch-upstream pin the
-        # release tag to the requested version and force a fresh download.
+        # release tag to the requested version and force a fresh download. (aarch64 only.)
         rel = f"v{nfqws2_ver}" if args.fetch_upstream else None
         fetch_nfqws2_assets(rel=rel, force=args.fetch_upstream)
         build_versions["nfqws2"] = f"{nfqws2_ver}-{args.revision}"
@@ -579,14 +774,14 @@ def main():
         die("nothing to build: pass --version / --tpws-version / --nfqws2-version")
 
     label = ", ".join(f"{k} {v}" for k, v in build_versions.items()) or "(re-index only)"
-    print(f"=== Building opkg feed: {label} ({ARCH}) ===")
+    print(f"=== Building opkg feed [{FEED_ARCH_DIR}]: {label} ({ARCH}) ===")
     print(f"Output: {FEED_OUT}")
     write_feed(build_versions, FEED_OUT)
 
     if args.publish:
         # Derive a commit message from whatever versions are now in the feed.
         _, ipks = build_packages_index(FEED_OUT)
-        msg = "feed: " + ", ".join(n[:-4].replace("_" + ARCH, "") for n in ipks)
+        msg = f"feed[{FEED_ARCH_DIR}]: " + ", ".join(n[:-4].replace("_" + ARCH, "") for n in ipks)
         publish_feed(msg, FEED_OUT)
 
     print("\n=== DONE ===")

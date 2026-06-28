@@ -12922,7 +12922,8 @@
             "sing-box ставится из нашего фида <code>detour</code> " +
             "(<code>opkg update &amp;&amp; opkg upgrade sing-box</code>) и " +
             "перезапускается автоматически.",
-          keeneticOpkg: true, // Keenetic: sing-box from Entware (sing-box-go)
+          // Keenetic now serves sing-box from our own mipsel feed (feed/mipsel),
+          // same feed flow as OpenWrt — no Entware sing-box-go special case anymore.
         },
         zapret: {
           label: "zapret (tpws)",
@@ -12939,7 +12940,8 @@
             "zapret (tpws DPI-bypass) ставится из нашего фида <code>detour</code> " +
             "(<code>opkg update &amp;&amp; opkg upgrade tpws-zapret</code>) и " +
             "перезапускается автоматически.",
-          keeneticBundled: true, // Keenetic: tpws bundled in the panel package
+          // Keenetic now serves tpws from our own mipsel feed (feed/mipsel), same
+          // feed flow as OpenWrt — no longer bundled in the panel package.
         },
         zapret2: {
           label: "zapret2 (nfqws2)",
@@ -13120,20 +13122,11 @@
             "На этой платформе он не поддерживается.";
           return;
         }
-        // sing-box on Keenetic → Entware OPKG path (sing-box-go).
-        if (isKeen && cfg.keeneticOpkg) {
-          opkgSec.style.display = "block";
-          return;
-        }
-        // tpws bundled with the panel on Keenetic → update with the panel.
-        if (isKeen && cfg.keeneticBundled) {
-          naSec.style.display = "block";
-          document.getElementById("bins-unavail-text").innerHTML =
-            "На этой платформе zapret (tpws) входит в пакет панели и обновляется " +
-            "вместе с ней — откройте «Версия панели», чтобы обновить.";
-          return;
-        }
-        // OpenWrt: opkg feed path (sing-box / zapret / zapret2).
+        // sing-box + zapret(tpws) now ship from our opkg feed on BOTH platforms
+        // (aarch64 for OpenWrt, mipsel for Keenetic) — one unified feed path. The old
+        // Keenetic special cases (Entware sing-box-go / bundled tpws) are gone; the
+        // legacy bins-opkg-section is retained only for backward compat and no longer
+        // shown. zapret2 stays OpenWrt-only (handled above).
         feedSec.style.display = "block";
         document.getElementById("bins-feed-desc").innerHTML = cfg.feedDesc;
         document.getElementById("bins-modal-apply-btn").textContent = cfg.applyLabel;

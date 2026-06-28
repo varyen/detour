@@ -24,20 +24,29 @@ hook directories. There is also **no MPTCP/QSDK bug** here, so the
 
 ## Binaries
 
-**sing-box comes from the Entware feed, not bundled.** The `mipsel-3.4` feed has
-`sing-box-go` (Provides: `sing-box`, currently 1.13.3, installs to
-`/opt/bin/sing-box`). The detour package just declares `Depends: sing-box`, so
-opkg downloads it (~18 MB) built for the exact arch — which **eliminates the
-float-ABI risk** (no `-softfloat` guesswork; the feed build is correct by
-construction). `opkg upgrade` keeps it current.
+**sing-box AND tpws now come from OUR mipsel opkg feed (`feed/mipsel`), not bundled,
+not Entware.** (v1.22.0+ — previously sing-box was Entware's `sing-box-go`, lagging
+at 1.13.3 while upstream was 1.13.14, and tpws was bundled in the panel package.)
 
-**tpws is bundled** (~127 KB) — zapret/`tpws`/`nfqws` are NOT in the Entware feed,
-so `fetch-bins.py` still pulls `tpws` from bol-van/zapret `binaries/linux-mipsel/tpws`
-(ELF32 LE MIPS) into `keenetic/bins/`. (It also fetches sing-box, now unused by the
-package — harmless.)
+- **`sing-box`** — built by `build_feed.py --arch mipsel` from the upstream
+  `sing-box-<ver>-linux-mipsle-softfloat-musl` asset: 32-bit little-endian MIPS,
+  **soft-float**, **fully static musl** → no `Error relocating` possible, correct
+  ABI for Entware `mipselsf`. Installs to `/opt/bin/sing-box`. Tracks the newest
+  1.13.x, like OpenWrt. Entware's `sing-box-go` (Provides: `sing-box`) stays a
+  fallback for the `Depends`; `detour-update`'s `ensure_singbox` migrates the box
+  to our package and retires `sing-box-go`.
+- **`tpws-zapret`** — `binaries/linux-mipsel/tpws` from bol-van/zapret (ELF32 LE
+  MIPS, ~127 KB), packaged into the feed. Installs to `/opt/sbin/tpws-zapret`.
+- **No `nfqws2` (zapret2)** — needs NFQUEUE, which KeeneticOS does not provide, so
+  the engine can't run; it stays OpenWrt-only.
 
-⚠ VALIDATE on device: `/opt/bin/sing-box version` must not say `Error relocating`
-(it won't if pulled from the feed), and `tpws --help` runs.
+The panel declares `Depends: sing-box, tpws-zapret`; `deploy_keenetic.py` /
+`entware-bootstrap.sh` add the `feed/mipsel` line and install both BEFORE the panel.
+`keenetic/fetch-bins.py` is no longer needed (nothing is bundled).
+
+⚠ VALIDATE on device: `/opt/bin/sing-box version` must not say `Error relocating`,
+`/opt/sbin/tpws-zapret --version` runs, and `opkg list-installed | grep -E
+'^sing-box|^tpws-zapret'` shows OUR feed versions (not `sing-box-go`).
 
 ## Path layout (all under /opt — survives KeeneticOS firmware updates on the USB volume)
 

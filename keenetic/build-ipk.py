@@ -13,14 +13,19 @@ Install on the router:  opkg update && opkg install ./detour-keenetic_<ver>_all.
 Architecture is `all` on purpose: opkg side-loading a local .ipk accepts `all`
 regardless of the host's exact mipselsf arch string.
 
-SLIM build: sing-box is NOT bundled — it comes from the Entware feed via
-`Depends: sing-box` (package `sing-box-go` 1.13.x, Provides: sing-box, installs
-to /opt/bin/sing-box, ABI guaranteed-correct for mipsel-3.4 soft-float). Only
-tpws is bundled (~127 KB) because zapret is not in the Entware feed. Net result:
-panel ~90 KB + tpws ~127 KB instead of a 22.5 MB self-contained package, and the
-float-ABI risk on sing-box disappears.
+SLIM build: NO binaries are bundled — sing-box AND tpws-zapret both come from our
+OWN mipsel opkg feed (feed/mipsel) via `Depends: sing-box, tpws-zapret`, the same
+model as the OpenWrt build. sing-box is the `-mipsle-softfloat-musl` static build
+(latest 1.13.x, NOT Entware's lagging sing-box-go); tpws is bol-van/zapret's
+linux-mipsel prebuilt. Net result: panel ~90 KB instead of a self-contained
+package, both binaries upgrade on their own from the feed, and the panel always
+tracks the newest upstream. Entware's `sing-box-go` (Provides: sing-box) stays a
+fallback for the sing-box Depends if our feed is briefly unreachable;
+detour-update's ensure_singbox migrates to (and pins) our package.
 
-Run `keenetic/fetch-bins.py` first to populate keenetic/bins/ (tpws only needed).
+The mipsel feed MUST be configured before installing this package (deploy_keenetic
+/ entware-bootstrap add it; detour-update's apply runs ensure_singbox+ensure_tpws
+first). No `keenetic/fetch-bins.py` step is needed anymore (nothing is bundled).
 """
 import io
 import os
@@ -37,19 +42,22 @@ OUT_DIR = os.path.join(ROOT, "releases", "keenetic")
 
 PKG = "detour-keenetic"
 ARCH = "all"
-# Entware runtime deps — opkg pulls these from the mipselsf feed on install.
-# `sing-box` resolves to the feed's `sing-box-go` (Provides: sing-box).
+# Runtime deps. `sing-box` + `tpws-zapret` come from OUR mipsel feed (feed/mipsel);
+# the rest are Entware mipselsf packages opkg pulls on install. `sing-box` prefers
+# our feed package (a real `sing-box`) over Entware's `sing-box-go` (Provides:
+# sing-box) — the latter is the automatic fallback if our feed is unreachable.
 # NOT listed on purpose (would block opkg resolution — they are not standalone
 # packages in the Entware feed):
 #   * start-stop-daemon — a busybox applet (busybox is Essential, already present).
 #   * lua-cjson — absent from the feed (only the C `cJSON`); shell CGI doesn't need it.
-DEPENDS = ("sing-box, iptables, ipset, dnsmasq-full, lighttpd, lighttpd-mod-cgi, "
+DEPENDS = ("sing-box, tpws-zapret, iptables, ipset, dnsmasq-full, lighttpd, lighttpd-mod-cgi, "
            "lighttpd-mod-setenv, lua, coreutils-base64, openssl-util, curl, swap-utils")
 
 # (source_path, archive_path_under_opt, mode, fix_shebang)
-# sing-box is NOT here — it is pulled from opkg (Depends: sing-box).
+# NO binaries here — sing-box AND tpws-zapret are both pulled from our mipsel feed
+# (Depends: sing-box, tpws-zapret). Only the init.d service scripts (S52/S53) ship
+# in the panel; the binaries they launch come from the feed.
 FILES = [
-    (os.path.join(BINS, "tpws-zapret"), "opt/sbin/tpws-zapret", 0o755, False),
     # Source from router_files/ (canonical) — same source as the OpenWrt build, so
     # the Keenetic package never drifts behind. (router-backup/ was the old source.)
     (os.path.join(ROUTER_FILES, "index.html"), "opt/share/www/detour/index.html", 0o644, False),
@@ -178,7 +186,7 @@ mkdir -p /opt/etc/detour/subscriptions /opt/etc/sing-box/profiles /opt/etc/zapre
          /tmp/detour-sessions /tmp/hosts
 echo "{version}" > /opt/etc/detour/version
 touch /opt/etc/detour/platform            # the panel CGI's platform shim keys off this
-chmod 0755 /opt/sbin/tpws-zapret /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
+chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\

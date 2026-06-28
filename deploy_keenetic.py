@@ -19,10 +19,12 @@ list; there is NO second manifest here to keep in sync.
    the panel from the stale router-backup/ snapshot and uploaded a bundled sing-box
    that the slim .ipk dropped. Building + installing the .ipk removes all of that.)
 
-⚠ Requires: a routers.local.json entry with platform="keenetic", Entware already
-  installed on the router (USB + opkg working), and keenetic/bins/ populated for the
-  bundled tpws (run keenetic/fetch-bins.py first). sing-box resolves from the Entware
-  feed (sing-box-go) at install time.
+⚠ Requires: a routers.local.json entry with platform="keenetic" and Entware already
+  installed on the router (USB + opkg working). sing-box AND tpws-zapret now come from
+  OUR mipsel opkg feed (feed/mipsel) — this script configures that feed and installs
+  both BEFORE the panel (step 4), so the panel's `Depends: sing-box, tpws-zapret`
+  resolve to the latest 1.13.x build, not Entware's lagging sing-box-go. Nothing is
+  bundled anymore (no keenetic/fetch-bins.py step needed).
 """
 import argparse
 import importlib.util
@@ -130,14 +132,34 @@ def main():
     step("Panel auth")
     seed_auth_if_absent(ssh, cfg)
 
-    # 4. Upload + opkg install. The postinst seeds config, disables Entware's bundled
-    #    S99sing-box, registers S90detour-cron, and starts the services. sing-box and the
-    #    other Depends resolve from the Entware feed.
+    # 4. Configure OUR mipsel opkg feed and install the binary deps BEFORE the panel,
+    #    so the panel's `Depends: sing-box, tpws-zapret` resolve from our feed — and the
+    #    box gets the latest 1.13.x sing-box (-mipsle-softfloat-musl) instead of Entware's
+    #    lagging sing-box-go. --force-overwrite takes over /opt/bin/sing-box if sing-box-go
+    #    already owns it; we then retire sing-box-go so the two can't fight over the binary.
+    step("opkg feed (mipsel) + binaries (sing-box, tpws-zapret)")
+    feed_line = "src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/mipsel"
+    feed_cmd = (
+        "mkdir -p /opt/etc/opkg; "
+        "grep -qs '^src/gz detour ' /opt/etc/opkg/customfeeds.conf 2>/dev/null "
+        f"|| echo '{feed_line}' >> /opt/etc/opkg/customfeeds.conf; "
+        "opkg update 2>&1 | tail -3; "
+        "opkg install --force-overwrite sing-box tpws-zapret 2>&1 | tail -6; "
+        "if opkg list-installed sing-box 2>/dev/null | grep -q '^sing-box ' && "
+        "opkg list-installed sing-box-go 2>/dev/null | grep -q '^sing-box-go '; then "
+        "opkg remove sing-box-go 2>&1 | tail -2; fi"
+    )
+    out, _, _ = exec_cmd(ssh, feed_cmd, timeout=300)
+    print("  " + out.strip().replace("\n", "\n  "))
+
+    # 5. Upload + opkg install the panel. The postinst seeds config, disables Entware's
+    #    bundled S99sing-box, registers S90detour-cron, and starts the services. sing-box
+    #    + tpws-zapret (the panel Depends) are already in from our feed (step 4).
     step("Installing the .ipk (opkg — runs postinst: config seed + service start)")
     remote_ipk = "/tmp/" + os.path.basename(ipk_path)
     put_file(ssh, ipk_path, remote_ipk, "0644")
     out, _, _ = exec_cmd(
-        ssh, f"opkg update >/dev/null 2>&1; opkg install --force-reinstall '{remote_ipk}' 2>&1",
+        ssh, f"opkg install --force-reinstall '{remote_ipk}' 2>&1",
         timeout=300)
     print("  " + out.strip().replace("\n", "\n  "))
     exec_cmd(ssh, f"rm -f '{remote_ipk}'")

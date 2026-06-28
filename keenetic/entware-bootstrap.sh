@@ -25,10 +25,24 @@ PKGS="iptables ipset dnsmasq-full lighttpd lighttpd-mod-cgi lighttpd-mod-setenv 
 echo "[bootstrap] opkg install: $PKGS"
 opkg install $PKGS
 
+# Detour mipsel opkg feed — serves sing-box (latest 1.13.x, the -mipsle-softfloat-musl
+# static build) and tpws-zapret, which are the panel's `Depends: sing-box, tpws-zapret`.
+# Add it BEFORE installing the panel .ipk, or opkg can't resolve those deps. (sing-box
+# also has an Entware fallback via sing-box-go, but tpws-zapret is ONLY in our feed.)
+DETOUR_FEED="src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/mipsel"
+if ! grep -qs '^src/gz detour ' /opt/etc/opkg/customfeeds.conf 2>/dev/null; then
+    echo "[bootstrap] adding detour mipsel feed"
+    echo "$DETOUR_FEED" >> /opt/etc/opkg/customfeeds.conf
+    opkg update
+fi
+echo "[bootstrap] opkg install: sing-box tpws-zapret (from the detour feed)"
+opkg install --force-overwrite sing-box tpws-zapret
+
 # Directory skeleton on the Entware volume.
 mkdir -p /opt/sbin /opt/etc/sing-box/profiles /opt/etc/zapret-tpws \
          /opt/etc/detour /opt/var/log /opt/var/run \
          /opt/share/www/detour /opt/share/www/cgi-bin \
          /opt/etc/ndm/netfilter.d /opt/etc/lighttpd/conf.d
 
-echo "[bootstrap] done. Next: deploy bins to /opt/sbin, configs to /opt/etc, panel to /opt/share/www."
+echo "[bootstrap] done. Next: install the panel (it pulls sing-box + tpws from the feed):"
+echo "             opkg install ./detour-keenetic_<ver>_all.ipk"

@@ -4,8 +4,10 @@
 # finds the latest upstream release for sing-box (pinned to the feed's current
 # major.minor), tpws (bol-van/zapret) and nfqws2 (bol-van/zapret2), and — if any
 # is newer — runs `build_feed.py --fetch-upstream --publish` to rebuild + force-push
-# the `feed` branch. Routers then see the new version (green chip) on their next
-# 6h check; install stays manual.
+# the `feed` branch. It publishes BOTH arch feeds: aarch64 (OpenWrt/GL.iNet, with
+# nfqws2) and mipsel (Keenetic/Entware, sing-box + tpws only — no NFQUEUE there).
+# publish_feed preserves the sibling arch, so neither drops the other. Routers then
+# see the new version (green chip) on their next 6h check; install stays manual.
 #
 # Setup (one secret):
 #   Settings → Secrets and variables → Actions → New repository secret

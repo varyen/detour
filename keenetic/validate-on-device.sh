@@ -83,8 +83,15 @@ info "version file: $(cat /opt/etc/detour/version 2>/dev/null || echo '(detour n
 info "opkg: $(opkg list-installed 2>/dev/null | grep -iE '^detour|sing-box|dnsmasq|ipset|lighttpd' | tr '\n' '; ')"
 if [ -x /opt/bin/sing-box ]; then
     info "sing-box: $(/opt/bin/sing-box version 2>&1 | head -1)"
+    info "sing-box pkg: $(opkg list-installed 2>/dev/null | grep -E '^sing-box(-go)? ' | tr '\n' '; ')"
 else
-    info "sing-box: not installed (comes from Entware sing-box-go)"
+    info "sing-box: not installed (should come from our mipsel feed pkg 'sing-box')"
+fi
+if [ -x /opt/sbin/tpws-zapret ]; then
+    info "tpws: $(/opt/sbin/tpws-zapret --version 2>&1 | head -1)"
+    info "tpws pkg: $(opkg list-installed tpws-zapret 2>/dev/null | tr '\n' '; ')"
+else
+    info "tpws: not installed (should come from our mipsel feed pkg 'tpws-zapret')"
 fi
 
 printf '\n=== DONE — paste everything above back ===\n'

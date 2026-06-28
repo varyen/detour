@@ -35,9 +35,10 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 OWNER = os.environ.get("DETOUR_GH_OWNER") or "varyen"
 REPO = os.environ.get("DETOUR_GH_REPO") or "detour"
-FEED_PACKAGES_URL = (
-    f"https://raw.githubusercontent.com/{OWNER}/{REPO}/feed/aarch64/Packages"
-)
+
+
+def feed_packages_url(arch):
+    return f"https://raw.githubusercontent.com/{OWNER}/{REPO}/feed/{arch}/Packages"
 
 SINGBOX_REPO = "SagerNet/sing-box"
 ZAPRET_REPO = "bol-van/zapret"
@@ -106,10 +107,10 @@ def latest_in_minor(repo, major_minor):
     return best, newest_any
 
 
-def feed_versions():
-    """{pkg: version} the feed currently serves, parsed from its Packages index."""
+def feed_versions(arch):
+    """{pkg: version} the <arch> feed currently serves, parsed from its Packages index."""
     req = urllib.request.Request(
-        FEED_PACKAGES_URL,
+        feed_packages_url(arch),
         headers={"User-Agent": "detour-feed-autopublish", "Cache-Control": "no-cache"},
     )
     txt = urllib.request.urlopen(req, timeout=60).read().decode()
@@ -129,17 +130,28 @@ def main():
                     help="print the decision; do not build/publish")
     args = ap.parse_args()
 
+    # aarch64 is the BASELINE/pin source: the sing-box major.minor pin comes from it,
+    # and its index must be complete (it serves nfqws2, which mipsel never can).
     try:
-        feed = feed_versions()
+        feed = feed_versions("aarch64")
     except Exception as e:  # noqa: BLE001 — any failure means unknown baseline
-        print(f"ERROR: cannot read feed Packages ({FEED_PACKAGES_URL}): {e}",
+        print(f"ERROR: cannot read aarch64 feed Packages ({feed_packages_url('aarch64')}): {e}",
               file=sys.stderr)
         sys.exit(1)
     for req in ("sing-box", "tpws-zapret", "nfqws2"):
         if req not in feed:
-            print(f"ERROR: feed Packages missing {req}; refusing to guess. got {feed}",
+            print(f"ERROR: aarch64 feed Packages missing {req}; refusing to guess. got {feed}",
                   file=sys.stderr)
             sys.exit(1)
+
+    # mipsel (Keenetic) feed — best-effort; an empty/missing one (first run) just means
+    # "publish it". It tracks the SAME sing-box + tpws versions as aarch64 (no nfqws2:
+    # KeeneticOS has no NFQUEUE, so zapret2 can never run there).
+    try:
+        mips = feed_versions("mipsel")
+    except Exception as e:  # noqa: BLE001
+        print(f"NOTE: mipsel feed Packages unreadable ({e}) — treating as empty (will seed).")
+        mips = {}
 
     cur_sb, cur_tpws, cur_nfq = feed["sing-box"], feed["tpws-zapret"], feed["nfqws2"]
     sb_pin = ".".join(cur_sb.split(".")[:2])
@@ -157,22 +169,43 @@ def main():
         print(f"  NOTE: sing-box {sb_any} is out upstream but crosses the {sb_pin} "
               f"pin — bump the feed by hand once to move the pin (config schema risk).")
     print(f"tpws     : feed {cur_tpws} | latest {tpws_latest} -> {tpws_t}")
-    print(f"nfqws2   : feed {cur_nfq} | latest {nfq_latest} -> {nfq_t}")
+    print(f"nfqws2   : feed {cur_nfq} | latest {nfq_latest} -> {nfq_t}  (aarch64 only)")
 
-    if sb_t == cur_sb and tpws_t == cur_tpws and nfq_t == cur_nfq:
-        print("feed is up to date — nothing to publish.")
+    # aarch64 republishes if any of its three packages move; mipsel republishes if its
+    # sing-box/tpws lag the targets (covers both an upstream bump AND seeding a fresh
+    # or drifted mipsel feed). Targets are shared so the two arches stay in lockstep.
+    aarch64_changed = (sb_t != cur_sb or tpws_t != cur_tpws or nfq_t != cur_nfq)
+    mips_changed = (sb_t != mips.get("sing-box") or tpws_t != mips.get("tpws-zapret"))
+    cur_mips_sb, cur_mips_tpws = mips.get("sing-box", "-"), mips.get("tpws-zapret", "-")
+    print(f"mipsel   : feed sing-box {cur_mips_sb} / tpws {cur_mips_tpws} "
+          f"-> {sb_t} / {tpws_t}  (changed={mips_changed})")
+
+    if not aarch64_changed and not mips_changed:
+        print("both feeds up to date — nothing to publish.")
         return
 
-    cmd = [sys.executable, os.path.join(HERE, "build_feed.py"), "--fetch-upstream",
-           "--version", sb_t, "--tpws-version", tpws_t, "--nfqws2-version", nfq_t]
-    if not args.dry_run:
-        cmd.append("--publish")
-    print("RUN:", " ".join(cmd))
+    # Build the per-arch build_feed.py invocations. aarch64 carries nfqws2; mipsel
+    # does NOT (no NFQUEUE on Keenetic). They publish sequentially; publish_feed
+    # preserves the sibling arch dir on the feed branch, so neither drops the other.
+    runs = []
+    if aarch64_changed:
+        runs.append(["--fetch-upstream", "--version", sb_t,
+                     "--tpws-version", tpws_t, "--nfqws2-version", nfq_t])
+    if mips_changed:
+        runs.append(["--arch", "mipsel", "--fetch-upstream",
+                     "--version", sb_t, "--tpws-version", tpws_t])
+
+    for extra in runs:
+        cmd = [sys.executable, os.path.join(HERE, "build_feed.py"), *extra]
+        if not args.dry_run:
+            cmd.append("--publish")
+        print("RUN:", " ".join(cmd))
+        if not args.dry_run:
+            subprocess.run(cmd, check=True, cwd=HERE)
     if args.dry_run:
         print("(dry-run — not publishing)")
         return
-    subprocess.run(cmd, check=True, cwd=HERE)
-    print("feed published.")
+    print("feed(s) published.")
 
 
 if __name__ == "__main__":

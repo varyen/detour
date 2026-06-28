@@ -95,11 +95,12 @@ ASSET_SIG_RE='^detour_.*\.ipk\.sig$'
 STASH_IPK=/etc/detour/installed.ipk
 
 # --- Keenetic/Entware platform shim (mirrors detour-api / detour-hosts) --------
-# No opkg feed for the panel here and sing-box comes from Entware (sing-box-go),
-# so self-update = pull the detour-keenetic_*.ipk asset and opkg-install it; the
-# feed/sing-box ensure steps are skipped. usign may be absent on Entware → the
-# signature check is skipped if so (the asset still comes straight from GitHub).
-# GH_TOKEN is OPTIONAL here (public repo) — gh_curl omits auth when it's empty.
+# The PANEL has no opkg feed here, so panel self-update = pull the
+# detour-keenetic_*.ipk asset and opkg-install it. sing-box + tpws DO come from our
+# own mipsel feed now (feed/mipsel) — same as OpenWrt — so the feed/ensure steps run.
+# usign may be absent on Entware → the .ipk signature check is skipped if so (the
+# asset still comes straight from GitHub). GH_TOKEN is OPTIONAL here (public repo) —
+# gh_curl omits auth when it's empty.
 KEENETIC=0
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     KEENETIC=1
@@ -119,11 +120,14 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     ASSET_RE='^detour-keenetic_.*\.ipk$'
     ASSET_SIG_RE='^detour-keenetic_.*\.ipk\.sig$'
     STASH_IPK=/opt/etc/detour/installed.ipk
-    # sing-box on Keenetic is Entware's `sing-box-go`, NOT our `sing-box` feed pkg.
-    # Without this override sb_installed_version/sb_upgrade_version query the wrong
-    # package, find nothing, report current="0.0.0", and the bins chip stays amber
-    # forever (every GitHub upstream beats 0.0.0). See cmd_bins_check.
-    SINGBOX_PKG=sing-box-go
+    # sing-box + tpws now come from OUR mipsel feed (feed/mipsel) — same model as
+    # OpenWrt — so the panel can ship the latest 1.13.x instead of waiting on Entware's
+    # lagging `sing-box-go`. Entware's `sing-box-go` (Provides: sing-box) remains an
+    # automatic fallback for `Depends: sing-box` if our feed is ever unreachable, but
+    # ensure_singbox migrates to (and pins) our package and retires sing-box-go.
+    SINGBOX_PKG=sing-box
+    FEED_CONF=/opt/etc/opkg/customfeeds.conf
+    FEED_LINE="src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/mipsel"
     # GH_OWNER/GH_REPO inherit the varyen/detour defaults set above.
 fi
 [ -f "$CONFIG" ] && . "$CONFIG"
@@ -304,9 +308,11 @@ LUA
 select_url()  { printf '%s\n' "$1" | awk -F '\t' -v re="$2" 'NR>1 && $1 ~ re { print $2; exit }'; }
 select_name() { printf '%s\n' "$1" | awk -F '\t' -v re="$2" 'NR>1 && $1 ~ re { print $1; exit }'; }
 
-# Ensure our sing-box feed line is present in opkg's customfeeds.conf.
+# Ensure our sing-box/tpws feed line is present in opkg's customfeeds.conf. Runs on
+# BOTH platforms now: the Keenetic shim above points FEED_CONF/FEED_LINE at
+# /opt/etc/opkg + feed/mipsel, so Keenetic gets its own mipsel feed (it used to skip).
 ensure_feed() {
-    [ "$KEENETIC" = 1 ] && return 0   # Keenetic: sing-box from Entware, no detour feed
+    mkdir -p "$(dirname "$FEED_CONF")" 2>/dev/null   # /opt/etc/opkg may not exist yet on Keenetic
     touch "$FEED_CONF" 2>/dev/null
     grep -qs "^src/gz $FEED_NAME " "$FEED_CONF" 2>/dev/null && return 0
     echo "$FEED_LINE" >> "$FEED_CONF" && log "added opkg feed: $FEED_LINE"
@@ -316,9 +322,6 @@ ensure_feed() {
 # pre-existing UNOWNED binary from older direct deploys. Non-fatal: the init.d
 # tolerates a missing binary (traffic routes directly until sing-box arrives).
 ensure_singbox() {
-    # Keenetic gets sing-box from the Entware `sing-box-go` package, managed
-    # separately (panel's singbox_opkg_upgrade) — nothing to ensure from a feed.
-    [ "$KEENETIC" = 1 ] && return 0
     ensure_feed
     if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG "; then
         return 0
@@ -327,6 +330,18 @@ ensure_singbox() {
     opkg update >/dev/null 2>&1
     opkg install --force-overwrite "$SINGBOX_PKG" >/dev/null 2>&1 \
         || log "WARNING: opkg install $SINGBOX_PKG failed (feed unreachable?)"
+    # Keenetic: once OUR feed sing-box owns /opt/bin/sing-box, retire Entware's
+    # sing-box-go so the two can't fight over the binary/opkg registry. Guarded on
+    # ours being confirmed installed first — our `sing-box` already satisfies
+    # detour-keenetic's `Depends: sing-box`, so the removal is dependency-safe.
+    # Best-effort; --force-overwrite already reassigned the shared binary to us, so
+    # removing sing-box-go won't delete /opt/bin/sing-box.
+    if [ "$KEENETIC" = 1 ] \
+       && opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG " \
+       && opkg list-installed sing-box-go 2>/dev/null | grep -q '^sing-box-go '; then
+        opkg remove sing-box-go >/dev/null 2>&1 \
+            && log "removed Entware sing-box-go (superseded by feed sing-box)"
+    fi
 }
 
 # Installed sing-box version per opkg ("" if not opkg-owned).
@@ -448,19 +463,13 @@ cmd_bins_check() {
     local cur avail upstream upnew
     cur=$(sb_installed_version); [ -n "$cur" ] || cur="0.0.0"
     avail=$(sb_upgrade_version); [ -n "$avail" ] || avail="$cur"
-    if [ "$KEENETIC" = 1 ]; then
-        # Keenetic: sing-box is Entware's `sing-box-go`, which we don't control and
-        # which always lags SagerNet's GitHub latest. The "newer upstream on GitHub"
-        # signal (amber chip) is meaningful only on OpenWrt, where WE own the feed and
-        # can bump it. Here the only actionable update is what `opkg upgrade
-        # sing-box-go` can install (cur != avail), so suppress the upstream probe —
-        # otherwise the chip is pinned amber permanently with nothing to install.
-        upstream=""; upnew=false
-    else
-        upstream=$(gh_latest_tag "$SINGBOX_UPSTREAM_REPO") || upstream=$(prev_field "$BINS_STATE_FILE" upstream)
-        upnew=false
-        [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
-    fi
+    # WE own the sing-box feed on BOTH arches now (aarch64 + mipsel), so the "newer
+    # upstream on GitHub" amber chip is actionable everywhere — bumping the feed is all
+    # it takes. (Previously suppressed on Keenetic, where sing-box came from Entware's
+    # uncontrollable sing-box-go and the chip would pin amber with nothing to install.)
+    upstream=$(gh_latest_tag "$SINGBOX_UPSTREAM_REPO") || upstream=$(prev_field "$BINS_STATE_FILE" upstream)
+    upnew=false
+    [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
     write_bins_state "$cur" "$avail" "$upstream" "$upnew"
     if [ "$cur" != "$avail" ]; then
         log "sing-box update available (feed): $cur -> $avail"
@@ -498,9 +507,10 @@ cmd_bins_apply() {
     # never direct. postinst's `restart` clears the flag once the new daemon is up;
     # the trap is the safety net if opkg aborts mid-upgrade. This wraps the upgrade
     # from the PANEL side, so it protects even an already-installed feed package
-    # whose own prerm predates the fix. OpenWrt only — on Keenetic sing-box is
-    # Entware's `sing-box-go`, whose pkg never touches detour's iptables, and the
-    # init uses a marker (not this flag); see action `singbox_opkg_upgrade`.
+    # whose own prerm predates the fix. OpenWrt only — the mipsel feed sing-box has a
+    # NO-OP prerm (it never stops the daemon or touches iptables), and its postinst
+    # bounces sing-box via S52detour-singbox `restart`, which keeps the REDIRECT marker
+    # up → fail-closed without this flag. So no keepfw flag is needed on Keenetic.
     SB_KEEPFW=/tmp/.singbox-keepfw
     [ "$KEENETIC" = 1 ] && SB_KEEPFW=""
     trap 'rm -f "$LOCKFILE"; [ -n "$SB_KEEPFW" ] && rm -f "$SB_KEEPFW"' EXIT INT TERM
@@ -525,9 +535,9 @@ cmd_bins_apply() {
 }
 
 # ---- tpws-zapret (opkg feed) helpers ----
-# Mirror the sing-box helpers. On Keenetic tpws is BUNDLED in the panel package
-# (there is no opkg feed there), so the feed-driven check/apply are no-ops that
-# report as much; tpws updates ride along with a panel update on that platform.
+# Mirror the sing-box helpers. tpws now ships from OUR feed on BOTH platforms
+# (aarch64 + mipsel) — on Keenetic it used to be bundled in the panel package, but
+# the mipsel feed serves it now, so the check/apply work there too.
 
 # Installed tpws-zapret version per opkg ("" if not opkg-owned — e.g. when it is
 # still the binary bundled by an older `detour` panel).
@@ -540,12 +550,12 @@ tpws_upgrade_version() {
     opkg list-upgradable 2>/dev/null | awk -v p="$TPWS_PKG" '$1==p {print $NF; exit}'
 }
 
-# Ensure tpws-zapret is installed (from the feed). --force-overwrite takes over
-# the /usr/bin/tpws-zapret that an OLD bundled panel owned, transferring opkg
-# ownership to the tpws-zapret package. Non-fatal: the init.d tolerates a missing
-# binary (DPI bypass simply off until tpws arrives).
+# Ensure tpws-zapret is installed (from the feed). --force-overwrite takes over the
+# tpws-zapret binary that an OLD bundled panel owned (/usr/bin on OpenWrt,
+# /opt/sbin on Keenetic), transferring opkg ownership to the tpws-zapret feed
+# package. Non-fatal: the init.d tolerates a missing binary (DPI bypass simply off
+# until tpws arrives).
 ensure_tpws() {
-    [ "$KEENETIC" = 1 ] && return 0   # Keenetic: tpws bundled in the panel, no feed
     ensure_feed
     if opkg list-installed "$TPWS_PKG" 2>/dev/null | grep -q "^$TPWS_PKG "; then
         return 0
@@ -567,12 +577,6 @@ EOF
 }
 
 cmd_tpws_check() {
-    if [ "$KEENETIC" = 1 ]; then
-        local cur; cur=$(tpws_installed_version); [ -n "$cur" ] || cur="bundled"
-        write_tpws_state "$cur" "$cur"
-        log "tpws-zapret bundled with the panel on Keenetic (no feed check)"
-        return 0
-    fi
     log "checking the opkg feed for a newer tpws-zapret..."
     ensure_feed
     opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
@@ -593,7 +597,6 @@ cmd_tpws_check() {
 }
 
 cmd_tpws_apply() {
-    [ "$KEENETIC" = 1 ] && die "tpws-zapret is bundled with the panel on Keenetic — update the panel instead"
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM

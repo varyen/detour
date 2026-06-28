@@ -4,7 +4,7 @@
 > Два движка под одним SPA-интерфейсом — **sing-box** (Trojan/VLESS-прокси) и
 > **zapret-tpws** (DPI-bypass) — с самообновлением по подписанным `.ipk`-релизам.
 
-**Версия:** [`1.21.0`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
+**Версия:** [`1.22.0`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -100,17 +100,22 @@ python3 deploy_router.py --router home --full
 
 ## Релизы и самообновление
 
-Панель — это slim-`.ipk` (init.d, CGI, HTML, Lua, updater) **+ bundled
-`tpws-zapret`** (~110 КБ; zapret нет ни в одном opkg-фиде). Бинарник **`sing-box`
-не входит в пакет** — панель объявляет `Depends: sing-box`, а сам бинарник
-приходит из **нашего публичного opkg-фида**:
+Панель — это slim-`.ipk` (init.d, CGI, HTML, Lua, updater). Бинарники **`sing-box`
+и `tpws-zapret` в пакет не входят** — панель объявляет `Depends: sing-box,
+tpws-zapret`, а сами бинарники приходят из **нашего публичного opkg-фида**:
 
-- **`detour`** — панель для OpenWrt/GL.iNet; **`detour-keenetic`** — для
-  Keenetic/Entware (там sing-box берётся из Entware `sing-box-go`).
-- **opkg-фид** (`build_feed.py` → ветка `feed` репо `varyen/detour`) раздаёт
-  `sing-box` 1.13.x как `Architecture: all`. Дистрибутивный фид GL.iNet застрял
-  на 1.8.10 (ломает схему конфига 1.13.x), поэтому держим свой. Фид по версии
-  бьёт дистрибутивный, так что `opkg install sing-box` ставит именно наш.
+- **`detour`** — панель для OpenWrt/GL.iNet (фид `feed/aarch64`);
+  **`detour-keenetic`** — для Keenetic/Entware (фид `feed/mipsel`: sing-box
+  `-mipsle-softfloat-musl` + tpws `linux-mipsel`; Entware `sing-box-go` — только
+  фолбэк). _(v1.22.0+ — раньше на Keenetic sing-box брался из Entware, а tpws был
+  bundled.)_
+- **opkg-фид** (`build_feed.py --arch {aarch64|mipsel}` → ветка `feed` репо
+  `varyen/detour`) раздаёт `sing-box` 1.13.x как `Architecture: all`.
+  Дистрибутивный фид GL.iNet застрял на 1.8.10 (ломает схему конфига 1.13.x), а
+  Entware `sing-box-go` отстаёт — поэтому держим **свой фид на обе платформы**,
+  он по версии бьёт оба, так что `opkg install sing-box` ставит именно наш.
+- **zapret2 (`nfqws2`)** — только в `feed/aarch64`: на Keenetic нет NFQUEUE,
+  движок не запускается, поэтому в mipsel-фид он не входит.
 
 ### Сборка
 

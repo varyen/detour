@@ -2074,29 +2074,15 @@ bypass_strategy)
     ;;
 
 singbox_opkg_upgrade)
-    # Keenetic/Entware: pull the latest sing-box from Entware (sing-box-go), re-disable
-    # the package's own auto-start, then restart our service. Runs DETACHED with a live
-    # log (apply_log) so the panel streams opkg output in real time — same UX as the
-    # OpenWrt feed applies. sing-box's restart doesn't touch the panel's lighttpd, so
-    # this CGI survives; detaching also keeps a slow opkg run off the HTTP timeout
-    # (previously the synchronous run could truncate as «Unexpected end of JSON input»).
-    # The sentinel rc reflects `opkg upgrade`, not the trailing restart/bins-check.
+    # LEGACY ALIAS (kept for the panel-upgrade window where an old Keenetic UI still
+    # POSTs this action to a freshly-installed CGI). sing-box now comes from OUR mipsel
+    # feed on Keenetic, not Entware's sing-box-go, so just delegate to the unified feed
+    # apply — identical to bins_update_apply (`detour-update bins-apply`: ensure feed +
+    # opkg update + opkg upgrade sing-box, detached with a live apply_log). The new UI
+    # calls bins_update_apply directly; this path is only the back-compat shim.
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    command -v opkg >/dev/null 2>&1 || { json_err "opkg not available"; exit 0; }
-    # Installed version BEFORE the upgrade (computed here, in the CGI) so the detached
-    # worker can echo a clear before→after verdict. Without this the live log ends on a
-    # silent `opkg upgrade` no-op and the operator reads "ничего не произошло" as a bug,
-    # when Entware simply has nothing newer (the common case — see check button).
-    SB_BEFORE=$(opkg list-installed sing-box-go 2>/dev/null | awk '{print $3; exit}')
-    SB_CMD="echo 'sing-box на Keenetic ставится из фида Entware (пакет sing-box-go), НЕ из фида detour.';"
-    SB_CMD="$SB_CMD echo \"Текущая версия: ${SB_BEFORE:-неизвестна}\";"
-    SB_CMD="$SB_CMD echo '--- opkg update ---'; opkg update;"
-    SB_CMD="$SB_CMD echo '--- opkg upgrade sing-box-go ---'; opkg upgrade sing-box-go; SB_RC=\$?;"
-    SB_CMD="$SB_CMD SB_AFTER=\$(opkg list-installed sing-box-go 2>/dev/null | awk '{print \$3; exit}');"
-    SB_CMD="$SB_CMD if [ \"\$SB_AFTER\" = \"$SB_BEFORE\" ]; then echo \"Версия не изменилась (\${SB_AFTER:-?}) — в фиде Entware нет более новой.\"; else echo \"Обновлено: ${SB_BEFORE:-?} -> \${SB_AFTER:-?}\"; fi;"
-    SB_CMD="$SB_CMD if [ -f /opt/etc/init.d/S99sing-box ]; then /opt/etc/init.d/S99sing-box stop 2>/dev/null; chmod 0644 /opt/etc/init.d/S99sing-box 2>/dev/null; fi;"
-    SB_CMD="$SB_CMD $SINGBOX_INITD restart >/dev/null 2>&1; \"$UPDATE_BIN\" bins-check >/dev/null 2>&1; [ \"\$SB_RC\" = 0 ]"
-    start_apply "$SB_CMD"
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    start_apply "\"$UPDATE_BIN\" bins-apply"
     ;;
 
 singbox_config)

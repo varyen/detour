@@ -809,7 +809,7 @@ def main():
     print(f"=== Building detour v{version} ===")
     print(f"Output: {out_dir}")
 
-    # --- panel (slim; sing-box comes from the opkg feed, tpws is bundled) ---
+    # --- panel (slim; sing-box + tpws-zapret both come from the opkg feed) ---
     print("\n[panel] Assembling .ipk ...")
     panel_ipk, panel_size = build_ipk(PACKAGE_NAME, version, PANEL_FILES, out_dir,
                                       inject_keyring=True)
@@ -845,7 +845,8 @@ def main():
                 "(scripts/UI). sing-box AND tpws-zapret are pulled from the opkg feed.\n")
         if keenetic_ipk:
             f.write(f"- `{os.path.basename(keenetic_ipk)}` — Keenetic/Entware (mipsel) package "
-                    "(tpws bundled; no feed there).\n")
+                    "(sing-box + tpws-zapret pulled from our mipsel feed `feed/mipsel`; "
+                    "nothing bundled).\n")
         f.write("\n## Binaries (sing-box + tpws-zapret)\n\n")
         f.write(
             "Neither binary is bundled — the panel `Depends: sing-box, tpws-zapret`, "
