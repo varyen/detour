@@ -318,6 +318,51 @@ ensure_feed() {
     echo "$FEED_LINE" >> "$FEED_CONF" && log "added opkg feed: $FEED_LINE"
 }
 
+# Base URL of our feed (the last whitespace-token of FEED_LINE, e.g.
+# https://raw.githubusercontent.com/varyen/detour/feed/mipsel).
+feed_base() { printf '%s' "${FEED_LINE##* }"; }
+
+# On Keenetic force curl onto IPv4: wget/curl to the RU-throttled
+# raw.githubusercontent.com routinely HANGS on IPv6 (the owner saw exactly this).
+# OpenWrt links are fine on dual-stack, so only pin v4 on Keenetic.
+feed_curl_v4() { [ "$KEENETIC" = 1 ] && printf -- '-4'; }
+
+# feed_available_version <pkg> → the Version our feed currently serves for <pkg>
+# ("" if unreachable / absent). Reads the feed `Packages` index over curl (NOT
+# opkg) so it works even when opkg's own downloader can't fetch the feed.
+feed_available_version() {
+    local pkg="$1"
+    gh_curl_retry $(feed_curl_v4) -fsSL --max-time 30 "$(feed_base)/Packages" 2>/dev/null \
+        | awk -v p="$pkg" '$1=="Package:"{c=$2} $1=="Version:" && c==p {print $2; exit}'
+}
+
+# feed_curl_install <pkg> → download <pkg>'s .ipk from our feed via curl and
+# `opkg install --force-overwrite` it locally. This SIDESTEPS opkg's own
+# downloader, which is broken on Entware/Keenetic for our HTTPS feed:
+#   * the default Entware `wget-nossl` can't do HTTPS at all, and
+#   * even `wget-ssl` hangs on IPv6 to the RU-throttled raw.githubusercontent.com.
+# curl (-4, with gh_curl_retry's fresh-DNS retries) is what actually works there —
+# it's the same path the panel self-update already uses for the release .ipk.
+# --force-overwrite takes the binary over from a previous owner (Entware sing-box-go
+# or an old bundled-tpws panel). Returns 0 only on a confirmed opkg install.
+feed_curl_install() {
+    local pkg="$1" base file tmp v4
+    base=$(feed_base); v4=$(feed_curl_v4)
+    file=$(gh_curl_retry $v4 -fsSL --max-time 30 "$base/Packages" 2>/dev/null \
+        | awk -v p="$pkg" '$1=="Package:"{c=$2} $1=="Filename:" && c==p {print $2; exit}')
+    [ -n "$file" ] || { log "feed: $pkg not found in $base/Packages (feed unreachable?)"; return 1; }
+    tmp="/tmp/$file"
+    log "feed: downloading $file via curl${v4:+ (IPv4)} ..."
+    gh_curl_retry $v4 -fsSL --max-time 300 -o "$tmp" "$base/$file" \
+        || { log "feed: download of $file failed"; rm -f "$tmp"; return 1; }
+    if ! opkg install --force-overwrite "$tmp" 2>&1; then
+        log "feed: opkg install $file failed"; rm -f "$tmp"; return 1
+    fi
+    rm -f "$tmp"
+    log "feed: installed $pkg from $file"
+    return 0
+}
+
 # Ensure sing-box is installed (from the feed). --force-overwrite takes over a
 # pre-existing UNOWNED binary from older direct deploys. Non-fatal: the init.d
 # tolerates a missing binary (traffic routes directly until sing-box arrives).
@@ -327,9 +372,16 @@ ensure_singbox() {
         return 0
     fi
     log "sing-box not installed — pulling from the feed"
-    opkg update >/dev/null 2>&1
-    opkg install --force-overwrite "$SINGBOX_PKG" >/dev/null 2>&1 \
-        || log "WARNING: opkg install $SINGBOX_PKG failed (feed unreachable?)"
+    if [ "$KEENETIC" = 1 ]; then
+        # Keenetic: opkg's own downloader can't fetch our HTTPS feed (wget-nossl /
+        # IPv6 hang) — pull the .ipk via curl and install it locally instead.
+        feed_curl_install "$SINGBOX_PKG" \
+            || log "WARNING: feed install of $SINGBOX_PKG failed (feed unreachable?)"
+    else
+        opkg update >/dev/null 2>&1
+        opkg install --force-overwrite "$SINGBOX_PKG" >/dev/null 2>&1 \
+            || log "WARNING: opkg install $SINGBOX_PKG failed (feed unreachable?)"
+    fi
     # Keenetic: once OUR feed sing-box owns /opt/bin/sing-box, retire Entware's
     # sing-box-go so the two can't fight over the binary/opkg registry. Guarded on
     # ours being confirmed installed first — our `sing-box` already satisfies
@@ -459,17 +511,32 @@ EOF
 cmd_bins_check() {
     log "checking the opkg feed for a newer sing-box..."
     ensure_feed
-    opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
     local cur avail upstream upnew
-    cur=$(sb_installed_version); [ -n "$cur" ] || cur="0.0.0"
-    avail=$(sb_upgrade_version); [ -n "$avail" ] || avail="$cur"
+    cur=$(sb_installed_version)
+    if [ "$KEENETIC" = 1 ]; then
+        # Keenetic: opkg can't fetch our HTTPS feed (wget-nossl / IPv6), so
+        # opkg list-upgradable is blind to it. Read the available version straight
+        # from the feed Packages over curl — works whether or not our package is
+        # installed yet (cur is empty before the migration off Entware sing-box-go).
+        avail=$(feed_available_version "$SINGBOX_PKG")
+        [ -n "$cur" ] || cur="0.0.0"
+        [ -n "$avail" ] || avail="$cur"
+    else
+        opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
+        [ -n "$cur" ] || cur="0.0.0"
+        avail=$(sb_upgrade_version); [ -n "$avail" ] || avail="$cur"
+    fi
     # WE own the sing-box feed on BOTH arches now (aarch64 + mipsel), so the "newer
     # upstream on GitHub" amber chip is actionable everywhere — bumping the feed is all
     # it takes. (Previously suppressed on Keenetic, where sing-box came from Entware's
     # uncontrollable sing-box-go and the chip would pin amber with nothing to install.)
     upstream=$(gh_latest_tag "$SINGBOX_UPSTREAM_REPO") || upstream=$(prev_field "$BINS_STATE_FILE" upstream)
     upnew=false
-    [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
+    # "Newer upstream" = upstream beats what the FEED serves (avail), not what's
+    # installed (cur). Comparing against cur lit the amber chip permanently when our
+    # package wasn't installed yet (cur=0.0.0 < every upstream) even though the feed
+    # was already current — exactly the bogus "в фиде нет 1.13.14" the owner saw.
+    [ -n "$upstream" ] && [ "$avail" != "0.0.0" ] && version_gt "$upstream" "${avail%-*}" && upnew=true
     write_bins_state "$cur" "$avail" "$upstream" "$upnew"
     if [ "$cur" != "$avail" ]; then
         log "sing-box update available (feed): $cur -> $avail"
@@ -515,20 +582,35 @@ cmd_bins_apply() {
     [ "$KEENETIC" = 1 ] && SB_KEEPFW=""
     trap 'rm -f "$LOCKFILE"; [ -n "$SB_KEEPFW" ] && rm -f "$SB_KEEPFW"' EXIT INT TERM
     ensure_feed
-    log "opkg update + upgrade sing-box from the feed..."
-    opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
-    # Set the flag NOW — right before the upgrade, AFTER the (possibly slow, flaky-
-    # network) opkg update — so it is still fresh (< the 2-min staleness window) when
-    # the prerm's `stop` runs. postinst's `restart` re-touches and then clears it.
-    [ -n "$SB_KEEPFW" ] && : > "$SB_KEEPFW"
-    if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG "; then
-        # `opkg upgrade` no-ops if already newest; fall back to a forced install.
-        opkg upgrade "$SINGBOX_PKG" 2>&1 \
-            || opkg install --force-overwrite "$SINGBOX_PKG" 2>&1 \
-            || die "opkg upgrade sing-box failed"
+    if [ "$KEENETIC" = 1 ]; then
+        # Keenetic: opkg can't fetch our HTTPS feed (wget-nossl / IPv6 hang) — curl the
+        # current feed sing-box and install it locally. postinst's marker-guarded
+        # restart keeps fail-closed, so no keepfw flag here. Also installs (not just
+        # upgrades) when our package isn't present yet — the migration off Entware's
+        # sing-box-go, which we then retire.
+        log "downloading + installing sing-box from the feed (curl)..."
+        feed_curl_install "$SINGBOX_PKG" || die "feed install of sing-box failed (feed unreachable?)"
+        if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG " \
+           && opkg list-installed sing-box-go 2>/dev/null | grep -q '^sing-box-go '; then
+            opkg remove sing-box-go >/dev/null 2>&1 \
+                && log "removed Entware sing-box-go (superseded by feed sing-box)"
+        fi
     else
-        opkg install --force-overwrite "$SINGBOX_PKG" 2>&1 \
-            || die "opkg install sing-box failed"
+        log "opkg update + upgrade sing-box from the feed..."
+        opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
+        # Set the flag NOW — right before the upgrade, AFTER the (possibly slow, flaky-
+        # network) opkg update — so it is still fresh (< the 2-min staleness window) when
+        # the prerm's `stop` runs. postinst's `restart` re-touches and then clears it.
+        [ -n "$SB_KEEPFW" ] && : > "$SB_KEEPFW"
+        if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG "; then
+            # `opkg upgrade` no-ops if already newest; fall back to a forced install.
+            opkg upgrade "$SINGBOX_PKG" 2>&1 \
+                || opkg install --force-overwrite "$SINGBOX_PKG" 2>&1 \
+                || die "opkg upgrade sing-box failed"
+        else
+            opkg install --force-overwrite "$SINGBOX_PKG" 2>&1 \
+                || die "opkg install sing-box failed"
+        fi
     fi
     cmd_bins_check >/dev/null 2>&1 || true
     log "sing-box now at $(sb_installed_version)"
@@ -561,9 +643,14 @@ ensure_tpws() {
         return 0
     fi
     log "tpws-zapret not installed — pulling from the feed"
-    opkg update >/dev/null 2>&1
-    opkg install --force-overwrite "$TPWS_PKG" >/dev/null 2>&1 \
-        || log "WARNING: opkg install $TPWS_PKG failed (feed unreachable?)"
+    if [ "$KEENETIC" = 1 ]; then
+        feed_curl_install "$TPWS_PKG" \
+            || log "WARNING: feed install of $TPWS_PKG failed (feed unreachable?)"
+    else
+        opkg update >/dev/null 2>&1
+        opkg install --force-overwrite "$TPWS_PKG" >/dev/null 2>&1 \
+            || log "WARNING: opkg install $TPWS_PKG failed (feed unreachable?)"
+    fi
 }
 
 # Write the tpws update-state file the panel reads (same shape as bins state).
@@ -579,13 +666,21 @@ EOF
 cmd_tpws_check() {
     log "checking the opkg feed for a newer tpws-zapret..."
     ensure_feed
-    opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
     local cur avail upstream upnew
-    cur=$(tpws_installed_version); [ -n "$cur" ] || cur="0.0.0"
-    avail=$(tpws_upgrade_version); [ -n "$avail" ] || avail="$cur"
+    cur=$(tpws_installed_version)
+    if [ "$KEENETIC" = 1 ]; then
+        # Keenetic: read the feed version over curl (opkg can't fetch our HTTPS feed).
+        avail=$(feed_available_version "$TPWS_PKG")
+        [ -n "$cur" ] || cur="0.0.0"
+        [ -n "$avail" ] || avail="$cur"
+    else
+        opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
+        [ -n "$cur" ] || cur="0.0.0"
+        avail=$(tpws_upgrade_version); [ -n "$avail" ] || avail="$cur"
+    fi
     upstream=$(gh_latest_tag "$TPWS_UPSTREAM_REPO") || upstream=$(prev_field "$TPWS_STATE_FILE" upstream)
     upnew=false
-    [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
+    [ -n "$upstream" ] && [ "$avail" != "0.0.0" ] && version_gt "$upstream" "${avail%-*}" && upnew=true
     write_tpws_state "$cur" "$avail" "$upstream" "$upnew"
     if [ "$cur" != "$avail" ]; then
         log "tpws-zapret update available (feed): $cur -> $avail"
@@ -601,16 +696,22 @@ cmd_tpws_apply() {
     : > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
     ensure_feed
-    log "opkg update + upgrade tpws-zapret from the feed..."
-    opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
-    if opkg list-installed "$TPWS_PKG" 2>/dev/null | grep -q "^$TPWS_PKG "; then
-        # `opkg upgrade` no-ops if already newest; fall back to a forced install.
-        opkg upgrade "$TPWS_PKG" 2>&1 \
-            || opkg install --force-overwrite "$TPWS_PKG" 2>&1 \
-            || die "opkg upgrade tpws-zapret failed"
+    if [ "$KEENETIC" = 1 ]; then
+        # Keenetic: bypass opkg's broken HTTPS downloader — curl the feed tpws + install.
+        log "downloading + installing tpws-zapret from the feed (curl)..."
+        feed_curl_install "$TPWS_PKG" || die "feed install of tpws-zapret failed (feed unreachable?)"
     else
-        opkg install --force-overwrite "$TPWS_PKG" 2>&1 \
-            || die "opkg install tpws-zapret failed"
+        log "opkg update + upgrade tpws-zapret from the feed..."
+        opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
+        if opkg list-installed "$TPWS_PKG" 2>/dev/null | grep -q "^$TPWS_PKG "; then
+            # `opkg upgrade` no-ops if already newest; fall back to a forced install.
+            opkg upgrade "$TPWS_PKG" 2>&1 \
+                || opkg install --force-overwrite "$TPWS_PKG" 2>&1 \
+                || die "opkg upgrade tpws-zapret failed"
+        else
+            opkg install --force-overwrite "$TPWS_PKG" 2>&1 \
+                || die "opkg install tpws-zapret failed"
+        fi
     fi
     cmd_tpws_check >/dev/null 2>&1 || true
     log "tpws-zapret now at $(tpws_installed_version)"
@@ -754,6 +855,17 @@ cmd_apply() {
         exit 1
     fi
     rm -rf "$tmp"
+    # opkg (especially Entware) can return exit 0 even when an install FAILED on an
+    # unmet dependency — the package silently stays the OLD version. (Observed on
+    # Keenetic: 1.22.0 reported "applied" but stayed 1.21.0 because the feed wasn't
+    # configured and `Depends: tpws-zapret` was unmet.) Don't trust the exit code:
+    # confirm the version actually advanced before reporting success.
+    local got_ver; got_ver=$(current_version)
+    if [ "$got_ver" != "$newver" ]; then
+        log "ERROR: opkg returned success but version is $got_ver, expected $newver (unmet dependency / feed unreachable?)"
+        write_state "error" "opkg сообщил успех, но версия осталась $got_ver (ожидалась $newver) — вероятно не разрешилась зависимость (фид недоступен?)" "$newver"
+        exit 1
+    fi
     write_state "applied" "installed v$newver via opkg" "$newver"
     log "installed v$newver successfully"
     # Keenetic only: refresh the sing-box chip state with THIS (just-installed) updater
@@ -766,10 +878,24 @@ cmd_apply() {
     return 0   # never let the trailing refresh flip cmd_apply's success status
 }
 
+# Print the Version field from a detour .ipk ("" on failure). Our packages are a
+# gzip-tar of debian-binary + control.tar.gz + data.tar.gz (NOT the classic ar
+# format), so a plain `tar` reads them on busybox.
+ipk_version() {
+    local f="$1" d v
+    d=$(mktemp -d 2>/dev/null) || return 1
+    tar -xzf "$f" -C "$d" 2>/dev/null
+    [ -f "$d/control.tar.gz" ] && tar -xzf "$d/control.tar.gz" -C "$d" 2>/dev/null
+    v=$(awk -F': ' '/^Version:/{print $2; exit}' "$d/control" 2>/dev/null)
+    rm -rf "$d"
+    printf '%s' "$v"
+}
+
 cmd_apply_local() {
     local ipk="$1"
     [ -n "$ipk" ] || die "usage: apply-local <ipk-file>"
     local sig="$ipk.sig"
+    local want; want=$(ipk_version "$ipk")   # expected version (for the success check)
     # Local panel install still needs sing-box + tpws-zapret present for the Depends.
     ensure_singbox
     ensure_tpws
@@ -781,6 +907,13 @@ cmd_apply_local() {
     fi
     local cur
     cur=$(current_version)
+    # Same opkg-exit-0-on-unmet-dep guard as cmd_apply: if we parsed the .ipk's
+    # version, confirm the install actually took (the package didn't silently stay old).
+    if [ -n "$want" ] && [ "$cur" != "$want" ]; then
+        log "ERROR: opkg returned success but version is $cur, expected $want (unmet dependency?)"
+        write_state "error" "opkg сообщил успех, но версия осталась $cur (в пакете $want) — вероятно не разрешилась зависимость (фид недоступен?)" "$cur"
+        exit 1
+    fi
     write_state "applied" "installed v$cur via local ipk" "$cur"
     # Keenetic only: refresh the sing-box chip state (see cmd_apply for the rationale).
     if [ "$KEENETIC" = 1 ]; then cmd_bins_check >/dev/null 2>&1 || true; fi

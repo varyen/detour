@@ -132,25 +132,49 @@ def main():
     step("Panel auth")
     seed_auth_if_absent(ssh, cfg)
 
-    # 4. Configure OUR mipsel opkg feed and install the binary deps BEFORE the panel,
-    #    so the panel's `Depends: sing-box, tpws-zapret` resolve from our feed — and the
-    #    box gets the latest 1.13.x sing-box (-mipsle-softfloat-musl) instead of Entware's
-    #    lagging sing-box-go. --force-overwrite takes over /opt/bin/sing-box if sing-box-go
-    #    already owns it; we then retire sing-box-go so the two can't fight over the binary.
-    step("opkg feed (mipsel) + binaries (sing-box, tpws-zapret)")
+    # 4. Provide sing-box + tpws-zapret BEFORE the panel (its `Depends`). Most robust:
+    #    upload the locally-built feed .ipk and opkg-install them on the router — NO
+    #    router-side HTTPS download, which is unreliable on Keenetic (Entware wget-nossl
+    #    can't do HTTPS, and even wget-ssl stalls on IPv6 to the RU-throttled GitHub raw
+    #    host — exactly what a remote owner hit). We still record the feed line so the
+    #    panel's later in-UI upgrades have a source (they fetch via curl -4). Falls back
+    #    to a plain `opkg install` only if the local feed .ipk weren't built.
+    step("Binaries (sing-box, tpws-zapret) + mipsel feed line")
     feed_line = "src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/mipsel"
-    feed_cmd = (
-        "mkdir -p /opt/etc/opkg; "
-        "grep -qs '^src/gz detour ' /opt/etc/opkg/customfeeds.conf 2>/dev/null "
-        f"|| echo '{feed_line}' >> /opt/etc/opkg/customfeeds.conf; "
-        "opkg update 2>&1 | tail -3; "
-        "opkg install --force-overwrite sing-box tpws-zapret 2>&1 | tail -6; "
+    exec_cmd(ssh, "mkdir -p /opt/etc/opkg; grep -qs '^src/gz detour ' "
+                  "/opt/etc/opkg/customfeeds.conf 2>/dev/null || echo "
+                  f"'{feed_line}' >> /opt/etc/opkg/customfeeds.conf")
+    import glob
+    feed_dir = os.path.join(HERE, "releases", "feed", "mipsel")
+    local_ipks = sorted(glob.glob(os.path.join(feed_dir, "sing-box_*_all.ipk"))
+                        + glob.glob(os.path.join(feed_dir, "tpws-zapret_*_all.ipk")))
+    if local_ipks:
+        names = []
+        for p in local_ipks:
+            rp = "/tmp/" + os.path.basename(p)
+            print(f"  upload {os.path.basename(p)}")
+            put_file(ssh, p, rp, "0644")
+            names.append(rp)
+        joined = " ".join(f"'{n}'" for n in names)
+        out, _, _ = exec_cmd(ssh, f"opkg install --force-overwrite {joined} 2>&1 | tail -8",
+                             timeout=300)
+        print("  " + out.strip().replace("\n", "\n  "))
+        exec_cmd(ssh, f"rm -f {joined}")
+    else:
+        print("  (no local feed .ipk in releases/feed/mipsel — run "
+              "`python build_feed.py --arch mipsel --version <v> --tpws-version <v>` first;")
+        print("   falling back to a plain opkg install, which may fail on RU links)")
+        out, _, _ = exec_cmd(ssh, "opkg update 2>&1 | tail -3; "
+                                  "opkg install --force-overwrite sing-box tpws-zapret 2>&1 | tail -6",
+                             timeout=300)
+        print("  " + out.strip().replace("\n", "\n  "))
+    # Retire Entware's sing-box-go once our feed sing-box owns /opt/bin/sing-box.
+    out, _, _ = exec_cmd(ssh,
         "if opkg list-installed sing-box 2>/dev/null | grep -q '^sing-box ' && "
         "opkg list-installed sing-box-go 2>/dev/null | grep -q '^sing-box-go '; then "
-        "opkg remove sing-box-go 2>&1 | tail -2; fi"
-    )
-    out, _, _ = exec_cmd(ssh, feed_cmd, timeout=300)
-    print("  " + out.strip().replace("\n", "\n  "))
+        "opkg remove sing-box-go 2>&1 | tail -2; fi")
+    if out.strip():
+        print("  " + out.strip().replace("\n", "\n  "))
 
     # 5. Upload + opkg install the panel. The postinst seeds config, disables Entware's
     #    bundled S99sing-box, registers S90detour-cron, and starts the services. sing-box
