@@ -186,6 +186,12 @@ mkdir -p /opt/etc/detour/subscriptions /opt/etc/sing-box/profiles /opt/etc/zapre
          /tmp/detour-sessions /tmp/hosts
 echo "{version}" > /opt/etc/detour/version
 touch /opt/etc/detour/platform            # the panel CGI's platform shim keys off this
+# Pin wget (hence opkg's own downloader) to IPv4 — RU links stall/block IPv6 to
+# raw.githubusercontent.com, and opkg has no timeout flags, so a single stuck wget
+# froze /opt/tmp/opkg.lock and hung every prior install. Idempotent.
+if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
+    printf 'prefer_family = IPv4\\ntimeout = 30\\ntries = 3\\n' >> /opt/etc/wgetrc
+fi
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\

@@ -308,10 +308,27 @@ LUA
 select_url()  { printf '%s\n' "$1" | awk -F '\t' -v re="$2" 'NR>1 && $1 ~ re { print $2; exit }'; }
 select_name() { printf '%s\n' "$1" | awk -F '\t' -v re="$2" 'NR>1 && $1 ~ re { print $1; exit }'; }
 
+# Keenetic: pin wget — and therefore opkg's OWN downloader — to IPv4. Requests to the
+# RU-throttled raw.githubusercontent.com HANG for many minutes over IPv6; opkg passes
+# no timeout flags, so one stuck wget freezes /opt/tmp/opkg.lock and the whole update
+# (the owner hit this on every install). `prefer_family = IPv4` (their validated fix)
+# makes wget try IPv4 first; timeout/tries cap a stuck transfer. Idempotent. We curl -4
+# our OWN feed in feed_curl_install, but opkg's wget still runs for `opkg update` and
+# any manual opkg op — this protects those too.
+ensure_ipv4_wget() {
+    [ "$KEENETIC" = 1 ] || return 0
+    local rc=/opt/etc/wgetrc
+    grep -qs '^[[:space:]]*prefer_family' "$rc" 2>/dev/null && return 0
+    mkdir -p /opt/etc 2>/dev/null
+    printf 'prefer_family = IPv4\ntimeout = 30\ntries = 3\n' >> "$rc" \
+        && log "pinned wget to IPv4 ($rc) — avoids the IPv6 hang to GitHub"
+}
+
 # Ensure our sing-box/tpws feed line is present in opkg's customfeeds.conf. Runs on
 # BOTH platforms now: the Keenetic shim above points FEED_CONF/FEED_LINE at
 # /opt/etc/opkg + feed/mipsel, so Keenetic gets its own mipsel feed (it used to skip).
 ensure_feed() {
+    ensure_ipv4_wget   # Keenetic-only no-op elsewhere; runs before any opkg/wget op
     mkdir -p "$(dirname "$FEED_CONF")" 2>/dev/null   # /opt/etc/opkg may not exist yet on Keenetic
     touch "$FEED_CONF" 2>/dev/null
     grep -qs "^src/gz $FEED_NAME " "$FEED_CONF" 2>/dev/null && return 0

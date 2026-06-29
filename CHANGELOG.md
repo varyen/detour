@@ -5,6 +5,25 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.22.2] — 2026-06-29
+
+Закрываем класс «зависаний opkg по IPv6» на Keenetic автоматически (по фидбэку с
+железа: каждая установка вешалась на резолве `raw.githubusercontent.com` по IPv6,
+пока вручную не прописывался `prefer_family = IPv4` в `/opt/etc/wgetrc`).
+
+### Исправлено
+
+- **opkg/wget на Keenetic больше не виснет на IPv6 к GitHub.** В РФ IPv6-маршрут к
+  `raw.githubusercontent.com` блокируется/таймаутится, а у opkg нет флагов
+  таймаута — один зависший `wget` держал `/opt/tmp/opkg.lock` десятками минут и
+  морозил всю установку. Теперь `prefer_family = IPv4` (+`timeout`/`tries`)
+  прописывается в `/opt/etc/wgetrc` **автоматически**: postinst панели сеет его при
+  установке, а `detour-update` (`ensure_ipv4_wget` в `ensure_feed`) дописывает его
+  перед любой opkg/wget-операцией — так что и уже стоящие коробки чинятся на
+  следующей проверке. Идемпотентно (не дублирует, если строка уже есть). _Keenetic._
+- `entware-bootstrap.sh` переведён с `inet4_only` на проверенный на устройстве
+  `prefer_family = IPv4`.
+
 ## [1.22.1] — 2026-06-29
 
 Багфиксы по фидбэку с живого Keenetic (первая фид-установка вскрыла настоящие

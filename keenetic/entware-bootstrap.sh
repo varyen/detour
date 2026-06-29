@@ -29,10 +29,12 @@ echo "[bootstrap] opkg install: $PKGS"
 opkg install $PKGS
 
 # Force wget/opkg onto IPv4: requests to the RU-throttled raw.githubusercontent.com
-# routinely HANG on IPv6. /opt/etc/wgetrc is read by Entware's wget.
-if ! grep -qs '^inet4_only' /opt/etc/wgetrc 2>/dev/null; then
+# routinely HANG on IPv6, freezing opkg (no timeout flags) for many minutes.
+# /opt/etc/wgetrc is read by Entware's wget. `prefer_family = IPv4` is the fix the
+# owner validated on the device (opkg update dropped from minutes/hang to 2-3s).
+if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
     echo "[bootstrap] pinning wget to IPv4 (/opt/etc/wgetrc)"
-    printf 'inet4_only = on\ntimeout = 30\ntries = 3\n' >> /opt/etc/wgetrc
+    printf 'prefer_family = IPv4\ntimeout = 30\ntries = 3\n' >> /opt/etc/wgetrc
 fi
 
 # Detour mipsel opkg feed — serves sing-box (latest 1.13.x, the -mipsle-softfloat-musl
