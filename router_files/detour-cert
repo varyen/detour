@@ -8,9 +8,12 @@
 # serve it) is the only viable HTTP-01 method here. DNS-01 could be a later add.
 #
 # UNIVERSAL install target (autodetected):
-#   nginx present  → cert into /etc/nginx/ssl/<domain>/, reload nginx. Routing the
-#                    domain → panel stays the user's nginx job (we don't write server
-#                    blocks). Challenge served via a managed conf.d snippet.
+#   nginx present  → cert into /etc/nginx/ssl/<domain>/, reload nginx. We also install
+#                    a managed, name-based :443 routing vhost (zz-detour-panel-tls.conf)
+#                    so SNI=<domain> serves ITS cert and proxies to the panel — without
+#                    it a default :443 server (e.g. GL.iNet's) answers <domain> with the
+#                    wrong cert and the panel is unreachable over HTTPS even though the
+#                    LE cert is valid. Challenge served via a managed conf.d snippet.
 #   else OpenWrt   → uhttpd: cert into /etc/detour/ssl, point uhttpd at it + listen
 #                    :443, restart. Panel then live at https://<domain>/detour/.
 #   else Keenetic  → lighttpd: combined pem + an ssl include, restart the panel.
@@ -28,6 +31,11 @@ LOG=/var/log/detour-cert.log
 ACME_WEBROOT=/var/detour-acme              # HTTP-01 challenge docroot (nginx mode)
 NGINX_CONFD=/etc/nginx/conf.d
 NGINX_SNIPPET=/etc/nginx/conf.d/detour-acme.conf
+# Managed panel-routing vhost. The `zz-` prefix makes it sort LAST in conf.d so the
+# router's own default :443 server (e.g. GL.iNet gl.conf) stays the default_server —
+# IP / unknown-SNI is unaffected; this named block wins for <domain> by SNI. A
+# standalone file survives re-renders of other configs (e.g. lan-proxy).
+NGINX_PANEL_VHOST=/etc/nginx/conf.d/zz-detour-panel-tls.conf
 NGINX_SSL=/etc/nginx/ssl
 DETOUR_SSL="$DETOUR_DIR/ssl"               # uhttpd/lighttpd mode cert dir
 LIGHTTPD_DOCROOT=/opt/share/www
@@ -166,6 +174,74 @@ EOF
     return 1
 }
 
+# What cert does the LOCAL :443 actually hand back for SNI=<domain>? Echoes the served
+# CN (empty if openssl s_client is unavailable or nothing answers). Used both to verify
+# after issue and to surface "serving the wrong cert" in the panel. Empty ≠ mismatch:
+# callers must treat empty as "unknown", never as a failure, so a build without
+# `openssl s_client` doesn't trigger a false warning.
+serving_cn() {  # $1 domain  [$2 port=443] → served CN or ""
+    _sp="${2:-443}"
+    echo | openssl s_client -connect "127.0.0.1:$_sp" -servername "$1" 2>/dev/null \
+        | openssl x509 -noout -subject 2>/dev/null \
+        | sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([^,/]*\).*/\1/p' | head -1 \
+        | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# Local HTTP backend that serves the Detour panel (nginx-front routers run the panel on
+# uhttpd). Derived from uhttpd's listen_http port, default :8080. Echoes host:port.
+panel_backend() {
+    _lh=$(uci -q get uhttpd.main.listen_http 2>/dev/null | tr ' ' '\n' | grep -v '^$' | head -1)
+    case "$_lh" in
+        *:*) _pp=${_lh##*:} ;;
+        '')  _pp=8080 ;;
+        *)   _pp=$_lh ;;
+    esac
+    case "$_pp" in ''|*[!0-9]*) _pp=8080 ;; esac
+    printf '127.0.0.1:%s' "$_pp"
+}
+
+# Install the managed name-based :443 vhost so SNI=<domain> serves OUR cert and proxies
+# to the panel. Guarded by `nginx -t` (revert on failure). Idempotent — same path each
+# time. Called only when the domain doesn't already serve its own cert, so it never
+# fights a working user-provided routing block.
+nginx_add_panel_vhost() {  # $1 domain  $2 certdir
+    [ -d "$NGINX_CONFD" ] || return 1
+    _pd="$1"; _pc="$2"; _pb=$(panel_backend)
+    cat > "$NGINX_PANEL_VHOST" <<EOF
+# Managed by detour-cert — serve the Detour panel over HTTPS for $_pd.
+# The zz- filename sorts LAST in conf.d so the router's own default :443 server stays
+# the default_server (IP / unknown-SNI unaffected); this named block wins by SNI.
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name $_pd;
+
+    ssl_certificate     $_pc/fullchain.pem;
+    ssl_certificate_key $_pc/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location / {
+        proxy_pass http://$_pb;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+    }
+}
+EOF
+    if nginx -t >/dev/null 2>&1; then
+        /etc/init.d/nginx reload >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1
+        log "managed panel vhost written for $_pd → $_pb"
+        return 0
+    fi
+    log "nginx -t failed after panel vhost — reverting"
+    rm -f "$NGINX_PANEL_VHOST"; nginx -s reload >/dev/null 2>&1
+    return 1
+}
+
 # Choose a webroot the :80 server provably serves for this domain. Echoes the path.
 prepare_webroot() {  # $1 domain  $2 http80-server → echoes webroot, or fails
     _d="$1"; _srv="$2"
@@ -271,11 +347,21 @@ detect)
         _dom="$DOMAIN"; _ctgt="$TARGET_MODE"; _exp=$(cert_expiry "$CERT_DIR/fullchain.pem")
     fi
     [ -f "$STATE" ] && { _res=$(sed -n 's/.*"last_result":"\([^"]*\)".*/\1/p' "$STATE"); _err=$(sed -n 's/.*"last_error":"\([^"]*\)".*/\1/p' "$STATE"); }
-    printf '{"ok":true,"acme_present":%s,"http80":%s,"target":%s,"wan_ip":%s,"platform":%s,"domain":%s,"expiry":%s,"last_result":%s,"last_error":%s}\n' \
+    # Live check: does the local :443 actually hand back THIS domain's cert? Catches the
+    # "valid cert, but SNI served the router's default cert" breakage. Empty served CN =
+    # unknown (no openssl s_client / nothing on :443) → report serving_ok:true so we
+    # never warn on inability to probe; only a concrete different CN is a mismatch.
+    _scn=""; _sok=true
+    if [ -n "$_dom" ]; then
+        _scn=$(serving_cn "$_dom")
+        [ -n "$_scn" ] && [ "$_scn" != "$_dom" ] && _sok=false
+    fi
+    printf '{"ok":true,"acme_present":%s,"http80":%s,"target":%s,"wan_ip":%s,"platform":%s,"domain":%s,"expiry":%s,"last_result":%s,"last_error":%s,"serving_ok":%s,"serving_cn":%s}\n' \
         "$( [ "$_acme" = yes ] && echo true || echo false )" \
         "$(json_str "$(http80_server)")" "$(json_str "$(target_mode)")" \
         "$(json_str "$(wan_ip)")" "$(json_str "$PLATFORM")" \
-        "$(json_str "$_dom")" "$(json_str "$_exp")" "$(json_str "$_res")" "$(json_str "$_err")"
+        "$(json_str "$_dom")" "$(json_str "$_exp")" "$(json_str "$_res")" "$(json_str "$_err")" \
+        "$_sok" "$(json_str "$_scn")"
     ;;
 
 status)
@@ -351,7 +437,18 @@ EOF
     case "$TGT" in
         uhttpd)   configure_uhttpd  "$CERT_DIR_V" ;;
         lighttpd) configure_lighttpd "$CERT_DIR_V" ;;
-        nginx)    /etc/init.d/nginx reload >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1 ;;
+        nginx)
+            /etc/init.d/nginx reload >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1
+            # Ensure SNI=<domain> on :443 actually serves this cert. A default :443
+            # server (e.g. GL.iNet's) otherwise answers <domain> with its own cert and
+            # the panel is unreachable over HTTPS. Add a managed routing vhost unless
+            # the domain already serves its own cert (sleep: let workers finish reload).
+            sleep 1
+            if [ "$(serving_cn "$DOMAIN_IN")" != "$DOMAIN_IN" ]; then
+                nginx_add_panel_vhost "$DOMAIN_IN" "$CERT_DIR_V" || \
+                    log "could not install managed panel vhost for $DOMAIN_IN"
+            fi
+            ;;
     esac
 
     ensure_renewal

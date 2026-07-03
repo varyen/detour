@@ -9090,6 +9090,19 @@
             warn =
               "Keenetic: порт 80 занят веб-интерфейсом роутера. Для HTTP-01 проброс порта 80 должен вести на панель Detour (lighttpd :8080).";
           }
+          // Live served-cert mismatch: the LE cert is valid, but SNI=<domain> on :443 is
+          // answered with a different cert (e.g. the router's default) → the panel is
+          // unreachable over HTTPS. Re-issuing re-installs the managed routing vhost and
+          // restores it. Takes priority over the port-80 hints.
+          if (d.domain && d.serving_ok === false) {
+            warn =
+              "⚠ Сертификат для " +
+              d.domain +
+              " выпущен, но по HTTPS сейчас отдаётся другой сертификат" +
+              (d.serving_cn ? " (" + d.serving_cn + ")" : "") +
+              " — панель недоступна по HTTPS. Нажмите «Выпустить / обновить», чтобы восстановить маршрут." +
+              (warn ? " " + warn : "");
+          }
           if (warn) {
             warnText.textContent = warn;
             warnBox.style.display = "";
