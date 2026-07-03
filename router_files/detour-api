@@ -44,6 +44,7 @@ PUSH_BIN="/usr/sbin/detour-push"            # Web Push (VAPID) sender — backs 
 PUSH_MSG="/tmp/detour-push.msg"             # latest push message JSON (read by the service worker; tmpfs, not remapped)
 CERT_BIN="/usr/sbin/detour-cert"            # Let's Encrypt helper (acme.sh) — backs the cert_* actions
 CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written by detour-cert)
+OFFLOAD_BIN="/usr/sbin/detour-offload"      # QCA HW-offload watchdog/recovery — backs the offload_* actions
 # Swap file (Keenetic/Entware only — /opt on a USB flash needs swap or the stack
 # gets OOM-killed). Managed via the S05swap init script; backs the swap_* actions.
 SWAPFILE="/opt/swapfile"
@@ -118,6 +119,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PUSH_BIN="$OPT/sbin/detour-push"   # PUSH_MSG stays /tmp (not remapped, like HEALTH_DB)
     CERT_BIN="$OPT/sbin/detour-cert"
     CERT_STATE="$OPT/var/state/detour-cert.json"
+    OFFLOAD_BIN="$OPT/sbin/detour-offload"   # QCA-only; no-op on Keenetic (no NSS accelerator)
     SWAPFILE="$OPT/swapfile"
     SWAP_INITD="$OPT/etc/init.d/S05swap"
     SWAP_STATE="$OPT/var/state/detour-swap.json"
@@ -3005,6 +3007,32 @@ cert_issue)
     case "$CEML" in ''|*[!a-zA-Z0-9.@_+-]*) json_err "bad email"; exit 0 ;; esac
     detach_bg "/tmp/detour-cert-bg.log" "$CERT_BIN" issue "$CDOM" "$CEML"
     printf '{"ok":true,"started":true}'
+    ;;
+
+# ==================== HW OFFLOAD WATCHDOG (QCA NSS/PPE) ====================
+# Thin front over /usr/sbin/detour-offload — detects a wedged QCA hardware flow-offload
+# (forwarding fell to the CPU → ~100 Mbit until reboot) and recovers without a reboot.
+# QCA-only: the helper reports supported:false on non-QCA (Keenetic/MT6000) and the panel
+# hides the control. The binary is shipped OpenWrt-only, so guard on its presence too.
+offload_status)
+    if [ -x "$OFFLOAD_BIN" ]; then "$OFFLOAD_BIN" status
+    else printf '{"ok":true,"supported":false,"mode":"off"}'; fi
+    ;;
+
+offload_set)
+    # Body = {"mode":"auto|notify|off"}.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$OFFLOAD_BIN" ] || { json_err "not supported on this platform"; exit 0; }
+    OMODE=$(printf '%s' "$POST_DATA" | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    case "$OMODE" in auto|notify|off) ;; *) json_err "invalid mode"; exit 0 ;; esac
+    "$OFFLOAD_BIN" set-mode "$OMODE"
+    ;;
+
+offload_kick)
+    # Manual force-recover (the panel's «Пнуть ускоритель» button).
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$OFFLOAD_BIN" ] || { json_err "not supported on this platform"; exit 0; }
+    "$OFFLOAD_BIN" kick
     ;;
 
 # ==================== SWAP FILE (Keenetic/Entware flash) ====================

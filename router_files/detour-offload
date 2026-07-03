@@ -1,0 +1,181 @@
+#!/bin/sh
+# detour-offload — watchdog + auto-recovery for QCA NSS/PPE hardware flow-offload on
+# ipq53xx GL.iNet (e.g. GL-BE9300). When offload wedges, LAN<->WAN forwarding falls to
+# the CPU: throughput collapses toward ~100 Mbit and a REBOOT is normally the only fix.
+# This detects that state (sustained NET softirq while the userspace proxy is idle) and
+# recovers WITHOUT a reboot by flushing / restarting the accelerator. Cron: * * * * *.
+#
+# QCA-NSS ONLY (needs /sys/kernel/debug/ecm + qca-nss-ecm). On any other platform —
+# Keenetic (mipsel), MediaTek MT6000, non-QCA OpenWrt — there is no such accelerator to
+# wedge or kick, so every subcommand is a safe no-op and the panel hides the control.
+# (Same class as NFQUEUE/nfqws2: physically OpenWrt/QCA-specific.)
+#
+# Signal (from a live A/B test 2026-07-03): healthy forwarding rides the PPE fast path
+# and BYPASSES the CPU (softirq stays low even at 300+ Mbit). When offload wedges the
+# same traffic is software-forwarded → NET softirq spikes while userspace stays idle.
+# Proxied traffic (sing-box/tpws/nfqws2) burns USER cpu, not softirq, so it is excluded.
+#
+# Config: /etc/detour/offload.conf  ->  MODE=auto|notify|off   (default auto)
+
+DETOUR_DIR=/etc/detour
+CONF="$DETOUR_DIR/offload.conf"
+STATE=/var/state/detour-offload.json
+LOG=/var/log/detour-offload.log
+PUSH_BIN=/usr/sbin/detour-push
+ECM=/sys/kernel/debug/ecm
+COOLDOWN=/tmp/detour-offload.cooldown
+STREAK=/tmp/detour-offload.streak
+COOLDOWN_SECS=600
+SIRQ_WEDGE=40        # softirq% over the sample that counts as "forwarding on the CPU"
+USER_MAX=25          # if userspace CPU is above this, high softirq is the proxy, not a wedge
+
+# Keenetic path shim (kept for consistency; qca_supported() makes it a no-op there).
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DETOUR_DIR=/opt/etc/detour
+    CONF="$DETOUR_DIR/offload.conf"
+    STATE=/opt/var/state/detour-offload.json
+    LOG=/opt/var/log/detour-offload.log
+    PUSH_BIN=/opt/sbin/detour-push
+    mkdir -p /opt/var/state /opt/var/log 2>/dev/null
+fi
+
+NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
+log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"; }
+
+qca_supported() {
+    [ -e "$ECM/gl_front_end_ipv4_stop" ] || [ -e "$ECM/front_end_ipv4_stop" ] || [ -x /etc/init.d/qca-nss-ecm ]
+}
+
+get_mode() {
+    _m=auto
+    [ -f "$CONF" ] && _m=$(sed -n 's/^MODE=//p' "$CONF" 2>/dev/null | tail -1)
+    case "$_m" in auto|notify|off) ;; *) _m=auto ;; esac
+    echo "$_m"
+}
+
+# softirq% userspace% idle% over ~1s (from the aggregate /proc/stat cpu line).
+cpu_sample() {
+    set -- $(awk '/^cpu /{print $8, $2+$3, $5, $2+$3+$4+$5+$6+$7+$8}' /proc/stat 2>/dev/null)
+    _s1=${1:-0}; _u1=${2:-0}; _i1=${3:-0}; _t1=${4:-0}
+    sleep 1
+    set -- $(awk '/^cpu /{print $8, $2+$3, $5, $2+$3+$4+$5+$6+$7+$8}' /proc/stat 2>/dev/null)
+    _s2=${1:-0}; _u2=${2:-0}; _i2=${3:-0}; _t2=${4:-0}
+    _dt=$((_t2 - _t1)); [ "$_dt" -le 0 ] && _dt=1
+    echo "$(( (_s2-_s1)*100/_dt )) $(( (_u2-_u1)*100/_dt )) $(( (_i2-_i1)*100/_dt ))"
+}
+
+# Light kick: momentarily stop→resume the ECM front-ends so stale accelerated flows are
+# dropped and re-accelerated. CRUCIAL: only cycle front-ends that are currently RUNNING
+# (stop==0) and restore them to 0 — a front-end that is stopped by default (observed:
+# GL's `gl_front_end_*_stop`==1, because this firmware drives the standard `front_end_*`
+# path) MUST stay stopped; enabling it would fight the active accelerator.
+ecm_flush() {
+    _cycled=""
+    for n in front_end_ipv4_stop gl_front_end_ipv4_stop front_end_ipv6_stop gl_front_end_ipv6_stop; do
+        f="$ECM/$n"; [ -e "$f" ] || continue
+        _v=$(cat "$f" 2>/dev/null)
+        if [ "$_v" = "0" ]; then echo 1 > "$f" 2>/dev/null; _cycled="$_cycled $n"; fi
+    done
+    sleep 1
+    for n in $_cycled; do echo 0 > "$ECM/$n" 2>/dev/null; done
+}
+ecm_restart() { [ -x /etc/init.d/qca-nss-ecm ] && /etc/init.d/qca-nss-ecm restart >/dev/null 2>&1; }
+
+push_alert() { [ -x "$PUSH_BIN" ] && "$PUSH_BIN" send "$1" "$2" >/dev/null 2>&1; return 0; }
+
+write_state() {  # $1 mode  $2 last_action  $3 last_result  $4 sirq  $5 user
+    mkdir -p "$(dirname "$STATE")" 2>/dev/null
+    _sup=false; qca_supported && _sup=true
+    printf '{"ok":true,"supported":%s,"mode":%s,"last_action":%s,"last_result":%s,"last_sirq":%s,"last_user":%s,"last_ts":%s}\n' \
+        "$_sup" "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "${4:-0}" "${5:-0}" "$NOW" > "$STATE"
+}
+
+# Escalating recovery. Echoes a short result token; returns 0 if it looks recovered.
+recover() {
+    log "recovery: light ECM flush"
+    ecm_flush
+    sleep 3
+    set -- $(cpu_sample); _s=${1:-0}; _u=${2:-0}
+    if [ "$_s" -lt "$SIRQ_WEDGE" ] || [ "$_u" -ge "$USER_MAX" ]; then echo "flush_ok(sirq=${_s})"; return 0; fi
+    log "recovery: escalate to qca-nss-ecm restart"
+    ecm_restart
+    sleep 4
+    set -- $(cpu_sample); _s=${1:-0}; _u=${2:-0}
+    if [ "$_s" -lt "$SIRQ_WEDGE" ] || [ "$_u" -ge "$USER_MAX" ]; then echo "restart_ok(sirq=${_s})"; return 0; fi
+    echo "still_wedged(sirq=${_s})"; return 1
+}
+
+CMD="${1:-tick}"
+case "$CMD" in
+tick)
+    qca_supported || { write_state off "n/a" "unsupported" 0 0; exit 0; }
+    MODE=$(get_mode)
+    [ "$MODE" = off ] && exit 0
+    set -- $(cpu_sample); SIRQ=${1:-0}; USERP=${2:-0}; IDLE=${3:-0}
+    # Healthy (or proxied load) → clear the streak and record.
+    if [ "$SIRQ" -lt "$SIRQ_WEDGE" ] || [ "$USERP" -ge "$USER_MAX" ]; then
+        rm -f "$STREAK" 2>/dev/null
+        write_state "$MODE" none healthy "$SIRQ" "$USERP"
+        exit 0
+    fi
+    # Candidate wedge — require 2 consecutive ticks to ignore transient softirq spikes.
+    streak=0; [ -f "$STREAK" ] && streak=$(cat "$STREAK" 2>/dev/null)
+    case "$streak" in ''|*[!0-9]*) streak=0 ;; esac
+    streak=$((streak + 1)); echo "$streak" > "$STREAK"
+    log "wedge candidate sirq=${SIRQ}% user=${USERP}% idle=${IDLE}% streak=$streak mode=$MODE"
+    [ "$streak" -lt 2 ] && { write_state "$MODE" watch "candidate(sirq=${SIRQ})" "$SIRQ" "$USERP"; exit 0; }
+    # Cooldown so we don't flap.
+    last=0; [ -f "$COOLDOWN" ] && last=$(cat "$COOLDOWN" 2>/dev/null)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    if [ "$((NOW - last))" -lt "$COOLDOWN_SECS" ]; then
+        log "wedge confirmed but in cooldown ($((NOW-last))s) — no action"
+        write_state "$MODE" cooldown "confirmed(sirq=${SIRQ})" "$SIRQ" "$USERP"
+        exit 0
+    fi
+    log "WEDGE CONFIRMED sirq=${SIRQ}% user=${USERP}% — offload down, forwarding on CPU (mode=$MODE)"
+    if [ "$MODE" = notify ]; then
+        push_alert "Detour: offload просел" "Аппаратное ускорение упало (softirq ${SIRQ}%, форвардинг на CPU) — скорость ограничена. Панель → «Пнуть ускоритель», либо перезагрузите роутер."
+        echo "$NOW" > "$COOLDOWN"; rm -f "$STREAK"
+        write_state "$MODE" notified "confirmed(sirq=${SIRQ})" "$SIRQ" "$USERP"
+        exit 0
+    fi
+    RES=$(recover)
+    echo "$NOW" > "$COOLDOWN"; rm -f "$STREAK"
+    log "recovery result: $RES"
+    case "$RES" in
+        *_ok*) push_alert "Detour: offload восстановлен" "Аппаратное ускорение залипло — авто-восстановление сработало (${RES}). Скорость должна вернуться." ;;
+        *)     push_alert "Detour: offload НЕ восстановлен" "Ускорение залипло, авто-kick не помог (${RES}). Рекомендуется перезагрузка роутера." ;;
+    esac
+    write_state "$MODE" recover "$RES" "$SIRQ" "$USERP"
+    ;;
+
+kick)
+    qca_supported || { echo '{"ok":false,"error":"unsupported on this platform"}'; exit 0; }
+    RES=$(recover); echo "$NOW" > "$COOLDOWN"
+    log "manual kick: $RES"
+    write_state "$(get_mode)" manual_kick "$RES" 0 0
+    printf '{"ok":true,"result":%s}\n' "$(json_str "$RES")"
+    ;;
+
+status)
+    if [ -f "$STATE" ]; then cat "$STATE"
+    else _sup=false; qca_supported && _sup=true; printf '{"ok":true,"supported":%s,"mode":%s,"last_action":""}\n' "$_sup" "$(json_str "$(get_mode)")"; fi
+    ;;
+
+detect)
+    _sup=false; qca_supported && _sup=true
+    printf '{"ok":true,"supported":%s,"mode":%s}\n' "$_sup" "$(json_str "$(get_mode)")"
+    ;;
+
+set-mode)
+    _m="$2"; case "$_m" in auto|notify|off) ;; *) echo '{"ok":false,"error":"bad mode"}'; exit 0 ;; esac
+    mkdir -p "$DETOUR_DIR" 2>/dev/null
+    echo "MODE=$_m" > "$CONF"
+    write_state "$_m" none "mode set" 0 0
+    printf '{"ok":true,"mode":%s}\n' "$(json_str "$_m")"
+    ;;
+
+*) echo "usage: detour-offload {tick|kick|status|detect|set-mode <auto|notify|off>}" >&2; exit 2 ;;
+esac

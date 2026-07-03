@@ -2760,6 +2760,32 @@
                   HTTPS-сертификат
                 </button>
               </div>
+              <!-- Аппаратное ускорение (offload) — только QCA (home); показывается по offload_status.supported -->
+              <div id="hdr-offload-group" style="display: none">
+                <div class="hdr-menu-sep"></div>
+                <div class="hdr-menu-title">Сеть</div>
+                <button
+                  class="hdr-menu-item"
+                  role="menuitem"
+                  onclick="hdrMenuRun(openOffloadModal)"
+                  title="Авто-восстановление аппаратного ускорения (offload) при просадке скорости — без перезагрузки роутера"
+                >
+                  <svg
+                    class="i"
+                    width="15"
+                    height="15"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+                  </svg>
+                  Ускорение (offload)
+                </button>
+              </div>
               <!-- SWAP-файл — Keenetic only; shown on Keenetic (см. loadStatus). -->
               <div id="hdr-swap-group" style="display: none">
                 <div class="hdr-menu-sep"></div>
@@ -3765,6 +3791,79 @@
 
           <div class="modal-footer">
             <button class="btn" onclick="closeSwapModal()">Закрыть</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== Аппаратное ускорение (offload) — QCA / home ===== -->
+      <div
+        class="modal-overlay"
+        id="offload-modal"
+        style="display: none"
+        onclick="if (event.target === this) closeOffloadModal();"
+      >
+        <div class="modal" style="max-width: 560px">
+          <h3>
+            <svg
+              class="i"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+            </svg>
+            Аппаратное ускорение (offload)
+          </h3>
+          <p class="helper-text-block">
+            На этом роутере (QCA NSS/PPE) скорость LAN↔WAN держит аппаратный
+            ускоритель. Иногда он «залипает» — форвардинг сваливается на CPU и
+            скорость падает до ~100 Мбит, обычно до перезагрузки. Watchdog ловит это
+            (всплеск softirq при простое прокси) и восстанавливает ускоритель
+            <b>без ребута</b>.
+          </p>
+          <div class="editor-section" style="margin-bottom: 14px">
+            <p class="helper-text-block" id="offload-current-text">Загрузка…</p>
+            <div class="form-row">
+              <label for="offload-mode">При обнаружении просадки</label>
+              <select id="offload-mode" onchange="setOffloadMode()">
+                <option value="auto">Авто-восстановление (kick, реком.)</option>
+                <option value="notify">Только уведомлять (push)</option>
+                <option value="off">Выключено</option>
+              </select>
+            </div>
+            <button
+              class="btn"
+              id="offload-kick-btn"
+              onclick="offloadKick()"
+              style="margin-top: 10px"
+            >
+              Пнуть ускоритель сейчас
+            </button>
+            <div
+              id="offload-status"
+              style="
+                font-size: 12px;
+                color: var(--text-dim);
+                margin-top: 8px;
+                min-height: 16px;
+              "
+            ></div>
+          </div>
+          <p
+            class="helper-text-block"
+            style="color: var(--text-dim); font-size: 11px"
+          >
+            Эффективность авто-kick подтверждается на реальном залипании — watchdog
+            зафиксирует результат. Крайняя мера, если kick не помог, — перезагрузка
+            роутера.
+          </p>
+          <div class="modal-footer">
+            <button class="btn" onclick="closeOffloadModal()">Закрыть</button>
           </div>
         </div>
       </div>
@@ -6451,6 +6550,19 @@
           if (swapGroup)
             swapGroup.style.display =
               currentPlatform === "keenetic" ? "contents" : "none";
+
+          // Аппаратное ускорение (offload) — только QCA-NSS (home). Ёмкость узнаём
+          // однократно через offload_status.supported (currentPlatform недостаточно:
+          // MT6000 тоже openwrt, но без QCA-ускорителя).
+          if (!offloadChecked) {
+            offloadChecked = true;
+            api("offload_status")
+              .then(function (o) {
+                var g = document.getElementById("hdr-offload-group");
+                if (g) g.style.display = o && o.supported ? "contents" : "none";
+              })
+              .catch(function () {});
+          }
 
           var sbDot = document.getElementById("sb-dot");
           sbDot.className =
@@ -9209,6 +9321,86 @@
       }
 
       // ===== SWAP-файл MODAL (Keenetic) =====
+      // ===== Аппаратное ускорение (offload) watchdog + авто-восстановление (QCA/home) =====
+      // Detects a wedged QCA HW flow-offload (forwarding fell to CPU → ~100 Mbit until
+      // reboot) and recovers without a reboot. Backend: detour-offload. QCA-only — the
+      // menu entry is hidden where offload_status.supported is false.
+      var offloadChecked = false;
+      async function openOffloadModal() {
+        document.getElementById("offload-modal").style.display = "flex";
+        document.getElementById("offload-status").textContent = "";
+        await offloadRefresh();
+      }
+      function closeOffloadModal() {
+        document.getElementById("offload-modal").style.display = "none";
+      }
+      async function offloadRefresh() {
+        var curText = document.getElementById("offload-current-text");
+        try {
+          var d = await api("offload_status");
+          if (!d.supported) {
+            curText.textContent =
+              "Недоступно на этом устройстве (нет QCA-ускорителя).";
+            return;
+          }
+          var sel = document.getElementById("offload-mode");
+          if (d.mode) sel.value = d.mode;
+          var parts = [
+            "Режим: " +
+              (d.mode === "auto"
+                ? "авто-восстановление"
+                : d.mode === "notify"
+                  ? "только уведомлять"
+                  : "выключено"),
+          ];
+          if (d.last_action && d.last_action !== "none")
+            parts.push(
+              "последнее: " +
+                escapeHtml(d.last_action) +
+                (d.last_result ? " (" + escapeHtml(d.last_result) + ")" : ""),
+            );
+          if (typeof d.last_sirq !== "undefined")
+            parts.push("softirq " + escapeHtml(String(d.last_sirq)) + "%");
+          curText.innerHTML = parts.join(" · ");
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            curText.textContent = e.message || String(e);
+        }
+      }
+      async function setOffloadMode() {
+        var mode = document.getElementById("offload-mode").value;
+        var status = document.getElementById("offload-status");
+        status.textContent = "Сохранение…";
+        try {
+          await api("offload_set", "POST", { mode: mode });
+          status.textContent = "Сохранено.";
+          await offloadRefresh();
+        } catch (e) {
+          status.innerHTML =
+            '<span style="color:var(--red)">' +
+            escapeHtml(e.message || String(e)) +
+            "</span>";
+        }
+      }
+      async function offloadKick() {
+        var btn = document.getElementById("offload-kick-btn");
+        var status = document.getElementById("offload-status");
+        btn.disabled = true;
+        status.textContent = "Пинаю ускоритель…";
+        try {
+          var r = await api("offload_kick", "POST", {});
+          status.textContent = "Готово: " + (r.result || "ok");
+          await offloadRefresh();
+        } catch (e) {
+          status.innerHTML =
+            '<span style="color:var(--red)">' +
+            escapeHtml(e.message || String(e)) +
+            "</span>";
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
       var swapPollTimer = null;
 
       async function openSwapModal() {

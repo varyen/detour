@@ -138,6 +138,7 @@ PANEL_FILES = [
     (("router_files", "detour-health"), "usr/sbin/detour-health", 0o755),
     (("router_files", "detour-push"), "usr/sbin/detour-push", 0o755),
     (("router_files", "detour-cert"), "usr/sbin/detour-cert", 0o755),
+    (("router_files", "detour-offload"), "usr/sbin/detour-offload", 0o755),
     (("router_files", "detour-hosts"), "usr/sbin/detour-hosts", 0o755),
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
@@ -338,7 +339,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /etc/firewall.lan_mark_fallback /etc/hotplug.d/iface/99-proxy-guard \\
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
-    /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
+    /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-offload /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
     /www/cgi-bin/detour-api 2>/dev/null
@@ -401,6 +402,10 @@ fi
 /etc/init.d/detour-logbridge enable >/dev/null 2>&1
 /etc/init.d/detour-logbridge restart >/dev/null 2>&1
 
+# 3f) Seed the HW-offload watchdog config on first install only (keeplist-preserved, so
+# a user's later choice survives upgrades). Default: auto-recover a wedged QCA accelerator.
+[ -f /etc/detour/offload.conf ] || echo 'MODE=auto' > /etc/detour/offload.conf
+
 # 4) Install/refresh cron entries for self-update + subscription-refresh.
 # subscription-refresh ticks hourly; the script itself decides which subscriptions
 # are due based on their per-subscription `interval_hours` (default 24h) + the
@@ -411,7 +416,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -423,6 +428,10 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   # in-flight sing-box and the old odd/even-minute split is no longer needed.
   echo "* * * * * /usr/sbin/detour-health active >/dev/null 2>&1"
   echo "23 */12 * * * /usr/sbin/detour-hosts refresh-cron >/var/log/detour-hosts.log 2>&1"
+  # HW-offload watchdog — QCA/ipq53xx only; a safe no-op on non-QCA hardware. Detects a
+  # wedged NSS/PPE accelerator (LAN<->WAN forwarding fell to the CPU → ~100 Mbit until a
+  # reboot) and recovers it in place. Mode lives in /etc/detour/offload.conf (default auto).
+  echo "* * * * * /usr/sbin/detour-offload tick >/dev/null 2>&1"
 ) | crontab -
 /etc/init.d/cron enable >/dev/null 2>&1
 /etc/init.d/cron restart >/dev/null 2>&1
@@ -461,6 +470,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-ping' \\
                       | grep -v 'detour-health' \\
                       | grep -v 'detour-hosts' \\
+                      | grep -v 'detour-offload' \\
                       | crontab - 2>/dev/null
 exit 0
 """
