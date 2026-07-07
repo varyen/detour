@@ -3022,7 +3022,7 @@
         class="modal-overlay"
         id="change-password-modal"
         style="display: none"
-        onclick="if (event.target === this) closeChangePasswordModal();"
+        onclick="backdropClose(event, closeChangePasswordModal)"
       >
         <div class="modal" style="max-width: 480px">
           <h3>
@@ -3100,7 +3100,7 @@
         class="modal-overlay"
         id="update-modal"
         style="display: none"
-        onclick="if (event.target === this) closeUpdateModal();"
+        onclick="backdropClose(event, closeUpdateModal)"
       >
         <div class="modal" style="max-width: 540px">
           <h3>
@@ -3253,7 +3253,7 @@
         class="modal-overlay"
         id="bins-modal"
         style="display: none"
-        onclick="if (event.target === this) closeBinsModal();"
+        onclick="backdropClose(event, closeBinsModal)"
       >
         <div class="modal" style="max-width: 540px">
           <h3>
@@ -3418,7 +3418,7 @@
         class="modal-overlay"
         id="push-modal"
         style="display: none"
-        onclick="if (event.target === this) closePushSettingsModal();"
+        onclick="backdropClose(event, closePushSettingsModal)"
       >
         <div class="modal" style="max-width: 520px">
           <h3>
@@ -3519,7 +3519,7 @@
         class="modal-overlay"
         id="keen-https-help-modal"
         style="display: none"
-        onclick="if (event.target === this) closeKeenHttpsHelp();"
+        onclick="backdropClose(event, closeKeenHttpsHelp)"
       >
         <div class="modal" style="max-width: 600px">
           <h3>
@@ -3608,7 +3608,7 @@
         class="modal-overlay"
         id="cert-modal"
         style="display: none"
-        onclick="if (event.target === this) closeCertModal();"
+        onclick="backdropClose(event, closeCertModal)"
       >
         <div class="modal" style="max-width: 560px">
           <h3>
@@ -3701,7 +3701,7 @@
         class="modal-overlay"
         id="swap-modal"
         style="display: none"
-        onclick="if (event.target === this) closeSwapModal();"
+        onclick="backdropClose(event, closeSwapModal)"
       >
         <div class="modal" style="max-width: 560px">
           <h3>
@@ -3800,7 +3800,7 @@
         class="modal-overlay"
         id="offload-modal"
         style="display: none"
-        onclick="if (event.target === this) closeOffloadModal();"
+        onclick="backdropClose(event, closeOffloadModal)"
       >
         <div class="modal" style="max-width: 560px">
           <h3>
@@ -5155,7 +5155,7 @@
       class="modal-overlay"
       id="profile-modal"
       style="display: none"
-      onclick="if (event.target === this) closeProfileModal();"
+      onclick="backdropClose(event, closeProfileModal)"
     >
       <div class="modal">
         <h3 id="profile-modal-title">🔐 Добавить VPN-профиль</h3>
@@ -5497,7 +5497,7 @@
       class="modal-overlay"
       id="share-modal"
       style="display: none"
-      onclick="if (event.target === this) closeShareModal();"
+      onclick="backdropClose(event, closeShareModal)"
     >
       <div class="modal" style="max-width: 760px">
         <h3 id="share-modal-title">🔗 Ссылка профиля</h3>
@@ -5553,7 +5553,7 @@
       class="modal-overlay"
       id="chain-modal"
       style="display: none"
-      onclick="if (event.target === this) closeChainModal();"
+      onclick="backdropClose(event, closeChainModal)"
     >
       <div class="modal">
         <h3>🔗 Цепочка VPN / Proxy</h3>
@@ -5597,6 +5597,32 @@
         intervalHours: 0,
         userInfo: "",
       };
+
+      // ===== MODAL BACKDROP CLOSE =====
+      // Close a modal only on a genuine backdrop click: the press (mousedown)
+      // AND the release must BOTH land on the overlay itself. Without the press
+      // check, selecting text inside a field and releasing the mouse over the
+      // backdrop fires a `click` whose target is the overlay — which used to
+      // close the modal by accident. We record where each press started and gate
+      // the close on it, so a stray mouseup on the backdrop no longer closes.
+      var __modalPressTarget = null;
+      document.addEventListener(
+        "mousedown",
+        function (e) {
+          __modalPressTarget = e.target;
+        },
+        true
+      );
+      // Called by every .modal-overlay's inline onclick. `closeFn` is that
+      // modal's own close handler (kept per-modal so its cleanup/reset runs).
+      function backdropClose(event, closeFn) {
+        if (
+          event.target === event.currentTarget &&
+          __modalPressTarget === event.currentTarget
+        ) {
+          closeFn();
+        }
+      }
 
       // ===== THEME (dark / light) =====
       // The active theme lives on <html data-theme="...">. It is set before

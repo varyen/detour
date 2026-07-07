@@ -989,7 +989,14 @@ read_egress_ip_state() {
     EGRESS_IP=""
     EGRESS_TS=0
     [ -f "$EGRESS_IP_STATE" ] || return 0
-    IFS='\t' read -r EGRESS_CHAIN EGRESS_IP EGRESS_TS < "$EGRESS_IP_STATE" 2>/dev/null
+    # Fields are TAB-separated (writer uses printf '%s\t%s\t%s'). Parse with cut
+    # -f (default delimiter is a real TAB). Do NOT use IFS='\t': in busybox that
+    # is the two literal chars backslash+t, so the chain gets split on every 't'
+    # ("mayami_ssha_extra" -> "mayami_ssha_ex") and never matches the active
+    # chain — the v1.24.0 "external IP shows a dash" bug.
+    EGRESS_CHAIN=$(cut -f1 "$EGRESS_IP_STATE" 2>/dev/null)
+    EGRESS_IP=$(cut -f2 "$EGRESS_IP_STATE" 2>/dev/null)
+    EGRESS_TS=$(cut -f3 "$EGRESS_IP_STATE" 2>/dev/null)
     case "$EGRESS_TS" in ''|*[!0-9]*) EGRESS_TS=0 ;; esac
 }
 
