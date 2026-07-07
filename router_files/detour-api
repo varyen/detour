@@ -40,6 +40,11 @@ HEALTH_SWITCH="/tmp/detour-health.switch"   # last auto-switch event marker (JSO
 HEALTH_UNSUPP="/tmp/detour-health.unsupported" # set by detour-health when sing-box lacks clash_api
 HEALTH_URLS="/etc/sing-box/health-urls.list" # health-check targets: "label|url" per line (panel-editable)
 HEALTH_BIN="/usr/sbin/detour-health"
+EGRESS_IP_STATE="/tmp/detour-egress-ip.tsv"    # active chain -> last known public egress IP (TSV cache)
+EGRESS_IP_LOCK="/tmp/detour-egress-ip.lock"    # single-flight lock for the background refresh
+EGRESS_IP_LOG="/tmp/detour-egress-ip.log"
+EGRESS_IP_URL="https://api.ipify.org"
+EGRESS_IP_TTL=300
 PUSH_BIN="/usr/sbin/detour-push"            # Web Push (VAPID) sender — backs the push_* actions
 PUSH_MSG="/tmp/detour-push.msg"             # latest push message JSON (read by the service worker; tmpfs, not remapped)
 CERT_BIN="/usr/sbin/detour-cert"            # Let's Encrypt helper (acme.sh) — backs the cert_* actions
@@ -600,7 +605,10 @@ route_map_targets() {
     }' "$SINGBOX_ROUTEMAP"
 }
 
-# Emit classified entries ("D domain" / "I ipcidr") belonging to ONE target.
+# Emit classified entries belonging to ONE target:
+#   D domain   - exact hostname from the route-map
+#   W domain   - wildcard/suffix hostname from the route-map (*.host)
+#   I ipcidr   - literal IPv4/CIDR
 route_map_section() {
     local id="$1"
     [ -f "$SINGBOX_ROUTEMAP" ] || return 0
@@ -616,12 +624,16 @@ route_map_section() {
     {
         if (!inblk) next
         line=$0
+        wild=0
         sub(/\/\/.*/, "", line); sub(/#.*/, "", line); gsub(/\r/, "", line)
         gsub(/^[ \t]+|[ \t]+$/, "", line)
-        sub(/^\*\./, "", line)
+        if (line ~ /^\*\./) { wild=1; sub(/^\*\./, "", line) }
         if (line == "") next
         if (line ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print "I " line; next }
-        if (line ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print "D " line; next }
+        if (line ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) {
+            if (wild) print "W " line; else print "D " line
+            next
+        }
     }' "$SINGBOX_ROUTEMAP"
 }
 
@@ -646,20 +658,35 @@ route_tag_for() {
 # fragment from the route map. Sets globals RX_OB, RX_EP, RX_RULES.
 compute_route_extras() {
     local chain="$1"
-    local target tag payload ptype dom_arr ip_arr robj rule_objs
+    local target tag payload ptype dom_arr dom_exact_objs ip_arr robj rule_objs host_override
     RX_OB=""; RX_EP=""; RX_RULES=""
     rule_objs=""
     for target in $(route_map_targets); do
         [ -f "$SINGBOX_PROFILES_DIR/$target.json" ] || continue
-        dom_arr=$(route_map_section "$target" | awk '$1=="D"{ if(n++)printf","; printf "\"%s\"",$2 }')
-        ip_arr=$(route_map_section "$target" | awk '$1=="I"{ if(n++)printf","; printf "\"%s\"",$2 }')
-        [ -z "$dom_arr" ] && [ -z "$ip_arr" ] && continue
         tag=$(route_tag_for "$target" "$chain")
+        ptype=$(json_val "type" "$SINGBOX_PROFILES_DIR/$target.json")
+        host_override=0
+        case "$ptype" in
+            socks|socks4|socks4a|socks5|http|http-proxy|https-proxy) host_override=1 ;;
+        esac
+        if [ "$host_override" = 1 ]; then
+            # Hostname-sensitive outbounds (HTTP/SOCKS) need the CONNECT target as a
+            # hostname, not as the already-resolved IP from transparent REDIRECT.
+            # For plain entries emit exact-host rules with override_address; keep
+            # wildcard/suffix entries separate (they still match as suffix rules,
+            # but cannot reconstruct an arbitrary subdomain hostname from an IP).
+            dom_exact_objs=$(route_map_section "$target" | awk -v tag="$tag" 'BEGIN{n=0} $1=="D"{ if(n++)printf","; printf "{\"action\":\"route\",\"domain\":[\"%s\"],\"outbound\":\"%s\",\"override_address\":\"%s\"}",$2,tag,$2 }')
+            dom_arr=$(route_map_section "$target" | awk '$1=="W"{ if(n++)printf","; printf "\"%s\"",$2 }')
+        else
+            dom_exact_objs=""
+            dom_arr=$(route_map_section "$target" | awk '$1=="D" || $1=="W"{ if(n++)printf","; printf "\"%s\"",$2 }')
+        fi
+        ip_arr=$(route_map_section "$target" | awk '$1=="I"{ if(n++)printf","; printf "\"%s\"",$2 }')
+        [ -z "$dom_exact_objs" ] && [ -z "$dom_arr" ] && [ -z "$ip_arr" ] && continue
         if [ "$tag" = "out_$target" ]; then
             payload=$(extract_profile_outbound "$SINGBOX_PROFILES_DIR/$target.json")
             [ -n "$payload" ] || continue
             payload=$(set_outbound_chain_fields "$payload" "$tag" "")
-            ptype=$(json_val "type" "$SINGBOX_PROFILES_DIR/$target.json")
             if [ "$ptype" = "wireguard" ]; then
                 payload=$(translate_wireguard_profile "$payload")
                 RX_EP="$RX_EP,
@@ -668,6 +695,9 @@ compute_route_extras() {
                 RX_OB="$RX_OB,
     $payload"
             fi
+        fi
+        if [ -n "$dom_exact_objs" ]; then
+            if [ -n "$rule_objs" ]; then rule_objs="$rule_objs,$dom_exact_objs"; else rule_objs="$dom_exact_objs"; fi
         fi
         if [ -n "$dom_arr" ]; then
             robj="{\"action\":\"route\",\"domain_suffix\":[$dom_arr],\"outbound\":\"$tag\"}"
@@ -697,6 +727,7 @@ compute_route_extras() {
 #   $3 extra endpoints JSON (comma-prefixed) or empty
 #   $4 route rules fragment ('    "rules": [...],\n') or empty
 #   $5 listen_port (default 12345)
+#   $6 inbound_kind (redirect | mixed; default redirect)
 # Returns 1 if the chain is invalid.
 render_chain_config() {
     local chain_csv="$1"
@@ -704,8 +735,9 @@ render_chain_config() {
     local extra_endpoints="$3"
     local route_rules="$4"
     local listen_port="${5:-12345}"
+    local inbound_kind="${6:-redirect}"
     local normalized old_ifs total idx pname pfile ptype payload tag detour
-    local outbounds_json endpoints_json outbounds_block
+    local outbounds_json endpoints_json outbounds_block inbound_block
 
     normalized=$(normalize_profile_list "$chain_csv")
     [ -z "$normalized" ] && return 1
@@ -799,6 +831,22 @@ render_chain_config() {
 "
     fi
 
+        if [ "$inbound_kind" = "mixed" ]; then
+                inbound_block="    {
+            \"type\": \"mixed\",
+            \"tag\": \"mixed-in\",
+            \"listen\": \"127.0.0.1\",
+            \"listen_port\": $listen_port
+        }"
+        else
+                inbound_block="    {
+            \"type\": \"redirect\",
+            \"tag\": \"redirect-in\",
+            \"listen\": \"::\",
+            \"listen_port\": $listen_port
+        }"
+        fi
+
     # log: WARN, not "info" — at info sing-box emits a line per connection
     # (~40-50 MB/day). On Keenetic /var/log is tmpfs (~124 MB total): an info log
     # filled it in ~3 days and cascaded (curl/lighttpd/sessions/health all failed
@@ -814,12 +862,7 @@ render_chain_config() {
     "timestamp": true
   },
   "inbounds": [
-    {
-      "type": "redirect",
-      "tag": "redirect-in",
-      "listen": "::",
-      "listen_port": $listen_port
-    }
+${inbound_block}
   ],
 $(if [ -n "$endpoints_json" ]; then cat <<EOEP
     "endpoints": [
@@ -939,6 +982,15 @@ get_routing_mode() {
 
 get_upstream_ips() {
     get_settings_val "upstream_ips"
+}
+
+read_egress_ip_state() {
+    EGRESS_CHAIN=""
+    EGRESS_IP=""
+    EGRESS_TS=0
+    [ -f "$EGRESS_IP_STATE" ] || return 0
+    IFS='\t' read -r EGRESS_CHAIN EGRESS_IP EGRESS_TS < "$EGRESS_IP_STATE" 2>/dev/null
+    case "$EGRESS_TS" in ''|*[!0-9]*) EGRESS_TS=0 ;; esac
 }
 
 # ==================== AUTH ====================
@@ -1068,6 +1120,38 @@ if [ "$1" = "activate" ]; then
     write_settings "$CHAIN" "$RMODE" "$UPSTREAM_IPS" "$SBMODE"
     $SINGBOX_INITD reconfigure >/dev/null 2>&1
     echo "activate: $CHAIN"
+    exit 0
+fi
+if [ "$1" = "egress-ip-refresh" ]; then
+    CHAIN=$(normalize_profile_list "$2")
+    [ -z "$CHAIN" ] && CHAIN=$(get_active_chain)
+    [ -n "$CHAIN" ] || exit 0
+    if ! mkdir "$EGRESS_IP_LOCK" 2>/dev/null; then exit 0; fi
+    _port=19480
+    _conf="/tmp/detour-egress-ip.conf.$$"
+    _data="/tmp/detour-egress-ip.data.$$"
+    _sbpid=""
+    _cleanup_egress() {
+        [ -n "$_sbpid" ] && kill "$_sbpid" 2>/dev/null
+        [ -n "$_sbpid" ] && kill -9 "$_sbpid" 2>/dev/null
+        rm -rf "$EGRESS_IP_LOCK" "$_conf" "$_data" 2>/dev/null
+    }
+    trap _cleanup_egress EXIT INT TERM HUP
+    if ! render_chain_config "$CHAIN" "" "" "" "$_port" mixed > "$_conf"; then exit 1; fi
+    "$SINGBOX_BIN" check -c "$_conf" >/dev/null 2>&1 || exit 1
+    "$SINGBOX_BIN" run -c "$_conf" -D "$_data" > "$EGRESS_IP_LOG" 2>&1 &
+    _sbpid=$!
+    _tries=0
+    _ip=""
+    while [ "$_tries" -lt 5 ]; do
+        sleep 1
+        kill -0 "$_sbpid" 2>/dev/null || break
+        _ip=$(curl -4 -sS -m 10 -x "socks5h://127.0.0.1:$_port" "$EGRESS_IP_URL" 2>/dev/null | tr -d '\r\n' | grep -E '^[0-9.]+$' | head -1)
+        [ -n "$_ip" ] && break
+        _tries=$((_tries + 1))
+    done
+    _now=$(date +%s 2>/dev/null); case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+    printf '%s\t%s\t%s\n' "$CHAIN" "$_ip" "$_now" > "$EGRESS_IP_STATE" 2>/dev/null
     exit 0
 fi
 # =================================================
@@ -1345,6 +1429,21 @@ status)
     SB_MODE=$(get_singbox_mode)
     SB_ROUTE_TARGETS=$(route_map_targets | grep -c . 2>/dev/null)
     [ -z "$SB_ROUTE_TARGETS" ] && SB_ROUTE_TARGETS=0
+    SB_EGRESS_IP=""
+    SB_EGRESS_TS=0
+    SB_EGRESS_REFRESHING=false
+    read_egress_ip_state
+    if [ "$EGRESS_CHAIN" = "$SB_CHAIN" ]; then
+        SB_EGRESS_IP="$EGRESS_IP"
+        SB_EGRESS_TS=$EGRESS_TS
+    fi
+    NOW_EGRESS=$(date +%s 2>/dev/null); case "$NOW_EGRESS" in ''|*[!0-9]*) NOW_EGRESS=0 ;; esac
+    if [ "$SB_RUNNING" = "true" ] && { [ "$EGRESS_CHAIN" != "$SB_CHAIN" ] || [ $((NOW_EGRESS - SB_EGRESS_TS)) -ge "$EGRESS_IP_TTL" ]; }; then
+        if [ ! -d "$EGRESS_IP_LOCK" ]; then
+            detach_bg "$EGRESS_IP_LOG" "$0 egress-ip-refresh $SB_CHAIN"
+            SB_EGRESS_REFRESHING=true
+        fi
+    fi
     PA_VERSION=$(cat "$VERSION_FILE" 2>/dev/null | head -1)
     [ -z "$PA_VERSION" ] && PA_VERSION="?"
 
@@ -1409,6 +1508,9 @@ status)
     "ipset_members": "$IPSET_MEMBERS",
     "active_profile": "$SB_PROFILE",
     "active_type": "$SB_TYPE",
+    "external_ip": "$SB_EGRESS_IP",
+    "external_ip_checked": $SB_EGRESS_TS,
+    "external_ip_refreshing": $SB_EGRESS_REFRESHING,
         "active_chain": $(print_csv_json_array "$SB_CHAIN"),
     "routing_mode": "$SB_ROUTING",
     "singbox_mode": "$SB_MODE",

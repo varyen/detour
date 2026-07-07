@@ -3891,6 +3891,8 @@
               ><span class="value" id="sb-port">—</span>
               <span class="label">Профиль</span
               ><span class="value" id="sb-profile-name">—</span>
+              <span class="label">Внешний IP</span
+              ><span class="value" id="sb-egress-ip">—</span>
               <span class="label">Пинг</span
               ><span class="value" id="sb-ping">—</span>
               <span class="label">Работает</span
@@ -6594,6 +6596,12 @@
           // Profile & routing info
           document.getElementById("sb-profile-name").textContent =
             d.singbox.active_profile || "default";
+          document.getElementById("sb-egress-ip").textContent = d.singbox
+            .external_ip
+            ? d.singbox.external_ip
+            : d.singbox.external_ip_refreshing
+              ? "обновляется…"
+              : "—";
           var modeLabel =
             d.singbox.routing_mode === "all-except"
               ? "Все кроме указанных"

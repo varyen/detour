@@ -5,6 +5,40 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.24.0] — 2026-07-07
+
+Исправлена маршрутизация HTTP/SOCKS-профилей по сайтам через вкладку
+«Маршрутизация».
+
+### Добавлено
+
+- **На главной карточке sing-box показывается внешний выходной IP активной цепочки.**
+  Панель читает его из `status`, а backend держит короткий кэш и обновляет значение
+  в фоне через временный loopback `mixed`-inbound по текущей активной цепочке, чтобы
+  не блокировать главную страницу сетевым запросом на каждый reload. Пока значение
+  обновляется, UI показывает «обновляется…». _OpenWrt/GL.iNet + Keenetic parity в CGI/UI._
+
+### Исправлено
+
+- **Точные hostnames в route-map теперь корректно ходят через HTTP/SOCKS-профили.**
+  Проблема была в transparent `redirect -> socks/http outbound`: после DNS-резолва
+  в прокси уходил уже **IP-адрес**, а не hostname. Для части HTTP/SOCKS-upstream'ов
+  это ломало `CONNECT` и давало таймауты на сайтах/API, хотя прямой `curl` через
+  `socks5h://` работал. Теперь для hostname-sensitive профилей (`socks*`, `http`,
+  `http-proxy`, `https-proxy`) plain host entries в `route-map.list` собираются в
+  exact-host правила sing-box с `override_address`, чтобы outbound получал исходный
+  hostname. Это чинит сценарии вроде `api.anthropic.com`, `claude.ai`, `ipify.org`.
+  _OpenWrt/GL.iNet + Keenetic parity в кодогенераторе._
+
+### Важно
+
+- Для **HTTP/SOCKS** это надёжно работает именно для **точных hostnames**. Записи
+  вида `*.example.com` / suffix-маршрутизация по-прежнему не могут восстановить
+  произвольный hostname из уже перехваченного IP в transparent TCP-path, поэтому
+  для таких профилей в route-map лучше указывать конкретные hostnames. Маршрутизация
+  по `IP/CIDR` остаётся доступной, но для HTTP/SOCKS может зависеть от поведения
+  конкретного upstream-прокси.
+
 ## [1.23.0] — 2026-07-03
 
 Новое: авто-восстановление аппаратного ускорения (offload) на QCA-роутерах. На home
