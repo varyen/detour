@@ -28,10 +28,11 @@
 ### Исправлено
 
 - **Claude route-map обновлён под актуальные входные домены.** Для proxy-target
-  `claude_usa` добавлены `claude.com`, `www.claude.com` и
-  `console.anthropic.com`, чтобы новые Claude entrypoints не выпадали из
-  маршрута после переезда части трафика с `claude.ai`. _OpenWrt/GL.iNet +
-  Keenetic — общий формат route-map._
+  `claude_usa`/`claude_usa_http` добавлены `claude.com`, `www.claude.com`,
+  `console.anthropic.com`, `downloads.claude.ai` и соседние CDN-hostnames
+  `www.claudeusercontent.com` / `static.claudeusercontent.com`, чтобы новые
+  Claude entrypoints и загрузчик Claude Code не выпадали из маршрута. _OpenWrt/
+  GL.iNet + Keenetic — общий формат route-map._
 
 ## [1.25.0] — 2026-07-10
 

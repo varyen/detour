@@ -59,7 +59,6 @@ PUSH_MSG="/tmp/detour-push.msg"             # latest push message JSON (read by 
 CERT_BIN="/usr/sbin/detour-cert"            # Let's Encrypt helper (acme.sh) — backs the cert_* actions
 CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written by detour-cert)
 OFFLOAD_BIN="/usr/sbin/detour-offload"      # QCA HW-offload watchdog/recovery — backs the offload_* actions
-WANWATCH_CONF="/etc/detour/wan-watch.conf"  # WAN speed watchdog config (mode/cooldown/window/restart cap)
 # Swap file (Keenetic/Entware only — /opt on a USB flash needs swap or the stack
 # gets OOM-killed). Managed via the S05swap init script; backs the swap_* actions.
 SWAPFILE="/opt/swapfile"
@@ -137,7 +136,6 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     CERT_BIN="$OPT/sbin/detour-cert"
     CERT_STATE="$OPT/var/state/detour-cert.json"
     OFFLOAD_BIN="$OPT/sbin/detour-offload"   # QCA-only; no-op on Keenetic (no NSS accelerator)
-    WANWATCH_CONF="$OPT/etc/detour/wan-watch.conf"
     SWAPFILE="$OPT/swapfile"
     SWAP_INITD="$OPT/etc/init.d/S05swap"
     SWAP_STATE="$OPT/var/state/detour-swap.json"
@@ -256,142 +254,6 @@ start_apply() {
     : > "$APPLY_LOG" 2>/dev/null
     detach_bg "$APPLY_LOG" "$1; echo \"$APPLY_DONE_MARK rc=\$?\""
     printf '{"ok":true,"status":"started"}\n'
-}
-
-json_str_or_null() {
-    if [ -n "$1" ]; then
-        printf '"%s"' "$(printf '%s' "$1" | json_escape)"
-    else
-        printf 'null'
-    fi
-}
-
-detect_wan_device() {
-    _wd=""
-    if [ "$PLATFORM" = "openwrt" ] && command -v ubus >/dev/null 2>&1; then
-        _wst=$(ubus call network.interface.wan status 2>/dev/null)
-        _wd=$(printf '%s\n' "$_wst" | sed -n 's/.*"device"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-        [ -n "$_wd" ] || _wd=$(printf '%s\n' "$_wst" | sed -n 's/.*"l3_device"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-    fi
-    [ -n "$_wd" ] || _wd=$(ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-    printf '%s' "$_wd"
-}
-
-wan_speed_label() {
-    case "$1" in
-        ''|*[!0-9]*) printf '—' ;;
-        2500) printf '2.5 Гбит/с' ;;
-        1000) printf '1 Гбит/с' ;;
-        *) printf '%s Мбит/с' "$1" ;;
-    esac
-}
-
-read_wan_link() {
-    WAN_DEV=$(detect_wan_device)
-    WAN_CARRIER=false
-    WAN_SPEED_Mbps=""
-    WAN_DUPLEX=""
-    WAN_RESTART_SUPPORTED=false
-
-    if [ "$PLATFORM" = "openwrt" ] && command -v ifdown >/dev/null 2>&1 && command -v ifup >/dev/null 2>&1; then
-        WAN_RESTART_SUPPORTED=true
-    fi
-
-    if [ -n "$WAN_DEV" ] && [ "$PLATFORM" = "openwrt" ] && command -v ubus >/dev/null 2>&1; then
-        _wdev=$(ubus call network.device status "{\"name\":\"$WAN_DEV\"}" 2>/dev/null)
-        if [ -n "$_wdev" ]; then
-            printf '%s\n' "$_wdev" | grep -q '"carrier"[[:space:]]*:[[:space:]]*true' && WAN_CARRIER=true
-            WAN_SPEED_Mbps=$(printf '%s\n' "$_wdev" | sed -n 's/.*"speed"[[:space:]]*:[[:space:]]*"\([0-9][0-9]*\)[^"]*".*/\1/p' | head -1)
-            _spd_raw=$(printf '%s\n' "$_wdev" | sed -n 's/.*"speed"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-            case "$_spd_raw" in
-                *F) WAN_DUPLEX=full ;;
-                *H) WAN_DUPLEX=half ;;
-            esac
-        fi
-    fi
-
-    if [ -n "$WAN_DEV" ] && command -v ethtool >/dev/null 2>&1 && { [ -z "$WAN_SPEED_Mbps" ] || [ -z "$WAN_DUPLEX" ]; }; then
-        _et=$(ethtool "$WAN_DEV" 2>/dev/null)
-        if [ -n "$_et" ]; then
-            if [ "$WAN_CARRIER" != true ] && printf '%s\n' "$_et" | grep -q 'Link detected:[[:space:]]*yes'; then
-                WAN_CARRIER=true
-            fi
-            [ -n "$WAN_SPEED_Mbps" ] || WAN_SPEED_Mbps=$(printf '%s\n' "$_et" | sed -n 's/.*Speed:[[:space:]]*\([0-9][0-9]*\)Mb\/s.*/\1/p' | head -1)
-            [ -n "$WAN_DUPLEX" ] || WAN_DUPLEX=$(printf '%s\n' "$_et" | sed -n 's/.*Duplex:[[:space:]]*\([A-Za-z][A-Za-z]*\).*/\L\1/p' | head -1)
-        fi
-    fi
-
-    WAN_SPEED_LABEL=$(wan_speed_label "$WAN_SPEED_Mbps")
-}
-
-get_wanwatch_mode() {
-    _m=notify
-    [ -f "$WANWATCH_CONF" ] && _m=$(sed -n 's/^MODE=//p' "$WANWATCH_CONF" 2>/dev/null | tail -1)
-    case "$_m" in auto|notify|off) ;; *) _m=notify ;; esac
-    printf '%s' "$_m"
-}
-
-get_wanwatch_num() { # $1 key $2 default
-    _v="$2"
-    if [ -f "$WANWATCH_CONF" ]; then
-        _raw=$(sed -n "s/^$1=//p" "$WANWATCH_CONF" 2>/dev/null | tail -1)
-        case "$_raw" in ''|*[!0-9]*) ;; *) _v=$_raw ;; esac
-    fi
-    printf '%s' "$_v"
-}
-
-wanwatch_auto_supported() {
-    [ "$PLATFORM" = "openwrt" ] && command -v ifdown >/dev/null 2>&1 && command -v ifup >/dev/null 2>&1
-}
-
-json_file_str() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
-json_file_num() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -1; }
-json_file_bool() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p" "$2" 2>/dev/null | head -1; }
-
-print_wan_link_json() {
-    read_wan_link
-    WAN_MODE=$(get_wanwatch_mode)
-    WAN_COOLDOWN_SECS=$(get_wanwatch_num COOLDOWN_SECS 1800)
-    WAN_WINDOW_SECS=$(get_wanwatch_num WINDOW_SECS 21600)
-    WAN_MAX_RESTARTS=$(get_wanwatch_num MAX_RESTARTS 3)
-    WAN_AUTO_SUPPORTED=false; wanwatch_auto_supported && WAN_AUTO_SUPPORTED=true
-    WAN_LAST_CHANGE=0
-    WAN_LAST_DEGRADED=0
-    WAN_LAST_RECOVERED=0
-    WAN_LAST_RESTART=0
-    WAN_LAST_SUPPRESSED=0
-    WAN_RESTART_COUNT=0
-    WAN_RESTART_WINDOW_START=0
-    WAN_LAST_RESTART_RESULT=""
-    WAN_STATE_DEGRADED=false
-    case "$WAN_SPEED_Mbps" in
-        ''|*[!0-9]*) ;;
-        *) [ "$WAN_CARRIER" = true ] && [ "$WAN_SPEED_Mbps" -lt 1000 ] && WAN_STATE_DEGRADED=true ;;
-    esac
-    if [ -f "$KEEPALIVE_STATE" ]; then
-        _b=$(json_file_bool degraded "$KEEPALIVE_STATE"); [ -n "$_b" ] && WAN_STATE_DEGRADED=$_b
-        WAN_LAST_CHANGE=$(json_file_num last_change "$KEEPALIVE_STATE")
-        WAN_LAST_DEGRADED=$(json_file_num last_degraded "$KEEPALIVE_STATE")
-        WAN_LAST_RECOVERED=$(json_file_num last_recovered "$KEEPALIVE_STATE")
-        WAN_LAST_RESTART=$(json_file_num last_restart "$KEEPALIVE_STATE")
-        WAN_LAST_SUPPRESSED=$(json_file_num last_suppressed "$KEEPALIVE_STATE")
-        WAN_RESTART_COUNT=$(json_file_num restart_count "$KEEPALIVE_STATE")
-        WAN_RESTART_WINDOW_START=$(json_file_num restart_window_start "$KEEPALIVE_STATE")
-        WAN_LAST_RESTART_RESULT=$(json_file_str last_restart_result "$KEEPALIVE_STATE")
-    fi
-    case "$WAN_LAST_CHANGE" in ''|*[!0-9]*) WAN_LAST_CHANGE=0 ;; esac
-    case "$WAN_LAST_DEGRADED" in ''|*[!0-9]*) WAN_LAST_DEGRADED=0 ;; esac
-    case "$WAN_LAST_RECOVERED" in ''|*[!0-9]*) WAN_LAST_RECOVERED=0 ;; esac
-    case "$WAN_LAST_RESTART" in ''|*[!0-9]*) WAN_LAST_RESTART=0 ;; esac
-    case "$WAN_LAST_SUPPRESSED" in ''|*[!0-9]*) WAN_LAST_SUPPRESSED=0 ;; esac
-    case "$WAN_RESTART_COUNT" in ''|*[!0-9]*) WAN_RESTART_COUNT=0 ;; esac
-    case "$WAN_RESTART_WINDOW_START" in ''|*[!0-9]*) WAN_RESTART_WINDOW_START=0 ;; esac
-    case "$WAN_SPEED_Mbps" in ''|*[!0-9]*) _wan_speed_json=null ;; *) _wan_speed_json=$WAN_SPEED_Mbps ;; esac
-    printf '{"device":%s,"carrier":%s,"speed_mbps":%s,"speed_label":%s,"duplex":%s,"restart_supported":%s,"auto_supported":%s,"mode":%s,"degraded":%s,"cooldown_secs":%s,"window_secs":%s,"max_restarts":%s,"last_change":%s,"last_degraded":%s,"last_recovered":%s,"last_restart":%s,"last_suppressed":%s,"restart_count":%s,"restart_window_start":%s,"last_restart_result":%s}' \
-        "$(json_str_or_null "$WAN_DEV")" "$WAN_CARRIER" "$_wan_speed_json" \
-        "$(json_str_or_null "$WAN_SPEED_LABEL")" "$(json_str_or_null "$WAN_DUPLEX")" "$WAN_RESTART_SUPPORTED" "$WAN_AUTO_SUPPORTED" \
-        "$(json_str_or_null "$WAN_MODE")" "$WAN_STATE_DEGRADED" "$WAN_COOLDOWN_SECS" "$WAN_WINDOW_SECS" "$WAN_MAX_RESTARTS" \
-        "$WAN_LAST_CHANGE" "$WAN_LAST_DEGRADED" "$WAN_LAST_RECOVERED" "$WAN_LAST_RESTART" "$WAN_LAST_SUPPRESSED" "$WAN_RESTART_COUNT" "$WAN_RESTART_WINDOW_START" "$(json_str_or_null "$WAN_LAST_RESTART_RESULT")"
 }
 
 # Sanitize profile name: only a-zA-Z0-9_- allowed, no path traversal
@@ -1828,7 +1690,6 @@ status)
         _PP=$(sed -n 's/.*server\.port[^0-9]*\([0-9][0-9]*\).*/\1/p' "$OPT/etc/lighttpd/detour.conf" 2>/dev/null | head -1)
         [ -n "$_PP" ] && PANEL_PORT="$_PP"
     fi
-    WAN_LINK_JSON=$(print_wan_link_json)
 
     cat <<EOF
 {
@@ -1884,8 +1745,7 @@ status)
     "disk_free": "${DISK_FREE}MB",
     "cpu": "$CPU_PCT",
     "cpu_cores": $CPU_CORES
-    },
-    "wan_link": $WAN_LINK_JSON
+  }
 }
 EOF
     ;;
@@ -3595,44 +3455,6 @@ offload_kick)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$OFFLOAD_BIN" ] || { json_err "not supported on this platform"; exit 0; }
     "$OFFLOAD_BIN" kick
-    ;;
-
-wan_restart)
-    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    [ "$PLATFORM" = "openwrt" ] || { json_err "restart WAN from the panel is not supported on this platform yet"; exit 0; }
-    command -v ifdown >/dev/null 2>&1 || { json_err "ifdown is not available"; exit 0; }
-    command -v ifup >/dev/null 2>&1 || { json_err "ifup is not available"; exit 0; }
-    ifdown wan >/dev/null 2>&1 || true
-    sleep 3
-    ifup wan >/dev/null 2>&1 || true
-    sleep 8
-    [ -x "$KEEPALIVE_BIN" ] && "$KEEPALIVE_BIN" >/dev/null 2>&1 || true
-    printf '{"ok":true,"wan_link":%s}' "$(print_wan_link_json)"
-    ;;
-
-wan_watch_status)
-    printf '{"ok":true,"wan_link":%s}' "$(print_wan_link_json)"
-    ;;
-
-wan_watch_set)
-    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    WMODE=$(printf '%s' "$POST_DATA" | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-    case "$WMODE" in auto|notify|off) ;; *) json_err "invalid mode"; exit 0 ;; esac
-    if [ "$WMODE" = auto ] && ! wanwatch_auto_supported; then
-        json_err "auto restart WAN is not supported on this platform yet"
-        exit 0
-    fi
-    mkdir -p "$DETOUR_DIR" 2>/dev/null
-    _cool=$(get_wanwatch_num COOLDOWN_SECS 1800)
-    _win=$(get_wanwatch_num WINDOW_SECS 21600)
-    _max=$(get_wanwatch_num MAX_RESTARTS 3)
-    cat > "$WANWATCH_CONF" <<EOF
-MODE=$WMODE
-COOLDOWN_SECS=$_cool
-WINDOW_SECS=$_win
-MAX_RESTARTS=$_max
-EOF
-    printf '{"ok":true,"wan_link":%s}' "$(print_wan_link_json)"
     ;;
 
 # ==================== SWAP FILE (Keenetic/Entware flash) ====================

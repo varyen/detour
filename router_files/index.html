@@ -2554,14 +2554,6 @@
               title="Keep-alive активного VPN"
               >🛰 VPN: ...</span
             >
-            <span
-              class="meter"
-              id="sys-wan"
-              title="Состояние WAN-порта"
-              onclick="openWanModal()"
-              style="cursor: pointer"
-              >🌐 WAN: ...</span
-            >
           </div>
           <button
             class="btn-update-cta"
@@ -2774,35 +2766,10 @@
                   HTTPS-сертификат
                 </button>
               </div>
-              <div id="hdr-network-group" style="display: none">
-                <div class="hdr-menu-sep"></div>
-                <div class="hdr-menu-title">Сеть</div>
-                <button
-                  class="hdr-menu-item"
-                  role="menuitem"
-                  id="hdr-wan-restart-btn"
-                  onclick="hdrMenuRun(openWanModal)"
-                  title="Состояние WAN-порта, авто-реакция на деградацию и ручной перезапуск WAN"
-                >
-                  <svg
-                    class="i"
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
-                    <path d="M21 3v5h-5" />
-                  </svg>
-                  <span id="hdr-wan-restart-label">WAN</span>
-                </button>
-              </div>
               <!-- Аппаратное ускорение (offload) — только QCA (home); показывается по offload_status.supported -->
               <div id="hdr-offload-group" style="display: none">
+                <div class="hdr-menu-sep"></div>
+                <div class="hdr-menu-title">Сеть</div>
                 <button
                   class="hdr-menu-item"
                   role="menuitem"
@@ -3205,9 +3172,9 @@
             </label>
             <div class="helper-text" style="margin-top: 2px">
               По умолчанию выключено: панель не ходит в GitHub в фоне. Включите,
-              чтобы раз в 6 ч проверять обновления панели и бинарников (sing-box,
-              zapret, zapret2) и подсвечивать зелёным чипы с доступным обновлением
-              — установка всё равно остаётся ручной.
+              чтобы раз в 6 ч проверять обновления панели и бинарников
+              (sing-box, zapret, zapret2) и подсвечивать зелёным чипы с
+              доступным обновлением — установка всё равно остаётся ручной.
             </div>
             <div
               id="upd-autocheck-status"
@@ -3492,9 +3459,9 @@
           >
             <p class="helper-text-block" style="color: var(--red)">
               Push-уведомления доступны только когда панель открыта по
-              <b>HTTPS</b> (например
-              <b>https://panel.example.com/detour/</b>). По адресу http://IP браузер
-              их не разрешает — откройте панель по защищённому домену.
+              <b>HTTPS</b> (например <b>https://panel.example.com/detour/</b>).
+              По адресу http://IP браузер их не разрешает — откройте панель по
+              защищённому домену.
             </p>
           </div>
 
@@ -3579,11 +3546,12 @@
             HTTPS-доступ к панели (Keenetic)
           </h3>
           <p class="helper-text-block">
-            Push-уведомления работают только когда панель открыта по <b>HTTPS</b>.
-            На Keenetic не нужен отдельный сертификат Let's Encrypt — проще
-            опубликовать панель через встроенный сервис <b>KeenDNS</b>: роутер сам
-            выдаёт и продлевает валидный сертификат, и панель открывается по адресу
-            вида <b>https://detour.<i>ваш-хост</i>.keenetic.pro/detour/</b>.
+            Push-уведомления работают только когда панель открыта по
+            <b>HTTPS</b>. На Keenetic не нужен отдельный сертификат Let's
+            Encrypt — проще опубликовать панель через встроенный сервис
+            <b>KeenDNS</b>: роутер сам выдаёт и продлевает валидный сертификат,
+            и панель открывается по адресу вида
+            <b>https://detour.<i>ваш-хост</i>.keenetic.pro/detour/</b>.
           </p>
 
           <div class="editor-section" style="margin-bottom: 14px">
@@ -3671,7 +3639,8 @@
             Выпустить сертификат Let's Encrypt для домена, A-запись которого
             указывает на этот роутер, чтобы открывать панель по HTTPS (это нужно
             для push-уведомлений). Проверка — HTTP-01: на время выпуска
-            <b>порт&nbsp;80 роутера должен быть доступен из интернета</b> по этому домену.
+            <b>порт&nbsp;80 роутера должен быть доступен из интернета</b> по
+            этому домену.
           </p>
 
           <div
@@ -3687,10 +3656,18 @@
             id="cert-warn"
             style="display: none; margin-bottom: 14px"
           >
-            <p class="helper-text-block" style="color: var(--red)" id="cert-warn-text"></p>
+            <p
+              class="helper-text-block"
+              style="color: var(--red)"
+              id="cert-warn-text"
+            ></p>
           </div>
 
-          <div class="editor-section" id="cert-main" style="margin-bottom: 14px">
+          <div
+            class="editor-section"
+            id="cert-main"
+            style="margin-bottom: 14px"
+          >
             <div class="form-grid">
               <div class="full">
                 <label for="cert-domain">Домен (A-запись → роутер)</label>
@@ -3714,7 +3691,11 @@
               </div>
             </div>
             <div class="flex-gap" style="margin-top: 12px">
-              <button class="btn primary" id="cert-issue-btn" onclick="issueCert()">
+              <button
+                class="btn primary"
+                id="cert-issue-btn"
+                onclick="issueCert()"
+              >
                 🔒 Получить сертификат
               </button>
             </div>
@@ -3762,9 +3743,9 @@
             Файл подкачки (SWAP)
           </h3>
           <p class="helper-text-block">
-            На Keenetic панель и её сервисы (sing-box, lighttpd, dnsmasq) живут на
-            USB-флешке, а оперативной памяти мало. Без файла подкачки стек под
-            нагрузкой убивается по нехватке памяти — панель «ведёт себя
+            На Keenetic панель и её сервисы (sing-box, lighttpd, dnsmasq) живут
+            на USB-флешке, а оперативной памяти мало. Без файла подкачки стек
+            под нагрузкой убивается по нехватке памяти — панель «ведёт себя
             нестабильно». Здесь можно создать SWAP-файл на флешке (он сам
             подключается при каждой загрузке) или удалить его.
           </p>
@@ -3789,7 +3770,11 @@
             ></p>
           </div>
 
-          <div class="editor-section" id="swap-main" style="margin-bottom: 14px">
+          <div
+            class="editor-section"
+            id="swap-main"
+            style="margin-bottom: 14px"
+          >
             <div class="form-grid">
               <div>
                 <label for="swap-size">Размер файла подкачки</label>
@@ -3834,71 +3819,6 @@
         </div>
       </div>
 
-      <!-- ===== WAN link / auto-restart ===== -->
-      <div
-        class="modal-overlay"
-        id="wan-modal"
-        style="display: none"
-        onclick="backdropClose(event, closeWanModal)"
-      >
-        <div class="modal" style="max-width: 560px">
-          <h3>
-            <svg
-              class="i"
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
-              <path d="M21 3v5h-5" />
-            </svg>
-            WAN-порт
-          </h3>
-          <p class="helper-text-block">
-            Здесь видно, с какой скоростью реально поднялся интернет-порт.
-            Если линк залип на <b>100 Мбит/с</b>, это режет и скорость VPN.
-            Можно либо только уведомлять, либо на OpenWrt автоматически
-            переподнимать WAN с защитой от флапов.
-          </p>
-          <div class="editor-section" style="margin-bottom: 14px">
-            <p class="helper-text-block" id="wan-current-text">Загрузка…</p>
-            <div class="form-row">
-              <label for="wan-watch-mode">При деградации WAN</label>
-              <select id="wan-watch-mode" onchange="setWanWatchMode()">
-                <option value="auto">Авто-перезапуск WAN (если поддерживается)</option>
-                <option value="notify">Только уведомлять (push)</option>
-                <option value="off">Выключено</option>
-              </select>
-            </div>
-            <div
-              id="wan-watch-note"
-              class="helper-text-block"
-              style="margin-top: 10px; font-size: 12px; color: var(--text-dim)"
-            ></div>
-            <button
-              class="btn"
-              id="wan-restart-btn"
-              onclick="restartWanLink()"
-              style="margin-top: 10px"
-            >
-              Перезапустить WAN сейчас
-            </button>
-            <div
-              id="wan-status"
-              style="font-size: 12px; color: var(--text-dim); margin-top: 8px; min-height: 16px"
-            ></div>
-          </div>
-          <div class="modal-footer">
-            <button class="btn" onclick="closeWanModal()">Закрыть</button>
-          </div>
-        </div>
-      </div>
-
       <!-- ===== Аппаратное ускорение (offload) — QCA / home ===== -->
       <div
         class="modal-overlay"
@@ -3926,8 +3846,9 @@
           <p class="helper-text-block">
             На этом роутере (QCA NSS/PPE) скорость LAN↔WAN держит аппаратный
             ускоритель. Иногда он «залипает» — форвардинг сваливается на CPU и
-            скорость падает до ~100 Мбит, обычно до перезагрузки. Watchdog ловит это
-            (всплеск softirq при простое прокси) и восстанавливает ускоритель
+            скорость падает до ~100 Мбит, обычно до перезагрузки. Watchdog ловит
+            это (всплеск softirq при простое прокси) и восстанавливает
+            ускоритель
             <b>без ребута</b>.
           </p>
           <div class="editor-section" style="margin-bottom: 14px">
@@ -3962,9 +3883,9 @@
             class="helper-text-block"
             style="color: var(--text-dim); font-size: 11px"
           >
-            Эффективность авто-kick подтверждается на реальном залипании — watchdog
-            зафиксирует результат. Крайняя мера, если kick не помог, — перезагрузка
-            роутера.
+            Эффективность авто-kick подтверждается на реальном залипании —
+            watchdog зафиксирует результат. Крайняя мера, если kick не помог, —
+            перезагрузка роутера.
           </p>
           <div class="modal-footer">
             <button class="btn" onclick="closeOffloadModal()">Закрыть</button>
@@ -4000,11 +3921,19 @@
               <span class="label">Пинг</span
               ><span class="value" id="sb-ping">—</span>
               <span class="label">Работает</span
-              ><span class="value" id="sb-health" title="функциональная проверка через VPN (раз в час)">—</span>
+              ><span
+                class="value"
+                id="sb-health"
+                title="функциональная проверка через VPN (раз в час)"
+                >—</span
+              >
               <span class="label">Скорость</span
-              ><span class="value" id="sb-speed" title="измеренная скорость скачивания активного VPN (раз в час)">—</span>
-              <span class="label">WAN</span
-              ><span class="value" id="sb-wan-speed" title="скорость WAN-порта, которая ограничивает максимальную скорость VPN">—</span>
+              ><span
+                class="value"
+                id="sb-speed"
+                title="измеренная скорость скачивания активного VPN (раз в час)"
+                >—</span
+              >
               <span class="label">Режим</span
               ><span class="value" id="sb-routing-mode">—</span>
               <span class="label">Записей</span
@@ -4332,9 +4261,9 @@
             <div id="domains-all-except-panel" style="display: none">
               <p class="helper-text-block">
                 Сайты-исключения: домены, <code>*.поддомены</code>, IP-адреса и
-                подсети из этого списка <strong>НЕ</strong> будут проксироваться.
-                Весь остальной трафик пойдёт через VPN. Комментарии через
-                <code>//</code> или <code>#</code>.
+                подсети из этого списка <strong>НЕ</strong> будут
+                проксироваться. Весь остальной трафик пойдёт через VPN.
+                Комментарии через <code>//</code> или <code>#</code>.
               </p>
               <textarea
                 class="domains"
@@ -4421,13 +4350,14 @@
             <p class="helper-text-block">
               Каждый блок ниже описывает отдельный маршрут: какой профиль должен
               забрать указанные домены / <code>*.поддомены</code> / IP / CIDR.
-              <strong>Строгий режим</strong> по умолчанию заставляет такой трафик
-              либо уйти через указанный маршрут, либо быть заблокированным.
-              Он не сваливается ни в текущий активный VPN/прокси, ни в прямой
-              выход при остановленном <code>sing-box</code>. Галка
+              <strong>Строгий режим</strong> по умолчанию заставляет такой
+              трафик либо уйти через указанный маршрут, либо быть
+              заблокированным. Он не сваливается ни в текущий активный
+              VPN/прокси, ни в прямой выход при остановленном
+              <code>sing-box</code>. Галка
               <strong>«Через активную цепочку»</strong> строит путь вида
-              <code>текущий VPN → route-прокси/VPN</code> вместо прямого выхода к
-              указанной цели.
+              <code>текущий VPN → route-прокси/VPN</code> вместо прямого выхода
+              к указанной цели.
             </p>
             <div class="flex-gap" style="margin-bottom: 8px">
               <select
@@ -4455,7 +4385,14 @@
                 background: var(--btn-hover, rgba(255, 255, 255, 0.02));
               "
             >
-              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+              <div
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 8px;
+                  flex-wrap: wrap;
+                "
+              >
                 <strong>🕵️ Умный перехват прокси</strong>
                 <span
                   id="intercept-mode-note"
@@ -4466,11 +4403,11 @@
                 Если устройство (например, браузер) жёстко прибито к тому же
                 SOCKS/HTTP-прокси, который здесь задан как цель маршрута, включи
                 перехват — роутер прозрачно применит к его трафику либо
-                маршрутизацию панели (<strong>Маршрут</strong>: домены маршрута →
-                через этот прокси, остальное → основной выход), либо сделает этот
-                proxy полноценным выходом для всего трафика
-                (<strong>Весь трафик</strong>). Работает только в режиме
-                <strong>«Один инстанс»</strong>.
+                маршрутизацию панели (<strong>Маршрут</strong>: домены маршрута
+                → через этот прокси, остальное → основной выход), либо сделает
+                этот proxy полноценным выходом для всего трафика (<strong
+                  >Весь трафик</strong
+                >). Работает только в режиме <strong>«Один инстанс»</strong>.
               </p>
               <div
                 id="intercept-list"
@@ -4521,21 +4458,44 @@
             <!-- Mirror Detour's logs into the system syslog (→ remote log server,
                  e.g. Keenetic «Отправлять логи на удалённый сервер»). Files still
                  written, so this viewer is unaffected — it only ADDS a syslog copy. -->
-            <div class="health-controls" id="syslog-controls" style="margin-top: 12px">
-              <label class="health-toggle" title="Дублировать логи Detour (health, cert, nfqws2, tpws) в системный syslog. Если в прошивке роутера включена отправка логов на удалённый сервер (Synology и т.п.) — туда полетят и логи Detour. Сами файлы логов остаются, просмотрщик выше работает как прежде.">
-                <input type="checkbox" id="syslog-enabled" onchange="saveLogConfig()" />
+            <div
+              class="health-controls"
+              id="syslog-controls"
+              style="margin-top: 12px"
+            >
+              <label
+                class="health-toggle"
+                title="Дублировать логи Detour (health, cert, nfqws2, tpws) в системный syslog. Если в прошивке роутера включена отправка логов на удалённый сервер (Synology и т.п.) — туда полетят и логи Detour. Сами файлы логов остаются, просмотрщик выше работает как прежде."
+              >
+                <input
+                  type="checkbox"
+                  id="syslog-enabled"
+                  onchange="saveLogConfig()"
+                />
                 Дублировать логи Detour в syslog
               </label>
-              <label class="health-toggle" title="Слать в syslog и подробный лог sing-box (самый объёмный — пишет про каждое соединение). Нужно для диагностики зависаний/утечки RAM на удалённом сервере. Без верхнего тумблера не действует.">
-                <input type="checkbox" id="syslog-singbox" onchange="saveLogConfig()" />
+              <label
+                class="health-toggle"
+                title="Слать в syslog и подробный лог sing-box (самый объёмный — пишет про каждое соединение). Нужно для диагностики зависаний/утечки RAM на удалённом сервере. Без верхнего тумблера не действует."
+              >
+                <input
+                  type="checkbox"
+                  id="syslog-singbox"
+                  onchange="saveLogConfig()"
+                />
                 Включать подробный лог sing-box
               </label>
             </div>
-            <p class="helper-text-block" id="syslog-help" style="margin-top: 6px">
-              Логи дублируются в системный журнал через <code>logger</code>. Файлы
-              логов при этом сохраняются — этот просмотрщик не меняется. Чтобы они
-              ушли на внешний сервер, включите отправку логов в самой прошивке
-              роутера. <strong>На Keenetic не проверено на «живом» железе</strong> —
+            <p
+              class="helper-text-block"
+              id="syslog-help"
+              style="margin-top: 6px"
+            >
+              Логи дублируются в системный журнал через <code>logger</code>.
+              Файлы логов при этом сохраняются — этот просмотрщик не меняется.
+              Чтобы они ушли на внешний сервер, включите отправку логов в самой
+              прошивке роутера.
+              <strong>На Keenetic не проверено на «живом» железе</strong> —
               убедитесь, что <code>logger</code> Entware попадает в пересылаемый
               журнал.
             </p>
@@ -4847,40 +4807,85 @@
           <!-- Functional health check: real fetch of target URLs THROUGH each VPN
                (raз в час). Catches "сервер пингуется, но YouTube/сайт не работает". -->
           <div class="health-controls" id="health-controls">
-            <button class="btn primary" id="health-check-all-btn" onclick="refreshHealthAll(this)">
+            <button
+              class="btn primary"
+              id="health-check-all-btn"
+              onclick="refreshHealthAll(this)"
+            >
               ⚕ Проверить работу всех
             </button>
-            <label class="health-toggle" title="Фоновая проверка работоспособности раз в час">
-              <input type="checkbox" id="health-enabled" onchange="saveHealthConfig()" />
+            <label
+              class="health-toggle"
+              title="Фоновая проверка работоспособности раз в час"
+            >
+              <input
+                type="checkbox"
+                id="health-enabled"
+                onchange="saveHealthConfig()"
+              />
               Проверять работу (раз в час)
             </label>
-            <label class="health-toggle" title="Если активный VPN не прошёл проверку — автоматически переключиться на ближайший рабочий профиль">
-              <input type="checkbox" id="health-autoswitch" onchange="saveHealthConfig()" />
+            <label
+              class="health-toggle"
+              title="Если активный VPN не прошёл проверку — автоматически переключиться на ближайший рабочий профиль"
+            >
+              <input
+                type="checkbox"
+                id="health-autoswitch"
+                onchange="saveHealthConfig()"
+              />
               Авто-переключение на рабочий
             </label>
-            <label class="health-toggle" title="Замерять реальную скорость скачивания у профилей, где в таблице включён значок ↓. Качает реальный трафик через VPN (объём — в селекторе справа). Кнопка ⚕ в строке профиля всё равно может сделать разовый замер вручную.">
-              <input type="checkbox" id="health-speed" onchange="saveHealthConfig()" />
+            <label
+              class="health-toggle"
+              title="Замерять реальную скорость скачивания у профилей, где в таблице включён значок ↓. Качает реальный трафик через VPN (объём — в селекторе справа). Кнопка ⚕ в строке профиля всё равно может сделать разовый замер вручную."
+            >
+              <input
+                type="checkbox"
+                id="health-speed"
+                onchange="saveHealthConfig()"
+              />
               Замер скорости
             </label>
-            <label class="health-toggle" id="health-speed-size-wrap" title="Размер файла, который скачивается через VPN при замере. Больше файл — точнее на быстрых каналах (маленький 8 МБ упирается в ~50–60 Мбит/с из-за TLS-рукопожатия и разгона TCP), но больше реального трафика через VPN за один замер.">
+            <label
+              class="health-toggle"
+              id="health-speed-size-wrap"
+              title="Размер файла, который скачивается через VPN при замере. Больше файл — точнее на быстрых каналах (маленький 8 МБ упирается в ~50–60 Мбит/с из-за TLS-рукопожатия и разгона TCP), но больше реального трафика через VPN за один замер."
+            >
               Объём замера:
               <select id="health-speed-size" onchange="saveHealthConfig()">
                 <option value="8000000">8 МБ — эконом (как сейчас)</option>
-                <option value="30000000">30 МБ — стандарт (≈ до 150 Мбит/с)</option>
-                <option value="75000000">75 МБ — точный (≈ до 350 Мбит/с)</option>
-                <option value="150000000">150 МБ — максимум (≈ до 600 Мбит/с)</option>
+                <option value="30000000">
+                  30 МБ — стандарт (≈ до 150 Мбит/с)
+                </option>
+                <option value="75000000">
+                  75 МБ — точный (≈ до 350 Мбит/с)
+                </option>
+                <option value="150000000">
+                  150 МБ — максимум (≈ до 600 Мбит/с)
+                </option>
               </select>
             </label>
-            <button class="btn" type="button" onclick="toggleHealthUrlsBox()" id="health-urls-toggle-btn">
+            <button
+              class="btn"
+              type="button"
+              onclick="toggleHealthUrlsBox()"
+              id="health-urls-toggle-btn"
+            >
               🎯 Цели проверки
             </button>
           </div>
-          <div class="health-switch-note" id="health-switch-note" style="display: none"></div>
+          <div
+            class="health-switch-note"
+            id="health-switch-note"
+            style="display: none"
+          ></div>
           <div id="health-urls-box" style="display: none">
             <p class="helper-text-block">
-              По одной цели на строку: <code>Название|https://адрес</code> (название
-              необязательно). Профиль считается «рабочим», только если открылись
-              ВСЕ цели. Пусто = значения по умолчанию (YouTube + видео-CDN + Google).
+              По одной цели на строку:
+              <code>Название|https://адрес</code> (название необязательно).
+              Профиль считается «рабочим», только если открылись ВСЕ цели. Пусто
+              = значения по умолчанию (YouTube + видео-CDN + Google).
             </p>
             <textarea
               id="health-urls-editor"
@@ -4888,7 +4893,9 @@
               placeholder="YouTube|https://www.youtube.com/generate_204&#10;YouTube видео|https://redirector.googlevideo.com/generate_204&#10;Google|https://www.google.com/generate_204"
             ></textarea>
             <div class="flex-gap">
-              <button class="btn primary" onclick="saveHealthUrls()">💾 Сохранить цели</button>
+              <button class="btn primary" onclick="saveHealthUrls()">
+                💾 Сохранить цели
+              </button>
             </div>
           </div>
           <div class="vpn-table-wrap">
@@ -4905,7 +4912,9 @@
                   >
                     Пинг<span class="vpn-sort-ind" data-sortind="ping"></span>
                   </th>
-                  <th title="Реальная проверка через VPN: открываются ли целевые сайты (раз в час)">
+                  <th
+                    title="Реальная проверка через VPN: открываются ли целевые сайты (раз в час)"
+                  >
                     Работает
                   </th>
                   <th
@@ -5189,8 +5198,8 @@
             Список всех VPN-профилей: массовый выбор, перенос между группами,
             удаление и отметка «участвует в авто-переключении» (чип
             <span class="row-tag as-on" style="padding: 1px 6px">✓ авто</span> у
-            строки). Выделите профили (Shift+клик — диапазон) и примените действие.
-            Фильтруйте по группе или ищите по имени.
+            строки). Выделите профили (Shift+клик — диапазон) и примените
+            действие. Фильтруйте по группе или ищите по имени.
           </div>
           <div class="bulk-toolbar">
             <label class="check-row">
@@ -5205,7 +5214,10 @@
             <span style="flex: 1"></span>
             <select
               id="bulk-group-filter"
-              onchange="bulkLastIndex=null;renderBulkProfilesList()"
+              onchange="
+                bulkLastIndex = null;
+                renderBulkProfilesList();
+              "
               style="
                 height: 30px;
                 padding: 0 10px;
@@ -5223,7 +5235,10 @@
               type="text"
               id="bulk-search"
               placeholder="🔍 поиск..."
-              oninput="bulkLastIndex=null;renderBulkProfilesList()"
+              oninput="
+                bulkLastIndex = null;
+                renderBulkProfilesList();
+              "
               style="
                 height: 30px;
                 padding: 0 10px;
@@ -5754,7 +5769,7 @@
         function (e) {
           __modalPressTarget = e.target;
         },
-        true
+        true,
       );
       // Called by every .modal-overlay's inline onclick. `closeFn` is that
       // modal's own close handler (kept per-modal so its cleanup/reset runs).
@@ -6752,7 +6767,6 @@
           document.getElementById("sb-enabled").textContent = d.singbox.enabled
             ? "Да"
             : "Нет";
-          renderWanLink(d.wan_link || {});
 
           // Protocol badge — reflect the ACTIVE outbound's type (egress profile),
           // not a hard-coded label. Hidden when there is no typed active profile.
@@ -7207,9 +7221,7 @@
         var ago = e.ts ? " · " + fmtPingAgo(e.ts) : "";
         var sp = fmtSpeed(e.dl);
         var title =
-          (parts.join(" · ") || "нет данных") +
-          (sp ? " · ↓ " + sp : "") +
-          ago;
+          (parts.join(" · ") || "нет данных") + (sp ? " · ↓ " + sp : "") + ago;
         if (e.ok && total > 0)
           return { cls: "health-good", text: "✓", title: title };
         if (pass > 0) return { cls: "health-bad", text: "✕", title: title };
@@ -7291,184 +7303,6 @@
           spEl.title = sp
             ? "измеренная скорость скачивания активного VPN"
             : "скорость ещё не измерена";
-        }
-      }
-      function renderWanLink(link) {
-        link = link || {};
-        var sp = document.getElementById("sb-wan-speed");
-        var meter = document.getElementById("sys-wan");
-        var speedTxt = link.speed_label || "—";
-        var warn = link.carrier === false ? "down" : link.degraded ? "warn" : "ok";
-        if (sp) {
-          sp.textContent = speedTxt;
-          var tip = "скорость WAN-порта";
-          if (link.device) tip += " (" + link.device + ")";
-          if (link.duplex) tip += " · " + link.duplex;
-          if (link.carrier === false) tip += " · линк не поднят";
-          sp.title = tip;
-          sp.style.color =
-            link.speed_mbps && link.speed_mbps < 1000
-              ? "var(--yellow)"
-              : link.carrier === false
-                ? "var(--red)"
-                : "";
-        }
-        if (meter) {
-          meter.textContent =
-            "🌐 WAN: " +
-            (link.carrier === false ? "down" : link.speed_label || "—");
-          meter.style.color =
-            warn === "down"
-              ? "var(--red, #f85149)"
-              : warn === "warn"
-                ? "var(--yellow)"
-                : "var(--green, #3fb950)";
-          meter.title =
-            "WAN-порт" +
-            (link.device ? " (" + link.device + ")" : "") +
-            ": " +
-            (link.carrier === false ? "линк не поднят" : link.speed_label || "—");
-        }
-        var group = document.getElementById("hdr-network-group");
-        if (group) group.style.display = "contents";
-        var label = document.getElementById("hdr-wan-restart-label");
-        if (label)
-          label.textContent = link.speed_label && link.speed_label !== "—"
-            ? "WAN (" + link.speed_label + ")"
-            : "WAN";
-        var btn = document.getElementById("hdr-wan-restart-btn");
-        if (btn) {
-          var title =
-            "Состояние WAN-порта, авто-реакция на деградацию и ручной перезапуск WAN";
-          if (link.device || link.speed_label)
-            title +=
-              "\nСейчас: " +
-              (link.device || "WAN") +
-              " · " +
-              (link.speed_label || "—");
-          btn.title = title;
-        }
-      }
-      async function openWanModal() {
-        document.getElementById("wan-modal").style.display = "flex";
-        document.getElementById("wan-status").textContent = "";
-        await wanRefresh();
-      }
-      function closeWanModal() {
-        document.getElementById("wan-modal").style.display = "none";
-      }
-      function fmtSecMin(sec) {
-        sec = parseInt(sec, 10);
-        if (!sec || isNaN(sec)) return "—";
-        if (sec < 60) return sec + " с";
-        if (sec < 3600) return Math.round(sec / 60) + " мин";
-        return Math.round(sec / 3600) + " ч";
-      }
-      async function wanRefresh() {
-        var curText = document.getElementById("wan-current-text");
-        var note = document.getElementById("wan-watch-note");
-        var restartBtn = document.getElementById("wan-restart-btn");
-        try {
-          var r = await api("wan_watch_status");
-          var d = r.wan_link || {};
-          renderWanLink(d);
-          var sel = document.getElementById("wan-watch-mode");
-          if (sel && d.mode) sel.value = d.mode;
-          if (sel) {
-            var autoOpt = sel.querySelector('option[value="auto"]');
-            if (autoOpt)
-              autoOpt.disabled = d.auto_supported === false;
-          }
-          if (restartBtn) restartBtn.disabled = d.restart_supported === false;
-          var parts = [];
-          parts.push((d.device || "WAN") + ": " + (d.carrier === false ? "линк не поднят" : d.speed_label || "—"));
-          if (d.duplex) parts.push(d.duplex);
-          if (d.degraded) parts.push("деградация");
-          if (d.last_restart_result) parts.push("посл. restart: " + d.last_restart_result);
-          curText.textContent = parts.join(" · ");
-          var notes = [];
-          notes.push(
-            "Режим: " +
-              (d.mode === "auto"
-                ? d.auto_supported === false
-                  ? "авто недоступен на этой платформе"
-                  : "авто-перезапуск"
-                : d.mode === "notify"
-                  ? "только уведомления"
-                  : "выключено"),
-          );
-          if (d.cooldown_secs) notes.push("cooldown " + fmtSecMin(d.cooldown_secs));
-          if (d.max_restarts && d.window_secs)
-            notes.push("не больше " + d.max_restarts + " restarts за " + fmtSecMin(d.window_secs));
-          if (d.restart_count && d.restart_window_start)
-            notes.push("в текущем окне попыток: " + d.restart_count);
-          if (d.last_degraded) notes.push("посл. просадка " + relTime(d.last_degraded));
-          if (d.last_recovered) notes.push("посл. восстановление " + relTime(d.last_recovered));
-          note.textContent = notes.join(" · ");
-        } catch (e) {
-          if (e.message !== "Not authenticated") curText.textContent = e.message || String(e);
-        }
-      }
-      async function setWanWatchMode() {
-        var mode = document.getElementById("wan-watch-mode").value;
-        var status = document.getElementById("wan-status");
-        status.textContent = "Сохранение…";
-        try {
-          var r = await api("wan_watch_set", "POST", JSON.stringify({ mode: mode }));
-          if (!r.ok) throw new Error(r.error || "Не удалось сохранить режим");
-          renderWanLink(r.wan_link || {});
-          status.textContent = "Сохранено.";
-          await wanRefresh();
-        } catch (e) {
-          status.innerHTML =
-            '<span style="color:var(--red)">' +
-            escapeHtml(e.message || String(e)) +
-            "</span>";
-        }
-      }
-      async function restartWanLink() {
-        if (
-          !confirm(
-            "Переподнять WAN?\n\nИнтернет и VPN отвалятся на 10–20 секунд, затем интерфейс поднимется заново.",
-          )
-        )
-          return;
-        var btn = document.getElementById("wan-restart-btn");
-        var label = document.getElementById("hdr-wan-restart-label");
-        var status = document.getElementById("wan-status");
-        var prev = btn ? btn.textContent : "";
-        if (btn) btn.disabled = true;
-        if (btn) btn.textContent = "Перезапускаю WAN…";
-        if (status) status.textContent = "Перезапускаю WAN…";
-        try {
-          toast("Переподнимаю WAN…", "success");
-          var d = await api("wan_restart", "POST");
-          if (!d.ok) throw new Error(d.error || "Не удалось переподнять WAN");
-          renderWanLink(d.wan_link || {});
-          if (status)
-            status.textContent =
-              "WAN поднят: " +
-              ((d.wan_link && d.wan_link.speed_label) || "готово");
-          toast(
-            "WAN поднят: " +
-              ((d.wan_link && d.wan_link.speed_label) || "готово"),
-            "success",
-          );
-          await loadStatus();
-          await wanRefresh();
-        } catch (e) {
-          if (e.message !== "Not authenticated")
-            toast("Ошибка: " + e.message, "error");
-          if (status)
-            status.innerHTML =
-              '<span style="color:var(--red)">' +
-              escapeHtml(e.message || String(e)) +
-              "</span>";
-        } finally {
-          if (btn) btn.disabled = false;
-          if (btn) btn.textContent = prev || "Перезапустить WAN сейчас";
-          if (label && (!label.textContent || label.textContent === "WAN"))
-            label.textContent = "WAN";
         }
       }
       function profileNameById(id) {
@@ -7570,7 +7404,12 @@
           var d = await api(
             "health_config",
             "POST",
-            JSON.stringify({ enabled: en, auto_switch: as, speed: sp, speed_bytes: sb }),
+            JSON.stringify({
+              enabled: en,
+              auto_switch: as,
+              speed: sp,
+              speed_bytes: sb,
+            }),
           );
           if (d && d.ok) {
             healthMeta.enabled = !!en;
@@ -7793,7 +7632,8 @@
             hb = healthResults[b.id];
           var da = ha && ha.dl > 0 ? ha.dl : -1;
           var db = hb && hb.dl > 0 ? hb.dl : -1;
-          if (da < 0 && db < 0) return (a.name || "").localeCompare(b.name || "");
+          if (da < 0 && db < 0)
+            return (a.name || "").localeCompare(b.name || "");
           if (da < 0) return 1;
           if (db < 0) return -1;
           if (da !== db) return (da - db) * dir;
@@ -7957,7 +7797,7 @@
           (asEligible
             ? "Участвует в авто-переключении · клик, чтобы исключить"
             : "Исключён из авто-переключения · клик, чтобы включить") +
-          "\" onclick=\"toggleAutoswitch('" +
+          '" onclick="toggleAutoswitch(\'' +
           escapeHtml(p.id) +
           "', this)\">" +
           autoswitchIconSvg() +
@@ -7968,7 +7808,7 @@
           (spEligible
             ? "Участвует в фоновых замерах скорости · клик, чтобы исключить"
             : "Исключён из фоновых замеров скорости · клик, чтобы включить") +
-          "\" onclick=\"toggleSpeedcheck('" +
+          '" onclick="toggleSpeedcheck(\'' +
           escapeHtml(p.id) +
           "', this)\">" +
           speedcheckIconSvg() +
@@ -7980,7 +7820,7 @@
           "</button>" +
           '<button class="vpn-refresh-btn vpn-health-btn" title="Проверить работу через VPN" onclick="refreshOneHealth(\'' +
           escapeHtml(p.id) +
-          "', this)\"><span class=\"health-glyph\">⚕</span></button>" +
+          '\', this)"><span class="health-glyph">⚕</span></button>' +
           (isActive
             ? '<button type="button" class="vpn-toggle on" role="switch" aria-checked="true" title="Активный профиль"></button>'
             : '<button type="button" class="vpn-toggle" role="switch" aria-checked="false" title="Сделать активным" onclick="activateProfileById(\'' +
@@ -9488,7 +9328,9 @@
         status.textContent = "Запрос разрешения…";
         var cfg = await api("push_config");
         if (!cfg.available || !cfg.vapid_public) {
-          throw new Error("Push недоступен на роутере (нет openssl/ключа VAPID)");
+          throw new Error(
+            "Push недоступен на роутере (нет openssl/ключа VAPID)",
+          );
         }
         var reg = await navigator.serviceWorker.register(PUSH_SW_URL, {
           scope: PUSH_SCOPE,
@@ -9511,7 +9353,8 @@
           });
         }
         var resp = await api("push_subscribe", "POST", JSON.stringify(sub));
-        if (!resp.ok) throw new Error(resp.error || "Не удалось сохранить подписку");
+        if (!resp.ok)
+          throw new Error(resp.error || "Не удалось сохранить подписку");
         toast("Push включён для этого браузера", "success");
       }
 
@@ -9630,7 +9473,9 @@
           }
           var note = [];
           if (!d.acme_present)
-            note.push("acme.sh будет установлен автоматически при первом выпуске.");
+            note.push(
+              "acme.sh будет установлен автоматически при первом выпуске.",
+            );
           if (d.wan_ip)
             note.push(
               "Порт 80 (WAN " +
@@ -9638,12 +9483,16 @@
                 ") должен быть доступен из интернета по вашему домену.",
             );
           document.getElementById("cert-status").innerHTML = note.length
-            ? '<span style="color:var(--text-dim)">' + note.join(" ") + "</span>"
+            ? '<span style="color:var(--text-dim)">' +
+              note.join(" ") +
+              "</span>"
             : "";
         } catch (e) {
           if (e.message !== "Not authenticated")
             document.getElementById("cert-status").innerHTML =
-              '<span style="color:var(--red)">' + escapeHtml(e.message || e) + "</span>";
+              '<span style="color:var(--red)">' +
+              escapeHtml(e.message || e) +
+              "</span>";
         }
       }
 
@@ -9653,11 +9502,13 @@
         var btn = document.getElementById("cert-issue-btn");
         var status = document.getElementById("cert-status");
         if (!/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
-          status.innerHTML = '<span style="color:var(--red)">Введите корректный домен</span>';
+          status.innerHTML =
+            '<span style="color:var(--red)">Введите корректный домен</span>';
           return;
         }
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-          status.innerHTML = '<span style="color:var(--red)">Введите корректный email</span>';
+          status.innerHTML =
+            '<span style="color:var(--red)">Введите корректный email</span>';
           return;
         }
         btn.disabled = true;
@@ -9682,7 +9533,9 @@
           btn.disabled = false;
           if (e.message !== "Not authenticated")
             status.innerHTML =
-              '<span style="color:var(--red)">' + escapeHtml(e.message || e) + "</span>";
+              '<span style="color:var(--red)">' +
+              escapeHtml(e.message || e) +
+              "</span>";
         }
       }
 
@@ -9919,10 +9772,7 @@
       }
 
       async function createSwap() {
-        var size = parseInt(
-          document.getElementById("swap-size").value,
-          10,
-        );
+        var size = parseInt(document.getElementById("swap-size").value, 10);
         var btn = document.getElementById("swap-create-btn");
         var rmBtn = document.getElementById("swap-remove-btn");
         var status = document.getElementById("swap-status");
@@ -12565,7 +12415,10 @@
       }
       async function clearSingboxLog() {
         if (!confirm("Очистить выбранный лог?")) return;
-        await api("logs_clear&name=" + encodeURIComponent(currentLogName), "POST");
+        await api(
+          "logs_clear&name=" + encodeURIComponent(currentLogName),
+          "POST",
+        );
         toast("Лог очищен", "success");
         loadSingboxLog();
       }
@@ -13011,7 +12864,9 @@
           .replace(/\r/g, "")
           .split("\n")
           .forEach(function (line) {
-            var header = line.match(/^\s*\/\/\s*===\s*route:\s*([A-Za-z0-9_-]+)\s*===\s*$/);
+            var header = line.match(
+              /^\s*\/\/\s*===\s*route:\s*([A-Za-z0-9_-]+)\s*===\s*$/,
+            );
             if (header) {
               var id = header[1];
               if (byId.has(id)) {
@@ -13044,11 +12899,14 @@
           .map(function (rule) {
             var id = makeProfileId(rule.id || "");
             if (!id) return "";
-            var body = String(rule.text || "").replace(/\r/g, "").trim();
+            var body = String(rule.text || "")
+              .replace(/\r/g, "")
+              .trim();
             if (!body) return "";
             return [
               "// === route:" + id + " ===",
-              "// meta: strict=" + (rule.strict ? "1" : "0") +
+              "// meta: strict=" +
+                (rule.strict ? "1" : "0") +
                 " via_chain=" +
                 (rule.viaChain ? "1" : "0"),
               body,
@@ -13060,7 +12918,12 @@
 
       function routeRuleProfileOptions(select, selectedId) {
         select.innerHTML = "";
-        if (selectedId && !currentProfiles.some(function (p) { return p.id === selectedId; })) {
+        if (
+          selectedId &&
+          !currentProfiles.some(function (p) {
+            return p.id === selectedId;
+          })
+        ) {
           var missing = document.createElement("option");
           missing.value = selectedId;
           missing.textContent = selectedId + " (профиль не найден)";
@@ -13125,7 +12988,8 @@
             "display:flex;flex-direction:column;gap:6px;font-size:13px;";
 
           var strictLabel = document.createElement("label");
-          strictLabel.style.cssText = "display:flex;align-items:flex-start;gap:8px;cursor:pointer;";
+          strictLabel.style.cssText =
+            "display:flex;align-items:flex-start;gap:8px;cursor:pointer;";
           var strict = document.createElement("input");
           strict.type = "checkbox";
           strict.checked = !!rule.strict;
@@ -13139,7 +13003,8 @@
           strictLabel.appendChild(strictText);
 
           var chainLabel = document.createElement("label");
-          chainLabel.style.cssText = "display:flex;align-items:flex-start;gap:8px;cursor:pointer;";
+          chainLabel.style.cssText =
+            "display:flex;align-items:flex-start;gap:8px;cursor:pointer;";
           var chain = document.createElement("input");
           chain.type = "checkbox";
           chain.checked = !!rule.viaChain;
@@ -13158,7 +13023,8 @@
           var textarea = document.createElement("textarea");
           textarea.className = "domains";
           textarea.spellcheck = false;
-          textarea.placeholder = "claude.ai\napi.anthropic.com\n160.79.104.0/21";
+          textarea.placeholder =
+            "claude.ai\napi.anthropic.com\n160.79.104.0/21";
           textarea.value = rule.text || "";
           textarea.oninput = function () {
             rule.text = textarea.value;
@@ -13242,7 +13108,8 @@
             cb.onchange = saveIntercept;
             var span = document.createElement("span");
             span.textContent =
-              (p ? p.name || p.id : id) + (p && p.type ? " (" + p.type + ")" : "");
+              (p ? p.name || p.id : id) +
+              (p && p.type ? " (" + p.type + ")" : "");
             label.appendChild(cb);
             label.appendChild(span);
             var mode = document.createElement("select");
@@ -13301,10 +13168,15 @@
 
       async function saveRouteMap() {
         var invalid = routeRules.find(function (rule) {
-          return !makeProfileId(rule.id || "") || !String(rule.text || "").trim();
+          return (
+            !makeProfileId(rule.id || "") || !String(rule.text || "").trim()
+          );
         });
         if (invalid) {
-          toast("У каждого маршрута должен быть профиль и хотя бы один хост/IP", "error");
+          toast(
+            "У каждого маршрута должен быть профиль и хотя бы один хост/IP",
+            "error",
+          );
           return;
         }
         var text = serializeRouteMapSections();
@@ -13348,21 +13220,16 @@
         var detail = document.getElementById("ka-detail");
         var unknown = !d || d.ok === null || typeof d.ok === "undefined";
         var ok = d && d.ok === true;
-        var wan = (d && d.wan) || null;
-        var wanDegraded = !!(wan && wan.degraded);
         if (meter) {
           meter.textContent = unknown
             ? "🛰 VPN: ?"
             : (ok ? "🛰 VPN: ✓ " : "🛰 VPN: ✗ ") +
               relTime(ok ? d.last_ok : d.last_checked);
-          if (!unknown && wanDegraded) meter.textContent += " · WAN " + (wan.speed_label || "?");
           meter.style.color = unknown
             ? ""
-            : !ok
-              ? "var(--red, #f85149)"
-              : wanDegraded
-                ? "var(--yellow)"
-                : "var(--green, #3fb950)";
+            : ok
+              ? "var(--green, #3fb950)"
+              : "var(--red, #f85149)";
         }
         if (dot)
           dot.className =
@@ -13371,9 +13238,7 @@
           txt.textContent = unknown
             ? "нет данных"
             : ok
-              ? wanDegraded
-                ? "активен, WAN просел"
-                : "активен"
+              ? "активен"
               : "недоступен";
         if (detail && d) {
           var parts = [];
@@ -13382,15 +13247,6 @@
           if (d.last_checked) parts.push("проверка " + relTime(d.last_checked));
           if (d.last_ok) parts.push("посл. успех " + relTime(d.last_ok));
           if (d.method) parts.push(d.method);
-          if (wan && (wan.device || wan.speed_label)) {
-            parts.push(
-              "WAN " +
-                (wan.device || "?") +
-                " " +
-                (wan.speed_label || "unknown") +
-                (wanDegraded ? " ⚠" : ""),
-            );
-          }
           detail.textContent = parts.join(" · ");
         }
       }
@@ -13427,7 +13283,12 @@
         // CPU — the always-visible load indicator on the chip + a popover row.
         var raw = sys.cpu;
         var pct = parseInt(raw, 10);
-        var has = !(raw === undefined || raw === null || raw === "" || isNaN(pct));
+        var has = !(
+          raw === undefined ||
+          raw === null ||
+          raw === "" ||
+          isNaN(pct)
+        );
         var cpuTxt = has ? pct + "%" : "—";
         var cpuColor = !has
           ? ""
@@ -13901,7 +13762,9 @@
       // zapret2 is supported only on OpenWrt with NFQUEUE (the CGI reports this as
       // binaries.nfqws2_supported; false on Keenetic / mipsel — no feed there).
       function zapret2Supported(b) {
-        return currentPlatform !== "keenetic" && (b || {}).nfqws2_supported !== false;
+        return (
+          currentPlatform !== "keenetic" && (b || {}).nfqws2_supported !== false
+        );
       }
 
       // Render one engine chip: version when installed, «н/д» when unsupported,
@@ -13935,13 +13798,15 @@
       function renderBinariesChip(b) {
         lastBinaries = b || null;
         if (!b) {
-          ["bins-version", "chip-zapret", "chip-zapret2"].forEach(function (id) {
-            var el = document.getElementById(id);
-            if (el) {
-              el.textContent = "";
-              el.classList.remove("chip-na", "has-update", "has-upstream");
-            }
-          });
+          ["bins-version", "chip-zapret", "chip-zapret2"].forEach(
+            function (id) {
+              var el = document.getElementById(id);
+              if (el) {
+                el.textContent = "";
+                el.classList.remove("chip-na", "has-update", "has-upstream");
+              }
+            },
+          );
           return;
         }
         renderEngineChip("singbox", b);
@@ -13994,7 +13859,9 @@
             "Последняя на GitHub: <strong>v" +
             escapeHtml(up) +
             "</strong>" +
-            (feedHas ? " — доступна в фиде, можно установить." : " — актуально.");
+            (feedHas
+              ? " — доступна в фиде, можно установить."
+              : " — актуально.");
         }
       }
 
@@ -14012,7 +13879,11 @@
         var present = !!b[cfg.presentKey];
         var ver = present ? b[cfg.verKey] || "?" : "не установлен";
         document.getElementById("bins-modal-desc").innerHTML =
-          "<strong>" + escapeHtml(cfg.label) + ":</strong> " + escapeHtml(ver) + ".";
+          "<strong>" +
+          escapeHtml(cfg.label) +
+          ":</strong> " +
+          escapeHtml(ver) +
+          ".";
 
         // Link to the upstream project on GitHub (sing-box / zapret / zapret2).
         var repoLink = document.getElementById("bins-modal-repo");
@@ -14064,7 +13935,8 @@
         // shown. zapret2 stays OpenWrt-only (handled above).
         feedSec.style.display = "block";
         document.getElementById("bins-feed-desc").innerHTML = cfg.feedDesc;
-        document.getElementById("bins-modal-apply-btn").textContent = cfg.applyLabel;
+        document.getElementById("bins-modal-apply-btn").textContent =
+          cfg.applyLabel;
       }
 
       // Check the feed for a newer version of the modal's current engine.
@@ -14120,7 +13992,8 @@
           var d = await api(cfg.applyAction, "POST", "");
           if (!d || !d.ok) {
             el.textContent =
-              "Ошибка: " + ((d && d.error) || "не удалось запустить обновление");
+              "Ошибка: " +
+              ((d && d.error) || "не удалось запустить обновление");
             if (btn) btn.disabled = false;
             return;
           }
@@ -14135,7 +14008,8 @@
               el.textContent =
                 "Долго нет ответа — см. лог; при необходимости обновите страницу.";
             } else {
-              el.textContent = "Ошибка обновления (код " + rc + ") — см. лог ниже.";
+              el.textContent =
+                "Ошибка обновления (код " + rc + ") — см. лог ниже.";
             }
             if (btn) btn.disabled = false;
           });
@@ -14237,7 +14111,8 @@
           var d = await api("singbox_opkg_upgrade", "POST", "");
           if (!d || !d.ok) {
             el.textContent =
-              "Ошибка: " + ((d && d.error) || "не удалось запустить обновление");
+              "Ошибка: " +
+              ((d && d.error) || "не удалось запустить обновление");
             btn.disabled = false;
             return;
           }
@@ -14252,7 +14127,8 @@
               el.textContent =
                 "Долго нет ответа — см. лог; при необходимости обновите страницу.";
             } else {
-              el.textContent = "Ошибка обновления (код " + rc + ") — см. лог ниже.";
+              el.textContent =
+                "Ошибка обновления (код " + rc + ") — см. лог ниже.";
             }
             btn.disabled = false;
           });
@@ -14334,7 +14210,9 @@
           z2btn.disabled = !sup;
           z2btn.style.opacity = sup ? "" : "0.5";
           z2btn.style.cursor = sup ? "" : "not-allowed";
-          z2btn.title = sup ? "" : "Недоступно: нужен NFQUEUE (нет на KeeneticOS)";
+          z2btn.title = sup
+            ? ""
+            : "Недоступно: нужен NFQUEUE (нет на KeeneticOS)";
         }
         var ab = document.getElementById("bypass-autostart");
         if (ab) ab.checked = b.autostart == 1 || b.autostart === true;
@@ -14457,7 +14335,8 @@
       function resetDpiConfig() {
         var ta = document.getElementById("dpi-config");
         if (ta)
-          ta.value = dpiMode === "zapret" ? TPWS_DEFAULT_ARGS : Z2_DEFAULT_STRATEGY;
+          ta.value =
+            dpiMode === "zapret" ? TPWS_DEFAULT_ARGS : Z2_DEFAULT_STRATEGY;
       }
       // Apply (select + start) an engine, then refresh. Shared by the selector,
       // Старт and Рестарт.
@@ -14616,8 +14495,12 @@
         window._statusInterval = setInterval(loadStatus, 10000);
         // Re-poll the cached update overview so chips reflect the 6h check-all
         // cron (panel + sing-box + zapret + zapret2) without a page reload.
-        if (window._updIndicatorInterval) clearInterval(window._updIndicatorInterval);
-        window._updIndicatorInterval = setInterval(refreshUpdateIndicator, 300000);
+        if (window._updIndicatorInterval)
+          clearInterval(window._updIndicatorInterval);
+        window._updIndicatorInterval = setInterval(
+          refreshUpdateIndicator,
+          300000,
+        );
       }
       init();
     </script>
