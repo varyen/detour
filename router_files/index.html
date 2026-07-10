@@ -4313,27 +4313,62 @@
             </div>
 
             <p class="helper-text-block">
-              Правила: выбери профиль, нажми «Добавить секцию», затем впиши
-              домены / <code>*.поддомены</code> / IP / CIDR (по одному на строку)
-              — как в обычном списке доменов. Каждая секция начинается заголовком
-              <code>// === route:ID ===</code>. Хосты из правил автоматически
-              попадают в проксируемый набор.
+              Каждый блок ниже описывает отдельный маршрут: какой профиль должен
+              забрать указанные домены / <code>*.поддомены</code> / IP / CIDR.
+              <strong>Строгий режим</strong> по умолчанию заставляет такой трафик
+              либо уйти через указанный маршрут, либо быть заблокированным.
+              Он не сваливается ни в текущий активный VPN/прокси, ни в прямой
+              выход при остановленном <code>sing-box</code>. Галка
+              <strong>«Через активную цепочку»</strong> строит путь вида
+              <code>текущий VPN → route-прокси/VPN</code> вместо прямого выхода к
+              указанной цели.
             </p>
             <div class="flex-gap" style="margin-bottom: 8px">
               <select
                 id="route-profile-select"
                 style="min-width: 220px"
               ></select>
-              <button class="btn" onclick="insertRouteSection()">
-                + Добавить секцию профиля
+              <button class="btn" onclick="addRouteRule()">
+                + Добавить маршрут
               </button>
             </div>
-            <textarea
-              class="domains"
-              id="route-map-editor"
-              spellcheck="false"
-              placeholder="// === route:profile_id ===&#10;youtube.com&#10;googlevideo.com&#10;1.2.3.0/24&#10;&#10;// === route:other_profile ===&#10;netflix.com"
-            ></textarea>
+            <div
+              id="route-rules-list"
+              style="display: flex; flex-direction: column; gap: 12px"
+            ></div>
+
+            <!-- Smart intercept: take over a client hard-pinned to the panel's OWN
+                 SOCKS/HTTP proxy so it gets the panel's split-routing, not a double-wrap. -->
+            <div
+              id="intercept-panel"
+              style="
+                margin-top: 16px;
+                padding: 12px;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                background: var(--btn-hover, rgba(255, 255, 255, 0.02));
+              "
+            >
+              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+                <strong>🕵️ Умный перехват прокси</strong>
+                <span
+                  id="intercept-mode-note"
+                  style="font-size: 12px; color: var(--text-dim)"
+                ></span>
+              </div>
+              <p class="helper-text-block" style="margin: 8px 0">
+                Если устройство (например, браузер) жёстко прибито к тому же
+                SOCKS/HTTP-прокси, который здесь задан как цель маршрута, включи
+                перехват — роутер прозрачно применит к его трафику маршрутизацию
+                панели (домены маршрута → через этот прокси, остальное → основной
+                выход), без сломанной двойной обёртки. Работает только в режиме
+                <strong>«Один инстанс»</strong>.
+              </p>
+              <div
+                id="intercept-list"
+                style="display: flex; flex-direction: column; gap: 6px"
+              ></div>
+            </div>
           </div>
         </div>
 
@@ -12539,6 +12574,7 @@
 
       // ===== PER-PROFILE ROUTING =====
       var currentSingboxMode = "single";
+      var routeRules = [];
 
       function updateSingboxModeUI(mode) {
         var s = document.getElementById("sbmode-single");
@@ -12602,35 +12638,313 @@
           o.textContent = (p.name || p.id) + " (" + (p.type || "?") + ")";
           sel.appendChild(o);
         });
+        renderRouteRules();
       }
 
-      function insertRouteSection() {
+      function createEmptyRouteRule(profileId) {
+        return {
+          id: profileId || "",
+          strict: true,
+          viaChain: false,
+          text: "",
+        };
+      }
+
+      function parseRouteMeta(metaText, rule) {
+        String(metaText || "")
+          .split(/\s+/)
+          .forEach(function (part) {
+            if (!part) return;
+            var pieces = part.split("=");
+            if (pieces.length !== 2) return;
+            var key = pieces[0];
+            var value = pieces[1];
+            var enabled = /^(1|true|yes|on)$/i.test(value);
+            if (key === "strict") rule.strict = enabled;
+            if (key === "via_chain") rule.viaChain = enabled;
+          });
+      }
+
+      function parseRouteMapSections(text) {
+        var rules = [];
+        var byId = new Map();
+        var current = null;
+        String(text || "")
+          .replace(/\r/g, "")
+          .split("\n")
+          .forEach(function (line) {
+            var header = line.match(/^\s*\/\/\s*===\s*route:\s*([A-Za-z0-9_-]+)\s*===\s*$/);
+            if (header) {
+              var id = header[1];
+              if (byId.has(id)) {
+                current = byId.get(id);
+              } else {
+                current = createEmptyRouteRule(id);
+                current._lines = [];
+                rules.push(current);
+                byId.set(id, current);
+              }
+              return;
+            }
+            if (!current) return;
+            var meta = line.match(/^\s*\/\/\s*meta:\s*(.*?)\s*$/);
+            if (meta) {
+              parseRouteMeta(meta[1], current);
+              return;
+            }
+            current._lines.push(line);
+          });
+        rules.forEach(function (rule) {
+          rule.text = (rule._lines || []).join("\n").replace(/^\n+|\n+$/g, "");
+          delete rule._lines;
+        });
+        return rules;
+      }
+
+      function serializeRouteMapSections() {
+        return routeRules
+          .map(function (rule) {
+            var id = makeProfileId(rule.id || "");
+            if (!id) return "";
+            var body = String(rule.text || "").replace(/\r/g, "").trim();
+            if (!body) return "";
+            return [
+              "// === route:" + id + " ===",
+              "// meta: strict=" + (rule.strict ? "1" : "0") +
+                " via_chain=" +
+                (rule.viaChain ? "1" : "0"),
+              body,
+            ].join("\n");
+          })
+          .filter(Boolean)
+          .join("\n\n");
+      }
+
+      function routeRuleProfileOptions(select, selectedId) {
+        select.innerHTML = "";
+        if (selectedId && !currentProfiles.some(function (p) { return p.id === selectedId; })) {
+          var missing = document.createElement("option");
+          missing.value = selectedId;
+          missing.textContent = selectedId + " (профиль не найден)";
+          select.appendChild(missing);
+        }
+        currentProfiles.forEach(function (p) {
+          var option = document.createElement("option");
+          option.value = p.id;
+          option.textContent = (p.name || p.id) + " (" + (p.type || "?") + ")";
+          select.appendChild(option);
+        });
+        select.value = selectedId || "";
+      }
+
+      function renderRouteRules() {
+        var list = document.getElementById("route-rules-list");
+        if (!list) return;
+        if (!routeRules.length) {
+          list.innerHTML =
+            '<div style="padding:12px;border:1px dashed var(--border);border-radius:10px;color:var(--text-dim);">Маршрутов пока нет. Добавь отдельный блок для каждого proxy/VPN-назначения.</div>';
+          return;
+        }
+        list.innerHTML = "";
+        routeRules.forEach(function (rule, index) {
+          var card = document.createElement("div");
+          card.style.cssText =
+            "padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-elev-solid);display:flex;flex-direction:column;gap:10px;";
+
+          var header = document.createElement("div");
+          header.style.cssText =
+            "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+
+          var select = document.createElement("select");
+          select.style.minWidth = "260px";
+          routeRuleProfileOptions(select, rule.id);
+          select.onchange = function () {
+            var nextId = select.value;
+            var duplicate = routeRules.some(function (item, itemIndex) {
+              return itemIndex !== index && item.id === nextId;
+            });
+            if (duplicate) {
+              toast("Для этого профиля уже есть отдельный маршрут", "error");
+              select.value = rule.id;
+              return;
+            }
+            rule.id = nextId;
+          };
+
+          var removeBtn = document.createElement("button");
+          removeBtn.className = "btn danger";
+          removeBtn.textContent = "Удалить";
+          removeBtn.onclick = function () {
+            routeRules.splice(index, 1);
+            renderRouteRules();
+          };
+
+          header.appendChild(select);
+          header.appendChild(removeBtn);
+
+          var toggles = document.createElement("div");
+          toggles.style.cssText =
+            "display:flex;flex-direction:column;gap:6px;font-size:13px;";
+
+          var strictLabel = document.createElement("label");
+          strictLabel.style.cssText = "display:flex;align-items:flex-start;gap:8px;cursor:pointer;";
+          var strict = document.createElement("input");
+          strict.type = "checkbox";
+          strict.checked = !!rule.strict;
+          strict.onchange = function () {
+            rule.strict = strict.checked;
+          };
+          var strictText = document.createElement("span");
+          strictText.textContent =
+            "Строгий режим: этот трафик либо уходит через указанный маршрут, либо блокируется. Никогда не падает ни в активный VPN/прокси, ни в прямой выход";
+          strictLabel.appendChild(strict);
+          strictLabel.appendChild(strictText);
+
+          var chainLabel = document.createElement("label");
+          chainLabel.style.cssText = "display:flex;align-items:flex-start;gap:8px;cursor:pointer;";
+          var chain = document.createElement("input");
+          chain.type = "checkbox";
+          chain.checked = !!rule.viaChain;
+          chain.onchange = function () {
+            rule.viaChain = chain.checked;
+          };
+          var chainText = document.createElement("span");
+          chainText.textContent =
+            "Через активную цепочку: сначала текущий VPN/прокси, затем выбранный маршрутный VPN/прокси";
+          chainLabel.appendChild(chain);
+          chainLabel.appendChild(chainText);
+
+          toggles.appendChild(strictLabel);
+          toggles.appendChild(chainLabel);
+
+          var textarea = document.createElement("textarea");
+          textarea.className = "domains";
+          textarea.spellcheck = false;
+          textarea.placeholder = "claude.ai\napi.anthropic.com\n160.79.104.0/21";
+          textarea.value = rule.text || "";
+          textarea.oninput = function () {
+            rule.text = textarea.value;
+          };
+
+          card.appendChild(header);
+          card.appendChild(toggles);
+          card.appendChild(textarea);
+          list.appendChild(card);
+        });
+      }
+
+      function addRouteRule() {
         var sel = document.getElementById("route-profile-select");
-        var ed = document.getElementById("route-map-editor");
-        if (!sel || !ed || !sel.value) return;
-        var header = "// === route:" + sel.value + " ===\n";
-        var v = ed.value;
-        if (v.length && v[v.length - 1] !== "\n") v += "\n";
-        if (v.length) v += "\n";
-        ed.value = v + header;
-        ed.focus();
-        ed.selectionStart = ed.selectionEnd = ed.value.length;
-        ed.scrollTop = ed.scrollHeight;
+        if (!sel || !sel.value) {
+          toast("Сначала добавь хотя бы один профиль", "error");
+          return;
+        }
+        if (
+          routeRules.some(function (rule) {
+            return rule.id === sel.value;
+          })
+        ) {
+          toast("Для этого профиля маршрут уже существует", "info");
+          return;
+        }
+        routeRules.push(createEmptyRouteRule(sel.value));
+        renderRouteRules();
       }
 
       async function loadRouteMap() {
         try {
           var d = await api("route_map");
-          document.getElementById("route-map-editor").value = d.routemap || "";
+          routeRules = parseRouteMapSections(d.routemap || "");
         } catch (e) {
           if (e.message !== "Not authenticated")
             toast("Ошибка загрузки маршрутов", "error");
         }
         renderRouteProfileSelect();
+        renderRouteRules();
+        loadIntercept();
+      }
+
+      // ===== SMART INTERCEPT (self-proxy takeover) =====
+      async function loadIntercept() {
+        var list = document.getElementById("intercept-list");
+        var note = document.getElementById("intercept-mode-note");
+        if (!list) return;
+        try {
+          var d = await api("self_intercept");
+          var elig = d.eligible || [];
+          var sel = d.targets || [];
+          var single = d.mode === "single";
+          if (note)
+            note.textContent = single
+              ? ""
+              : "(недоступно в режиме «Несколько инстансов»)";
+          if (!elig.length) {
+            list.innerHTML =
+              '<span style="font-size:12px;color:var(--text-dim);">Нет SOCKS/HTTP-целей маршрута. Добавь секцию с профилем-прокси выше.</span>';
+            return;
+          }
+          list.innerHTML = "";
+          elig.forEach(function (id) {
+            var p = (currentProfiles || []).find(function (x) {
+              return x.id === id;
+            });
+            var label = document.createElement("label");
+            label.style.cssText =
+              "display:flex;align-items:center;gap:8px;cursor:pointer;";
+            var cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.value = id;
+            cb.checked = sel.indexOf(id) !== -1;
+            cb.disabled = !single;
+            cb.onchange = saveIntercept;
+            var span = document.createElement("span");
+            span.textContent =
+              (p ? p.name || p.id : id) + (p && p.type ? " (" + p.type + ")" : "");
+            label.appendChild(cb);
+            label.appendChild(span);
+            list.appendChild(label);
+          });
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            list.innerHTML =
+              '<span style="font-size:12px;color:var(--text-dim);">Ошибка загрузки</span>';
+        }
+      }
+
+      async function saveIntercept() {
+        var list = document.getElementById("intercept-list");
+        if (!list) return;
+        var ids = [];
+        list.querySelectorAll("input[type=checkbox]").forEach(function (cb) {
+          cb.disabled = true;
+          if (cb.checked) ids.push(cb.value);
+        });
+        try {
+          var d = await api("self_intercept", "POST", ids.join(","));
+          toast(
+            d.ok
+              ? "Перехват обновлён, sing-box перезапущен"
+              : "Ошибка: " + (d.error || "?"),
+            d.ok ? "success" : "error",
+          );
+          if (d.ok) setTimeout(loadStatus, 2500);
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            toast("Ошибка: " + e.message, "error");
+        } finally {
+          loadIntercept();
+        }
       }
 
       async function saveRouteMap() {
-        var text = document.getElementById("route-map-editor").value;
+        var invalid = routeRules.find(function (rule) {
+          return !makeProfileId(rule.id || "") || !String(rule.text || "").trim();
+        });
+        if (invalid) {
+          toast("У каждого маршрута должен быть профиль и хотя бы один хост/IP", "error");
+          return;
+        }
+        var text = serializeRouteMapSections();
         var btn = document.getElementById("btn-save-routemap");
         if (btn) btn.disabled = true;
         try {
@@ -12641,7 +12955,10 @@
               : "Ошибка: " + d.error,
             d.ok ? "success" : "error",
           );
-          if (d.ok) setTimeout(loadStatus, 2500);
+          if (d.ok) {
+            setTimeout(loadStatus, 2500);
+            loadIntercept(); // route-map targets may have changed
+          }
         } catch (e) {
           if (e.message !== "Not authenticated")
             toast("Ошибка: " + e.message, "error");

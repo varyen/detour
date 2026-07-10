@@ -11,6 +11,12 @@ DOMAINS_FILE=/etc/sing-box/proxy-domains.list
 WHITELIST_FILE=/etc/sing-box/whitelist-domains.list
 ROUTE_MAP=/etc/sing-box/route-map.list
 SETTINGS_FILE=/etc/sing-box/settings.json
+# Self-proxy "smart intercept" map (written by the CGI's compute_intercept_inbounds):
+# one "<server_ip>\t<server_port>\t<local_socks_inbound_port>" line per intercepted
+# upstream SOCKS/HTTP proxy. We REDIRECT LAN connections destined to that endpoint
+# into the matching local sing-box SOCKS inbound so a client hard-pinned to the same
+# proxy gets the panel's routing instead of a double-proxy wrap. Absent = feature off.
+INTERCEPT_MAP=/etc/sing-box/intercept.map
 IPSET_NAME=singbox_domains
 IPSET_WL=singbox_whitelist
 LOG=/var/log/sing-box.log
@@ -270,6 +276,70 @@ route_map_section() {
     }' "$ROUTE_MAP"
 }
 
+route_map_option() {
+    local id="$1" key="$2" def="$3"
+    [ -f "$ROUTE_MAP" ] || {
+        printf '%s' "$def"
+        return 0
+    }
+    awk -v want="$id" -v opt="$key" -v def="$def" '
+    BEGIN { inblk=0; found=0 }
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        t=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", t)
+        sub(/[[:space:]]*===.*$/, "", t)
+        gsub(/[^a-zA-Z0-9_-]/, "", t)
+        inblk = (t == want) ? 1 : 0
+        next
+    }
+    inblk && /^[[:space:]]*\/\/[[:space:]]*meta:/ {
+        line=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*meta:[[:space:]]*/, "", line)
+        n=split(line, parts, /[[:space:]]+/)
+        for (i=1; i<=n; i++) {
+            split(parts[i], kv, "=")
+            if (kv[1] == opt && kv[2] != "") {
+                print kv[2]
+                found=1
+                exit
+            }
+        }
+    }
+    END { if (!found) print def }' "$ROUTE_MAP"
+}
+
+route_map_bool_option() {
+    local id="$1" key="$2" def="$3" v
+    v=$(route_map_option "$id" "$key" "$def")
+    case "$v" in
+        1|true|yes|on) printf '1' ;;
+        0|false|no|off) printf '0' ;;
+        *) printf '%s' "$def" ;;
+    esac
+}
+
+# Emit "N id port ipset" for every non-empty route target. Port/ipset numbering is
+# shared by the CGI and firewall, so a route block keeps a stable redirect port
+# within the current file order in both single- and multi-instance modes.
+route_map_slots() {
+    [ -f "$ROUTE_MAP" ] || return 0
+    local n=0 id
+    for id in $(route_map_targets); do
+        route_map_section "$id" | grep -q . || continue
+        [ -f "$CONFIG_DIR/profiles/$id.json" ] || continue
+        n=$((n + 1))
+        echo "$n $id $((12345 + n)) singbox_t$n"
+    done
+}
+
+route_map_strict_slots() {
+    local n id port ipset
+    route_map_slots | while read -r n id port ipset; do
+        [ "$(route_map_bool_option "$id" strict 1)" = "1" ] || continue
+        echo "$n $id $port $ipset"
+    done
+}
+
 # Emit "N id port ipset conf" for every committed per-target instance, i.e. each
 # route target that has a generated /etc/sing-box/config-<id>.json. Port is read
 # from that config (the CGI is the sole port assigner), ipset is index-derived
@@ -285,6 +355,45 @@ multi_instances() {
         n=$((n + 1))
         echo "$n $id $port singbox_t$n $conf"
     done
+}
+
+# Self-proxy smart intercept: for each intercepted upstream proxy endpoint listed in
+# the map, REDIRECT LAN (+ VPN road-warrior) TCP connections to that endpoint into the
+# local SOCKS inbound sing-box runs for it. The jump is inserted at the TOP of nat
+# PREROUTING so it wins over the all-except RETURN for the proxy IP. No loop: sing-box's
+# own re-dial to the real upstream is locally generated (OUTPUT) and "-i <lan>"
+# PREROUTING never matches it. Idempotent (safe to re-run on every start).
+setup_intercept() {
+    [ -s "$INTERCEPT_MAP" ] || return 0
+    iptables -t nat -N SINGBOX_INTERCEPT 2>/dev/null
+    iptables -t nat -F SINGBOX_INTERCEPT
+    local ip port inport
+    while read -r ip port inport; do
+        [ -n "$ip" ] && [ -n "$port" ] && [ -n "$inport" ] || continue
+        iptables -t nat -A SINGBOX_INTERCEPT -p tcp -d "$ip" --dport "$port" -j REDIRECT --to-ports "$inport"
+        open_port_lan "$inport"
+    done < "$INTERCEPT_MAP"
+    local IIF
+    for IIF in br-lan $(vpn_redirect_ifaces); do
+        [ -n "$IIF" ] || continue
+        iptables -t nat -D PREROUTING -i "$IIF" -j SINGBOX_INTERCEPT 2>/dev/null
+        iptables -t nat -I PREROUTING 1 -i "$IIF" -j SINGBOX_INTERCEPT
+    done
+}
+
+teardown_intercept() {
+    local IIF ip port inport
+    for IIF in br-lan $(vpn_redirect_ifaces); do
+        [ -n "$IIF" ] || continue
+        iptables -t nat -D PREROUTING -i "$IIF" -j SINGBOX_INTERCEPT 2>/dev/null
+    done
+    if command -v conntrack >/dev/null 2>&1 && [ -s "$INTERCEPT_MAP" ]; then
+        while read -r ip port inport; do
+            [ -n "$inport" ] && conntrack -D -p tcp --reply-port-src "$inport" >/dev/null 2>&1
+        done < "$INTERCEPT_MAP"
+    fi
+    iptables -t nat -F SINGBOX_INTERCEPT 2>/dev/null
+    iptables -t nat -X SINGBOX_INTERCEPT 2>/dev/null
 }
 
 start_service() {
@@ -314,8 +423,9 @@ start_service() {
     ipset create $IPSET_NAME hash:net -exist
     mkdir -p /tmp/dnsmasq.d
 
-    # Flattened route-map (all targets) — used to warm DNS and (single mode) to
-    # add per-profile-routed hosts into the 12345 redirect set.
+    # Flattened route-map (all targets) — used only to warm DNS. Actual route-map
+    # traffic goes through per-target ipsets/ports even in single mode, so strict
+    # sections can fail CLOSED instead of leaking into the main final outbound.
     rm -f /tmp/routemap-all.list
     if [ -f "$ROUTE_MAP" ]; then
         route_map_targets | while IFS= read -r rid; do
@@ -335,17 +445,12 @@ start_service() {
         [ -x /usr/sbin/detour-push ] && /usr/sbin/detour-push bypass-apply --no-reload
     else
         setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
-        # SINGLE mode: per-profile-routed hosts must also reach 12345 — the one
-        # sing-box splits them across outbounds via route.rules.
-        if [ "$MODE" != "multi" ] && [ -s /tmp/routemap-all.list ]; then
-            setup_domains_file /tmp/routemap-all.list "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-routemap.conf"
-        fi
     fi
 
-    # ---- MULTI: per-target ipsets + dnsmasq (one set/port per route target) ----
-    if [ "$MODE" = "multi" ]; then
-        multi_instances > "$INST_TMP"
-        while read -r n id port ipset conf; do
+    # ---- Per-target route ipsets + dnsmasq (one set/port per route target) ----
+    route_map_slots > "$INST_TMP"
+    if [ -s "$INST_TMP" ]; then
+        while read -r n id port ipset; do
             ipset create "$ipset" hash:net -exist
             route_map_section "$id" > "/tmp/routemap-$ipset.list"
             setup_domains_file "/tmp/routemap-$ipset.list" "$ipset" "/tmp/dnsmasq.d/singbox-$ipset.conf"
@@ -406,10 +511,11 @@ start_service() {
         iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345
     fi
 
-    # ---- MULTI: per-target ports + REDIRECTs inserted ABOVE the default catch-all.
-    # REDIRECT delivers locally, so per-target traffic is not blackholed by rule 9920.
-    if [ "$MODE" = "multi" ] && [ -s "$INST_TMP" ]; then
-        while read -r n id port ipset conf; do
+    # ---- Per-target ports + REDIRECTs inserted ABOVE the default catch-all.
+    # REDIRECT delivers locally, so strict per-target routes are never blackholed
+    # by rule 9920 before sing-box gets a chance to decide between target/block.
+    if [ -s "$INST_TMP" ]; then
+        while read -r n id port ipset; do
             open_port_lan "$port"
             iptables -t nat -D PREROUTING -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port" 2>/dev/null
             iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
@@ -431,13 +537,17 @@ start_service() {
             iptables -t nat -D PREROUTING -i "$VIF" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345 2>/dev/null
             iptables -t nat -I PREROUTING -i "$VIF" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345
         fi
-        if [ "$MODE" = "multi" ] && [ -s "$INST_TMP" ]; then
-            while read -r n id port ipset conf; do
+        if [ -s "$INST_TMP" ]; then
+            while read -r n id port ipset; do
                 iptables -t nat -D PREROUTING -i "$VIF" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port" 2>/dev/null
                 iptables -t nat -I PREROUTING -i "$VIF" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
             done < "$INST_TMP"
         fi
     done
+
+    # Self-proxy smart intercept (map file; single mode) — install last so its jump
+    # sits above the routing chains for the intercepted proxy endpoints.
+    setup_intercept
 
     # Connections already pinned (conntrack) to the old route for IPs now in the
     # redirect/whitelist sets keep flowing the old way until the entry dies —
@@ -516,6 +626,10 @@ stop_service() {
         iptables -t mangle -D PREROUTING -i "$VIF" -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000 2>/dev/null
     done
 
+    # Remove self-proxy smart-intercept chain + jumps (full teardown only; KEEPFW
+    # restart keeps them so the daemon gap fails CLOSED, same as the other REDIRECTs).
+    teardown_intercept
+
     # MULTI: remove EVERY per-target REDIRECT (match-set singbox_t*), independent
     # of the current route-map, BEFORE destroying the sets they reference.
     if command -v iptables-save >/dev/null 2>&1; then
@@ -524,13 +638,24 @@ stop_service() {
         done
     fi
 
+    # Strict route blocks stay fail-closed even after a manual stop: keep only the
+    # per-target REDIRECTs for strict route sections so matching traffic still hits
+    # a closed local port instead of leaking through the active/direct path.
+    route_map_strict_slots | while read -r n id port ipset; do
+        iptables -t nat -I PREROUTING 1 -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
+        for VIF in $(vpn_redirect_ifaces); do
+            [ -n "$VIF" ] || continue
+            iptables -t nat -I PREROUTING 1 -i "$VIF" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
+        done
+    done
+
     close_port_lan
 
     # Purge flows still DNATed to the (now dead) sing-box ports — otherwise
     # established connections hang on a closed socket until the entry expires.
     if command -v conntrack >/dev/null 2>&1; then
         conntrack -D -p tcp --reply-port-src 12345 >/dev/null 2>&1
-        multi_instances | while read -r n id port ipset conf; do
+        route_map_slots | while read -r n id port ipset; do
             conntrack -D -p tcp --reply-port-src "$port" >/dev/null 2>&1
         done
     fi
@@ -538,8 +663,6 @@ stop_service() {
     # Remove dnsmasq configs (default, route-map, all per-target sets)
     rm -f /tmp/dnsmasq.d/singbox-domains.conf
     rm -f /tmp/dnsmasq.d/singbox-whitelist.conf
-    rm -f /tmp/dnsmasq.d/singbox-routemap.conf
-    rm -f /tmp/dnsmasq.d/singbox-singbox_t*.conf
     rm -f /tmp/dnsmasq.d/singbox-push-bypass.conf   # whitelist ipset is destroyed below
     /etc/init.d/dnsmasq restart
 
@@ -550,13 +673,15 @@ stop_service() {
     ipset flush $IPSET_WL 2>/dev/null
     ipset destroy $IPSET_WL 2>/dev/null
     for s in $(ipset list -n 2>/dev/null | grep '^singbox_t'); do
+        case " $(route_map_strict_slots | awk '{print $4}' | tr '\n' ' ') " in
+            *" $s "*) continue ;;
+        esac
         ipset flush "$s" 2>/dev/null
         ipset destroy "$s" 2>/dev/null
     done
 }
 
 reload_service() {
-    local MODE=$(get_singbox_mode)
     local ROUTING_MODE=$(get_routing_mode)
 
     # Re-read domains and update ipset/dnsmasq
@@ -574,18 +699,13 @@ reload_service() {
     if [ -f "$ROUTE_MAP" ]; then
         route_map_targets | while IFS= read -r rid; do route_map_section "$rid"; done > /tmp/routemap-all.list 2>/dev/null
     fi
-    if [ "$MODE" != "multi" ] && [ "$ROUTING_MODE" != "all-except" ] && [ -s /tmp/routemap-all.list ]; then
-        setup_domains_file /tmp/routemap-all.list "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-routemap.conf"
-    fi
-    if [ "$MODE" = "multi" ]; then
-        multi_instances | while read -r n id port ipset conf; do
-            ipset create "$ipset" hash:net -exist
-            ipset flush "$ipset" 2>/dev/null
-            route_map_section "$id" > "/tmp/routemap-$ipset.list"
-            setup_domains_file "/tmp/routemap-$ipset.list" "$ipset" "/tmp/dnsmasq.d/singbox-$ipset.conf"
-            rm -f "/tmp/routemap-$ipset.list"
-        done
-    fi
+    route_map_slots | while read -r n id port ipset; do
+        ipset create "$ipset" hash:net -exist
+        ipset flush "$ipset" 2>/dev/null
+        route_map_section "$id" > "/tmp/routemap-$ipset.list"
+        setup_domains_file "/tmp/routemap-$ipset.list" "$ipset" "/tmp/dnsmasq.d/singbox-$ipset.conf"
+        rm -f "/tmp/routemap-$ipset.list"
+    done
 
     /etc/init.d/dnsmasq restart
     sleep 1

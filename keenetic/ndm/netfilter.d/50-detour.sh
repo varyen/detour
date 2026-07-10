@@ -26,6 +26,7 @@ WL_IPSET="${SINGBOX_WL_IPSET:-singbox_whitelist}"
 DNS_PORT="${DETOUR_DNS_PORT:-5354}"
 ALLVPN_MARK="/opt/etc/detour/allvpn.enabled"   # «Все через VPN» (set by the panel)
 DNS_MARK="/opt/etc/detour/dns.enabled"         # detour dnsmasq up (set by S50detour-dns)
+ROUTE_MAP="${SINGBOX_ROUTEMAP_LIST:-/opt/etc/sing-box/route-map.list}"
 
 # Extra inbound ifaces (besides LAN_IF) that get the same redirect — VPN
 # road-warriors. From settings.json "vpn_redirect_ifaces" (space/comma list);
@@ -57,6 +58,100 @@ add() {
 del() {
     t="$1"; c="$2"; shift 2
     while iptables -t "$t" -C "$c" "$@" 2>/dev/null; do iptables -t "$t" -D "$c" "$@"; done
+}
+
+route_map_targets() {
+    [ -f "$ROUTE_MAP" ] || return 0
+    awk '
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        line=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", line)
+        sub(/[[:space:]]*===.*$/, "", line)
+        gsub(/[^a-zA-Z0-9_-]/, "", line)
+        if (line != "" && !seen[line]++) print line
+    }' "$ROUTE_MAP"
+}
+
+route_map_section() {
+    id="$1"
+    [ -f "$ROUTE_MAP" ] || return 0
+    awk -v want="$id" '
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        t=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", t)
+        sub(/[[:space:]]*===.*$/, "", t)
+        gsub(/[^a-zA-Z0-9_-]/, "", t)
+        inblk = (t == want) ? 1 : 0
+        next
+    }
+    {
+        if (!inblk) next
+        sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+        sub(/^\*\./, "")
+        if ($0 == "") next
+        if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print; next }
+        if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print; next }
+    }' "$ROUTE_MAP"
+}
+
+route_map_option() {
+    id="$1" key="$2" def="$3"
+    [ -f "$ROUTE_MAP" ] || {
+        printf '%s' "$def"
+        return 0
+    }
+    awk -v want="$id" -v opt="$key" -v def="$def" '
+    BEGIN { inblk=0; found=0 }
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        t=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", t)
+        sub(/[[:space:]]*===.*$/, "", t)
+        gsub(/[^a-zA-Z0-9_-]/, "", t)
+        inblk = (t == want) ? 1 : 0
+        next
+    }
+    inblk && /^[[:space:]]*\/\/[[:space:]]*meta:/ {
+        line=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*meta:[[:space:]]*/, "", line)
+        n=split(line, parts, /[[:space:]]+/)
+        for (i=1; i<=n; i++) {
+            split(parts[i], kv, "=")
+            if (kv[1] == opt && kv[2] != "") {
+                print kv[2]
+                found=1
+                exit
+            }
+        }
+    }
+    END { if (!found) print def }' "$ROUTE_MAP"
+}
+
+route_map_bool_option() {
+    id="$1" key="$2" def="$3"
+    v=$(route_map_option "$id" "$key" "$def")
+    case "$v" in
+        1|true|yes|on) printf '1' ;;
+        0|false|no|off) printf '0' ;;
+        *) printf '%s' "$def" ;;
+    esac
+}
+
+route_map_slots() {
+    [ -f "$ROUTE_MAP" ] || return 0
+    n=0
+    for id in $(route_map_targets); do
+        route_map_section "$id" | grep -q . || continue
+        [ -f "${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/profiles/$id.json" ] || continue
+        n=$((n + 1))
+        echo "$n $id $((SINGBOX_PORT + n)) singbox_t$n"
+    done
+}
+
+route_map_strict_slots() {
+    route_map_slots | while read -r n id port ipset; do
+        [ "$(route_map_bool_option "$id" strict 1)" = "1" ] || continue
+        echo "$n $id $port $ipset"
+    done
 }
 
 # All inbound interfaces that receive transparent-proxy rules: LAN + opt-in VPN.
@@ -95,8 +190,21 @@ for IF in $IFACES; do
         -j REDIRECT --to-ports "$SINGBOX_PORT"
     del nat PREROUTING -i "$IF" -j SINGBOX_ALL
 done
+if command -v iptables-save >/dev/null 2>&1; then
+    iptables-save -t nat 2>/dev/null | grep -- '--match-set singbox_t' | sed 's/^-A/-D/' | while IFS= read -r rule; do
+        [ -n "$rule" ] && iptables -t nat $rule 2>/dev/null
+    done
+fi
 
 if [ -f /opt/etc/detour/singbox.enabled ]; then
+    route_map_slots | while read -r n id port ipset; do
+        ipset create "$ipset" hash:net -exist 2>/dev/null
+        for IF in $IFACES; do
+            [ -n "$IF" ] || continue
+            add nat PREROUTING -i "$IF" -p tcp -m set --match-set "$ipset" dst \
+                -j REDIRECT --to-ports "$port"
+        done
+    done
     if [ "$ROUTING_MODE" = "all-except" ]; then
         # Proxy EVERYTHING except private/loopback/CGNAT, the upstream server(s),
         # and the whitelist ipset. sing-box itself also sends whitelisted domains
@@ -130,6 +238,16 @@ if [ -f /opt/etc/detour/singbox.enabled ]; then
         done
     fi
 else
+    # sing-box disabled: keep only strict route sections fail-closed by redirecting
+    # them into closed local ports; non-strict sections are allowed to go direct.
+    route_map_strict_slots | while read -r n id port ipset; do
+        ipset create "$ipset" hash:net -exist 2>/dev/null
+        for IF in $IFACES; do
+            [ -n "$IF" ] || continue
+            add nat PREROUTING -i "$IF" -p tcp -m set --match-set "$ipset" dst \
+                -j REDIRECT --to-ports "$port"
+        done
+    done
     # sing-box disabled → make sure the all-except chain is gone.
     iptables -t nat -F SINGBOX_ALL 2>/dev/null
     iptables -t nat -X SINGBOX_ALL 2>/dev/null

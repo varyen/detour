@@ -6,6 +6,12 @@ SINGBOX_CONFIG_DIR="/etc/sing-box"
 SINGBOX_DOMAINS="/etc/sing-box/proxy-domains.list"
 SINGBOX_CONFIG="/etc/sing-box/config.json"
 SINGBOX_ROUTEMAP="/etc/sing-box/route-map.list"
+# Self-proxy "smart intercept" map (one line per intercepted SOCKS/HTTP proxy:
+# "<server_ip>\t<server_port>\t<local_socks_inbound_port>"). Written by
+# compute_intercept_inbounds; read by sing-box.initd to install the LAN REDIRECT
+# so a client hard-pinned to the SAME upstream proxy gets the panel's routing
+# instead of a broken double-proxy wrap. Empty/absent = feature off.
+SINGBOX_INTERCEPT_MAP="/etc/sing-box/intercept.map"
 SINGBOX_LOG="/var/log/sing-box.log"
 SINGBOX_INITD="/etc/init.d/sing-box"
 SINGBOX_SETTINGS="/etc/sing-box/settings.json"
@@ -86,6 +92,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_DOMAINS="$OPT/etc/sing-box/proxy-domains.list"
     SINGBOX_CONFIG="$OPT/etc/sing-box/config.json"
     SINGBOX_ROUTEMAP="$OPT/etc/sing-box/route-map.list"
+    SINGBOX_INTERCEPT_MAP="$OPT/etc/sing-box/intercept.map"
     SINGBOX_LOG="$OPT/var/log/sing-box.log"
     SINGBOX_INITD="$OPT/etc/init.d/S52detour-singbox"
     SINGBOX_SETTINGS="$OPT/etc/sing-box/settings.json"
@@ -478,6 +485,13 @@ write_settings() {
     log_syslog_sb=${LOG_SYSLOG_SB_OVERRIDE:-$(get_settings_val "log_to_syslog_singbox")}
     [ -z "$log_syslog_sb" ] && log_syslog_sb="0"
 
+    # Smart-intercept target list (CSV of route-map target ids whose upstream SOCKS/
+    # HTTP proxy endpoint the panel transparently takes over for LAN clients). Same
+    # preserve-or-override dance as the flags above: the self_intercept action sets it
+    # via SELF_INTERCEPT_OVERRIDE; every other rewrite re-reads it so it survives.
+    local self_intercept
+    self_intercept=${SELF_INTERCEPT_OVERRIDE:-$(get_settings_val "self_intercept")}
+
     cat > "$SINGBOX_SETTINGS" <<EOF
 {
   "active_profile": "$active_profile",
@@ -492,7 +506,8 @@ write_settings() {
   "health_speed_url": "$health_speed_url",
   "health_speed_bytes": "$health_speed_bytes",
   "log_to_syslog": "$log_syslog",
-  "log_to_syslog_singbox": "$log_syslog_sb"
+  "log_to_syslog_singbox": "$log_syslog_sb",
+  "self_intercept": "$self_intercept"
 }
 EOF
 }
@@ -637,6 +652,57 @@ route_map_section() {
     }' "$SINGBOX_ROUTEMAP"
 }
 
+route_map_option() {
+    local id="$1" key="$2" def="$3"
+    [ -f "$SINGBOX_ROUTEMAP" ] || {
+        printf '%s' "$def"
+        return 0
+    }
+    awk -v want="$id" -v opt="$key" -v def="$def" '
+    BEGIN { inblk=0; found=0 }
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        t=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", t)
+        sub(/[[:space:]]*===.*$/, "", t)
+        gsub(/[^a-zA-Z0-9_-]/, "", t)
+        inblk = (t == want) ? 1 : 0
+        next
+    }
+    inblk && /^[[:space:]]*\/\/[[:space:]]*meta:/ {
+        line=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*meta:[[:space:]]*/, "", line)
+        n=split(line, parts, /[[:space:]]+/)
+        for (i=1; i<=n; i++) {
+            split(parts[i], kv, "=")
+            if (kv[1] == opt && kv[2] != "") {
+                print kv[2]
+                found=1
+                exit
+            }
+        }
+    }
+    END { if (!found) print def }' "$SINGBOX_ROUTEMAP"
+}
+
+route_map_bool_option() {
+    local id="$1" key="$2" def="$3" v
+    v=$(route_map_option "$id" "$key" "$def")
+    case "$v" in
+        1|true|yes|on) printf '1' ;;
+        0|false|no|off) printf '0' ;;
+        *) printf '%s' "$def" ;;
+    esac
+}
+
+route_target_chain() {
+    local base_chain="$1" target="$2"
+    if csv_contains "$base_chain" "$target"; then
+        printf '%s' "$target"
+    else
+        normalize_profile_list "$base_chain,$target"
+    fi
+}
+
 # Resolve the outbound tag a route target should use. If the target id is a
 # member of the active chain, reuse that chain tag (no duplicate outbound).
 # Otherwise the target gets a dedicated "out_<id>" outbound.
@@ -654,21 +720,35 @@ route_tag_for() {
     printf 'out_%s' "$id"
 }
 
-# Single-instance mode: compute the extra outbounds/endpoints and route.rules
-# fragment from the route map. Sets globals RX_OB, RX_EP, RX_RULES.
+# Single-instance mode: compute the extra outbounds/endpoints/inbounds and
+# route.rules fragment from the route map. Route-map traffic enters through a
+# dedicated redirect inbound per target, so strict sections can fail CLOSED
+# instead of falling through to the active VPN/proxy. Sets RX_OB/RX_EP/RX_RULES/
+# RX_INBOUNDS.
 compute_route_extras() {
     local chain="$1"
     local target tag payload ptype dom_arr dom_exact_objs ip_arr robj rule_objs host_override
-    RX_OB=""; RX_EP=""; RX_RULES=""
+    local idx inport in_tag fallback_objs via_chain strict detour
+    RX_OB=""; RX_EP=""; RX_RULES=""; RX_INBOUNDS=""
     rule_objs=""
+    fallback_objs=""
+    idx=0
     for target in $(route_map_targets); do
+        route_map_section "$target" | grep -q . || continue
         [ -f "$SINGBOX_PROFILES_DIR/$target.json" ] || continue
+        idx=$((idx + 1))
+        inport=$((12345 + idx))
+        in_tag="in_rt_$idx"
+        strict=$(route_map_bool_option "$target" strict 1)
+        via_chain=$(route_map_bool_option "$target" via_chain 0)
         tag=$(route_tag_for "$target" "$chain")
         ptype=$(json_val "type" "$SINGBOX_PROFILES_DIR/$target.json")
         host_override=0
         case "$ptype" in
             socks|socks4|socks4a|socks5|http|http-proxy|https-proxy) host_override=1 ;;
         esac
+        RX_INBOUNDS="$RX_INBOUNDS,
+    {\"type\":\"redirect\",\"tag\":\"$in_tag\",\"listen\":\"::\",\"listen_port\":$inport}"
         if [ "$host_override" = 1 ]; then
             # Hostname-sensitive outbounds (HTTP/SOCKS) need the CONNECT target as a
             # hostname, not as the already-resolved IP from transparent REDIRECT.
@@ -686,7 +766,9 @@ compute_route_extras() {
         if [ "$tag" = "out_$target" ]; then
             payload=$(extract_profile_outbound "$SINGBOX_PROFILES_DIR/$target.json")
             [ -n "$payload" ] || continue
-            payload=$(set_outbound_chain_fields "$payload" "$tag" "")
+            detour=""
+            [ "$via_chain" = "1" ] && detour="proxy"
+            payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
             if [ "$ptype" = "wireguard" ]; then
                 payload=$(translate_wireguard_profile "$payload")
                 RX_EP="$RX_EP,
@@ -707,7 +789,14 @@ compute_route_extras() {
             robj="{\"action\":\"route\",\"ip_cidr\":[$ip_arr],\"outbound\":\"$tag\"}"
             if [ -n "$rule_objs" ]; then rule_objs="$rule_objs,$robj"; else rule_objs="$robj"; fi
         fi
+        if [ "$strict" = "1" ]; then
+            robj="{\"action\":\"route\",\"inbound\":[\"$in_tag\"],\"outbound\":\"block\"}"
+            if [ -n "$fallback_objs" ]; then fallback_objs="$fallback_objs,$robj"; else fallback_objs="$robj"; fi
+        fi
     done
+    if [ -n "$fallback_objs" ]; then
+        if [ -n "$rule_objs" ]; then rule_objs="$rule_objs,$fallback_objs"; else rule_objs="$fallback_objs"; fi
+    fi
     if [ -n "$rule_objs" ]; then
         # sing-box >=1.11 ignores the inbound-level "sniff" option: it no longer
         # populates the connection's domain, so domain_suffix rules would never
@@ -718,6 +807,66 @@ compute_route_extras() {
         # byte-for-byte.
         RX_RULES="    \"rules\": [{\"action\":\"sniff\"},$rule_objs],
 "
+    fi
+}
+
+# Self-proxy "smart intercept". For each SOCKS/HTTP route-map target the user opted
+# into (settings.json "self_intercept" CSV) emit a local SOCKS inbound that MIRRORS
+# that proxy's credentials and shares the config's global route.rules. sing-box.initd
+# then REDIRECTs LAN connections destined to that SAME upstream proxy endpoint into
+# this inbound (via the map written here), so a browser hard-pinned to the proxy
+# transparently gets the panel's split-routing (route-mapped domains → the real
+# upstream, everything else → the main outbound) instead of a broken double-proxy
+# wrap. No loop: the inbound's own re-dial to the real upstream originates from the
+# router (OUTPUT), which the "-i br-lan" REDIRECT never matches. Single mode only.
+# Sets IX_INBOUNDS (comma-prefixed inbound objects, or empty) and (re)writes the map.
+compute_intercept_inbounds() {
+    IX_INBOUNDS=""
+    local sel target pfile ptype srv port user pass ip inport idx users tmp
+    idx=0
+    tmp="$SINGBOX_INTERCEPT_MAP.tmp.$$"
+    : > "$tmp"
+    sel=$(get_settings_val "self_intercept")
+    if [ -n "$sel" ]; then
+        for target in $(route_map_targets); do
+            csv_contains "$sel" "$target" || continue
+            pfile="$SINGBOX_PROFILES_DIR/$target.json"
+            [ -f "$pfile" ] || continue
+            ptype=$(json_val "type" "$pfile")
+            case "$ptype" in
+                socks|socks4|socks4a|socks5|http|http-proxy|https-proxy) ;;
+                *) continue ;;
+            esac
+            srv=$(json_val "server" "$pfile")
+            port=$(numeric_json_val "server_port" "$pfile")
+            [ -n "$srv" ] && [ -n "$port" ] || continue
+            user=$(json_val "username" "$pfile")
+            pass=$(json_val "password" "$pfile")
+            idx=$((idx + 1))
+            inport=$((12370 + idx))
+            if [ -n "$user" ]; then
+                users=",\"users\":[{\"username\":\"$(printf '%s' "$user" | json_escape)\",\"password\":\"$(printf '%s' "$pass" | json_escape)\"}]"
+            else
+                users=""
+            fi
+            IX_INBOUNDS="$IX_INBOUNDS,
+    {\"type\":\"socks\",\"tag\":\"in_ix_$target\",\"listen\":\"::\",\"listen_port\":$inport$users}"
+            # Firewall map: the proxy endpoint(s) LAN clients dial -> our inbound port.
+            if printf '%s' "$srv" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+                printf '%s\t%s\t%s\n' "$srv" "$port" "$inport" >> "$tmp"
+            else
+                nslookup_with_timeout "$srv" 127.0.0.1 2>/dev/null | \
+                    awk '/^Address [0-9]+: /{print $3} /^Address: /{print $2}' | \
+                    grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | while IFS= read -r ip; do
+                        printf '%s\t%s\t%s\n' "$ip" "$port" "$inport" >> "$tmp"
+                    done
+            fi
+        done
+    fi
+    if [ -s "$tmp" ]; then
+        mv "$tmp" "$SINGBOX_INTERCEPT_MAP"
+    else
+        rm -f "$tmp" "$SINGBOX_INTERCEPT_MAP"
     fi
 }
 
@@ -736,6 +885,7 @@ render_chain_config() {
     local route_rules="$4"
     local listen_port="${5:-12345}"
     local inbound_kind="${6:-redirect}"
+    local extra_inbounds="$7"   # comma-prefixed intercept SOCKS inbounds, or empty
     local normalized old_ifs total idx pname pfile ptype payload tag detour
     local outbounds_json endpoints_json outbounds_block inbound_block
 
@@ -803,17 +953,29 @@ render_chain_config() {
         {
             \"type\": \"direct\",
             \"tag\": \"direct\"
+        },
+        {
+            \"type\": \"block\",
+            \"tag\": \"block\"
         }"
     elif [ -n "$extra_outbounds" ]; then
         outbounds_block="$(printf '%s' "$extra_outbounds" | sed '1{/^,$/d;}'),
         {
             \"type\": \"direct\",
             \"tag\": \"direct\"
+        },
+        {
+            \"type\": \"block\",
+            \"tag\": \"block\"
         }"
     else
         outbounds_block="    {
             \"type\": \"direct\",
             \"tag\": \"direct\"
+        },
+        {
+            \"type\": \"block\",
+            \"tag\": \"block\"
         }"
     fi
 
@@ -862,7 +1024,7 @@ render_chain_config() {
     "timestamp": true
   },
   "inbounds": [
-${inbound_block}
+${inbound_block}${extra_inbounds}
   ],
 $(if [ -n "$endpoints_json" ]; then cat <<EOEP
     "endpoints": [
@@ -888,13 +1050,16 @@ build_config() {
     local mode="$1"
     local chain="$2"
     local tmp_default="${SINGBOX_CONFIG}.tmp.$$"
-    local err rc target tmp_t port idx pair src dst base tid
+    local err rc target tmp_t port idx pair src dst base tid target_chain
     local commit_list keep_targets
 
     commit_list=""
     keep_targets=""
 
     if [ "$mode" = "multi" ]; then
+        # Smart-intercept is single-mode only; drop any stale map so the initd
+        # doesn't install REDIRECTs pointing at inbounds this config won't have.
+        rm -f "$SINGBOX_INTERCEPT_MAP"
         # Default instance: active chain only, route rules suppressed.
         if ! render_chain_config "$chain" "" "" "" 12345 > "$tmp_default"; then
             rm -f "$tmp_default"; echo "failed to render default config (bad chain?)"; return 1
@@ -912,7 +1077,12 @@ build_config() {
             idx=$((idx + 1))
             port=$((12345 + idx))
             tmp_t="${SINGBOX_CONFIG_DIR}/config-$target.json.tmp.$$"
-            if ! render_chain_config "$target" "" "" "" "$port" > "$tmp_t"; then
+            if [ "$(route_map_bool_option "$target" via_chain 0)" = "1" ]; then
+                target_chain=$(route_target_chain "$chain" "$target")
+            else
+                target_chain="$target"
+            fi
+            if ! render_chain_config "$target_chain" "" "" "" "$port" > "$tmp_t"; then
                 for pair in $commit_list; do rm -f "${pair%%:*}"; done
                 rm -f "$tmp_t"
                 echo "failed to render config for target $target"; return 1
@@ -929,7 +1099,8 @@ build_config() {
     else
         # single mode: one config with route.rules + extra outbounds.
         compute_route_extras "$chain"
-        if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$RX_RULES" 12345 > "$tmp_default"; then
+        compute_intercept_inbounds
+        if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$RX_RULES" 12345 redirect "$RX_INBOUNDS$IX_INBOUNDS" > "$tmp_default"; then
             rm -f "$tmp_default"; echo "failed to render config (bad chain?)"; return 1
         fi
         err=$($SINGBOX_BIN check -c "$tmp_default" 2>&1)
@@ -1521,7 +1692,8 @@ status)
         "active_chain": $(print_csv_json_array "$SB_CHAIN"),
     "routing_mode": "$SB_ROUTING",
     "singbox_mode": "$SB_MODE",
-    "route_targets": $SB_ROUTE_TARGETS
+    "route_targets": $SB_ROUTE_TARGETS,
+    "self_intercept": $(print_csv_json_array "$(get_settings_val self_intercept)")
   },
   "zapret": {
     "running": $ZP_RUNNING,
@@ -1594,6 +1766,62 @@ route_map)
         else
             echo '{"routemap":""}'
         fi
+    fi
+    ;;
+
+# ==================== SELF-PROXY SMART INTERCEPT ====================
+# Transparently take over a LAN client's connection to one of the panel's OWN
+# SOCKS/HTTP proxies (a route-map target) and re-apply the panel's split-routing.
+# For a browser hard-pinned to that same upstream proxy (can't be reconfigured):
+# instead of a broken double-proxy wrap, it gets route-mapped domains via the real
+# upstream and everything else via the main outbound. GET: current + eligible
+# targets. POST body: CSV of route-map target ids to intercept. Single mode only.
+self_intercept)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        SBMODE=$(get_singbox_mode)
+        if [ "$SBMODE" != "single" ]; then
+            json_err "Умный перехват доступен только в одиночном режиме (single)"
+            exit 0
+        fi
+        NEWSEL=""
+        OLDIFS="$IFS"; IFS=','
+        for _t in $POST_DATA; do
+            _t=$(sanitize_name "$_t")
+            [ -n "$_t" ] || continue
+            _pf="$SINGBOX_PROFILES_DIR/$_t.json"
+            [ -f "$_pf" ] || continue
+            route_map_targets | grep -qx "$_t" || continue
+            case "$(json_val "type" "$_pf")" in
+                socks|socks4|socks4a|socks5|http|http-proxy|https-proxy) ;;
+                *) continue ;;
+            esac
+            case ",$NEWSEL," in *",$_t,"*) ;; *) NEWSEL="${NEWSEL:+$NEWSEL,}$_t" ;; esac
+        done
+        IFS="$OLDIFS"
+        ACHAIN=$(get_active_chain)
+        # settings BEFORE build_config: compute_intercept_inbounds reads self_intercept.
+        SELF_INTERCEPT_OVERRIDE="$NEWSEL" write_settings "$ACHAIN" "$(get_routing_mode)" "$(collect_upstream_ips)" "$SBMODE"
+        BUILD_ERR=$(build_config "$SBMODE" "$ACHAIN")
+        if [ $? -ne 0 ]; then
+            json_err "config build failed: $(printf '%s' "$BUILD_ERR" | json_escape)"
+            exit 0
+        fi
+        $SINGBOX_INITD restart >/dev/null 2>&1
+        sleep 3
+        printf '{"ok":true,"targets":%s}' "$(print_csv_json_array "$NEWSEL")"
+    else
+        SEL=$(get_settings_val "self_intercept")
+        ELIG=""
+        for _t in $(route_map_targets); do
+            _pf="$SINGBOX_PROFILES_DIR/$_t.json"
+            [ -f "$_pf" ] || continue
+            case "$(json_val "type" "$_pf")" in
+                socks|socks4|socks4a|socks5|http|http-proxy|https-proxy)
+                    ELIG="${ELIG:+$ELIG,}$_t" ;;
+            esac
+        done
+        printf '{"targets":%s,"eligible":%s,"mode":"%s"}' \
+            "$(print_csv_json_array "$SEL")" "$(print_csv_json_array "$ELIG")" "$(get_singbox_mode)"
     fi
     ;;
 

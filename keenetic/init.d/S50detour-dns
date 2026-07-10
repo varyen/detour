@@ -44,6 +44,101 @@ routing_mode() {
         "$SINGBOX_SETTINGS" 2>/dev/null | head -1
 }
 
+route_map_targets() {
+    [ -f "$SINGBOX_ROUTEMAP_LIST" ] || return 0
+    awk '
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        line=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", line)
+        sub(/[[:space:]]*===.*$/, "", line)
+        gsub(/[^a-zA-Z0-9_-]/, "", line)
+        if (line != "" && !seen[line]++) print line
+    }' "$SINGBOX_ROUTEMAP_LIST"
+}
+
+route_map_section() {
+    id="$1"
+    [ -f "$SINGBOX_ROUTEMAP_LIST" ] || return 0
+    awk -v want="$id" '
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        t=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", t)
+        sub(/[[:space:]]*===.*$/, "", t)
+        gsub(/[^a-zA-Z0-9_-]/, "", t)
+        inblk = (t == want) ? 1 : 0
+        next
+    }
+    {
+        if (!inblk) next
+        sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+        sub(/^\*\./, "")
+        if ($0 == "") next
+        if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) { print; next }
+        if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/) { print; next }
+    }' "$SINGBOX_ROUTEMAP_LIST"
+}
+
+route_map_option() {
+    id="$1" key="$2" def="$3"
+    [ -f "$SINGBOX_ROUTEMAP_LIST" ] || {
+        printf '%s' "$def"
+        return 0
+    }
+    awk -v want="$id" -v opt="$key" -v def="$def" '
+    BEGIN { inblk=0; found=0 }
+    /^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:/ {
+        t=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*===[[:space:]]*route:[[:space:]]*/, "", t)
+        sub(/[[:space:]]*===.*$/, "", t)
+        gsub(/[^a-zA-Z0-9_-]/, "", t)
+        inblk = (t == want) ? 1 : 0
+        next
+    }
+    inblk && /^[[:space:]]*\/\/[[:space:]]*meta:/ {
+        line=$0
+        sub(/^[[:space:]]*\/\/[[:space:]]*meta:[[:space:]]*/, "", line)
+        n=split(line, parts, /[[:space:]]+/)
+        for (i=1; i<=n; i++) {
+            split(parts[i], kv, "=")
+            if (kv[1] == opt && kv[2] != "") {
+                print kv[2]
+                found=1
+                exit
+            }
+        }
+    }
+    END { if (!found) print def }' "$SINGBOX_ROUTEMAP_LIST"
+}
+
+route_map_bool_option() {
+    id="$1" key="$2" def="$3"
+    v=$(route_map_option "$id" "$key" "$def")
+    case "$v" in
+        1|true|yes|on) printf '1' ;;
+        0|false|no|off) printf '0' ;;
+        *) printf '%s' "$def" ;;
+    esac
+}
+
+route_map_slots() {
+    [ -f "$SINGBOX_ROUTEMAP_LIST" ] || return 0
+    n=0
+    for id in $(route_map_targets); do
+        route_map_section "$id" | grep -q . || continue
+        [ -f "${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/profiles/$id.json" ] || continue
+        n=$((n + 1))
+        echo "$n $id singbox_t$n"
+    done
+}
+
+has_strict_routes() {
+    route_map_slots | while read -r n id ipset; do
+        [ "$(route_map_bool_option "$id" strict 1)" = "1" ] || continue
+        echo yes
+        return 0
+    done | grep -q yes
+}
+
 # gen_list <listfile> <ipset> <dnsmasq-conf-out>
 # Mirrors OpenWrt setup_domains_file(): IPs/CIDRs go straight into the ipset,
 # domains become `ipset=/domain/<ipset>` lines dnsmasq tags on resolution.
@@ -76,16 +171,13 @@ regen() {
         gen_list "$SINGBOX_WHITELIST_LIST" "$SINGBOX_WL_IPSET" "$DNSMASQ_CONF_DIR/singbox-whitelist.conf" || \
         : > "$DNSMASQ_CONF_DIR/singbox-whitelist.conf"
 
-    # route-map: single-instance — funnel every per-profile host/IP into singbox_domains
-    # (the one sing-box splits them across outbounds via route.rules). Strips the
-    # `// === route:ID ===` headers; keeps plain domain/IP/CIDR lines.
-    if [ -f "$SINGBOX_ROUTEMAP_LIST" ]; then
-        grep -v '===' "$SINGBOX_ROUTEMAP_LIST" 2>/dev/null > /tmp/detour-routemap.list
-        gen_list /tmp/detour-routemap.list "$SINGBOX_IPSET" "$DNSMASQ_CONF_DIR/singbox-routemap.conf"
-        rm -f /tmp/detour-routemap.list
-    else
-        : > "$DNSMASQ_CONF_DIR/singbox-routemap.conf"
-    fi
+    rm -f "$DNSMASQ_CONF_DIR"/singbox-singbox_t*.conf
+    route_map_slots | while read -r n id ipset; do
+        ipset create "$ipset" hash:net -exist 2>/dev/null
+        route_map_section "$id" > "/tmp/detour-routemap-$ipset.list"
+        gen_list "/tmp/detour-routemap-$ipset.list" "$ipset" "$DNSMASQ_CONF_DIR/singbox-$ipset.conf"
+        rm -f "/tmp/detour-routemap-$ipset.list"
+    done
 
     # Keep the Web-Push VPN-bypass conf fresh (push endpoints → singbox_whitelist so
     # the push channel rides the WAN when the active VPN is down). --no-reload: we are
@@ -98,8 +190,8 @@ running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; 
 start() {
     # Only run while a proxy is active. rc.unslung auto-starts every S* at boot, but
     # S52/S53 (which set these markers) re-invoke us via dns_up — so the standalone
-    # boot start no-ops here and we don't hijack LAN :53 when nothing needs it.
-    if [ ! -f /opt/etc/detour/singbox.enabled ] && [ ! -f /opt/etc/detour/zapret.enabled ]; then
+    # boot start no-ops here unless a strict route must still fail closed.
+    if [ ! -f /opt/etc/detour/singbox.enabled ] && [ ! -f /opt/etc/detour/zapret.enabled ] && ! has_strict_routes; then
         rm -f "$MARK"; apply_fw; return 0
     fi
     [ -x "$DNSMASQ_BIN" ] || { echo "detour-dns: missing $DNSMASQ_BIN (opkg install dnsmasq-full)"; exit 1; }
@@ -124,6 +216,16 @@ start() {
 }
 
 stop() {
+    if [ -f /opt/etc/detour/singbox.enabled ] || [ -f /opt/etc/detour/zapret.enabled ] || has_strict_routes; then
+        touch "$MARK"
+        regen
+        if running; then
+            apply_fw
+        else
+            start
+        fi
+        return 0
+    fi
     echo "Stopping detour-dns ..."
     rm -f "$MARK"
     [ -f "$PIDF" ] && kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null
