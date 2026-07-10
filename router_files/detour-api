@@ -626,6 +626,14 @@ route_map_targets() {
     }' "$SINGBOX_ROUTEMAP"
 }
 
+route_map_enabled_targets() {
+    local target
+    for target in $(route_map_targets); do
+        [ "$(route_map_bool_option "$target" active 1)" = "1" ] || continue
+        printf '%s\n' "$target"
+    done
+}
+
 # Emit classified entries belonging to ONE target:
 #   D domain   - exact hostname from the route-map
 #   W domain   - wildcard/suffix hostname from the route-map (*.host)
@@ -739,7 +747,7 @@ compute_route_extras() {
     rule_objs=""
     fallback_objs=""
     idx=0
-    for target in $(route_map_targets); do
+    for target in $(route_map_enabled_targets); do
         route_map_section "$target" | grep -q . || continue
         [ -f "$SINGBOX_PROFILES_DIR/$target.json" ] || continue
         idx=$((idx + 1))
@@ -839,7 +847,7 @@ compute_intercept_inbounds() { # $1 = active chain CSV
     sel=$(get_settings_val "self_intercept")
     sel_full=$(get_settings_val "self_intercept_full")
     if [ -n "$sel" ]; then
-        for target in $(route_map_targets); do
+        for target in $(route_map_enabled_targets); do
             csv_contains "$sel" "$target" || continue
             pfile="$SINGBOX_PROFILES_DIR/$target.json"
             [ -f "$pfile" ] || continue
@@ -1088,7 +1096,7 @@ build_config() {
         commit_list="$tmp_default:$SINGBOX_CONFIG"
 
         idx=0
-        for target in $(route_map_targets); do
+        for target in $(route_map_enabled_targets); do
             [ -f "$SINGBOX_PROFILES_DIR/$target.json" ] || continue
             route_map_section "$target" | grep -q . || continue
             idx=$((idx + 1))
@@ -1634,7 +1642,7 @@ status)
     [ -f "$SINGBOX_PROFILES_DIR/$SB_PROFILE.json" ] && \
         SB_TYPE=$(json_val "type" "$SINGBOX_PROFILES_DIR/$SB_PROFILE.json")
     SB_MODE=$(get_singbox_mode)
-    SB_ROUTE_TARGETS=$(route_map_targets | grep -c . 2>/dev/null)
+    SB_ROUTE_TARGETS=$(route_map_enabled_targets | grep -c . 2>/dev/null)
     [ -z "$SB_ROUTE_TARGETS" ] && SB_ROUTE_TARGETS=0
     SB_EGRESS_IP=""
     SB_EGRESS_TS=0
@@ -1830,7 +1838,7 @@ self_intercept)
             [ -n "$_t" ] || continue
             _pf="$SINGBOX_PROFILES_DIR/$_t.json"
             [ -f "$_pf" ] || continue
-            route_map_targets | grep -qx "$_t" || continue
+            route_map_enabled_targets | grep -qx "$_t" || continue
             case "$(json_val "type" "$_pf")" in
                 socks|socks4|socks4a|socks5|http|http-proxy|https-proxy) ;;
                 *) continue ;;
@@ -1858,7 +1866,7 @@ self_intercept)
         SEL=$(get_settings_val "self_intercept")
         SELFULL=$(get_settings_val "self_intercept_full")
         ELIG=""
-        for _t in $(route_map_targets); do
+        for _t in $(route_map_enabled_targets); do
             _pf="$SINGBOX_PROFILES_DIR/$_t.json"
             [ -f "$_pf" ] || continue
             case "$(json_val "type" "$_pf")" in
