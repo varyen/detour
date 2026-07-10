@@ -15,13 +15,21 @@
 SETTINGS=/etc/sing-box/settings.json
 PROFILES=/etc/sing-box/profiles
 STATE=/var/state/vpn-keepalive.json
+PUSH_BIN=/usr/sbin/detour-push
+DETOUR_DIR=/etc/detour
+WANWATCH_CONF=/etc/detour/wan-watch.conf
+PLATFORM=openwrt
 
 # Keenetic/Entware platform shim (mirrors detour-api).
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
     export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
     SETTINGS=/opt/etc/sing-box/settings.json
     PROFILES=/opt/etc/sing-box/profiles
     STATE=/opt/var/state/vpn-keepalive.json
+    PUSH_BIN=/opt/sbin/detour-push
+    DETOUR_DIR=/opt/etc/detour
+    WANWATCH_CONF=/opt/etc/detour/wan-watch.conf
 fi
 
 mkdir -p "$(dirname "$STATE")"
@@ -31,16 +39,128 @@ now=$(date +%s 2>/dev/null)
 
 jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
 jnum() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -1; }
+jbool() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p" "$2" 2>/dev/null | head -1; }
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"; }
+
+push_alert() {
+    [ -x "$PUSH_BIN" ] || return 0
+    "$PUSH_BIN" send "$1" "$2" >/dev/null 2>&1
+}
+
+detect_wan_device() {
+    _wd=""
+    if command -v ubus >/dev/null 2>&1; then
+        _wst=$(ubus call network.interface.wan status 2>/dev/null)
+        _wd=$(printf '%s\n' "$_wst" | sed -n 's/.*"device"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        [ -n "$_wd" ] || _wd=$(printf '%s\n' "$_wst" | sed -n 's/.*"l3_device"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    fi
+    [ -n "$_wd" ] || _wd=$(ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    printf '%s' "$_wd"
+}
+
+load_wanwatch_config() {
+    WANWATCH_MODE=notify
+    WANWATCH_COOLDOWN_SECS=1800
+    WANWATCH_WINDOW_SECS=21600
+    WANWATCH_MAX_RESTARTS=3
+    WANWATCH_AUTO_SUPPORTED=false
+    if [ "$PLATFORM" = "openwrt" ] && command -v ifdown >/dev/null 2>&1 && command -v ifup >/dev/null 2>&1; then
+        WANWATCH_AUTO_SUPPORTED=true
+    fi
+    if [ -f "$WANWATCH_CONF" ]; then
+        _m=$(sed -n 's/^MODE=//p' "$WANWATCH_CONF" 2>/dev/null | tail -1)
+        case "$_m" in auto|notify|off) WANWATCH_MODE=$_m ;; esac
+        _cd=$(sed -n 's/^COOLDOWN_SECS=//p' "$WANWATCH_CONF" 2>/dev/null | tail -1)
+        case "$_cd" in ''|*[!0-9]*) ;; *) WANWATCH_COOLDOWN_SECS=$_cd ;; esac
+        _ws=$(sed -n 's/^WINDOW_SECS=//p' "$WANWATCH_CONF" 2>/dev/null | tail -1)
+        case "$_ws" in ''|*[!0-9]*) ;; *) WANWATCH_WINDOW_SECS=$_ws ;; esac
+        _mr=$(sed -n 's/^MAX_RESTARTS=//p' "$WANWATCH_CONF" 2>/dev/null | tail -1)
+        case "$_mr" in ''|*[!0-9]*) ;; *) WANWATCH_MAX_RESTARTS=$_mr ;; esac
+    fi
+}
+
+wan_speed_label() {
+    case "$1" in
+        ''|*[!0-9]*) printf 'unknown' ;;
+        2500) printf '2.5 Gbit/s' ;;
+        1000) printf '1 Gbit/s' ;;
+        *) printf '%s Mbit/s' "$1" ;;
+    esac
+}
+
+read_wan_link() {
+    WAN_DEVICE=$(detect_wan_device)
+    WAN_CARRIER=false
+    WAN_SPEED_MBPS=""
+    WAN_DUPLEX=""
+    WAN_DEGRADED=false
+
+    if [ -n "$WAN_DEVICE" ] && command -v ubus >/dev/null 2>&1; then
+        _wdev=$(ubus call network.device status "{\"name\":\"$WAN_DEVICE\"}" 2>/dev/null)
+        if [ -n "$_wdev" ]; then
+            printf '%s\n' "$_wdev" | grep -q '"carrier"[[:space:]]*:[[:space:]]*true' && WAN_CARRIER=true
+            WAN_SPEED_MBPS=$(printf '%s\n' "$_wdev" | sed -n 's/.*"speed"[[:space:]]*:[[:space:]]*"\([0-9][0-9]*\)[^"]*".*/\1/p' | head -1)
+            _spd_raw=$(printf '%s\n' "$_wdev" | sed -n 's/.*"speed"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+            case "$_spd_raw" in
+                *F) WAN_DUPLEX=full ;;
+                *H) WAN_DUPLEX=half ;;
+            esac
+        fi
+    fi
+
+    if [ -n "$WAN_DEVICE" ] && command -v ethtool >/dev/null 2>&1 && { [ -z "$WAN_SPEED_MBPS" ] || [ -z "$WAN_DUPLEX" ]; }; then
+        _et=$(ethtool "$WAN_DEVICE" 2>/dev/null)
+        if [ -n "$_et" ]; then
+            if [ "$WAN_CARRIER" != true ] && printf '%s\n' "$_et" | grep -q 'Link detected:[[:space:]]*yes'; then
+                WAN_CARRIER=true
+            fi
+            [ -n "$WAN_SPEED_MBPS" ] || WAN_SPEED_MBPS=$(printf '%s\n' "$_et" | sed -n 's/.*Speed:[[:space:]]*\([0-9][0-9]*\)Mb\/s.*/\1/p' | head -1)
+            [ -n "$WAN_DUPLEX" ] || WAN_DUPLEX=$(printf '%s\n' "$_et" | sed -n 's/.*Duplex:[[:space:]]*\([A-Za-z][A-Za-z]*\).*/\L\1/p' | head -1)
+        fi
+    fi
+
+    case "$WAN_SPEED_MBPS" in
+        ''|*[!0-9]*) ;;
+        *) [ "$WAN_CARRIER" = true ] && [ "$WAN_SPEED_MBPS" -lt 1000 ] && WAN_DEGRADED=true ;;
+    esac
+    WAN_SPEED_LABEL=$(wan_speed_label "$WAN_SPEED_MBPS")
+}
 
 # Carry forward last_ok / last_fail timestamps from the previous run.
 prev_last_ok=0
 prev_last_fail=0
+prev_wan_degraded=false
+prev_wan_last_change=0
+prev_wan_last_degraded=0
+prev_wan_last_recovered=0
+prev_wan_last_restart=0
+prev_wan_last_suppressed=0
+prev_wan_restart_count=0
+prev_wan_restart_window_start=0
+prev_wan_last_restart_result=""
 if [ -f "$STATE" ]; then
     prev_last_ok=$(jnum last_ok "$STATE")
     prev_last_fail=$(jnum last_fail "$STATE")
+    prev_wan_degraded=$(jbool degraded "$STATE")
+    prev_wan_last_change=$(jnum last_change "$STATE")
+    prev_wan_last_degraded=$(jnum last_degraded "$STATE")
+    prev_wan_last_recovered=$(jnum last_recovered "$STATE")
+    prev_wan_last_restart=$(jnum last_restart "$STATE")
+    prev_wan_last_suppressed=$(jnum last_suppressed "$STATE")
+    prev_wan_restart_count=$(jnum restart_count "$STATE")
+    prev_wan_restart_window_start=$(jnum restart_window_start "$STATE")
+    prev_wan_last_restart_result=$(jstr last_restart_result "$STATE")
 fi
 [ -z "$prev_last_ok" ] && prev_last_ok=0
 [ -z "$prev_last_fail" ] && prev_last_fail=0
+[ "$prev_wan_degraded" = "true" ] || prev_wan_degraded=false
+[ -z "$prev_wan_last_change" ] && prev_wan_last_change=0
+[ -z "$prev_wan_last_degraded" ] && prev_wan_last_degraded=0
+[ -z "$prev_wan_last_recovered" ] && prev_wan_last_recovered=0
+[ -z "$prev_wan_last_restart" ] && prev_wan_last_restart=0
+[ -z "$prev_wan_last_suppressed" ] && prev_wan_last_suppressed=0
+[ -z "$prev_wan_restart_count" ] && prev_wan_restart_count=0
+[ -z "$prev_wan_restart_window_start" ] && prev_wan_restart_window_start=0
 
 profile=$(jstr active_profile "$SETTINGS")
 [ -z "$profile" ] && profile=$(jstr active_chain "$SETTINGS")
@@ -53,6 +173,73 @@ if [ -f "$pfile" ]; then
     server=$(jstr server "$pfile")
     port=$(jnum server_port "$pfile")
     ptype=$(jstr type "$pfile")
+fi
+
+read_wan_link
+load_wanwatch_config
+wan_last_change=$prev_wan_last_change
+wan_last_degraded=$prev_wan_last_degraded
+wan_last_recovered=$prev_wan_last_recovered
+wan_last_restart=$prev_wan_last_restart
+wan_last_suppressed=$prev_wan_last_suppressed
+wan_restart_count=$prev_wan_restart_count
+wan_restart_window_start=$prev_wan_restart_window_start
+wan_last_restart_result=$prev_wan_last_restart_result
+if [ "$WAN_DEGRADED" != "$prev_wan_degraded" ]; then
+    wan_last_change=$now
+    if [ "$WAN_DEGRADED" = true ]; then
+        wan_last_degraded=$now
+        case "$WANWATCH_MODE" in
+            off) ;;
+            *) push_alert "Detour: WAN просел" "WAN-порт ${WAN_DEVICE:-?} поднялся только как ${WAN_SPEED_LABEL}. Это режет скорость VPN. Панель → «WAN», либо проверьте кабель/аплинк." ;;
+        esac
+    elif [ "$prev_wan_degraded" = true ]; then
+        wan_last_recovered=$now
+        case "$WANWATCH_MODE" in
+            off) ;;
+            *) push_alert "Detour: WAN восстановлен" "WAN-порт ${WAN_DEVICE:-?} снова поднялся как ${WAN_SPEED_LABEL}. Ограничение скорости должно исчезнуть." ;;
+        esac
+    fi
+fi
+
+if [ "$WANWATCH_WINDOW_SECS" -le 0 ] 2>/dev/null; then WANWATCH_WINDOW_SECS=21600; fi
+if [ "$WANWATCH_COOLDOWN_SECS" -le 0 ] 2>/dev/null; then WANWATCH_COOLDOWN_SECS=1800; fi
+if [ "$WANWATCH_MAX_RESTARTS" -le 0 ] 2>/dev/null; then WANWATCH_MAX_RESTARTS=3; fi
+if [ "$wan_restart_window_start" -le 0 ] 2>/dev/null || [ "$((now - wan_restart_window_start))" -ge "$WANWATCH_WINDOW_SECS" ]; then
+    wan_restart_window_start=$now
+    wan_restart_count=0
+    wan_last_suppressed=0
+fi
+
+if [ "$WAN_DEGRADED" = true ] && [ "$WANWATCH_MODE" = auto ] && [ "$WANWATCH_AUTO_SUPPORTED" = true ]; then
+    _can_restart=1
+    if [ "$wan_last_restart" -gt 0 ] 2>/dev/null && [ "$((now - wan_last_restart))" -lt "$WANWATCH_COOLDOWN_SECS" ]; then
+        _can_restart=0
+    fi
+    if [ "$wan_restart_count" -ge "$WANWATCH_MAX_RESTARTS" ] 2>/dev/null; then
+        _can_restart=0
+        if [ "$wan_last_suppressed" -le 0 ] 2>/dev/null || [ "$((now - wan_last_suppressed))" -ge "$WANWATCH_WINDOW_SECS" ]; then
+            push_alert "Detour: WAN auto-restart остановлен" "WAN остаётся на ${WAN_SPEED_LABEL}; авто-перезапуск временно заблокирован (слишком много попыток за окно). Нужна ручная проверка кабеля/аплинка." 
+            wan_last_suppressed=$now
+        fi
+    fi
+    if [ "$_can_restart" = "1" ]; then
+        ifdown wan >/dev/null 2>&1 || true
+        sleep 3
+        ifup wan >/dev/null 2>&1 || true
+        sleep 8
+        read_wan_link
+        wan_last_restart=$now
+        wan_restart_count=$((wan_restart_count + 1))
+        wan_last_restart_result="$WAN_SPEED_LABEL"
+        if [ "$WAN_DEGRADED" = false ]; then
+            wan_last_change=$now
+            wan_last_recovered=$now
+            push_alert "Detour: WAN восстановлен" "Авто-перезапуск WAN помог: ${WAN_DEVICE:-?} снова поднялся как ${WAN_SPEED_LABEL}."
+        else
+            push_alert "Detour: WAN всё ещё просел" "Авто-перезапуск WAN не помог: ${WAN_DEVICE:-?} остался на ${WAN_SPEED_LABEL}. Проверьте кабель/аплинк."
+        fi
+    fi
 fi
 
 ok=0
@@ -104,6 +291,13 @@ fi
 ok_json=false; [ "$ok" = "1" ] && ok_json=true
 ping_json=false; [ "$ping_ok" = "1" ] && ping_json=true
 [ -z "$port" ] && port=0
+wan_carrier_json=false; [ "$WAN_CARRIER" = true ] && wan_carrier_json=true
+wan_degraded_json=false; [ "$WAN_DEGRADED" = true ] && wan_degraded_json=true
+wan_auto_supported_json=false; [ "$WANWATCH_AUTO_SUPPORTED" = true ] && wan_auto_supported_json=true
+case "$WAN_SPEED_MBPS" in ''|*[!0-9]*) wan_speed_json=null ;; *) wan_speed_json=$WAN_SPEED_MBPS ;; esac
+case "$WAN_DEVICE" in '') wan_device_json=null ;; *) wan_device_json=$(json_str "$WAN_DEVICE") ;; esac
+case "$WAN_DUPLEX" in '') wan_duplex_json=null ;; *) wan_duplex_json=$(json_str "$WAN_DUPLEX") ;; esac
+case "$wan_last_restart_result" in '') wan_last_restart_result_json=null ;; *) wan_last_restart_result_json=$(json_str "$wan_last_restart_result") ;; esac
 
 tmp="$STATE.tmp.$$"
 cat > "$tmp" <<EOF
@@ -116,7 +310,28 @@ cat > "$tmp" <<EOF
   "server": "$server",
   "port": $port,
   "ping_ok": $ping_json,
-  "method": "$method"
+    "method": "$method",
+    "wan": {
+        "device": $wan_device_json,
+        "carrier": $wan_carrier_json,
+        "speed_mbps": $wan_speed_json,
+        "speed_label": $(json_str "$WAN_SPEED_LABEL"),
+        "duplex": $wan_duplex_json,
+        "degraded": $wan_degraded_json,
+        "mode": $(json_str "$WANWATCH_MODE"),
+        "auto_supported": $wan_auto_supported_json,
+        "cooldown_secs": $WANWATCH_COOLDOWN_SECS,
+        "window_secs": $WANWATCH_WINDOW_SECS,
+        "max_restarts": $WANWATCH_MAX_RESTARTS,
+        "last_change": $wan_last_change,
+        "last_degraded": $wan_last_degraded,
+        "last_recovered": $wan_last_recovered,
+        "last_restart": $wan_last_restart,
+        "last_restart_result": $wan_last_restart_result_json,
+        "last_suppressed": $wan_last_suppressed,
+        "restart_count": $wan_restart_count,
+        "restart_window_start": $wan_restart_window_start
+    }
 }
 EOF
 mv "$tmp" "$STATE"
