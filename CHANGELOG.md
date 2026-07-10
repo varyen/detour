@@ -5,6 +5,34 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.25.1] — 2026-07-10
+
+Багфиксы для статусов VPN и перехвата Claude-прокси: у каждого профиля появился
+собственный флаг фонового замера скорости, а умный перехват proxy-target теперь
+может вести весь трафик клиента через выбранный SOCKS/HTTP-профиль.
+
+### Изменено
+
+- **В «Статусах VPN» появился per-profile флаг фонового speed-check.** Общий
+  тумблер проверки скорости остался master-switch, но теперь у каждой строки VPN
+  можно отдельно включить или выключить фоновые замеры, не трогая ручную проверку
+  по кнопке `⚕`. Флаг хранится вне profile JSON, поэтому не теряется после
+  subscription refresh. _OpenWrt/GL.iNet + Keenetic — общий CGI/UI/runtime._
+- **«Умный перехват прокси» получил режим `Весь трафик`.** Для SOCKS/HTTP route-
+  target теперь можно выбрать либо старый split-routing (`Маршрут`), либо полный
+  egress через выбранный proxy только для перехваченного клиента. Это даёт
+  корректный datapath для устройств, жёстко прибитых к одному proxy endpoint,
+  включая мобильные клиенты в Wi‑Fi сети. _OpenWrt/GL.iNet + Keenetic parity в
+  generator/UI._
+
+### Исправлено
+
+- **Claude route-map обновлён под актуальные входные домены.** Для proxy-target
+  `claude_usa` добавлены `claude.com`, `www.claude.com` и
+  `console.anthropic.com`, чтобы новые Claude entrypoints не выпадали из
+  маршрута после переезда части трафика с `claude.ai`. _OpenWrt/GL.iNet +
+  Keenetic — общий формат route-map._
+
 ## [1.25.0] — 2026-07-10
 
 Маршрутизация по профилям переделана из одной сырой textarea в отдельные route-блоки,

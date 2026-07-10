@@ -47,6 +47,9 @@ URLS_FILE=/etc/sing-box/health-urls.list
 # absent/empty file = every profile eligible (preserves the original behaviour). Kept
 # OUT of the profile JSON because subscription-refresh rebuilds those from scratch.
 AUTOSWITCH_EXCLUDE=/etc/sing-box/autoswitch-exclude.list
+# Profiles the user EXCLUDED from BACKGROUND speed checks (one id per line). Manual
+# per-row checks remain explicit user actions and may still measure speed once.
+SPEEDCHECK_EXCLUDE=/etc/sing-box/speedcheck-exclude.list
 SINGBOX_BIN=/usr/bin/sing-box
 API_BIN=/www/cgi-bin/detour-api
 LOG=/var/log/detour-health.log
@@ -120,6 +123,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PROFILES=/opt/etc/sing-box/profiles
     URLS_FILE=/opt/etc/sing-box/health-urls.list
     AUTOSWITCH_EXCLUDE=/opt/etc/sing-box/autoswitch-exclude.list
+    SPEEDCHECK_EXCLUDE=/opt/etc/sing-box/speedcheck-exclude.list
     SINGBOX_BIN=/opt/bin/sing-box
     # lighttpd doc-root is /opt/share/www (see keenetic/lighttpd/detour.conf and
     # the build-ipk.py install path) — NOT /opt/www. A wrong path here makes the
@@ -456,6 +460,12 @@ measure_speed() { # $1 = profile id  ->  echoes kbit/s (integer) or nothing
     case "$_kbps" in ''|*[!0-9]*) return 0 ;; esac
     [ "$_kbps" -gt 0 ] 2>/dev/null || return 0
     printf '%s' "$_kbps"
+}
+
+speedcheck_allowed() {
+    [ -f "$SPEEDCHECK_EXCLUDE" ] || return 0
+    grep -qxF "$1" "$SPEEDCHECK_EXCLUDE" 2>/dev/null && return 1
+    return 0
 }
 
 # Run the clash delay test for one outbound+URL; echo the ms delay, or nothing on
@@ -958,6 +968,7 @@ case "$SPEED_ENABLED" in
                 [ -f "$WORK/$_spid" ] || continue
                 _spok=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$_spid" 2>/dev/null)
                 [ "$_spok" = "1" ] || continue          # only healthy profiles
+                speedcheck_allowed "$_spid" || continue
                 _spk=$(measure_speed "$_spid")
                 [ -n "$_spk" ] && { set_dl "$_spid" "$_spk"; _spn=$((_spn + 1)); }
             done < "$PROBED"

@@ -1699,6 +1699,12 @@
         border-color: var(--green-border);
         opacity: 1;
       }
+      .vpn-speed-flag-btn.on {
+        color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+        opacity: 1;
+      }
       .vpn-activate-btn {
         height: 28px;
         padding: 0 12px;
@@ -4359,9 +4365,11 @@
               <p class="helper-text-block" style="margin: 8px 0">
                 Если устройство (например, браузер) жёстко прибито к тому же
                 SOCKS/HTTP-прокси, который здесь задан как цель маршрута, включи
-                перехват — роутер прозрачно применит к его трафику маршрутизацию
-                панели (домены маршрута → через этот прокси, остальное → основной
-                выход), без сломанной двойной обёртки. Работает только в режиме
+                перехват — роутер прозрачно применит к его трафику либо
+                маршрутизацию панели (<strong>Маршрут</strong>: домены маршрута →
+                через этот прокси, остальное → основной выход), либо сделает этот
+                proxy полноценным выходом для всего трафика
+                (<strong>Весь трафик</strong>). Работает только в режиме
                 <strong>«Один инстанс»</strong>.
               </p>
               <div
@@ -4750,9 +4758,9 @@
               <input type="checkbox" id="health-autoswitch" onchange="saveHealthConfig()" />
               Авто-переключение на рабочий
             </label>
-            <label class="health-toggle" title="Заодно с проверкой раз в час замерять реальную скорость скачивания активного профиля; у остальных — по кнопке ⚕. Качает реальный трафик через VPN (объём — в селекторе справа).">
+            <label class="health-toggle" title="Замерять реальную скорость скачивания у профилей, где в таблице включён значок ↓. Качает реальный трафик через VPN (объём — в селекторе справа). Кнопка ⚕ в строке профиля всё равно может сделать разовый замер вручную.">
               <input type="checkbox" id="health-speed" onchange="saveHealthConfig()" />
-              Замер скорости активного
+              Замер скорости
             </label>
             <label class="health-toggle" id="health-speed-size-wrap" title="Размер файла, который скачивается через VPN при замере. Больше файл — точнее на быстрых каналах (маленький 8 МБ упирается в ~50–60 Мбит/с из-за TLS-рукопожатия и разгона TCP), но больше реального трафика через VPN за один замер.">
               Объём замера:
@@ -7564,6 +7572,13 @@
         );
       }
 
+      function speedcheckIconSvg() {
+        return (
+          '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">' +
+          '<path d="M12 4v12"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>'
+        );
+      }
+
       // Flip ONE profile's auto-switch eligibility (the VPN-view check icon). Optimistic:
       // updates currentProfiles + the button immediately, reverts on a failed save.
       function toggleAutoswitch(id, btn) {
@@ -7598,6 +7613,38 @@
           });
       }
 
+      function toggleSpeedcheck(id, btn) {
+        var p = currentProfiles.find(function (x) {
+          return x.id === id;
+        });
+        var newElig = !(p ? p.speedcheck !== false : false);
+        if (p) p.speedcheck = newElig;
+        if (btn) {
+          btn.classList.toggle("on", newElig);
+          btn.title = newElig
+            ? "Участвует в фоновых замерах скорости · клик, чтобы исключить"
+            : "Исключён из фоновых замеров скорости · клик, чтобы включить";
+        }
+        return api(
+          "speedcheck_set&eligible=" + (newElig ? "1" : "0"),
+          "POST",
+          id,
+        )
+          .then(function (r) {
+            if (!r || !r.ok) throw new Error("save failed");
+          })
+          .catch(function () {
+            if (p) p.speedcheck = !newElig;
+            if (btn) {
+              btn.classList.toggle("on", !newElig);
+              btn.title = !newElig
+                ? "Участвует в фоновых замерах скорости · клик, чтобы исключить"
+                : "Исключён из фоновых замеров скорости · клик, чтобы включить";
+            }
+            toast("Не удалось сохранить флаг замера скорости", "error");
+          });
+      }
+
       function vpnStatusRowHtml(p) {
         var info = pingInfo(p.id);
         var e = pingResults[p.id];
@@ -7623,6 +7670,7 @@
           "</span>";
         var healthHtml = vpnHealthCellHtml(p.id);
         var asEligible = p.autoswitch !== false;
+        var spEligible = p.speedcheck !== false;
         var actions =
           '<button class="vpn-as-btn' +
           (asEligible ? " on" : "") +
@@ -7634,6 +7682,17 @@
           escapeHtml(p.id) +
           "', this)\">" +
           autoswitchIconSvg() +
+          "</button>" +
+          '<button class="vpn-as-btn vpn-speed-flag-btn' +
+          (spEligible ? " on" : "") +
+          '" title="' +
+          (spEligible
+            ? "Участвует в фоновых замерах скорости · клик, чтобы исключить"
+            : "Исключён из фоновых замеров скорости · клик, чтобы включить") +
+          "\" onclick=\"toggleSpeedcheck('" +
+          escapeHtml(p.id) +
+          "', this)\">" +
+          speedcheckIconSvg() +
           "</button>" +
           '<button class="vpn-refresh-btn" title="Обновить пинг" onclick="refreshOnePing(\'' +
           escapeHtml(p.id) +
@@ -12873,6 +12932,7 @@
           var d = await api("self_intercept");
           var elig = d.eligible || [];
           var sel = d.targets || [];
+          var full = d.full_targets || [];
           var single = d.mode === "single";
           if (note)
             note.textContent = single
@@ -12888,9 +12948,13 @@
             var p = (currentProfiles || []).find(function (x) {
               return x.id === id;
             });
+            var row = document.createElement("div");
+            row.setAttribute("data-intercept-row", id);
+            row.style.cssText =
+              "display:flex;align-items:center;gap:8px;justify-content:space-between;flex-wrap:wrap;";
             var label = document.createElement("label");
             label.style.cssText =
-              "display:flex;align-items:center;gap:8px;cursor:pointer;";
+              "display:flex;align-items:center;gap:8px;cursor:pointer;min-width:220px;flex:1;";
             var cb = document.createElement("input");
             cb.type = "checkbox";
             cb.value = id;
@@ -12902,7 +12966,21 @@
               (p ? p.name || p.id : id) + (p && p.type ? " (" + p.type + ")" : "");
             label.appendChild(cb);
             label.appendChild(span);
-            list.appendChild(label);
+            var mode = document.createElement("select");
+            mode.setAttribute("data-intercept-mode", id);
+            mode.style.cssText = "min-width:140px;";
+            mode.disabled = !single || !cb.checked;
+            mode.innerHTML =
+              '<option value="split">Маршрут</option><option value="full">Весь трафик</option>';
+            mode.value = full.indexOf(id) !== -1 ? "full" : "split";
+            mode.onchange = saveIntercept;
+            cb.onchange = function () {
+              mode.disabled = !single || !cb.checked;
+              saveIntercept();
+            };
+            row.appendChild(label);
+            row.appendChild(mode);
+            list.appendChild(row);
           });
         } catch (e) {
           if (e.message !== "Not authenticated")
@@ -12915,9 +12993,15 @@
         var list = document.getElementById("intercept-list");
         if (!list) return;
         var ids = [];
-        list.querySelectorAll("input[type=checkbox]").forEach(function (cb) {
+        list.querySelectorAll("[data-intercept-row]").forEach(function (row) {
+          var cb = row.querySelector('input[type="checkbox"]');
+          var mode = row.querySelector("select");
+          if (!cb) return;
           cb.disabled = true;
-          if (cb.checked) ids.push(cb.value);
+          if (mode) mode.disabled = true;
+          if (cb.checked) {
+            ids.push(cb.value + (mode && mode.value === "full" ? ":full" : ""));
+          }
         });
         try {
           var d = await api("self_intercept", "POST", ids.join(","));

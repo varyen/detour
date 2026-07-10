@@ -19,6 +19,9 @@ SINGBOX_PROFILES_DIR="/etc/sing-box/profiles"
 # Profiles EXCLUDED from auto-switch (one id per line; absent/empty = all eligible).
 # Read by detour-health's candidate pick; managed by the autoswitch_set action below.
 AUTOSWITCH_EXCLUDE="/etc/sing-box/autoswitch-exclude.list"
+# Profiles EXCLUDED from BACKGROUND speed checks (one id per line; absent/empty =
+# all eligible). Kept outside profile JSON for the same reason as auto-switch.
+SPEEDCHECK_EXCLUDE="/etc/sing-box/speedcheck-exclude.list"
 SINGBOX_WHITELIST="/etc/sing-box/whitelist-domains.list"
 ZAPRET_INITD="/etc/init.d/zapret-tpws"
 ZAPRET_CONF="/etc/zapret-tpws.conf"
@@ -98,6 +101,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_SETTINGS="$OPT/etc/sing-box/settings.json"
     SINGBOX_PROFILES_DIR="$OPT/etc/sing-box/profiles"
     AUTOSWITCH_EXCLUDE="$OPT/etc/sing-box/autoswitch-exclude.list"
+    SPEEDCHECK_EXCLUDE="$OPT/etc/sing-box/speedcheck-exclude.list"
     SINGBOX_WHITELIST="$OPT/etc/sing-box/whitelist-domains.list"
     ZAPRET_INITD="$OPT/etc/init.d/S53detour-zapret"
     ZAPRET_CONF="$OPT/etc/zapret-tpws.conf"
@@ -489,8 +493,9 @@ write_settings() {
     # HTTP proxy endpoint the panel transparently takes over for LAN clients). Same
     # preserve-or-override dance as the flags above: the self_intercept action sets it
     # via SELF_INTERCEPT_OVERRIDE; every other rewrite re-reads it so it survives.
-    local self_intercept
+    local self_intercept self_intercept_full
     self_intercept=${SELF_INTERCEPT_OVERRIDE:-$(get_settings_val "self_intercept")}
+    self_intercept_full=${SELF_INTERCEPT_FULL_OVERRIDE:-$(get_settings_val "self_intercept_full")}
 
     cat > "$SINGBOX_SETTINGS" <<EOF
 {
@@ -507,7 +512,8 @@ write_settings() {
   "health_speed_bytes": "$health_speed_bytes",
   "log_to_syslog": "$log_syslog",
   "log_to_syslog_singbox": "$log_syslog_sb",
-  "self_intercept": "$self_intercept"
+    "self_intercept": "$self_intercept",
+    "self_intercept_full": "$self_intercept_full"
 }
 EOF
 }
@@ -817,16 +823,21 @@ compute_route_extras() {
 # this inbound (via the map written here), so a browser hard-pinned to the proxy
 # transparently gets the panel's split-routing (route-mapped domains → the real
 # upstream, everything else → the main outbound) instead of a broken double-proxy
-# wrap. No loop: the inbound's own re-dial to the real upstream originates from the
-# router (OUTPUT), which the "-i br-lan" REDIRECT never matches. Single mode only.
-# Sets IX_INBOUNDS (comma-prefixed inbound objects, or empty) and (re)writes the map.
-compute_intercept_inbounds() {
+# wrap. In FULL mode a taken-over proxy becomes a true all-sites egress for its own
+# inbound via a dedicated per-inbound route rule. No loop: the inbound's own re-dial
+# to the real upstream originates from the router (OUTPUT), which the "-i br-lan"
+# REDIRECT never matches. Single mode only.
+# Sets IX_INBOUNDS / IX_RULES and (re)writes the map.
+compute_intercept_inbounds() { # $1 = active chain CSV
     IX_INBOUNDS=""
-    local sel target pfile ptype srv port user pass ip inport idx users tmp
+    IX_RULES=""
+    local chain="$1"
+    local sel sel_full target pfile ptype srv port user pass ip inport idx users tmp tag
     idx=0
     tmp="$SINGBOX_INTERCEPT_MAP.tmp.$$"
     : > "$tmp"
     sel=$(get_settings_val "self_intercept")
+    sel_full=$(get_settings_val "self_intercept_full")
     if [ -n "$sel" ]; then
         for target in $(route_map_targets); do
             csv_contains "$sel" "$target" || continue
@@ -851,6 +862,12 @@ compute_intercept_inbounds() {
             fi
             IX_INBOUNDS="$IX_INBOUNDS,
     {\"type\":\"socks\",\"tag\":\"in_ix_$target\",\"listen\":\"::\",\"listen_port\":$inport$users}"
+            if csv_contains "$sel_full" "$target"; then
+                tag=$(route_tag_for "$target" "$chain")
+                [ -n "$tag" ] || tag="out_$target"
+                if [ -n "$IX_RULES" ]; then IX_RULES="$IX_RULES,"; fi
+                IX_RULES="$IX_RULES{\"action\":\"route\",\"inbound\":[\"in_ix_$target\"],\"outbound\":\"$tag\"}"
+            fi
             # Firewall map: the proxy endpoint(s) LAN clients dial -> our inbound port.
             if printf '%s' "$srv" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
                 printf '%s\t%s\t%s\n' "$srv" "$port" "$inport" >> "$tmp"
@@ -1099,8 +1116,20 @@ build_config() {
     else
         # single mode: one config with route.rules + extra outbounds.
         compute_route_extras "$chain"
-        compute_intercept_inbounds
-        if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$RX_RULES" 12345 redirect "$RX_INBOUNDS$IX_INBOUNDS" > "$tmp_default"; then
+        compute_intercept_inbounds "$chain"
+        local route_rules rule_prefix rule_tail
+        route_rules="$RX_RULES"
+        if [ -n "$IX_RULES" ]; then
+            rule_prefix='    "rules": [{"action":"sniff"},'
+            if [ -n "$route_rules" ]; then
+                rule_tail=${route_rules#"$rule_prefix"}
+                route_rules="$rule_prefix$IX_RULES,$rule_tail"
+            else
+                route_rules="$rule_prefix$IX_RULES],
+"
+            fi
+        fi
+        if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$route_rules" 12345 redirect "$RX_INBOUNDS$IX_INBOUNDS" > "$tmp_default"; then
             rm -f "$tmp_default"; echo "failed to render config (bad chain?)"; return 1
         fi
         err=$($SINGBOX_BIN check -c "$tmp_default" 2>&1)
@@ -1774,8 +1803,9 @@ route_map)
 # SOCKS/HTTP proxies (a route-map target) and re-apply the panel's split-routing.
 # For a browser hard-pinned to that same upstream proxy (can't be reconfigured):
 # instead of a broken double-proxy wrap, it gets route-mapped domains via the real
-# upstream and everything else via the main outbound. GET: current + eligible
-# targets. POST body: CSV of route-map target ids to intercept. Single mode only.
+# upstream and everything else via the main outbound. A token may also be suffixed
+# with :full to turn that taken-over proxy into a full all-sites egress for its own
+# intercepted inbound. Single mode only.
 self_intercept)
     if [ "$REQUEST_METHOD" = "POST" ]; then
         SBMODE=$(get_singbox_mode)
@@ -1784,9 +1814,19 @@ self_intercept)
             exit 0
         fi
         NEWSEL=""
-        OLDIFS="$IFS"; IFS=','
-        for _t in $POST_DATA; do
-            _t=$(sanitize_name "$_t")
+        NEWFULL=""
+        SI_ITEMS="/tmp/detour-self-intercept.$$"
+        printf '%s' "$POST_DATA" | tr ',\r' '\n\n' > "$SI_ITEMS"
+        while IFS= read -r _tok || [ -n "$_tok" ]; do
+            _tok=$(printf '%s' "$_tok" | tr -d ' \t')
+            [ -n "$_tok" ] || continue
+            _mode="split"
+            case "$_tok" in
+                *:full) _mode="full"; _raw=${_tok%:full} ;;
+                *:split) _raw=${_tok%:split} ;;
+                *) _raw=$_tok ;;
+            esac
+            _t=$(sanitize_name "$_raw")
             [ -n "$_t" ] || continue
             _pf="$SINGBOX_PROFILES_DIR/$_t.json"
             [ -f "$_pf" ] || continue
@@ -1796,11 +1836,15 @@ self_intercept)
                 *) continue ;;
             esac
             case ",$NEWSEL," in *",$_t,"*) ;; *) NEWSEL="${NEWSEL:+$NEWSEL,}$_t" ;; esac
-        done
-        IFS="$OLDIFS"
+            if [ "$_mode" = "full" ]; then
+                case ",$NEWFULL," in *",$_t,"*) ;; *) NEWFULL="${NEWFULL:+$NEWFULL,}$_t" ;; esac
+            fi
+        done < "$SI_ITEMS"
+        rm -f "$SI_ITEMS"
         ACHAIN=$(get_active_chain)
         # settings BEFORE build_config: compute_intercept_inbounds reads self_intercept.
-        SELF_INTERCEPT_OVERRIDE="$NEWSEL" write_settings "$ACHAIN" "$(get_routing_mode)" "$(collect_upstream_ips)" "$SBMODE"
+        SELF_INTERCEPT_OVERRIDE="$NEWSEL" SELF_INTERCEPT_FULL_OVERRIDE="$NEWFULL" \
+            write_settings "$ACHAIN" "$(get_routing_mode)" "$(collect_upstream_ips)" "$SBMODE"
         BUILD_ERR=$(build_config "$SBMODE" "$ACHAIN")
         if [ $? -ne 0 ]; then
             json_err "config build failed: $(printf '%s' "$BUILD_ERR" | json_escape)"
@@ -1808,9 +1852,11 @@ self_intercept)
         fi
         $SINGBOX_INITD restart >/dev/null 2>&1
         sleep 3
-        printf '{"ok":true,"targets":%s}' "$(print_csv_json_array "$NEWSEL")"
+        printf '{"ok":true,"targets":%s,"full_targets":%s}' \
+            "$(print_csv_json_array "$NEWSEL")" "$(print_csv_json_array "$NEWFULL")"
     else
         SEL=$(get_settings_val "self_intercept")
+        SELFULL=$(get_settings_val "self_intercept_full")
         ELIG=""
         for _t in $(route_map_targets); do
             _pf="$SINGBOX_PROFILES_DIR/$_t.json"
@@ -1820,8 +1866,9 @@ self_intercept)
                     ELIG="${ELIG:+$ELIG,}$_t" ;;
             esac
         done
-        printf '{"targets":%s,"eligible":%s,"mode":"%s"}' \
-            "$(print_csv_json_array "$SEL")" "$(print_csv_json_array "$ELIG")" "$(get_singbox_mode)"
+        printf '{"targets":%s,"full_targets":%s,"eligible":%s,"mode":"%s"}' \
+            "$(print_csv_json_array "$SEL")" "$(print_csv_json_array "$SELFULL")" \
+            "$(print_csv_json_array "$ELIG")" "$(get_singbox_mode)"
     fi
     ;;
 
@@ -2615,12 +2662,18 @@ profiles_list)
         else
             PAS=true
         fi
+        # background speed-check eligible = id is NOT in the exclude list.
+        if [ -f "$SPEEDCHECK_EXCLUDE" ] && grep -qxF "$PNAME" "$SPEEDCHECK_EXCLUDE" 2>/dev/null; then
+            PSC=false
+        else
+            PSC=true
+        fi
         if [ "$FIRST" = "1" ]; then FIRST=0; else printf ','; fi
-        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s","autoswitch":%s}' \
+        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s","autoswitch":%s,"speedcheck":%s}' \
             "$PNAME" "$PTYPE" \
             "$(echo "$PDESC" | json_escape)" \
             "$(echo "$PGROUP" | json_escape)" \
-            "$PRMODE" "$PAS"
+            "$PRMODE" "$PAS" "$PSC"
     done
     printf '],"active":"%s","active_chain":' "$(get_active_profile)"
     print_csv_json_array "$(get_active_chain)"
@@ -2658,6 +2711,34 @@ autoswitch_set)
     rm -f "$AS_IDS"
     AS_CNT=$(grep -c . "$AUTOSWITCH_EXCLUDE" 2>/dev/null); [ -z "$AS_CNT" ] && AS_CNT=0
     printf '{"ok":true,"excluded":%s}' "$AS_CNT"
+    ;;
+
+speedcheck_set)
+    # Mark profiles eligible/ineligible for BACKGROUND speed checks. ?eligible=1|0 +
+    # POST body = profile ids (newline- or comma-separated). Like auto-switch, the
+    # store is a standalone exclude list so subscription refreshes keep the flag.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    SC_ELIG=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]eligible=\([^&]*\).*/\1/p' | head -1)
+    mkdir -p "$(dirname "$SPEEDCHECK_EXCLUDE")" 2>/dev/null
+    touch "$SPEEDCHECK_EXCLUDE" 2>/dev/null
+    SC_IDS="/tmp/detour-speedcheck-ids.$$"
+    printf '%s' "$POST_DATA" | tr ',\r' '\n\n' | while IFS= read -r _l || [ -n "$_l" ]; do
+        _s=$(printf '%s' "$_l" | tr -cd 'a-zA-Z0-9_-')
+        [ -n "$_s" ] && echo "$_s"
+    done | sort -u > "$SC_IDS"
+    if [ -s "$SC_IDS" ]; then
+        if [ "$SC_ELIG" = "1" ]; then
+            awk 'NR==FNR{rm[$0]=1; next} !($0 in rm)' "$SC_IDS" "$SPEEDCHECK_EXCLUDE" \
+                > "$SPEEDCHECK_EXCLUDE.new" 2>/dev/null
+        else
+            awk 'NF && !seen[$0]++' "$SPEEDCHECK_EXCLUDE" "$SC_IDS" \
+                > "$SPEEDCHECK_EXCLUDE.new" 2>/dev/null
+        fi
+        mv "$SPEEDCHECK_EXCLUDE.new" "$SPEEDCHECK_EXCLUDE" 2>/dev/null
+    fi
+    rm -f "$SC_IDS"
+    SC_CNT=$(grep -c . "$SPEEDCHECK_EXCLUDE" 2>/dev/null); [ -z "$SC_CNT" ] && SC_CNT=0
+    printf '{"ok":true,"excluded":%s}' "$SC_CNT"
     ;;
 
 profile_get)
