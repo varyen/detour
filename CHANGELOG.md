@@ -5,6 +5,19 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.25.2] — 2026-07-11
+
+Точечный bugfix релиз для HTTP/HTTPS proxy-target в «Умном перехвате прокси».
+
+### Исправлено
+
+- **HTTP/HTTPS proxy-target больше не ломаются в `Умном перехвате прокси`.**
+  Для профилей `http`, `http-proxy` и `https-proxy` локальный intercept-inbound
+  теперь создаётся как `http`, а не как `socks`, поэтому клиентский трафик,
+  жёстко привязанный к proxy endpoint, корректно проходит через панель и не
+  падает с `invalid argument` в sing-box. _OpenWrt/GL.iNet + Keenetic — общий
+  CGI/generator bugfix._
+
 ## [1.25.1] — 2026-07-10
 
 Багфиксы для статусов VPN и перехвата Claude-прокси: у каждого профиля появился

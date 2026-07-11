@@ -836,7 +836,7 @@ compute_intercept_inbounds() { # $1 = active chain CSV
     IX_INBOUNDS=""
     IX_RULES=""
     local chain="$1"
-    local sel sel_full target pfile ptype srv port user pass ip inport idx users tmp tag
+    local sel sel_full target pfile ptype srv port user pass ip inport idx users tmp tag in_kind
     idx=0
     tmp="$SINGBOX_INTERCEPT_MAP.tmp.$$"
     : > "$tmp"
@@ -852,6 +852,10 @@ compute_intercept_inbounds() { # $1 = active chain CSV
                 socks|socks4|socks4a|socks5|http|http-proxy|https-proxy) ;;
                 *) continue ;;
             esac
+            case "$ptype" in
+                http|http-proxy|https-proxy) in_kind="http" ;;
+                *) in_kind="socks" ;;
+            esac
             srv=$(json_val "server" "$pfile")
             port=$(numeric_json_val "server_port" "$pfile")
             [ -n "$srv" ] && [ -n "$port" ] || continue
@@ -865,7 +869,7 @@ compute_intercept_inbounds() { # $1 = active chain CSV
                 users=""
             fi
             IX_INBOUNDS="$IX_INBOUNDS,
-    {\"type\":\"socks\",\"tag\":\"in_ix_$target\",\"listen\":\"::\",\"listen_port\":$inport$users}"
+    {\"type\":\"$in_kind\",\"tag\":\"in_ix_$target\",\"listen\":\"::\",\"listen_port\":$inport$users}"
             if csv_contains "$sel_full" "$target"; then
                 tag=$(route_tag_for "$target" "$chain")
                 [ -n "$tag" ] || tag="out_$target"
