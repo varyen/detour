@@ -574,7 +574,24 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=True):
         out, _, _ = exec_cmd(ssh, "/usr/sbin/detour-push ensure-keys 2>/dev/null")
         print(f"  VAPID public key: {(out.strip()[:24] + '…') if out.strip() else 'FAILED'}")
 
-    # 8d. Let's Encrypt helper (acme.sh, HTTP-01 webroot) — backs the panel's HTTPS
+    # 8d. WAN PHY watchdog — detects a physical downgrade to 100 Mbps and sends
+    #     a push alert. Unlike the QCA offload kick, this points at cable / peer
+    #     port / passive copper path issues.
+    wan_local = os.path.join(ROUTER_FILES, "detour-wan-link")
+    if os.path.isfile(wan_local):
+        with open(wan_local, "rb") as f:
+            n = upload(ssh, f.read(), "/usr/sbin/detour-wan-link", "0755")
+        print(f"  /usr/sbin/detour-wan-link: {n} bytes")
+        wan_cron = "* * * * * /usr/sbin/detour-wan-link tick >/dev/null 2>&1"
+        exec_cmd(
+            ssh,
+            "( crontab -l 2>/dev/null | grep -v 'detour-wan-link' ; "
+            f"echo '{wan_cron}' ) | crontab -",
+        )
+        out, _, _ = exec_cmd(ssh, "crontab -l 2>/dev/null | grep detour-wan-link")
+        print(f"  cron: {out.strip() or 'NOT INSTALLED'}")
+
+    # 8e. Let's Encrypt helper (acme.sh, HTTP-01 webroot) — backs the panel's HTTPS
     #     section + auto-renewal. Issuance is user-triggered (needs a domain + open :80).
     cert_local = os.path.join(ROUTER_FILES, "detour-cert")
     if os.path.isfile(cert_local):

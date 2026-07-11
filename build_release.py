@@ -139,6 +139,7 @@ PANEL_FILES = [
     (("router_files", "detour-push"), "usr/sbin/detour-push", 0o755),
     (("router_files", "detour-cert"), "usr/sbin/detour-cert", 0o755),
     (("router_files", "detour-offload"), "usr/sbin/detour-offload", 0o755),
+    (("router_files", "detour-wan-link"), "usr/sbin/detour-wan-link", 0o755),
     (("router_files", "detour-hosts"), "usr/sbin/detour-hosts", 0o755),
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
@@ -416,7 +417,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -432,6 +433,9 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   # wedged NSS/PPE accelerator (LAN<->WAN forwarding fell to the CPU → ~100 Mbit until a
   # reboot) and recovers it in place. Mode lives in /etc/detour/offload.conf (default auto).
   echo "* * * * * /usr/sbin/detour-offload tick >/dev/null 2>&1"
+    # WAN PHY watchdog — warns when the physical uplink negotiated below 1 Gbps.
+    # This is a cable/peer-port/copper-path problem; unlike offload, no software kick fixes it.
+    echo "* * * * * /usr/sbin/detour-wan-link tick >/dev/null 2>&1"
 ) | crontab -
 /etc/init.d/cron enable >/dev/null 2>&1
 /etc/init.d/cron restart >/dev/null 2>&1
@@ -471,6 +475,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-health' \\
                       | grep -v 'detour-hosts' \\
                       | grep -v 'detour-offload' \\
+                      | grep -v 'detour-wan-link' \\
                       | crontab - 2>/dev/null
 exit 0
 """

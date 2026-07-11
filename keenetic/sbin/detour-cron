@@ -13,6 +13,7 @@
 #
 # Tick-based schedule (base tick = $DETOUR_CRON_TICK, default 300 s):
 #   * vpn-keepalive          every tick      (~5 min)
+#   * detour-wan-link        every tick      (~5 min)
 #   * subscription-refresh   every 12 ticks  (~1 h)
 #   * detour-update check-all every 72 ticks (~6 h), gated by AUTO_CHECK in
 #     /opt/etc/detour/update.conf (the panel «Авто-проверка» toggle writes it).
@@ -57,6 +58,11 @@ while :; do
     # than OpenWrt's 1-min cron, but Keenetic is the secondary platform.
     [ -x /opt/sbin/detour-ping ] && \
         /opt/sbin/detour-ping >"$LOGDIR/detour-ping.log" 2>&1
+
+    # WAN PHY watchdog — detect a physical downgrade to 100 Mbps and send a push
+    # alert with the cable/peer-port guidance. Distinct from offload issues.
+    [ -x /opt/sbin/detour-wan-link ] && \
+        /opt/sbin/detour-wan-link tick >"$LOGDIR/detour-wan-link.log" 2>&1
 
     # Focused functional check of ONLY the active profile. Run it BACKGROUNDED with a
     # self-paced budget (~one tick) so detour-health re-probes every 30–60 s — PARITY

@@ -347,6 +347,27 @@
         gap: 6px;
         align-items: center;
       }
+      .page-alert {
+        margin: 14px 20px 0;
+        padding: 12px 14px;
+        border-radius: 14px;
+        border: 1px solid rgba(214, 40, 40, 0.28);
+        background:
+          linear-gradient(180deg, rgba(214, 40, 40, 0.16), rgba(214, 40, 40, 0.08)),
+          var(--bg-elev-solid);
+        color: var(--text);
+        box-shadow: 0 10px 24px rgba(214, 40, 40, 0.08);
+      }
+      .page-alert strong {
+        display: block;
+        margin-bottom: 6px;
+        color: #ffb4b4;
+      }
+      .page-alert .sub {
+        color: var(--text-dim);
+        font-size: 13px;
+        line-height: 1.45;
+      }
       .meter {
         display: inline-flex;
         align-items: center;
@@ -2299,6 +2320,9 @@
         .header {
           padding: 0 12px;
         }
+        .page-alert {
+          margin: 12px 12px 0;
+        }
         .container {
           padding: 14px;
         }
@@ -2950,6 +2974,8 @@
           </button>
         </div>
       </div>
+
+      <div id="wan-link-alert" class="page-alert" style="display: none"></div>
 
       <!-- ===== TOOLBAR (admin / bulk) ===== -->
       <div class="toolbar" role="toolbar" aria-label="Управление">
@@ -5993,6 +6019,12 @@
         return outbound.type;
       }
 
+      function resolveProfileType(profile, outbound) {
+        var inferred = inferProfileType(outbound || (profile && profile.outbound));
+        if (inferred && inferred !== "unknown") return inferred;
+        return (profile && profile.type) || "unknown";
+      }
+
       // Human-readable label for a profile/outbound type string, shown in the
       // sing-box card badge so it reflects the ACTIVE protocol (vless → "VLESS")
       // instead of the old hard-coded "Trojan proxy".
@@ -6222,7 +6254,7 @@
         return {
           id: profile.id || makeProfileId(name),
           name: name,
-          type: profile.type || inferProfileType(outbound),
+          type: resolveProfileType(profile, outbound),
           uri: profile.uri || "",
           group: String(profile.group || "").trim(),
           routing_mode:
@@ -6715,6 +6747,41 @@
         }, 3000);
       }
 
+      function renderWanLinkAlert(wan) {
+        var box = document.getElementById("wan-link-alert");
+        if (!box) return;
+        if (!wan || !wan.supported || !wan.degraded) {
+          box.style.display = "none";
+          box.innerHTML = "";
+          return;
+        }
+        var speed = Number(wan.speed_mbps) || 0;
+        var partner = Number(wan.partner_max_mbps) || 0;
+        var summary =
+          speed > 0
+            ? "WAN линк negotiated только на " + speed + " Мбит/с."
+            : "WAN линк ниже гигабита.";
+        var diagnosis = wan.diagnosis ? escapeHtml(wan.diagnosis) : "";
+        var advice = wan.advice
+          ? escapeHtml(wan.advice)
+          : "Проверьте: 1) WAN-кабель 2) аплинк-порт 3) переходники и розетки";
+        var details = [];
+        if (wan.phy_if) details.push("PHY: " + escapeHtml(String(wan.phy_if)));
+        if (partner > 0) details.push("partner max: " + partner + " Мбит/с");
+        if (wan.duplex)
+          details.push("duplex: " + escapeHtml(String(wan.duplex)));
+        box.innerHTML =
+          "<strong>WAN ограничен физическим линком, а не offload</strong>" +
+          '<div class="sub">' +
+          escapeHtml(summary) +
+          " Kick здесь не поможет." +
+          (diagnosis ? " " + diagnosis + "." : "") +
+          " " + advice +
+          (details.length ? "<br><br>" + escapeHtml(details.join(" · ")) : "") +
+          "</div>";
+        box.style.display = "block";
+      }
+
       // ===== STATUS =====
       async function loadStatus() {
         try {
@@ -6841,6 +6908,7 @@
           lastStatus = d;
 
           renderSysStats(d.system || {});
+          renderWanLinkAlert(d.wan_link || null);
 
           // refresh the DPI-bypass engine switch alongside the rest of status
           loadBypassStatus();
@@ -6945,7 +7013,9 @@
       async function loadProfiles() {
         try {
           var d = await api("profiles_list");
-          currentProfiles = d.profiles || [];
+          currentProfiles = (d.profiles || []).map(function (profile, index) {
+            return ensureProfileShape(profile, index, profile.name);
+          });
           currentActiveProfileId = d.active || "";
           currentActiveChain =
             Array.isArray(d.active_chain) && d.active_chain.length
@@ -11106,7 +11176,7 @@
 
       function populateProxyForm(profile) {
         var outbound = profile.outbound || {};
-        var type = profile.type || inferProfileType(outbound);
+        var type = resolveProfileType(profile, outbound);
         document.getElementById("proxy-name").value = profile.name || "";
         document.getElementById("proxy-type").value =
           type === "https-proxy"
@@ -11211,13 +11281,15 @@
           if (r) r.checked = true;
         }
 
-        if (profile.type === "wireguard") {
+        var profileType = resolveProfileType(profile);
+
+        if (profileType === "wireguard") {
           populateWireguardForm(profile);
           activateModalTab("modal-wireguard");
         } else if (
-          profile.type === "http-proxy" ||
-          profile.type === "https-proxy" ||
-          /^socks/.test(profile.type || "") ||
+          profileType === "http-proxy" ||
+          profileType === "https-proxy" ||
+          /^socks/.test(profileType || "") ||
           (profile.outbound &&
             ["http", "socks"].indexOf(profile.outbound.type) >= 0)
         ) {

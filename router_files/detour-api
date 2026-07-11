@@ -59,6 +59,7 @@ PUSH_MSG="/tmp/detour-push.msg"             # latest push message JSON (read by 
 CERT_BIN="/usr/sbin/detour-cert"            # Let's Encrypt helper (acme.sh) — backs the cert_* actions
 CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written by detour-cert)
 OFFLOAD_BIN="/usr/sbin/detour-offload"      # QCA HW-offload watchdog/recovery — backs the offload_* actions
+WANLINK_BIN="/usr/sbin/detour-wan-link"     # WAN PHY/link-speed monitor — warns on 100M negotiation (not offload-related)
 # Swap file (Keenetic/Entware only — /opt on a USB flash needs swap or the stack
 # gets OOM-killed). Managed via the S05swap init script; backs the swap_* actions.
 SWAPFILE="/opt/swapfile"
@@ -136,6 +137,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     CERT_BIN="$OPT/sbin/detour-cert"
     CERT_STATE="$OPT/var/state/detour-cert.json"
     OFFLOAD_BIN="$OPT/sbin/detour-offload"   # QCA-only; no-op on Keenetic (no NSS accelerator)
+    WANLINK_BIN="$OPT/sbin/detour-wan-link"
     SWAPFILE="$OPT/swapfile"
     SWAP_INITD="$OPT/etc/init.d/S05swap"
     SWAP_STATE="$OPT/var/state/detour-swap.json"
@@ -562,6 +564,51 @@ get_singbox_mode() {
 # Numeric JSON value reader (json_val only matches quoted string values).
 numeric_json_val() {
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -1
+}
+
+normalize_profile_json() {
+    _np_tmp="/tmp/detour-profile.$$.$RANDOM.json"
+    printf '%s' "$1" > "$_np_tmp" 2>/dev/null || return 1
+    lua - "$PLATFORM" "$_np_tmp" 2>/dev/null <<'LUA'
+local platform = arg[1] or ""
+local path = arg[2] or ""
+if platform == "keenetic" then
+    package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
+end
+
+local ok, cjson = pcall(require, "cjson.safe")
+if not ok or not cjson then os.exit(1) end
+
+local f = io.open(path, "rb")
+if not f then os.exit(1) end
+local raw = f:read("*a")
+f:close()
+local obj = cjson.decode(raw)
+if type(obj) ~= "table" then os.exit(1) end
+
+local inferred = nil
+local outbound = obj.outbound
+if type(outbound) == "table" then
+    if outbound.type == "http" then
+        inferred = (type(outbound.tls) == "table" and outbound.tls.enabled) and "https-proxy" or "http-proxy"
+    elseif outbound.type == "socks" then
+        inferred = "socks" .. tostring(outbound.version or "5")
+    elseif type(outbound.type) == "string" and outbound.type ~= "" then
+        inferred = outbound.type
+    end
+end
+
+if inferred then
+    obj.type = inferred
+elseif type(obj.type) ~= "string" or obj.type == "" then
+    obj.type = "unknown"
+end
+
+io.write(cjson.encode(obj) or raw)
+LUA
+    _np_rc=$?
+    rm -f "$_np_tmp"
+    return $_np_rc
 }
 
 # TCP-handshake latency probe to HOST:PORT. Echoes integer ms on success (the
@@ -1695,6 +1742,12 @@ status)
         [ -n "$_PP" ] && PANEL_PORT="$_PP"
     fi
 
+    WANLINK_JSON='{"ok":true,"supported":false,"degraded":false,"diagnosis":"","advice":""}'
+    if [ -x "$WANLINK_BIN" ]; then
+        _WL=$($WANLINK_BIN status 2>/dev/null)
+        [ -n "$_WL" ] && WANLINK_JSON="$_WL"
+    fi
+
     cat <<EOF
 {
   "platform": "$PLATFORM",
@@ -1749,7 +1802,8 @@ status)
     "disk_free": "${DISK_FREE}MB",
     "cpu": "$CPU_PCT",
     "cpu_cores": $CPU_CORES
-  }
+    },
+    "wan_link": $WANLINK_JSON
 }
 EOF
     ;;
@@ -2776,6 +2830,8 @@ profile_save)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     # POST body is the full profile JSON {name, type, uri, outbound}
     # Extract the "id" field for filename, or use sanitized "name"
+    NORM_JSON=$(normalize_profile_json "$POST_DATA")
+    [ -n "$NORM_JSON" ] && POST_DATA="$NORM_JSON"
     P_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     [ -z "$P_ID" ] && P_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     P_ID=$(sanitize_name "$P_ID")

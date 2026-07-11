@@ -1,0 +1,228 @@
+#!/bin/sh
+# detour-wan-link — monitor the negotiated WAN Ethernet speed and warn when the
+# physical uplink drops below gigabit. This is not the same failure mode as a
+# wedged offload engine: when the WAN PHY negotiates at 100 Mbps, no software
+# kick can restore >100 Mbps until the cable / peer port / copper path is fixed.
+
+DETOUR_DIR=/etc/detour
+STATE=/var/state/detour-wan-link.json
+LOG=/var/log/detour-wan-link.log
+PUSH_BIN=/usr/sbin/detour-push
+PLATFORM=openwrt
+ADVICE="Проверьте: 1) WAN-кабель 2) аплинк-порт ONU/модема/свитча 3) переходники, патч-панель и розетки"
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DETOUR_DIR=/opt/etc/detour
+    STATE=/opt/var/state/detour-wan-link.json
+    LOG=/opt/var/log/detour-wan-link.log
+    PUSH_BIN=/opt/sbin/detour-push
+    mkdir -p /opt/var/state /opt/var/log 2>/dev/null
+fi
+
+[ -f "$DETOUR_DIR/detour.conf" ] && . "$DETOUR_DIR/detour.conf" 2>/dev/null
+
+NOW=$(date +%s 2>/dev/null)
+[ -n "$NOW" ] || NOW=0
+
+log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"; }
+
+ubus_field() {
+    _field="$1"
+    ubus call network.interface.wan status 2>/dev/null | \
+        sed -n "s/.*\"$_field\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
+}
+
+default_route_dev() {
+    ip route show default 2>/dev/null | awk '/^default /{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
+}
+
+iface_speed() {
+    _sp=$(cat "/sys/class/net/$1/speed" 2>/dev/null)
+    printf '%s' "$_sp" | grep -Eq '^[0-9]+$' || return 1
+    printf '%s' "$_sp"
+}
+
+iface_carrier() {
+    _car=$(cat "/sys/class/net/$1/carrier" 2>/dev/null)
+    [ "$_car" = "0" ] || [ "$_car" = "1" ] || {
+        printf '0'
+        return 0
+    }
+    printf '%s' "$_car"
+    return 0
+}
+
+iface_operstate() {
+    cat "/sys/class/net/$1/operstate" 2>/dev/null | head -1
+}
+
+iface_duplex() {
+    cat "/sys/class/net/$1/duplex" 2>/dev/null | head -1
+}
+
+first_lower_iface() {
+    _base="/sys/class/net/$1"
+    set -- "$_base"/lower_*
+    for _p in "$@"; do
+        [ -e "$_p" ] || continue
+        basename "$_p"
+        return 0
+    done
+    return 1
+}
+
+resolve_phy_iface() {
+    _cur="$1"
+    _hops=0
+    while [ -n "$_cur" ] && [ "$_hops" -lt 6 ]; do
+        if iface_speed "$_cur" >/dev/null 2>&1; then
+            printf '%s' "$_cur"
+            return 0
+        fi
+        _next=$(first_lower_iface "$_cur") || break
+        [ "$_next" = "$_cur" ] && break
+        _cur="$_next"
+        _hops=$((_hops + 1))
+    done
+    [ -n "$1" ] && printf '%s' "$1"
+}
+
+partner_max_mbps() {
+    ethtool "$1" 2>/dev/null | awk '
+    /Link partner advertised link modes:/ {cap=1}
+    cap==1 && $0 !~ /Link partner advertised link modes:/ && $0 !~ /^[[:space:]]/ {cap=0}
+    cap==1 {
+        txt=$0
+        while (match(txt, /(10000|5000|2500|1000|100|10)baseT/)) {
+            v=substr(txt, RSTART, RLENGTH)
+            sub(/baseT.*/, "", v)
+            if ((v + 0) > max) max = v + 0
+            txt = substr(txt, RSTART + RLENGTH)
+        }
+    }
+    END { if (max > 0) print max }'
+}
+
+current_wan_iface() {
+    [ -n "$WAN_PHY_IF" ] && { printf '%s' "$WAN_PHY_IF"; return 0; }
+    [ -n "$WAN_IF" ] && { printf '%s' "$WAN_IF"; return 0; }
+    if [ "$PLATFORM" = "openwrt" ]; then
+        _v=$(ubus_field l3_device)
+        [ -n "$_v" ] && { printf '%s' "$_v"; return 0; }
+        _v=$(ubus_field device)
+        [ -n "$_v" ] && { printf '%s' "$_v"; return 0; }
+        _v=$(uci -q get network.wan.device 2>/dev/null || uci -q get network.wan.ifname 2>/dev/null)
+        [ -n "$_v" ] && { printf '%s' "$_v"; return 0; }
+    fi
+    _v=$(default_route_dev)
+    [ -n "$_v" ] && printf '%s' "$_v"
+}
+
+collect_live() {
+    WL_SUPPORTED=false
+    WL_DEGRADED=false
+    WL_WAN_IF=$(current_wan_iface)
+    WL_PHY_IF=$(resolve_phy_iface "$WL_WAN_IF")
+    WL_SPEED=0
+    WL_PARTNER=0
+    WL_DUPLEX=""
+    WL_OPERSTATE=""
+    WL_CARRIER=0
+    WL_DIAGNOSIS=""
+
+    [ -n "$WL_PHY_IF" ] || {
+        WL_DIAGNOSIS="Не удалось определить WAN интерфейс"
+        return 0
+    }
+
+    WL_DUPLEX=$(iface_duplex "$WL_PHY_IF")
+    WL_OPERSTATE=$(iface_operstate "$WL_PHY_IF")
+    WL_CARRIER=$(iface_carrier "$WL_PHY_IF")
+    _sp=$(iface_speed "$WL_PHY_IF")
+    if [ -n "$_sp" ]; then
+        WL_SPEED=$_sp
+        WL_SUPPORTED=true
+    fi
+    _pm=$(partner_max_mbps "$WL_PHY_IF")
+    case "$_pm" in
+        ''|*[!0-9]*) _pm=0 ;;
+    esac
+    WL_PARTNER=${_pm:-0}
+
+    if [ "$WL_CARRIER" != "1" ]; then
+        WL_DIAGNOSIS="Линк WAN сейчас down"
+        return 0
+    fi
+    if [ "$WL_SPEED" -gt 0 ] 2>/dev/null; then
+        if [ "$WL_SPEED" -lt 1000 ]; then
+            WL_DEGRADED=true
+            if [ "$WL_PARTNER" -gt 0 ] 2>/dev/null && [ "$WL_PARTNER" -lt 1000 ]; then
+                WL_DIAGNOSIS="Соседний порт advertises только до ${WL_PARTNER} Mbps"
+            else
+                WL_DIAGNOSIS="WAN negotiated only ${WL_SPEED} Mbps"
+            fi
+        else
+            WL_DIAGNOSIS="WAN линк в норме"
+        fi
+    else
+        WL_DIAGNOSIS="Скорость линка недоступна для $WL_PHY_IF"
+    fi
+}
+
+write_json() {
+    printf '{"ok":true,"supported":%s,"wan_if":%s,"phy_if":%s,"speed_mbps":%s,"duplex":%s,"operstate":%s,"carrier":%s,"partner_max_mbps":%s,"degraded":%s,"diagnosis":%s,"advice":%s,"last_ts":%s}\n' \
+        "$WL_SUPPORTED" "$(json_str "$WL_WAN_IF")" "$(json_str "$WL_PHY_IF")" \
+        "${WL_SPEED:-0}" "$(json_str "$WL_DUPLEX")" "$(json_str "$WL_OPERSTATE")" \
+        "${WL_CARRIER:-0}" "${WL_PARTNER:-0}" "$WL_DEGRADED" \
+        "$(json_str "$WL_DIAGNOSIS")" "$(json_str "$ADVICE")" "$NOW"
+}
+
+write_state() {
+    mkdir -p "$(dirname "$STATE")" 2>/dev/null
+    write_json > "$STATE"
+}
+
+read_prev_degraded() {
+    [ -f "$STATE" ] || { echo false; return 0; }
+    sed -n 's/.*"degraded"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$STATE" 2>/dev/null | head -1
+}
+
+send_alert() {
+    _title="$1"
+    _body="$2"
+    [ -x "$PUSH_BIN" ] || return 0
+    "$PUSH_BIN" send "$_title" "$_body" >/dev/null 2>&1 || true
+}
+
+tick() {
+    collect_live
+    _prev=$(read_prev_degraded)
+    [ -n "$_prev" ] || _prev=false
+    if [ "$WL_DEGRADED" = true ] && [ "$_prev" != true ]; then
+        log "WAN degraded: speed=${WL_SPEED} partner=${WL_PARTNER} iface=${WL_PHY_IF}"
+        send_alert "Detour: WAN линк просел до ${WL_SPEED} Мбит" \
+            "Kick offload не поможет. ${WL_DIAGNOSIS}. ${ADVICE}."
+    elif [ "$WL_DEGRADED" != true ] && [ "$_prev" = true ] && [ "$WL_SPEED" -ge 1000 ] 2>/dev/null; then
+        log "WAN recovered: speed=${WL_SPEED} iface=${WL_PHY_IF}"
+        send_alert "Detour: WAN линк восстановлен" \
+            "WAN снова negotiated на ${WL_SPEED} Мбит (${WL_PHY_IF}). Ограничение 100 Мбит снято."
+    fi
+    write_state
+}
+
+case "${1:-status}" in
+    status)
+        collect_live
+        write_json
+        ;;
+    tick)
+        tick
+        ;;
+    *)
+        echo "usage: detour-wan-link {status|tick}" >&2
+        exit 2
+        ;;
+esac

@@ -89,6 +89,9 @@ FILES = [
     # Web Push (VAPID) sender (shared source, /opt shim). Backs the panel's push
     # settings + detour-health down/auto-switch alerts. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-push"), "opt/sbin/detour-push", 0o755, True),
+    # WAN PHY watchdog (shared source, /opt shim). Detects a physical negotiation
+    # downgrade to 100 Mbps and alerts with cable/peer-port guidance.
+    (os.path.join(ROUTER_FILES, "detour-wan-link"), "opt/sbin/detour-wan-link", 0o755, True),
     # Let's Encrypt helper (acme.sh, /opt shim). Best-effort on Keenetic: :80 is the
     # stock router UI, so HTTP-01 needs :80 forwarded to lighttpd. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-cert"), "opt/sbin/detour-cert", 0o755, True),
@@ -193,7 +196,8 @@ if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
     printf 'prefer_family = IPv4\\ntimeout = 30\\ntries = 3\\n' >> /opt/etc/wgetrc
 fi
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
-    /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \\
+    /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \
+    /opt/sbin/detour-wan-link \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\
