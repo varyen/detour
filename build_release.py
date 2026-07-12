@@ -11,8 +11,9 @@ Output:
     releases/v<version>/detour-keenetic_<version>_all.ipk   (+ .ipk.sig)
     releases/v<version>/RELEASE_NOTES.md
 
-sing-box is NOT bundled here — the panel `Depends: sing-box`, served by our own
-opkg feed (see build_feed.py). The distro feed is stuck on sing-box 1.8.10, which
+sing-box is NOT bundled here. The panel package installs on its own, then its
+postinst bootstraps our opkg feed and pulls sing-box + tpws-zapret in the
+background via detour-update. The distro feed is stuck on sing-box 1.8.10, which
 would break the panel's 1.13.x config schema.
 
 `.ipk` is the standard OpenWrt package format: a gzipped tar containing
@@ -61,16 +62,12 @@ PACKAGE_NAME = "detour"
 # non-aarch64 device ever joins.
 PACKAGE_ARCH = os.environ.get("DETOUR_ARCH", "all")
 
-# Runtime dependencies declared in `control`. opkg refuses to install if any
-# is missing. `dnsmasq-full` is needed for ipset= entries. `sing-box` AND
-# `tpws-zapret` are both pulled from our self-hosted feed (build_feed.py →
-# varyen/detour@feed): the GL.iNet distro feed is stuck on sing-box 1.8.10
-# (pre-1.11 schema break) and zapret's tpws is in no opkg feed at all, so the
-# feed MUST be configured before installing this package (deploy_router.py /
-# detour-update do that). The init.d tolerates a missing binary, so a router
-# without the feed still installs and routes directly — it just can't proxy /
-# DPI-bypass until the binaries arrive.
-DEPENDS = "lua, lua-cjson, curl, openssl-util, dnsmasq-full, kmod-ipt-ipset, ipset, sing-box, tpws-zapret"
+# Runtime dependencies declared in `control`. Keep only packages that must be
+# present BEFORE the panel can start. sing-box + tpws-zapret are intentionally
+# NOT hard Depends anymore: first install must succeed even when our custom feed
+# was not pre-seeded yet, and postinst then bootstraps that feed and installs the
+# runtime binaries in the background.
+DEPENDS = "lua, lua-cjson, curl, openssl-util, dnsmasq-full, kmod-ipt-ipset, ipset"
 
 MAINTAINER = "Maintainer <you@example.com>"
 DESCRIPTION = "Sing-box + zapret-tpws management panel for OpenWrt routers."
@@ -115,11 +112,9 @@ def _is_protected(path):
 # ends up at the corresponding location on the router after `opkg install`.
 #
 # The release ships ONE OpenWrt package: `detour` (PANEL_FILES). NEITHER binary
-# is bundled — the panel `Depends: sing-box, tpws-zapret`, both pulled from our
-# self-hosted opkg feed (build_feed.py). Panel updates stay tiny AND a panel
-# upgrade never touches the opkg-owned /usr/bin/{sing-box,tpws-zapret}. The
-# Keenetic/Entware package (keenetic/build-ipk.py) still bundles tpws because
-# there is no feed there.
+# is bundled — the panel postinst bootstraps our opkg feed and then installs
+# sing-box + tpws-zapret through detour-update. Panel updates stay tiny AND a
+# panel upgrade never touches the opkg-owned /usr/bin/{sing-box,tpws-zapret}.
 PANEL_FILES = [
     (("router_files", "sing-box.initd"), "etc/init.d/sing-box", 0o755),
     (("router_files", "zapret-tpws.initd"), "etc/init.d/zapret-tpws", 0o755),
@@ -131,6 +126,7 @@ PANEL_FILES = [
     ),
     (("router-backup", "etc", "sysctl.d", "99-mptcp.conf"), "etc/sysctl.d/99-mptcp.conf", 0o644),
     (("router_files", "base64-shim.sh"), "usr/bin/base64", 0o755),
+    (("router_files", "detour-bootstrap-install"), "usr/sbin/detour-bootstrap-install", 0o755),
     (("router_files", "detour-update"), "usr/sbin/detour-update", 0o755),
     (("router_files", "subscription-refresh"), "usr/sbin/subscription-refresh", 0o755),
     (("router_files", "vpn-keepalive"), "usr/sbin/vpn-keepalive", 0o755),
@@ -153,8 +149,8 @@ PANEL_FILES = [
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
     (("router_files", "index.html"), "www/detour/index.html", 0o644),
     (("router_files", "sw.js"), "www/detour/sw.js", 0o644),
-    # NOTE: tpws-zapret is NOT bundled here anymore — it comes from the opkg feed
-    # (Depends: tpws-zapret), same as sing-box. The Keenetic package still bundles it.
+    # NOTE: tpws-zapret is NOT bundled here anymore — first install bootstraps it
+    # from the opkg feed in the background, same as sing-box.
     # Pin our public key in two places: opkg's standard keyring (so future opkg
     # ecosystem tooling sees it) AND a stable path the updater knows about.
     (("keys", "release.usign.pub"), "etc/detour/release.usign.pub", 0o644),
@@ -339,6 +335,7 @@ fi
 # this is defence in depth).
 chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /etc/firewall.lan_mark_fallback /etc/hotplug.d/iface/99-proxy-guard \\
+    /usr/sbin/detour-bootstrap-install \
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
     /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-offload /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
@@ -365,6 +362,15 @@ fi
 # first push_config / alert). Lives in /etc/detour (keeplist-preserved); harmless
 # if openssl is unavailable — the panel just reports push unavailable.
 [ -x /usr/sbin/detour-push ] && /usr/sbin/detour-push ensure-keys >/dev/null 2>&1
+
+# 2d) First-install bootstrap for the self-hosted feed + runtime binaries.
+# The panel package intentionally installs before our custom feed exists.
+# After opkg returns, detach a worker that adds the feed and installs sing-box +
+# tpws-zapret via the freshly-installed detour-update. The helper itself is a
+# no-op when feed + packages are already present.
+if [ -x /usr/sbin/detour-bootstrap-install ]; then
+    ( sleep 5; /usr/sbin/detour-bootstrap-install ) </dev/null >/dev/null 2>&1 &
+fi
 
 # 3) Enable + (re)start services, but HONOUR the operator's «Автозапуск» choice
 # so a panel REINSTALL never resurrects a service the user turned off. The panel
@@ -858,24 +864,21 @@ def main():
         f.write(notes or "(no notes)")
         f.write("\n\n## Packages\n\n")
         f.write(f"- `{os.path.basename(panel_ipk)}` — panel for OpenWrt/GL.iNet "
-                "(scripts/UI). sing-box AND tpws-zapret are pulled from the opkg feed.\n")
+                "(scripts/UI). On first install it bootstraps the detour feed and then pulls sing-box + tpws-zapret automatically.\n")
         if keenetic_ipk:
             f.write(f"- `{os.path.basename(keenetic_ipk)}` — Keenetic/Entware (mipsel) package "
-                    "(sing-box + tpws-zapret pulled from our mipsel feed `feed/mipsel`; "
-                    "nothing bundled).\n")
+                    "(on first install it bootstraps our mipsel feed and then pulls sing-box + tpws-zapret automatically; nothing bundled).\n")
         f.write("\n## Binaries (sing-box + tpws-zapret)\n\n")
         f.write(
-            "Neither binary is bundled — the panel `Depends: sing-box, tpws-zapret`, "
-            f"both served by our feed (`{FEED_LINE}`). The feed must be configured "
-            "before install (`deploy_router.py` and `detour-update` do this "
-            "automatically). Build/publish the feed with "
+            "Neither binary is bundled — after the panel package lands, its postinst "
+            f"adds our feed (`{FEED_LINE}` on OpenWrt; `feed/mipsel` on Keenetic) and installs sing-box + tpws-zapret in the background via detour-update. Build/publish the feed with "
             "`python3 build_feed.py --version <sb-ver> --tpws-version <zapret-ver> --publish`.\n"
         )
         f.write("\n## Install\n\n")
         f.write(
             "### Fresh (SSH)\n\n"
-            f"```\nopkg update && opkg install sing-box tpws-zapret   # from the detour feed\n"
-            f"opkg install /tmp/{os.path.basename(panel_ipk)}\n```\n\n"
+            f"```\nopkg install /tmp/{os.path.basename(panel_ipk)}\n```\n\n"
+            "The panel then bootstraps the feed and pulls sing-box + tpws-zapret itself.\n\n"
             "### Panel update (existing install)\n\n"
             f"LuCI → Software → Upload `{os.path.basename(panel_ipk)}`, or the panel's "
             "self-update, or `detour-update apply`.\n\n"

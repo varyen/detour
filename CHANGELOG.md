@@ -5,6 +5,32 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.26.0] — 2026-07-12
+
+Минорный релиз, который убирает ручной bootstrap opkg-фида из первой установки
+и делает панель самодостаточной на OpenWrt и Keenetic.
+
+### Добавлено
+
+- **Пакет панели теперь сам добирает runtime-бинарники после первой установки.**
+  Новый helper `detour-bootstrap-install` после `opkg install` в фоне добавляет
+  нужный `detour`-фид и запускает `detour-update bins-apply` / `tpws-apply`,
+  чтобы подтянуть `sing-box` и `tpws-zapret` без ручных команд. _OpenWrt/
+  GL.iNet + Keenetic parity._
+
+### Изменено
+
+- **Первичная установка больше не требует заранее прописывать feed и вручную
+  ставить `sing-box` / `tpws-zapret`.** Оба `.ipk` больше не держат hard
+  `Depends` на эти два пакета, поэтому панель сначала ставится сама, а затем
+  догружает runtime-бинарники собственным bootstrap-процессом. _OpenWrt/
+  GL.iNet + Keenetic parity._
+- **README переписан под новый install flow.** В корневой инструкции теперь
+  достаточно одного `opkg install` для панели; отдельно описаны логи bootstrap
+  и осторожно отмечен сценарий Keenetic с папкой `install/` на флешке как
+  непроверенный в этом сеансе.
+
+
 ## [1.25.5] — 2026-07-12
 
 Bugfix-релиз для Keenetic-валидации WAN-диагностики и для PPPoE/tunnel uplink.

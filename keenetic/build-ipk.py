@@ -2,7 +2,7 @@
 """Assemble an Entware-installable .ipk for the Keenetic KN-1810 (mipsel).
 
 Output: releases/keenetic/detour-keenetic_<ver>_all.ipk
-Install on the router:  opkg update && opkg install ./detour-keenetic_<ver>_all.ipk
+Install on the router:  opkg install ./detour-keenetic_<ver>_all.ipk
 
 ⚠ EXPERIMENTAL — never run on hardware. This is the FIRST real-device validation:
   * float ABI of the mipsel bins is unverified (watch for "Error relocating"),
@@ -14,18 +14,19 @@ Architecture is `all` on purpose: opkg side-loading a local .ipk accepts `all`
 regardless of the host's exact mipselsf arch string.
 
 SLIM build: NO binaries are bundled — sing-box AND tpws-zapret both come from our
-OWN mipsel opkg feed (feed/mipsel) via `Depends: sing-box, tpws-zapret`, the same
-model as the OpenWrt build. sing-box is the `-mipsle-softfloat-musl` static build
+OWN mipsel opkg feed (feed/mipsel), which the panel bootstraps for itself on first
+install. sing-box is the `-mipsle-softfloat-musl` static build
 (latest 1.13.x, NOT Entware's lagging sing-box-go); tpws is bol-van/zapret's
 linux-mipsel prebuilt. Net result: panel ~90 KB instead of a self-contained
 package, both binaries upgrade on their own from the feed, and the panel always
 tracks the newest upstream. Entware's `sing-box-go` (Provides: sing-box) stays a
-fallback for the sing-box Depends if our feed is briefly unreachable;
+fallback if our feed is briefly unreachable;
 detour-update's ensure_singbox migrates to (and pins) our package.
 
-The mipsel feed MUST be configured before installing this package (deploy_keenetic
-/ entware-bootstrap add it; detour-update's apply runs ensure_singbox+ensure_tpws
-first). No `keenetic/fetch-bins.py` step is needed anymore (nothing is bundled).
+The mipsel feed no longer has to be configured before the first panel install:
+postinst schedules a background bootstrap that adds the feed and installs the
+runtime binaries via detour-update. No `keenetic/fetch-bins.py` step is needed
+anymore (nothing is bundled).
 """
 import io
 import os
@@ -42,21 +43,20 @@ OUT_DIR = os.path.join(ROOT, "releases", "keenetic")
 
 PKG = "detour-keenetic"
 ARCH = "all"
-# Runtime deps. `sing-box` + `tpws-zapret` come from OUR mipsel feed (feed/mipsel);
-# the rest are Entware mipselsf packages opkg pulls on install. `sing-box` prefers
-# our feed package (a real `sing-box`) over Entware's `sing-box-go` (Provides:
-# sing-box) — the latter is the automatic fallback if our feed is unreachable.
+# Runtime deps. Keep only packages the panel itself needs to start. `sing-box` +
+# `tpws-zapret` are installed later by the package's detached bootstrap helper, so
+# the first panel install succeeds even before our feed is configured.
 # NOT listed on purpose (would block opkg resolution — they are not standalone
 # packages in the Entware feed):
 #   * start-stop-daemon — a busybox applet (busybox is Essential, already present).
 #   * lua-cjson — absent from the feed (only the C `cJSON`); shell CGI doesn't need it.
-DEPENDS = ("sing-box, tpws-zapret, iptables, ipset, dnsmasq-full, lighttpd, lighttpd-mod-cgi, "
+DEPENDS = ("iptables, ipset, dnsmasq-full, lighttpd, lighttpd-mod-cgi, "
            "lighttpd-mod-setenv, lua, coreutils-base64, openssl-util, curl, swap-utils")
 
 # (source_path, archive_path_under_opt, mode, fix_shebang)
 # NO binaries here — sing-box AND tpws-zapret are both pulled from our mipsel feed
-# (Depends: sing-box, tpws-zapret). Only the init.d service scripts (S52/S53) ship
-# in the panel; the binaries they launch come from the feed.
+# by the package's post-install bootstrap. Only the init.d service scripts (S52/S53)
+# ship in the panel; the binaries they launch come from the feed.
 FILES = [
     # Source from router_files/ (canonical) — same source as the OpenWrt build, so
     # the Keenetic package never drifts behind. (router-backup/ was the old source.)
@@ -70,6 +70,7 @@ FILES = [
     # Hosts-DNS manager (shared source, already has a /opt platform shim) — serves
     # addn-hosts via the detour dnsmasq (S50detour-dns). fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-hosts"), "opt/sbin/detour-hosts", 0o755, True),
+    (os.path.join(ROUTER_FILES, "detour-bootstrap-install"), "opt/sbin/detour-bootstrap-install", 0o755, True),
     # Self-update (shared source, /opt shim for Keenetic): pulls detour-keenetic_*.ipk.
     (os.path.join(ROUTER_FILES, "detour-update"), "opt/sbin/detour-update", 0o755, True),
     # Unified DPI-bypass engine switch (off|zapret|zapret2). The panel's single DPI
@@ -198,7 +199,7 @@ touch /opt/etc/detour/platform            # the panel CGI's platform shim keys o
 if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
     printf 'prefer_family = IPv4\\ntimeout = 30\\ntries = 3\\n' >> /opt/etc/wgetrc
 fi
-chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
+chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \
     /opt/sbin/detour-wan-link \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
@@ -220,6 +221,11 @@ fi
 if [ ! -f /opt/etc/detour/update.conf ]; then
     printf 'GH_OWNER=varyen\\nGH_REPO=detour\\nGH_TOKEN=\\nAUTO_CHECK=1\\n' > /opt/etc/detour/update.conf
     chmod 600 /opt/etc/detour/update.conf
+fi
+# First-install bootstrap for the mipsel feed + runtime binaries. Delayed start
+# avoids the outer opkg lock; the helper itself skips when feed + packages already exist.
+if [ -x /opt/sbin/detour-bootstrap-install ]; then
+    ( sleep 5; /opt/sbin/detour-bootstrap-install ) </dev/null >/dev/null 2>&1 &
 fi
 # Scheduled tasks. On KeeneticOS the firmware sandbox kills the shell crond spawns
 # to run a job, so cron silently never fires here — instead we run the schedule

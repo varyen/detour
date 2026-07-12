@@ -4,7 +4,7 @@
 > Два движка под одним SPA-интерфейсом — **sing-box** (Trojan/VLESS-прокси) и
 > **zapret-tpws** (DPI-bypass) — с самообновлением по подписанным `.ipk`-релизам.
 
-**Версия:** [`1.25.5`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
+**Версия:** [`1.26.0`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -17,27 +17,39 @@
   `detour_X.Y.Z_all.ipk` для OpenWrt / GL.iNet или
   `detour-keenetic_X.Y.Z_all.ipk` для Keenetic / Entware.
 2. Скопируйте файл на роутер в `/tmp/`.
-3. Выполните команды для своей платформы.
+3. Установите пакет одной командой для своей платформы.
+4. Подождите 30-90 секунд: панель сама пропишет нужный `detour`-фид и
+   подтянет `sing-box` + `tpws-zapret` в фоне.
 
 ### OpenWrt / GL.iNet
 
 ```sh
-echo 'src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/aarch64' >> /etc/opkg/customfeeds.conf
-opkg update
-opkg install --force-overwrite sing-box tpws-zapret
 opkg install /tmp/detour_X.Y.Z_all.ipk
 ```
+
+Лог фонового bootstrap: `/var/log/detour-bootstrap.log`.
 
 ### Keenetic / Entware
 
 Entware должен быть уже установлен и смонтирован в `/opt`.
 
 ```sh
-echo 'src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/mipsel' >> /opt/etc/opkg/customfeeds.conf
-opkg update
-opkg install --force-overwrite sing-box tpws-zapret
 opkg install /tmp/detour-keenetic_X.Y.Z_all.ipk
 ```
+
+Лог фонового bootstrap: `/opt/var/log/detour-bootstrap.log`.
+
+### Keenetic: вариант через `install/` на флешке
+
+Если у вас уже есть рабочий USB-носитель с Entware и ваш Keenetic умеет
+обрабатывать папку `install` при загрузке, можно положить
+`detour-keenetic_X.Y.Z_all.ipk` туда и перезагрузить роутер. После установки
+сама панель точно так же должна дописать feed и подтянуть `sing-box` +
+`tpws-zapret` в фоне.
+
+Этот путь в данном репозитории пока не провалидирован на живом Keenetic в этом
+сеансе, поэтому относитесь к нему как к удобной альтернативе, а не как к уже
+подтверждённому основному сценарию.
 
 После установки панель доступна по адресу `http://<IP-роутера>:8080/detour/`.
 Дальше обновляться проще всего из самой панели или командой `detour-update apply`
@@ -136,8 +148,8 @@ python3 deploy_router.py --router home --full
 ## Релизы и самообновление
 
 Панель — это slim-`.ipk` (init.d, CGI, HTML, Lua, updater). Бинарники **`sing-box`
-и `tpws-zapret` в пакет не входят** — панель объявляет `Depends: sing-box,
-tpws-zapret`, а сами бинарники приходят из **нашего публичного opkg-фида**:
+и `tpws-zapret` в пакет не входят** — после установки панель сама добавляет
+наш публичный opkg-фид и подтягивает их в фоне:
 
 - **`detour`** — панель для OpenWrt/GL.iNet (фид `feed/aarch64`);
   **`detour-keenetic`** — для Keenetic/Entware (фид `feed/mipsel`: sing-box
@@ -177,11 +189,13 @@ python3 build_feed.py --version 1.13.2 --publish
   /usr/sbin/detour-update status         # JSON со статусом
   ```
 
-Фид прописывается в `/etc/opkg/customfeeds.conf` автоматически (`deploy_router.py`
-и `detour-update`); он должен быть прописан до установки панели, иначе
-`Depends: sing-box` не разрешится. Подписи (usign) проверяются против ключа,
-запиннингованного на роутере (`/etc/detour/release.usign.pub`); приватный ключ
-(`keys/`) — только на build-машине.
+Фид прописывается автоматически самой панелью при первой установке, а затем
+поддерживается `deploy_router.py` и `detour-update`. Если фоновый bootstrap не
+дотянул бинарники, проверьте лог `detour-bootstrap.log` и затем вручную
+запустите `detour-update bins-apply` и `detour-update tpws-apply`. Подписи
+(usign) проверяются против ключа, запиннингованного на роутере
+(`/etc/detour/release.usign.pub` или `/opt/etc/detour/release.usign.pub`);
+приватный ключ (`keys/`) — только на build-машине.
 
 ## Критические ограничения
 

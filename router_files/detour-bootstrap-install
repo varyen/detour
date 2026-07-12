@@ -1,0 +1,65 @@
+#!/bin/sh
+# detour-bootstrap-install — first-install helper for feed + runtime binaries.
+#
+# The panel package itself is intentionally installable without pre-seeding our
+# opkg feed. After the panel lands, this helper uses the just-installed
+# detour-update logic to add the correct feed and install/upgrade sing-box and
+# tpws-zapret in the background.
+
+set +e
+
+PLATFORM=openwrt
+UPDATE_BIN=/usr/sbin/detour-update
+FEED_CONF=/etc/opkg/customfeeds.conf
+FEED_NAME=detour
+LOG=/var/log/detour-bootstrap.log
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    UPDATE_BIN=/opt/sbin/detour-update
+    FEED_CONF=/opt/etc/opkg/customfeeds.conf
+    LOG=/opt/var/log/detour-bootstrap.log
+    mkdir -p /opt/etc/opkg /opt/var/log /opt/var/state 2>/dev/null
+fi
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+
+log() {
+    printf '[detour-bootstrap] %s\n' "$*" >> "$LOG" 2>/dev/null
+}
+
+pkg_installed() {
+    opkg list-installed "$1" 2>/dev/null | grep -q "^$1 "
+}
+
+feed_present() {
+    grep -qs "^src/gz $FEED_NAME " "$FEED_CONF" 2>/dev/null
+}
+
+need_bootstrap=0
+feed_present || need_bootstrap=1
+pkg_installed sing-box || need_bootstrap=1
+pkg_installed tpws-zapret || need_bootstrap=1
+
+if [ "$need_bootstrap" != "1" ]; then
+    log "skip: feed and runtime packages are already present"
+    exit 0
+fi
+
+if [ ! -x "$UPDATE_BIN" ]; then
+    log "skip: updater missing at $UPDATE_BIN"
+    exit 0
+fi
+
+log "starting runtime bootstrap on $PLATFORM"
+"$UPDATE_BIN" bins-apply >> "$LOG" 2>&1 || log "WARNING: bins-apply failed"
+"$UPDATE_BIN" tpws-apply >> "$LOG" 2>&1 || log "WARNING: tpws-apply failed"
+
+if pkg_installed sing-box && pkg_installed tpws-zapret; then
+    log "runtime bootstrap complete"
+else
+    log "runtime bootstrap incomplete — check feed reachability and rerun detour-update bins-apply / tpws-apply"
+fi
+
+exit 0
