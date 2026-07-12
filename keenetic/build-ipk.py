@@ -188,6 +188,11 @@ def build_control(version, installed_size):
     )
     postinst = f"""#!/bin/sh
 set +e
+LOG=/opt/var/log/detour-install.log
+mkdir -p /opt/var/log 2>/dev/null
+exec >> "$LOG" 2>&1
+set -x
+echo "=== detour-keenetic postinst start version={version} pid=$$ args:$* ==="
 mkdir -p /opt/etc/detour/subscriptions /opt/etc/sing-box/profiles /opt/etc/zapret-tpws \\
          /opt/etc/detour/dnsmasq.d /opt/var/log /opt/var/run /opt/var/state \\
          /tmp/detour-sessions /tmp/hosts
@@ -289,10 +294,16 @@ if [ -f /tmp/detour-panel-selfupdate ]; then
     rm -f /tmp/detour-panel-selfupdate
     /opt/etc/init.d/S51detour-panel restart 2>/dev/null
 fi
+echo "=== detour-keenetic postinst end version={version} pid=$$ ==="
 exit 0
 """
     prerm = """#!/bin/sh
 set +e
+LOG=/opt/var/log/detour-install.log
+mkdir -p /opt/var/log 2>/dev/null
+exec >> "$LOG" 2>&1
+set -x
+echo "=== detour-keenetic prerm start pid=$$ args:$* ==="
 # Stop the swap service first
 [ -x /opt/etc/init.d/S05swap ] && /opt/etc/init.d/S05swap stop 2>/dev/null
 # Stop the scheduler daemon first so a periodic task can't fire mid-upgrade.
@@ -312,6 +323,7 @@ set +e
 if [ ! -f /tmp/detour-panel-selfupdate ]; then
     /opt/etc/init.d/S51detour-panel stop 2>/dev/null
 fi
+echo "=== detour-keenetic prerm end pid=$$ args:$* ==="
 exit 0
 """
     postrm = """#!/bin/sh

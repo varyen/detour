@@ -13,6 +13,8 @@ UPDATE_BIN=/usr/sbin/detour-update
 FEED_CONF=/etc/opkg/customfeeds.conf
 FEED_NAME=detour
 LOG=/var/log/detour-bootstrap.log
+SINGBOX_BIN=/usr/bin/sing-box
+TPWS_BIN=/usr/bin/tpws-zapret
 
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PLATFORM=keenetic
@@ -20,13 +22,44 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     UPDATE_BIN=/opt/sbin/detour-update
     FEED_CONF=/opt/etc/opkg/customfeeds.conf
     LOG=/opt/var/log/detour-bootstrap.log
+    SINGBOX_BIN=/opt/bin/sing-box
+    TPWS_BIN=/opt/sbin/tpws-zapret
     mkdir -p /opt/etc/opkg /opt/var/log /opt/var/state 2>/dev/null
 fi
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
 
+timestamp() {
+    date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown-time
+}
+
 log() {
-    printf '[detour-bootstrap] %s\n' "$*" >> "$LOG" 2>/dev/null
+    printf '%s [detour-bootstrap] %s\n' "$(timestamp)" "$*" >> "$LOG" 2>/dev/null
+}
+
+run_cmd() {
+    log "+ $*"
+    "$@" >> "$LOG" 2>&1
+    rc=$?
+    log "rc=$rc :: $*"
+    return $rc
+}
+
+dump_file() {
+    _path="$1"
+    if [ -f "$_path" ]; then
+        log "--- BEGIN $_path ---"
+        sed 's/^/    /' "$_path" >> "$LOG" 2>&1
+        log "--- END $_path ---"
+    else
+        log "missing file: $_path"
+    fi
+}
+
+dump_runtime_state() {
+    run_cmd opkg list-installed
+    [ -n "$SINGBOX_BIN" ] && run_cmd ls -l "$SINGBOX_BIN"
+    [ -n "$TPWS_BIN" ] && run_cmd ls -l "$TPWS_BIN"
 }
 
 pkg_installed() {
@@ -43,6 +76,7 @@ pkg_installed sing-box || need_bootstrap=1
 pkg_installed tpws-zapret || need_bootstrap=1
 
 if [ "$need_bootstrap" != "1" ]; then
+    log "bootstrap decision: feed_present=$(feed_present && echo yes || echo no) sing-box=$(pkg_installed sing-box && echo yes || echo no) tpws=$(pkg_installed tpws-zapret && echo yes || echo no)"
     log "skip: feed and runtime packages are already present"
     exit 0
 fi
@@ -52,14 +86,27 @@ if [ ! -x "$UPDATE_BIN" ]; then
     exit 0
 fi
 
+log "==== bootstrap start pid=$$ platform=$PLATFORM ===="
+log "PATH=$PATH"
+log "UPDATE_BIN=$UPDATE_BIN FEED_CONF=$FEED_CONF SINGBOX_BIN=$SINGBOX_BIN TPWS_BIN=$TPWS_BIN"
+run_cmd uname -a
+run_cmd opkg --version
+run_cmd opkg print-architecture
+dump_file "$FEED_CONF"
+dump_runtime_state
+
 log "starting runtime bootstrap on $PLATFORM"
-"$UPDATE_BIN" bins-apply >> "$LOG" 2>&1 || log "WARNING: bins-apply failed"
-"$UPDATE_BIN" tpws-apply >> "$LOG" 2>&1 || log "WARNING: tpws-apply failed"
+run_cmd "$UPDATE_BIN" bins-apply || log "WARNING: bins-apply failed"
+dump_file "$FEED_CONF"
+run_cmd "$UPDATE_BIN" tpws-apply || log "WARNING: tpws-apply failed"
+dump_runtime_state
 
 if pkg_installed sing-box && pkg_installed tpws-zapret; then
     log "runtime bootstrap complete"
 else
     log "runtime bootstrap incomplete — check feed reachability and rerun detour-update bins-apply / tpws-apply"
 fi
+
+log "==== bootstrap end pid=$$ ===="
 
 exit 0

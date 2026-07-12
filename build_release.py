@@ -240,6 +240,12 @@ def build_control_tar_gz(version, installed_size):
 # detour postinst — runs after opkg unpacks the package.
 set +e
 
+LOG=/var/log/detour-install.log
+mkdir -p /var/log 2>/dev/null
+exec >> "$LOG" 2>&1
+set -x
+echo "=== detour postinst start version={version} pid=$$ args:$* ==="
+
 VERSION="{version}"
 
 # 1) Seed /etc/detour defaults on first install (preserve on upgrade).
@@ -454,12 +460,19 @@ mkdir -p /etc/opkg/keys
 chmod 0755 /etc/opkg/keys
 
 echo "detour $VERSION installed."
+echo "=== detour postinst end version=$VERSION pid=$$ ==="
 exit 0
 """
 
     prerm = """#!/bin/sh
 # detour prerm — runs before files are removed.
 set +e
+
+LOG=/var/log/detour-install.log
+mkdir -p /var/log 2>/dev/null
+exec >> "$LOG" 2>&1
+set -x
+echo "=== detour prerm start pid=$$ args:$* ==="
 
 # Stop services so opkg can replace the binaries cleanly.
 /etc/init.d/sing-box stop >/dev/null 2>&1
@@ -484,6 +497,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-offload' \\
                       | grep -v 'detour-wan-link' \\
                       | crontab - 2>/dev/null
+echo "=== detour prerm end pid=$$ args:$* ==="
 exit 0
 """
 

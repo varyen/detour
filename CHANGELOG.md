@@ -5,6 +5,27 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.26.1] — 2026-07-12
+
+Patch-релиз для диагностики первой установки и bootstrap на OpenWrt и Keenetic.
+
+### Добавлено
+
+- **Подробные install-логи пакета.** `postinst` и `prerm` теперь пишут пошаговый
+  trace в `detour-install.log`, чтобы после неудачной установки можно было
+  увидеть точный ход package lifecycle, а не только итоговый статус. _OpenWrt/
+  GL.iNet + Keenetic parity._
+- **Расширенный bootstrap-лог первой установки.** `detour-bootstrap-install`
+  теперь логирует окружение, текущий `customfeeds.conf`, список установленных
+  пакетов, проверку ожидаемых путей бинарников и exit codes для `bins-apply` /
+  `tpws-apply`. _OpenWrt/GL.iNet + Keenetic parity._
+
+### Изменено
+
+- **README дополнен точными путями install-логов.** Для OpenWrt и Keenetic
+  отдельно описано, какие файлы снимать с устройства после неудачной установки:
+  `detour-install.log` и `detour-bootstrap.log`.
+
 ## [1.26.0] — 2026-07-12
 
 Минорный релиз, который убирает ручной bootstrap opkg-фида из первой установки
