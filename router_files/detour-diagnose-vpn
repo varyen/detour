@@ -1,0 +1,204 @@
+#!/bin/sh
+# detour-diagnose-vpn — focused incident snapshot for "VPN selected, clients have
+# no internet, but the panel still looks healthy".
+#
+# Run it over SSH at the moment of the outage:
+#   /usr/sbin/detour-diagnose-vpn
+#   /usr/sbin/detour-diagnose-vpn --no-probe   # skip the live detour-health probe
+# Keenetic path is /opt/sbin/detour-diagnose-vpn.
+
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+PLATFORM=openwrt
+SETTINGS=/etc/sing-box/settings.json
+PROFILES=/etc/sing-box/profiles
+PING_DB=/tmp/detour-ping.db
+HEALTH_DB=/tmp/detour-health.db
+ASTATE=/tmp/detour-health.active-state
+SWITCH_MARK=/tmp/detour-health.switch
+UNSUPP_MARK=/tmp/detour-health.unsupported
+HEALTH_LOG=/var/log/detour-health.log
+SB_LOG=/var/log/sing-box.log
+HEALTH_BIN=/usr/sbin/detour-health
+API_BIN=/www/cgi-bin/detour-api
+DETOUR_DIR=/etc/detour
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
+    PATH=/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin
+    SETTINGS=/opt/etc/sing-box/settings.json
+    PROFILES=/opt/etc/sing-box/profiles
+    HEALTH_LOG=/opt/var/log/detour-health.log
+    SB_LOG=/opt/var/log/sing-box.log
+    HEALTH_BIN=/opt/sbin/detour-health
+    API_BIN=/opt/share/www/cgi-bin/detour-api
+    DETOUR_DIR=/opt/etc/detour
+fi
+
+RUN_PROBE=1
+case "$1" in
+    --no-probe) RUN_PROBE=0 ;;
+    '' ) ;;
+    *) echo "usage: detour-diagnose-vpn [--no-probe]" >&2; exit 2 ;;
+esac
+
+TS_HUMAN=$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null)
+[ -n "$TS_HUMAN" ] || TS_HUMAN=$(date 2>/dev/null)
+TS_FILE=$(date '+%Y%m%d-%H%M%S' 2>/dev/null)
+[ -n "$TS_FILE" ] || TS_FILE="now"
+OUT="/tmp/detour-vpn-diagnose-$TS_FILE.log"
+: > "$OUT" 2>/dev/null || OUT="/tmp/detour-vpn-diagnose.log"
+: > "$OUT" 2>/dev/null || { echo "cannot write $OUT" >&2; exit 1; }
+
+jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
+jnum() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$2" 2>/dev/null | head -1; }
+
+say() { printf '%s\n' "$*" | tee -a "$OUT"; }
+indent() {
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        printf '    %s\n' "$_line" | tee -a "$OUT"
+    done
+}
+hdr() { say ""; say "=== $* ==="; }
+run_sh() {
+    say "$ $1"
+    sh -c "$1" 2>&1 | indent
+}
+
+tcp_probe() {
+    _tp_h="$1"; _tp_p="$2"
+    [ -n "$_tp_h" ] && [ -n "$_tp_p" ] && [ "$_tp_p" != "0" ] || return 1
+    _tp_ms=$(lua - "$_tp_h" "$_tp_p" 2>/dev/null <<'LUA'
+local ok, socket = pcall(require, "socket")
+if not ok then os.exit(3) end
+local h, p = arg[1], tonumber(arg[2])
+local c = socket.tcp(); c:settimeout(3)
+local t0 = socket.gettime()
+local cok = c:connect(h, p)
+local t1 = socket.gettime()
+c:close()
+if not cok then os.exit(1) end
+io.write(string.format("%d", math.floor((t1 - t0) * 1000 + 0.5)))
+LUA
+)
+    _tp_rc=$?
+    if [ "$_tp_rc" = "0" ]; then
+        case "$_tp_ms" in ''|*[!0-9]*) echo "-1" ;; *) echo "$_tp_ms" ;; esac
+        return 0
+    fi
+    [ "$_tp_rc" = "1" ] && return 1
+    command -v nc >/dev/null 2>&1 || return 1
+    _tp_t0=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+    if timeout 3 nc "$_tp_h" "$_tp_p" </dev/null >/dev/null 2>&1; then
+        _tp_t1=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
+        if [ -n "$_tp_t0" ] && [ -n "$_tp_t1" ]; then
+            echo "$_tp_t0 $_tp_t1" | awk '{d=($2-$1)*1000; if(d<0)d=0; printf "%d", d}'
+        else
+            echo "-1"
+        fi
+        return 0
+    fi
+    return 1
+}
+
+ACTIVE=$(jstr active_profile "$SETTINGS")
+ACTIVE_CHAIN=$(jstr active_chain "$SETTINGS")
+ROUTING_MODE=$(jstr routing_mode "$SETTINGS")
+SB_MODE=$(jstr singbox_mode "$SETTINGS")
+H_ENABLED=$(jstr health_check_enabled "$SETTINGS")
+H_AUTO=$(jstr health_auto_switch "$SETTINGS")
+PFILE="$PROFILES/$ACTIVE.json"
+PNAME=""
+PTYPE=""
+SERVER=""
+PORT=""
+if [ -f "$PFILE" ]; then
+    PNAME=$(jstr name "$PFILE")
+    PTYPE=$(jstr type "$PFILE")
+    SERVER=$(jstr server "$PFILE")
+    PORT=$(jnum server_port "$PFILE")
+fi
+
+hdr "Detour VPN incident snapshot"
+say "time: ${TS_HUMAN:-unknown}"
+say "platform: $PLATFORM"
+say "output: $OUT"
+say "active_profile: ${ACTIVE:-<none>}"
+say "active_chain: ${ACTIVE_CHAIN:-<none>}"
+say "routing_mode: ${ROUTING_MODE:-<unset>}"
+say "singbox_mode: ${SB_MODE:-<unset>}"
+say "health_check_enabled: ${H_ENABLED:-<unset>}"
+say "health_auto_switch: ${H_AUTO:-<unset>}"
+say "profile_name: ${PNAME:-<unknown>}"
+say "profile_type: ${PTYPE:-<unknown>}"
+say "profile_server: ${SERVER:-<none>}"
+say "profile_port: ${PORT:-<none>}"
+
+hdr "Processes and listeners"
+run_sh "ps w 2>/dev/null | grep -E '[s]ing-box run|[t]pws|[d]etour-health|[d]etour-cron|[d]nsmasq|[l]ighttpd|[u]httpd|[n]ginx'"
+run_sh "netstat -tlnp 2>/dev/null | grep -E ':(80|443|8080|1081|12345|5354) '"
+MAIN_PID=$(ps w 2>/dev/null | awk '/[s]ing-box run/{print $1; exit}')
+if [ -n "$MAIN_PID" ] && [ -d "/proc/$MAIN_PID/fd" ]; then
+    hdr "Main sing-box process"
+    say "pid: $MAIN_PID"
+    say "open_fds: $(ls "/proc/$MAIN_PID/fd" 2>/dev/null | wc -l | tr -d ' ')"
+    run_sh "ps w 2>/dev/null | grep '[s]ing-box run'"
+fi
+
+hdr "Cached state"
+if [ -n "$ACTIVE" ] && [ -f "$HEALTH_DB" ]; then
+    run_sh "awk -F '\\t' -v id='$ACTIVE' '\$1==id{print}' '$HEALTH_DB'"
+else
+    say "health_db: unavailable"
+fi
+if [ -n "$ACTIVE" ] && [ -f "$PING_DB" ]; then
+    run_sh "awk -F '\\t' -v id='$ACTIVE' '\$1==id{print}' '$PING_DB'"
+else
+    say "ping_db: unavailable"
+fi
+[ -f "$ASTATE" ] && run_sh "cat '$ASTATE'" || say "active_state: unavailable"
+[ -f "$SWITCH_MARK" ] && run_sh "cat '$SWITCH_MARK'" || say "switch_mark: unavailable"
+[ -f "$UNSUPP_MARK" ] && say "unsupported_mark: present" || say "unsupported_mark: absent"
+
+hdr "Endpoint reachability"
+if [ -n "$SERVER" ]; then
+    run_sh "ping -c1 -W2 '$SERVER'"
+    if [ -n "$PORT" ]; then
+        TP=$(tcp_probe "$SERVER" "$PORT")
+        if [ $? -eq 0 ]; then
+            say "tcp_probe_ms: ${TP:--1}"
+        else
+            say "tcp_probe_ms: failed"
+        fi
+    else
+        say "tcp_probe_ms: no port in profile"
+    fi
+else
+    say "endpoint: active profile has no server"
+fi
+
+hdr "Firewall and routing snapshot"
+run_sh "iptables -t nat -S 2>/dev/null | grep -E '12345|1081|5354|SINGBOX|ZAPRET|dns'"
+if command -v nft >/dev/null 2>&1; then
+    run_sh "nft list table inet fw4 2>/dev/null | grep -E '12345|1081|5354|detour|singbox|zapret'"
+fi
+
+hdr "Recent logs"
+[ -f "$HEALTH_LOG" ] && run_sh "tail -40 '$HEALTH_LOG'" || say "health_log: unavailable"
+[ -f "$SB_LOG" ] && run_sh "tail -40 '$SB_LOG'" || say "singbox_log: unavailable"
+if command -v logread >/dev/null 2>&1; then
+    run_sh "logread 2>/dev/null | tail -120 | grep -E 'detour|sing-box|tpws|dnsmasq|dropbear|uhttpd|lighttpd|nginx'"
+fi
+
+hdr "Live functional probe"
+if [ "$RUN_PROBE" = "1" ] && [ -n "$ACTIVE" ] && [ -x "$HEALTH_BIN" ]; then
+    say "note: detour-health one updates the active profile cache and may measure speed once"
+    run_sh "'$HEALTH_BIN' one '$ACTIVE'"
+    if [ -f "$HEALTH_DB" ]; then
+        run_sh "awk -F '\\t' -v id='$ACTIVE' '\$1==id{print}' '$HEALTH_DB'"
+    fi
+else
+    say "live probe: skipped"
+fi
+
+hdr "Done"
+say "saved: $OUT"
+say "paste this file or the stdout back into chat"

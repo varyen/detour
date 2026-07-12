@@ -550,6 +550,20 @@ set_dl() { # $1 = id, $2 = kbit/s
         && mv "$_stmp" "$HEALTH_DB" 2>/dev/null || rm -f "$_stmp"
 }
 
+probe_summary() { # $1 = profile id -> "ok=.. rtt=.. delays=.."
+    [ -f "$WORK/$1" ] || { printf 'no-result'; return 0; }
+    awk -F'\t' 'NR==1{
+        r=($4==""?-1:$4);
+        d=($5==""?"-1":$5);
+        printf "ok=%s rtt=%s delays=%s", $2, r, d;
+        exit
+    }' "$WORK/$1" 2>/dev/null
+}
+
+sb_log_tail() {
+    tail -5 "$SB_LOG" 2>/dev/null | tr '\n' '|' | sed 's/|$//; s/[[:space:]][[:space:]]*/ /g'
+}
+
 # Human-readable profile name (the panel's label) for a push body; falls back to id.
 profile_name() {
     _pn=$(jstr name "$PROFILES/$1.json" 2>/dev/null)
@@ -653,7 +667,9 @@ active_check_once() {
     # If the throwaway instance can't even START, that's an INFRA problem, not a dead
     # egress — do NOT push (a false "VPN down" alert is worse than silence).
     if ! probe_idfile "$WORK/.active-ids"; then
-        log "active-check: throwaway sing-box failed to start — skipping (no false alert)"
+        _sbt=$(sb_log_tail)
+        [ -n "$_sbt" ] && _sbt="; sb=$_sbt"
+        log "active-check: $_A throwaway sing-box failed to start — skipping (no false alert)$_sbt"
         return 0
     fi
     _NEWOK=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$_A" 2>/dev/null)
@@ -669,8 +685,12 @@ active_check_once() {
         _PREVID=$(cut -f1 "$ASTATE" 2>/dev/null)
         _PREVOK=$(cut -f2 "$ASTATE" 2>/dev/null)
     fi
+    _SUM=$(probe_summary "$_A")
     if [ "$_NEWOK" = "0" ]; then
         _ANAME=$(profile_name "$_A")
+        if ! { [ "$_PREVID" = "$_A" ] && [ "$_PREVOK" = "0" ]; }; then
+            log "active-check: $_A confirmed DOWN ($_SUM)"
+        fi
         if autoswitch_active "$_A" "$_ANAME"; then
             log "active-check: $_A down → auto-switched"
         elif ! { [ "$_PREVID" = "$_A" ] && [ "$_PREVOK" = "0" ]; }; then
@@ -679,6 +699,8 @@ active_check_once() {
             push_alert "VPN недоступен" "Профиль «$_ANAME» не работает — проверочные адреса не открываются через VPN."
             log "active-check: $_A DOWN — push sent"
         fi
+    elif ! { [ "$_PREVID" = "$_A" ] && [ "$_PREVOK" = "1" ]; }; then
+        log "active-check: $_A OK ($_SUM)"
     fi
     # Record this run's result for the next transition check.
     printf '%s\t%s\n' "$_A" "$_NEWOK" > "$ASTATE"

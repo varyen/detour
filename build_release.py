@@ -136,6 +136,7 @@ PANEL_FILES = [
     (("router_files", "vpn-keepalive"), "usr/sbin/vpn-keepalive", 0o755),
     (("router_files", "detour-ping"), "usr/sbin/detour-ping", 0o755),
     (("router_files", "detour-health"), "usr/sbin/detour-health", 0o755),
+    (("router_files", "detour-diagnose-vpn"), "usr/sbin/detour-diagnose-vpn", 0o755),
     (("router_files", "detour-push"), "usr/sbin/detour-push", 0o755),
     (("router_files", "detour-cert"), "usr/sbin/detour-cert", 0o755),
     (("router_files", "detour-offload"), "usr/sbin/detour-offload", 0o755),

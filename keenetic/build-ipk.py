@@ -86,6 +86,9 @@ FILES = [
     # Functional health check (shared source, /opt shim). Driven hourly by the
     # S90detour-cron loop. Self-no-ops if Entware sing-box lacks clash_api.
     (os.path.join(ROUTER_FILES, "detour-health"), "opt/sbin/detour-health", 0o755, True),
+    # Focused incident snapshot for "VPN selected but traffic dead". Shared source,
+    # /opt shim; run manually over SSH when the issue is happening.
+    (os.path.join(ROUTER_FILES, "detour-diagnose-vpn"), "opt/sbin/detour-diagnose-vpn", 0o755, True),
     # Web Push (VAPID) sender (shared source, /opt shim). Backs the panel's push
     # settings + detour-health down/auto-switch alerts. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-push"), "opt/sbin/detour-push", 0o755, True),

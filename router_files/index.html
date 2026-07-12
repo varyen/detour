@@ -7259,12 +7259,19 @@
       }
       var healthTimer = null;
       var HEALTH_POLL_MS = 60000; // hourly probe → a 1-min reader poll is ample
+      var ACTIVE_HEALTH_STALE_S = 180;
       var HEALTH_COLORS = {
         "health-good": "#3fb950",
         "health-bad": "#f0883e",
         "health-dead": "#f85149",
         "health-pending": "",
       };
+
+      function isActiveHealthStale(id, e) {
+        if (!id || id !== currentActiveProfileId || !e) return false;
+        if (!e.ts) return true;
+        return Math.max(0, Math.floor(Date.now() / 1000) - e.ts) > ACTIVE_HEALTH_STALE_S;
+      }
 
       // Map a profile's functional result to a CSS class + glyph + a per-target
       // tooltip (so the user sees WHICH target failed, e.g. "YouTube ✓ · Google ✗").
@@ -7276,6 +7283,15 @@
             text: "·",
             title: "проверка работоспособности ещё не выполнялась",
           };
+        if (isActiveHealthStale(id, e)) {
+          return {
+            cls: "health-pending",
+            text: "·",
+            title:
+              "последняя проверка активного VPN устарела" +
+              (e.ts ? " · " + fmtPingAgo(e.ts) : ""),
+          };
+        }
         var urls = healthMeta.urls || [];
         var dl = e.delays || [];
         var parts = [],
@@ -7368,11 +7384,16 @@
         }
         if (spEl) {
           var e = id ? healthResults[id] : null;
-          var sp = e && healthMeta.supported ? fmtSpeed(e.dl) : "";
+          var sp =
+            e && healthMeta.supported && !isActiveHealthStale(id, e)
+              ? fmtSpeed(e.dl)
+              : "";
           spEl.textContent = sp ? "↓ " + sp : "—";
           spEl.title = sp
             ? "измеренная скорость скачивания активного VPN"
-            : "скорость ещё не измерена";
+            : e && isActiveHealthStale(id, e)
+              ? "последняя измеренная скорость активного VPN устарела"
+              : "скорость ещё не измерена";
         }
       }
       function profileNameById(id) {
@@ -7597,11 +7618,12 @@
           h = healthResults[id];
         var pingAgo = p && p.ts ? fmtPingAgo(p.ts) : "—";
         var vpnAgo = h && h.ts ? fmtPingAgo(h.ts) : "—";
+        var stale = isActiveHealthStale(id, h);
         var title =
           "пинг проверен: " +
           pingAgo +
           (healthMeta.supported ? " · VPN: " + vpnAgo : "");
-        var sp = h ? fmtSpeed(h.dl) : "";
+        var sp = h && !stale ? fmtSpeed(h.dl) : "";
         if (sp)
           return (
             '<span class="vc-speed-val" title="' +
@@ -7612,7 +7634,12 @@
           );
         return (
           '<span class="vc-speed-none" title="' +
-          escapeHtml(title + " · скорость ещё не измерена") +
+          escapeHtml(
+            title +
+              (stale
+                ? " · последняя скорость активного VPN устарела"
+                : " · скорость ещё не измерена"),
+          ) +
           '">—</span>'
         );
       }
