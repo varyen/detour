@@ -5,6 +5,23 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.25.5] — 2026-07-12
+
+Bugfix-релиз для Keenetic-валидации WAN-диагностики и для PPPoE/tunnel uplink.
+
+### Исправлено
+
+- **Keenetic-валидатор больше не теряет JSON из `detour-wan-link status`.**
+  `validate-recent-features.sh` больше не смешивает pipe с heredoc на одном
+  `stdin`, поэтому WAN-диагностика читается стабильно и не падает с ложным
+  `unreadable JSON`. _Keenetic — validation-script bugfix._
+- **`detour-wan-link` корректнее отделяет логический WAN от физического порта
+  на Keenetic PPPoE/tunnel uplink.** Если `wan_if` указывает на `ppp0`/другой
+  tunnel-интерфейс и прямой `lower_*`-цепочки нет, watchdog пытается вывести
+  уникальный physical uplink из speed-capable интерфейсов, сохраняя логический
+  `wan_if` и отдельно заполняя `phy_if`. _OpenWrt/GL.iNet + Keenetic — shared
+  watchdog with Keenetic-specific fallback._
+
 ## [1.25.4] — 2026-07-12
 
 Bugfix-релиз для ложноположительного статуса активного VPN и для диагностики

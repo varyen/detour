@@ -63,6 +63,20 @@ iface_duplex() {
     cat "/sys/class/net/$1/duplex" 2>/dev/null | head -1
 }
 
+iface_has_master() {
+    [ -L "/sys/class/net/$1/master" ]
+}
+
+iface_is_tunnelish() {
+    case "$1" in
+        ppp*|pppoe*|tun*|tap*|wg*|gre*|gretap*|ip6tnl*|sit*|ipip*|erspan*|bond*|ifb*)
+            return 0
+            ;;
+    esac
+    _type=$(cat "/sys/class/net/$1/type" 2>/dev/null | head -1)
+    [ "$_type" = "512" ]
+}
+
 first_lower_iface() {
     _base="/sys/class/net/$1"
     set -- "$_base"/lower_*
@@ -74,7 +88,52 @@ first_lower_iface() {
     return 1
 }
 
+iface_is_phy_candidate() {
+    _if="$1"
+    [ -n "$_if" ] || return 1
+    [ -d "/sys/class/net/$_if" ] || return 1
+    case "$_if" in
+        lo|br*|docker*|veth*|dummy*|ifb*|imq*|teql*|nflog*|nfqueue*|tun*|tap*|ppp*|pppoe*|wg*|gre*|gretap*|ip6tnl*|sit*|ipip*|erspan*|bond*)
+            return 1
+            ;;
+    esac
+    iface_has_master "$_if" && return 1
+    iface_speed "$_if" >/dev/null 2>&1 && return 0
+    _pm=$(partner_max_mbps "$_if")
+    [ -n "$_pm" ] && [ "$_pm" -gt 0 ] 2>/dev/null
+}
+
+scan_phy_candidates() {
+    _require_carrier="$1"
+    for _path in /sys/class/net/*; do
+        [ -e "$_path" ] || continue
+        _if=$(basename "$_path")
+        iface_is_phy_candidate "$_if" || continue
+        if [ "$_require_carrier" = "1" ] && [ "$(iface_carrier "$_if")" != "1" ]; then
+            continue
+        fi
+        printf '%s\n' "$_if"
+    done
+}
+
+unique_phy_candidate() {
+    _list=$(scan_phy_candidates "$1" | sed '/^$/d')
+    [ -n "$_list" ] || return 1
+    _count=$(printf '%s\n' "$_list" | wc -l | tr -d ' ')
+    [ "$_count" = "1" ] || return 1
+    printf '%s' "$_list"
+}
+
+fallback_phy_iface() {
+    unique_phy_candidate 1 || unique_phy_candidate 0
+}
+
 resolve_phy_iface() {
+    [ -n "$WAN_PHY_IF" ] && {
+        printf '%s' "$WAN_PHY_IF"
+        return 0
+    }
+    _orig="$1"
     _cur="$1"
     _hops=0
     while [ -n "$_cur" ] && [ "$_hops" -lt 6 ]; do
@@ -87,7 +146,14 @@ resolve_phy_iface() {
         _cur="$_next"
         _hops=$((_hops + 1))
     done
-    [ -n "$1" ] && printf '%s' "$1"
+    if [ "$PLATFORM" = "keenetic" ] && [ -n "$_orig" ] && iface_is_tunnelish "$_orig"; then
+        _fallback=$(fallback_phy_iface)
+        [ -n "$_fallback" ] && {
+            printf '%s' "$_fallback"
+            return 0
+        }
+    fi
+    [ -n "$_orig" ] && printf '%s' "$_orig"
 }
 
 partner_max_mbps() {
@@ -107,7 +173,6 @@ partner_max_mbps() {
 }
 
 current_wan_iface() {
-    [ -n "$WAN_PHY_IF" ] && { printf '%s' "$WAN_PHY_IF"; return 0; }
     [ -n "$WAN_IF" ] && { printf '%s' "$WAN_IF"; return 0; }
     if [ "$PLATFORM" = "openwrt" ]; then
         _v=$(ubus_field l3_device)
