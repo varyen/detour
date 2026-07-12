@@ -8,6 +8,41 @@
 
 ---
 
+## Установка
+
+Если вы просто хотите поставить Detour на роутер, а не разрабатывать его,
+используйте готовый `.ipk` из [GitHub Releases](https://github.com/varyen/detour/releases).
+
+1. Скачайте нужный пакет из последнего релиза:
+  `detour_X.Y.Z_all.ipk` для OpenWrt / GL.iNet или
+  `detour-keenetic_X.Y.Z_all.ipk` для Keenetic / Entware.
+2. Скопируйте файл на роутер в `/tmp/`.
+3. Выполните команды для своей платформы.
+
+### OpenWrt / GL.iNet
+
+```sh
+echo 'src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/aarch64' >> /etc/opkg/customfeeds.conf
+opkg update
+opkg install --force-overwrite sing-box tpws-zapret
+opkg install /tmp/detour_X.Y.Z_all.ipk
+```
+
+### Keenetic / Entware
+
+Entware должен быть уже установлен и смонтирован в `/opt`.
+
+```sh
+echo 'src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/mipsel' >> /opt/etc/opkg/customfeeds.conf
+opkg update
+opkg install --force-overwrite sing-box tpws-zapret
+opkg install /tmp/detour-keenetic_X.Y.Z_all.ipk
+```
+
+После установки панель доступна по адресу `http://<IP-роутера>:8080/detour/`.
+Дальше обновляться проще всего из самой панели или командой `detour-update apply`
+на роутере.
+
 ## Что это
 
 Detour — самохостируемая система обхода блокировок для роутеров GL.iNet
