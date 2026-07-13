@@ -4216,6 +4216,45 @@
               Zapret/2».
             </div>
           </div>
+
+          <!-- Голос Discord через VPN (UDP TPROXY, OpenWrt only) -->
+          <div class="card" id="discord-voice-card" style="display: none">
+            <div class="card-header">
+              <div class="card-title">
+                <span class="status-dot stopped" id="dvoice-dot"></span>
+                Голос Discord через VPN
+              </div>
+              <div class="refresh-indicator">
+                <span id="dvoice-status-text">--</span>
+              </div>
+            </div>
+            <div class="card-actions" style="margin-bottom: 4px">
+              <label
+                class="check-row"
+                style="display: inline-flex; align-items: center; gap: 6px"
+                title="Заворачивать голосовой UDP Discord (Cloudflare, порты 19294–19344) в активный VPN через TPROXY. Обходит блокировку голоса: инъекцию поддельных IP-discovery и троттлинг медиапотока."
+              >
+                <input
+                  type="checkbox"
+                  id="dvoice-enable"
+                  onchange="setDiscordVoice(this.checked)"
+                />
+                Включить
+              </label>
+            </div>
+            <div
+              id="dvoice-hint"
+              style="
+                font-size: 11px;
+                color: var(--text-muted);
+                margin-top: 4px;
+                min-height: 14px;
+              "
+            >
+              Голосовой трафик Discord пойдёт через активный VPN-профиль (нужен
+              рабочий VPN). Включай, если голос не подключается / «No Route».
+            </div>
+          </div>
         </div>
 
         <!-- ===== TABS ===== -->
@@ -5770,6 +5809,8 @@
       const API = "/cgi-bin/detour-api";
       var currentRoutingMode = "proxy-list";
       var currentProfiles = [];
+      var pendingAutoswitchFlags = Object.create(null);
+      var pendingSpeedcheckFlags = Object.create(null);
       var currentActiveChain = [];
       var editingChain = [];
       var lastParsedProfileType = "";
@@ -6257,6 +6298,8 @@
           type: resolveProfileType(profile, outbound),
           uri: profile.uri || "",
           group: String(profile.group || "").trim(),
+          autoswitch: profile.autoswitch !== false,
+          speedcheck: profile.speedcheck !== false,
           routing_mode:
             profile.routing_mode === "proxy-list" ||
             profile.routing_mode === "all-except"
@@ -6788,6 +6831,7 @@
           var d = await api("status");
           currentPlatform = d.platform || "openwrt";
           currentPanelPort = d.panel_port || 8080;
+          loadDiscordVoice();
 
           // Keenetic gets HTTPS via its built-in KeenDNS web-app publishing (valid
           // auto-renewed cert) — our Let's Encrypt flow doesn't apply there, so hide
@@ -7015,6 +7059,32 @@
           var d = await api("profiles_list");
           currentProfiles = (d.profiles || []).map(function (profile, index) {
             return ensureProfileShape(profile, index, profile.name);
+          }).map(function (profile) {
+            if (
+              Object.prototype.hasOwnProperty.call(
+                pendingAutoswitchFlags,
+                profile.id,
+              )
+            ) {
+              if ((profile.autoswitch !== false) === pendingAutoswitchFlags[profile.id]) {
+                delete pendingAutoswitchFlags[profile.id];
+              } else {
+                profile.autoswitch = pendingAutoswitchFlags[profile.id];
+              }
+            }
+            if (
+              Object.prototype.hasOwnProperty.call(
+                pendingSpeedcheckFlags,
+                profile.id,
+              )
+            ) {
+              if ((profile.speedcheck !== false) === pendingSpeedcheckFlags[profile.id]) {
+                delete pendingSpeedcheckFlags[profile.id];
+              } else {
+                profile.speedcheck = pendingSpeedcheckFlags[profile.id];
+              }
+            }
+            return profile;
           });
           currentActiveProfileId = d.active || "";
           currentActiveChain =
@@ -7026,6 +7096,8 @@
           populateGroupsUI();
           renderProfileSelect();
           renderChainPreview(currentActiveChain);
+          renderRouteProfileSelect();
+          renderRouteRules();
         } catch (e) {
           if (e.message !== "Not authenticated")
             console.error("Profiles error:", e);
@@ -7248,6 +7320,7 @@
         urls: [],
         switch: null,
       };
+      var healthConfigMutationSeq = 0;
       // kbit/s (as stored by detour-health) → short human string, or "" if unmeasured.
       function fmtSpeed(kbps) {
         if (kbps == null || kbps < 0) return "";
@@ -7448,8 +7521,10 @@
       }
       // Seed/refresh from the router's health cache (pure reader, like ping).
       function seedHealthStatus() {
+        var mutationSeq = healthConfigMutationSeq;
         return api("health_status")
           .then(function (d) {
+            if (mutationSeq !== healthConfigMutationSeq) return;
             applyHealthMeta(d);
             if (d && d.results) {
               healthResults = {};
@@ -7484,6 +7559,7 @@
       }
       // Save the two health toggles (no sing-box restart on the router side).
       async function saveHealthConfig() {
+        var mutationSeq = ++healthConfigMutationSeq;
         var en = document.getElementById("health-enabled").checked ? 1 : 0;
         var as = document.getElementById("health-autoswitch").checked ? 1 : 0;
         var spc = document.getElementById("health-speed");
@@ -7503,10 +7579,17 @@
             }),
           );
           if (d && d.ok) {
-            healthMeta.enabled = !!en;
-            healthMeta.auto_switch = !!as;
-            healthMeta.speed = !!sp;
+            healthMeta.enabled = d.enabled !== false;
+            healthMeta.auto_switch = !!d.auto_switch;
+            healthMeta.speed = d.speed !== false;
             healthMeta.speed_bytes = d.speed_bytes || sb;
+            if (mutationSeq === healthConfigMutationSeq) {
+              var asEl = document.getElementById("health-autoswitch");
+              if (asEl) asEl.checked = healthMeta.auto_switch;
+              if (spc) spc.checked = healthMeta.speed;
+              if (spsz) spsz.disabled = !healthMeta.speed;
+              seedHealthStatus();
+            }
             toast("Настройки проверки сохранены", "success");
           } else {
             toast("Не удалось сохранить настройки", "error");
@@ -7802,13 +7885,9 @@
           return x.id === id;
         });
         var newElig = !(p ? p.autoswitch !== false : false);
+        pendingAutoswitchFlags[id] = newElig;
         if (p) p.autoswitch = newElig;
-        if (btn) {
-          btn.classList.toggle("on", newElig);
-          btn.title = newElig
-            ? "Участвует в авто-переключении · клик, чтобы исключить"
-            : "Исключён из авто-переключения · клик, чтобы включить";
-        }
+        renderVpnStatusTable();
         return api(
           "autoswitch_set&eligible=" + (newElig ? "1" : "0"),
           "POST",
@@ -7816,15 +7895,12 @@
         )
           .then(function (r) {
             if (!r || !r.ok) throw new Error("save failed");
+            return loadProfiles().then(renderVpnStatusTable);
           })
           .catch(function () {
+            delete pendingAutoswitchFlags[id];
             if (p) p.autoswitch = !newElig;
-            if (btn) {
-              btn.classList.toggle("on", !newElig);
-              btn.title = !newElig
-                ? "Участвует в авто-переключении · клик, чтобы исключить"
-                : "Исключён из авто-переключения · клик, чтобы включить";
-            }
+            renderVpnStatusTable();
             toast("Не удалось сохранить флаг авто-переключения", "error");
           });
       }
@@ -7834,13 +7910,9 @@
           return x.id === id;
         });
         var newElig = !(p ? p.speedcheck !== false : false);
+        pendingSpeedcheckFlags[id] = newElig;
         if (p) p.speedcheck = newElig;
-        if (btn) {
-          btn.classList.toggle("on", newElig);
-          btn.title = newElig
-            ? "Участвует в фоновых замерах скорости · клик, чтобы исключить"
-            : "Исключён из фоновых замеров скорости · клик, чтобы включить";
-        }
+        renderVpnStatusTable();
         return api(
           "speedcheck_set&eligible=" + (newElig ? "1" : "0"),
           "POST",
@@ -7848,17 +7920,37 @@
         )
           .then(function (r) {
             if (!r || !r.ok) throw new Error("save failed");
+            return loadProfiles().then(renderVpnStatusTable);
           })
           .catch(function () {
+            delete pendingSpeedcheckFlags[id];
             if (p) p.speedcheck = !newElig;
-            if (btn) {
-              btn.classList.toggle("on", !newElig);
-              btn.title = !newElig
-                ? "Участвует в фоновых замерах скорости · клик, чтобы исключить"
-                : "Исключён из фоновых замеров скорости · клик, чтобы включить";
-            }
+            renderVpnStatusTable();
             toast("Не удалось сохранить флаг замера скорости", "error");
           });
+      }
+
+      var vpnRowActionsBound = false;
+      function bindVpnRowActions() {
+        if (vpnRowActionsBound) return;
+        var tbody = document.getElementById("vpn-status-tbody");
+        if (!tbody) return;
+        tbody.addEventListener("click", function (event) {
+          var btn = event.target.closest("button[data-vpn-action]");
+          if (!btn || !tbody.contains(btn)) return;
+          var id = btn.getAttribute("data-vpn-id") || "";
+          var action = btn.getAttribute("data-vpn-action") || "";
+          if (!id || !action) return;
+          event.preventDefault();
+          if (action === "autoswitch") {
+            toggleAutoswitch(id, btn);
+            return;
+          }
+          if (action === "speedcheck") {
+            toggleSpeedcheck(id, btn);
+          }
+        });
+        vpnRowActionsBound = true;
       }
 
       function vpnStatusRowHtml(p) {
@@ -7888,26 +7980,26 @@
         var asEligible = p.autoswitch !== false;
         var spEligible = p.speedcheck !== false;
         var actions =
-          '<button class="vpn-as-btn' +
+          '<button type="button" class="vpn-as-btn' +
           (asEligible ? " on" : "") +
+          '" data-vpn-action="autoswitch" data-vpn-id="' +
+          escapeHtml(p.id) +
           '" title="' +
           (asEligible
             ? "Участвует в авто-переключении · клик, чтобы исключить"
             : "Исключён из авто-переключения · клик, чтобы включить") +
-          '" onclick="toggleAutoswitch(\'' +
-          escapeHtml(p.id) +
-          "', this)\">" +
+          '">' +
           autoswitchIconSvg() +
           "</button>" +
-          '<button class="vpn-as-btn vpn-speed-flag-btn' +
+          '<button type="button" class="vpn-as-btn vpn-speed-flag-btn' +
           (spEligible ? " on" : "") +
+          '" data-vpn-action="speedcheck" data-vpn-id="' +
+          escapeHtml(p.id) +
           '" title="' +
           (spEligible
             ? "Участвует в фоновых замерах скорости · клик, чтобы исключить"
             : "Исключён из фоновых замеров скорости · клик, чтобы включить") +
-          '" onclick="toggleSpeedcheck(\'' +
-          escapeHtml(p.id) +
-          "', this)\">" +
+          '">' +
           speedcheckIconSvg() +
           "</button>" +
           '<button class="vpn-refresh-btn" title="Обновить пинг" onclick="refreshOnePing(\'' +
@@ -8189,6 +8281,7 @@
 
       // Tab entry point: make sure profiles + ping cache are loaded, then render.
       function loadVpnStatus() {
+        bindVpnRowActions();
         ensureVpnAgoTimer();
         var prep = currentProfiles.length ? Promise.resolve() : loadProfiles();
         Promise.resolve(prep).then(seedPingStatus).then(renderVpnStatusTable);
@@ -12922,7 +13015,20 @@
           sel.appendChild(o);
           return;
         }
-        currentProfiles.forEach(function (p) {
+        var usedIds = routeRules.map(function (rule) {
+          return rule.id;
+        });
+        var available = currentProfiles.filter(function (p) {
+          return usedIds.indexOf(p.id) === -1;
+        });
+        if (!available.length) {
+          var busy = document.createElement("option");
+          busy.value = "";
+          busy.textContent = "(свободных профилей нет)";
+          sel.appendChild(busy);
+          return;
+        }
+        available.forEach(function (p) {
           var o = document.createElement("option");
           o.value = p.id;
           o.textContent = (p.name || p.id) + " (" + (p.type || "?") + ")";
@@ -13069,6 +13175,7 @@
               return;
             }
             rule.id = nextId;
+            renderRouteProfileSelect();
           };
 
           var removeBtn = document.createElement("button");
@@ -13076,6 +13183,7 @@
           removeBtn.textContent = "Удалить";
           removeBtn.onclick = function () {
             routeRules.splice(index, 1);
+            renderRouteProfileSelect();
             renderRouteRules();
           };
 
@@ -13139,7 +13247,12 @@
       function addRouteRule() {
         var sel = document.getElementById("route-profile-select");
         if (!sel || !sel.value) {
-          toast("Сначала добавь хотя бы один профиль", "error");
+          toast(
+            currentProfiles.length
+              ? "Свободных профилей для нового маршрута не осталось"
+              : "Сначала добавь хотя бы один профиль",
+            "error",
+          );
           return;
         }
         if (
@@ -13151,6 +13264,7 @@
           return;
         }
         routeRules.push(createEmptyRouteRule(sel.value));
+        renderRouteProfileSelect();
         renderRouteRules();
       }
 
@@ -14515,6 +14629,54 @@
           toast("Ошибка: " + e.message, "error");
           loadBypassStatus();
         }
+      }
+
+      // ---- Голос Discord через VPN (UDP TPROXY, OpenWrt only) ----
+      async function loadDiscordVoice() {
+        var card = document.getElementById("discord-voice-card");
+        if (!card) return;
+        if (currentPlatform === "keenetic") {
+          card.style.display = "none";
+          return;
+        }
+        try {
+          var d = await api("discord_voice");
+          if (d && d.supported === false) {
+            card.style.display = "none";
+            return;
+          }
+          card.style.display = "";
+          var on = !!(d && d.enabled);
+          var cb = document.getElementById("dvoice-enable");
+          if (cb) cb.checked = on;
+          var dot = document.getElementById("dvoice-dot");
+          if (dot) dot.className = "status-dot " + (on ? "running" : "stopped");
+          var txt = document.getElementById("dvoice-status-text");
+          if (txt) txt.textContent = on ? "включено" : "выключено";
+        } catch (e) {}
+      }
+
+      async function setDiscordVoice(on) {
+        var txt = document.getElementById("dvoice-status-text");
+        if (txt) txt.textContent = "применяю…";
+        try {
+          var d = await api(
+            "discord_voice",
+            "POST",
+            JSON.stringify({ enabled: on ? 1 : 0 })
+          );
+          if (d && d.ok) {
+            toast(
+              on ? "Голос Discord через VPN включён" : "Выключено",
+              "success"
+            );
+          } else {
+            toast("Ошибка: " + ((d && d.error) || ""), "error");
+          }
+        } catch (e) {
+          toast("Ошибка: " + e.message, "error");
+        }
+        loadDiscordVoice();
       }
 
       // Tabs

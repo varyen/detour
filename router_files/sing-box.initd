@@ -35,6 +35,20 @@ KEEPFW_FLAG=/tmp/.singbox-keepfw
 # switch from ~100s to a few seconds. Full restart still does all of it.
 FASTSWITCH_FLAG=/tmp/.singbox-fastswitch
 
+# ---- Discord voice via VPN (UDP TPROXY, OpenWrt only) ----
+# TSPU blocks Discord voice by (1) injecting fake IP-discovery responses (SSRC=0 →
+# NO_ROUTE) and (2) throttling the media (5000 ms ping). Neither DPI-desync nor a
+# TCP REDIRECT helps (voice media is UDP; redirect is TCP-only). The fix funnels the
+# Discord/Cloudflare voice UDP ports through the VPN via a sing-box `tproxy` inbound
+# (emitted into config.json by the CGI only when this is on) so TSPU sees only the
+# encrypted tunnel. The fwmark MUST be masked ($VOICE_MARK/$VOICE_MARK): GL firmware
+# already marks some flows 0x8000, so an exact-match `ip rule` would miss them.
+VOICE_TPROXY_PORT=12350        # sing-box tproxy-voice inbound (config.json)
+VOICE_MARK=0x1e                # masked fwmark → local-delivery routing table
+VOICE_TABLE=106                # policy-routing table (local default dev lo)
+VOICE_PORTS=19294:19344        # Discord voice UDP port range (Cloudflare)
+VOICE_CHAIN=DISCORD_VPN        # mangle chain holding the TPROXY rule
+
 # Detect whether nftables (fw4) is available on this router.
 # OpenWrt 23.05+ uses nftables; older firmwares (e.g. GL.iNet 21.02 builds) use fw3+iptables only.
 has_nft() {
@@ -83,6 +97,14 @@ get_routing_mode() {
     [ -f "$SETTINGS_FILE" ] && m=$(sed -n 's/.*"routing_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS_FILE" | head -1)
     [ -z "$m" ] && m="proxy-list"
     echo "$m"
+}
+
+# Read discord_voice_vpn (0/1) from settings.json — route Discord voice UDP through
+# the VPN via TPROXY. Default off. See VOICE_* constants above.
+discord_voice_vpn() {
+    local v=""
+    [ -f "$SETTINGS_FILE" ] && v=$(sed -n 's/.*"discord_voice_vpn"[[:space:]]*:[[:space:]]*"\?\([01]\)"\?.*/\1/p' "$SETTINGS_FILE" | head -1)
+    [ "$v" = "1" ] && echo 1 || echo 0
 }
 
 # Extra input interfaces (besides br-lan) that should receive the same sing-box
@@ -396,6 +418,46 @@ teardown_intercept() {
     iptables -t nat -X SINGBOX_INTERCEPT 2>/dev/null
 }
 
+# ---- Discord voice via VPN (UDP TPROXY) ----
+# TPROXY the Discord voice UDP ports on br-lan (+ vpn_redirect_ifaces) into the local
+# sing-box tproxy-voice inbound, which relays them through the active outbound. The
+# tproxy-voice inbound only exists in config.json when the CGI rendered it (setting on),
+# so the daemon is the gate; here we just (un)install the firewall + policy routing.
+voice_tproxy_up() {
+    modprobe nft_tproxy 2>/dev/null; modprobe xt_TPROXY 2>/dev/null
+    ip -4 rule del fwmark "$VOICE_MARK/$VOICE_MARK" lookup "$VOICE_TABLE" 2>/dev/null
+    ip -4 rule add fwmark "$VOICE_MARK/$VOICE_MARK" lookup "$VOICE_TABLE" pref 12106
+    ip -4 route replace local default dev lo table "$VOICE_TABLE"
+    iptables -t mangle -N "$VOICE_CHAIN" 2>/dev/null
+    iptables -t mangle -F "$VOICE_CHAIN"
+    iptables -t mangle -A "$VOICE_CHAIN" -p udp -m udp --dport "$VOICE_PORTS" \
+        -j TPROXY --on-ip 127.0.0.1 --on-port "$VOICE_TPROXY_PORT" --tproxy-mark "$VOICE_MARK/$VOICE_MARK"
+    local IIF
+    for IIF in br-lan $(vpn_redirect_ifaces); do
+        [ -n "$IIF" ] || continue
+        iptables -t mangle -D PREROUTING -i "$IIF" -j "$VOICE_CHAIN" 2>/dev/null
+        iptables -t mangle -I PREROUTING 1 -i "$IIF" -j "$VOICE_CHAIN"
+    done
+}
+
+voice_tproxy_down() {
+    local IIF
+    for IIF in br-lan $(vpn_redirect_ifaces); do
+        [ -n "$IIF" ] || continue
+        iptables -t mangle -D PREROUTING -i "$IIF" -j "$VOICE_CHAIN" 2>/dev/null
+    done
+    iptables -t mangle -F "$VOICE_CHAIN" 2>/dev/null
+    iptables -t mangle -X "$VOICE_CHAIN" 2>/dev/null
+    ip -4 rule del fwmark "$VOICE_MARK/$VOICE_MARK" lookup "$VOICE_TABLE" 2>/dev/null
+    ip -4 route flush table "$VOICE_TABLE" 2>/dev/null
+}
+
+# Reconcile TPROXY firewall to the current setting on every (re)start — so toggling
+# the setting off then restarting (incl. KEEPFW) cleanly removes stale rules.
+voice_tproxy_apply() {
+    if [ "$(discord_voice_vpn)" = 1 ]; then voice_tproxy_up; else voice_tproxy_down; fi
+}
+
 start_service() {
     # Disable broken MPTCP (QSDK kernel + some MediaTek kernels)
     sysctl -w net.mptcp.enabled=0 >/dev/null 2>&1
@@ -414,6 +476,7 @@ start_service() {
     local ROUTING_MODE=$(get_routing_mode)
     local SB_POS=1 ZL
     local INST_TMP=/tmp/singbox-instances.start.$$
+    local CUR_ROUTE_IPSETS=""
     # Fast profile/chain switch (reconfigure): domains/ipsets/dnsmasq unchanged, so
     # skip the DNS warm-up + per-IP conntrack flush below. Firewall is rebuilt either
     # way (cheap) so the new upstream RETURN takes effect.
@@ -421,6 +484,7 @@ start_service() {
 
     # Create ipset(s) — hash:net supports both IPs and CIDRs
     ipset create $IPSET_NAME hash:net -exist
+    ipset flush $IPSET_NAME 2>/dev/null
     mkdir -p /tmp/dnsmasq.d
 
     # Flattened route-map (all targets) — used only to warm DNS. Actual route-map
@@ -436,6 +500,7 @@ start_service() {
     # ---- default-instance (port 12345) ipset + dnsmasq population ----
     if [ "$ROUTING_MODE" = "all-except" ]; then
         ipset create $IPSET_WL hash:net maxelem 131072 -exist
+        ipset flush $IPSET_WL 2>/dev/null
         setup_domains_file "$WHITELIST_FILE" "$IPSET_WL" "/tmp/dnsmasq.d/singbox-whitelist.conf"
         setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
         # Keep the browser's Web Push channel OFF the VPN: push endpoints resolve into the
@@ -448,10 +513,22 @@ start_service() {
     fi
 
     # ---- Per-target route ipsets + dnsmasq (one set/port per route target) ----
+    rm -f /tmp/dnsmasq.d/singbox-singbox_t*.conf
     route_map_slots > "$INST_TMP"
+    CUR_ROUTE_IPSETS=$(awk '{print $4}' "$INST_TMP" 2>/dev/null | tr '\n' ' ')
+    for s in $(ipset list -n 2>/dev/null | grep '^singbox_t'); do
+        case " $CUR_ROUTE_IPSETS " in
+            *" $s "*) ipset flush "$s" 2>/dev/null ;;
+            *)
+                ipset flush "$s" 2>/dev/null
+                ipset destroy "$s" 2>/dev/null
+                ;;
+        esac
+    done
     if [ -s "$INST_TMP" ]; then
         while read -r n id port ipset; do
             ipset create "$ipset" hash:net -exist
+            ipset flush "$ipset" 2>/dev/null
             route_map_section "$id" > "/tmp/routemap-$ipset.list"
             setup_domains_file "/tmp/routemap-$ipset.list" "$ipset" "/tmp/dnsmasq.d/singbox-$ipset.conf"
             rm -f "/tmp/routemap-$ipset.list"
@@ -514,6 +591,11 @@ start_service() {
     # ---- Per-target ports + REDIRECTs inserted ABOVE the default catch-all.
     # REDIRECT delivers locally, so strict per-target routes are never blackholed
     # by rule 9920 before sing-box gets a chance to decide between target/block.
+    if command -v iptables-save >/dev/null 2>&1; then
+        iptables-save -t nat 2>/dev/null | grep -- '--match-set singbox_t' | sed 's/^-A/-D/' | while IFS= read -r rule; do
+            [ -n "$rule" ] && iptables -t nat $rule 2>/dev/null
+        done
+    fi
     if [ -s "$INST_TMP" ]; then
         while read -r n id port ipset; do
             open_port_lan "$port"
@@ -548,6 +630,10 @@ start_service() {
     # Self-proxy smart intercept (map file; single mode) — install last so its jump
     # sits above the routing chains for the intercepted proxy endpoints.
     setup_intercept
+
+    # Discord voice → VPN (UDP TPROXY). Reconcile to the current setting; installed
+    # after the redirect chains so the mangle TPROXY sits at PREROUTING top.
+    voice_tproxy_apply
 
     # Connections already pinned (conntrack) to the old route for IPs now in the
     # redirect/whitelist sets keep flowing the old way until the entry dies —
@@ -629,6 +715,10 @@ stop_service() {
     # Remove self-proxy smart-intercept chain + jumps (full teardown only; KEEPFW
     # restart keeps them so the daemon gap fails CLOSED, same as the other REDIRECTs).
     teardown_intercept
+
+    # Discord voice TPROXY: full teardown only. A KEEPFW restart returns above and
+    # keeps it up, so the daemon gap fails CLOSED (voice UDP → dead :12350, refused).
+    voice_tproxy_down
 
     # MULTI: remove EVERY per-target REDIRECT (match-set singbox_t*), independent
     # of the current route-map, BEFORE destroying the sets they reference.

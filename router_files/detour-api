@@ -499,6 +499,12 @@ write_settings() {
     self_intercept=${SELF_INTERCEPT_OVERRIDE:-$(get_settings_val "self_intercept")}
     self_intercept_full=${SELF_INTERCEPT_FULL_OVERRIDE:-$(get_settings_val "self_intercept_full")}
 
+    # Discord voice via VPN (0/1). Preserve-or-override like the flags above; the
+    # discord_voice action sets DISCORD_VOICE_VPN_OVERRIDE before calling us.
+    local discord_voice
+    discord_voice=${DISCORD_VOICE_VPN_OVERRIDE:-$(get_settings_val "discord_voice_vpn")}
+    [ "$discord_voice" = "1" ] || discord_voice="0"
+
     cat > "$SINGBOX_SETTINGS" <<EOF
 {
   "active_profile": "$active_profile",
@@ -515,7 +521,8 @@ write_settings() {
   "log_to_syslog": "$log_syslog",
   "log_to_syslog_singbox": "$log_syslog_sb",
     "self_intercept": "$self_intercept",
-    "self_intercept_full": "$self_intercept_full"
+    "self_intercept_full": "$self_intercept_full",
+    "discord_voice_vpn": "$discord_voice"
 }
 EOF
 }
@@ -950,6 +957,14 @@ compute_intercept_inbounds() { # $1 = active chain CSV
 #   $5 listen_port (default 12345)
 #   $6 inbound_kind (redirect | mixed; default redirect)
 # Returns 1 if the chain is invalid.
+# Discord-voice-via-VPN flag (0/1). Override env wins so a settings/discord_voice POST
+# sees the new value for the SAME request (build_config runs before write_settings).
+# Never on Keenetic (no TPROXY there).
+discord_voice_vpn_val() {
+    [ "$PLATFORM" = keenetic ] && { echo 0; return; }
+    local v=${DISCORD_VOICE_VPN_OVERRIDE:-$(get_settings_val "discord_voice_vpn")}
+    [ "$v" = "1" ] && echo 1 || echo 0
+}
 render_chain_config() {
     local chain_csv="$1"
     local extra_outbounds="$2"
@@ -1081,6 +1096,21 @@ render_chain_config() {
         }"
         fi
 
+    # Discord voice via VPN: a UDP tproxy inbound on the DEFAULT instance only (port
+    # 12345). The initd TPROXYs Discord's Cloudflare voice UDP into it; it relays via
+    # route.final ("proxy") = active outbound. Only when enabled and not Keenetic.
+    local voice_inbound=""
+    if [ "$listen_port" = 12345 ] && [ "$(discord_voice_vpn_val)" = 1 ]; then
+        voice_inbound=",
+        {
+            \"type\": \"tproxy\",
+            \"tag\": \"tproxy-voice\",
+            \"listen\": \"::\",
+            \"listen_port\": 12350,
+            \"network\": \"udp\"
+        }"
+    fi
+
     # log: WARN, not "info" — at info sing-box emits a line per connection
     # (~40-50 MB/day). On Keenetic /var/log is tmpfs (~124 MB total): an info log
     # filled it in ~3 days and cascaded (curl/lighttpd/sessions/health all failed
@@ -1096,7 +1126,7 @@ render_chain_config() {
     "timestamp": true
   },
   "inbounds": [
-${inbound_block}${extra_inbounds}
+${inbound_block}${extra_inbounds}${voice_inbound}
   ],
 $(if [ -n "$endpoints_json" ]; then cat <<EOEP
     "endpoints": [
@@ -2937,6 +2967,38 @@ settings)
         else
             echo '{"active_profile":"default","active_chain":"default","routing_mode":"proxy-list","upstream_ips":"","singbox_mode":"single"}'
         fi
+    fi
+    ;;
+
+# ==================== DISCORD VOICE VIA VPN ====================
+# Toggle TPROXY-ing Discord's Cloudflare voice UDP (ports 19294-19344) through the
+# VPN. Defeats TSPU's fake-discovery injection + media throttling that a TCP redirect
+# / DPI-desync can't (voice media is UDP). OpenWrt only (needs TPROXY) — on Keenetic
+# the action refuses and the UI hides the control. GET returns {enabled,supported}.
+discord_voice)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        if [ "$PLATFORM" = keenetic ]; then
+            json_err "Голос Discord через VPN недоступен на Keenetic (нет TPROXY)"; exit 0
+        fi
+        NEW=$(printf '%s' "$POST_DATA" | sed -n 's/.*"enabled"[[:space:]]*:[[:space:]]*"\?\(true\|false\|[01]\)"\?.*/\1/p' | head -1)
+        case "$NEW" in true|1) NEW=1 ;; false|0) NEW=0 ;; *) json_err "enabled must be true/false"; exit 0 ;; esac
+        export DISCORD_VOICE_VPN_OVERRIDE="$NEW"
+        ACHAIN=$(get_active_chain)
+        SBMODE=$(get_singbox_mode)
+        # Rebuild config (adds/removes the tproxy-voice inbound), persist, then restart
+        # so the initd reconciles the TPROXY firewall to the new value.
+        BUILD_ERR=$(build_config "$SBMODE" "$ACHAIN")
+        if [ $? -ne 0 ]; then
+            json_err "config build failed: $(printf '%s' "$BUILD_ERR" | json_escape)"; exit 0
+        fi
+        write_settings "$ACHAIN" "$(get_routing_mode)" "$(collect_upstream_ips)" "$SBMODE"
+        $SINGBOX_INITD restart >/dev/null 2>&1
+        sleep 3
+        json_ok
+    else
+        EN=$(get_settings_val discord_voice_vpn); [ "$EN" = 1 ] && EN=true || EN=false
+        SUP=true; [ "$PLATFORM" = keenetic ] && SUP=false
+        printf '{"enabled":%s,"supported":%s}\n' "$EN" "$SUP"
     fi
     ;;
 
