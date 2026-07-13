@@ -4217,43 +4217,90 @@
             </div>
           </div>
 
-          <!-- Голос Discord через VPN (UDP TPROXY, OpenWrt only) -->
-          <div class="card" id="discord-voice-card" style="display: none">
+          <!-- UDP через VPN (TPROXY, OpenWrt only) -->
+          <div class="card" id="udp-vpn-card" style="display: none">
             <div class="card-header">
               <div class="card-title">
-                <span class="status-dot stopped" id="dvoice-dot"></span>
-                Голос Discord через VPN
+                <span class="status-dot stopped" id="udpvpn-dot"></span>
+                UDP через VPN
               </div>
               <div class="refresh-indicator">
-                <span id="dvoice-status-text">--</span>
+                <span id="udpvpn-status-text">--</span>
               </div>
             </div>
-            <div class="card-actions" style="margin-bottom: 4px">
+            <div
+              class="card-actions"
+              style="
+                margin-bottom: 6px;
+                gap: 6px;
+                flex-wrap: wrap;
+                align-items: center;
+              "
+            >
               <label
-                class="check-row"
-                style="display: inline-flex; align-items: center; gap: 6px"
-                title="Заворачивать голосовой UDP Discord (Cloudflare, порты 19294–19344) в активный VPN через TPROXY. Обходит блокировку голоса: инъекцию поддельных IP-discovery и троттлинг медиапотока."
+                style="
+                  display: inline-flex;
+                  align-items: center;
+                  gap: 6px;
+                  font-size: 13px;
+                "
+                title="Заворачивать UDP в активный VPN через TPROXY. Игры/голос к зарубежным серверам режет провайдер/ТСПУ, а TCP-обход тут не помогает (UDP нельзя REDIRECT'ить). Через туннель провайдер видит лишь зашифрованный трафик."
               >
-                <input
-                  type="checkbox"
-                  id="dvoice-enable"
-                  onchange="setDiscordVoice(this.checked)"
-                />
-                Включить
+                Режим:
+                <select
+                  id="udpvpn-mode"
+                  onchange="setUdpVpnMode(this.value)"
+                  style="
+                    padding: 3px 6px;
+                    background: var(--bg-input, #1b1b1b);
+                    color: var(--text);
+                    border: 1px solid var(--border, #333);
+                    border-radius: 6px;
+                  "
+                >
+                  <option value="off">Выкл</option>
+                  <option value="list">По списку</option>
+                  <option value="all">Весь UDP кроме прямых</option>
+                </select>
               </label>
             </div>
             <div
-              id="dvoice-hint"
+              id="udpvpn-list-wrap"
+              style="display: none; margin-bottom: 4px"
+            >
+              <textarea
+                id="udpvpn-list"
+                spellcheck="false"
+                style="
+                  width: 100%;
+                  height: 132px;
+                  box-sizing: border-box;
+                  font-family: monospace;
+                  font-size: 12px;
+                  padding: 6px;
+                  background: var(--bg-input, #1b1b1b);
+                  color: var(--text);
+                  border: 1px solid var(--border, #333);
+                  border-radius: 6px;
+                  resize: vertical;
+                "
+                placeholder="# UDP через VPN — хосты / подсети / домены / порты&#10;37.27.109.49            // весь UDP к этому IP&#10;37.27.109.49:8211       // только порт 8211 у этого IP&#10;10.0.0.0/24             // подсеть&#10;game.example.com        // домен (весь UDP к нему)&#10;:27015                  // порт с любого адреса&#10;19294:19344             // Discord voice (Cloudflare)"
+              ></textarea>
+              <div class="card-actions" style="margin-top: 4px">
+                <button class="btn primary" onclick="saveUdpVpnList()">
+                  💾 Сохранить список
+                </button>
+              </div>
+            </div>
+            <div
+              id="udpvpn-hint"
               style="
                 font-size: 11px;
                 color: var(--text-muted);
                 margin-top: 4px;
                 min-height: 14px;
               "
-            >
-              Голосовой трафик Discord пойдёт через активный VPN-профиль (нужен
-              рабочий VPN). Включай, если голос не подключается / «No Route».
-            </div>
+            ></div>
           </div>
         </div>
 
@@ -6831,7 +6878,7 @@
           var d = await api("status");
           currentPlatform = d.platform || "openwrt";
           currentPanelPort = d.panel_port || 8080;
-          loadDiscordVoice();
+          loadUdpVpn();
 
           // Keenetic gets HTTPS via its built-in KeenDNS web-app publishing (valid
           // auto-renewed cert) — our Let's Encrypt flow doesn't apply there, so hide
@@ -14631,43 +14678,70 @@
         }
       }
 
-      // ---- Голос Discord через VPN (UDP TPROXY, OpenWrt only) ----
-      async function loadDiscordVoice() {
-        var card = document.getElementById("discord-voice-card");
+      // ---- UDP через VPN (TPROXY, OpenWrt only) ----
+      async function loadUdpVpn() {
+        var card = document.getElementById("udp-vpn-card");
         if (!card) return;
         if (currentPlatform === "keenetic") {
           card.style.display = "none";
           return;
         }
         try {
-          var d = await api("discord_voice");
+          var d = await api("udp_vpn");
           if (d && d.supported === false) {
             card.style.display = "none";
             return;
           }
           card.style.display = "";
-          var on = !!(d && d.enabled);
-          var cb = document.getElementById("dvoice-enable");
-          if (cb) cb.checked = on;
-          var dot = document.getElementById("dvoice-dot");
-          if (dot) dot.className = "status-dot " + (on ? "running" : "stopped");
-          var txt = document.getElementById("dvoice-status-text");
-          if (txt) txt.textContent = on ? "включено" : "выключено";
+          var mode = (d && d.mode) || "off";
+          var sel = document.getElementById("udpvpn-mode");
+          if (sel) sel.value = mode;
+          var ta = document.getElementById("udpvpn-list");
+          if (ta && d && typeof d.list === "string") ta.value = d.list;
+          renderUdpVpnMode(mode);
         } catch (e) {}
       }
 
-      async function setDiscordVoice(on) {
-        var txt = document.getElementById("dvoice-status-text");
+      function renderUdpVpnMode(mode) {
+        var wrap = document.getElementById("udpvpn-list-wrap");
+        if (wrap) wrap.style.display = mode === "list" ? "" : "none";
+        var dot = document.getElementById("udpvpn-dot");
+        if (dot)
+          dot.className = "status-dot " + (mode !== "off" ? "running" : "stopped");
+        var txt = document.getElementById("udpvpn-status-text");
+        if (txt)
+          txt.textContent =
+            mode === "off"
+              ? "выключено"
+              : mode === "list"
+              ? "по списку"
+              : "весь UDP";
+        var hint = document.getElementById("udpvpn-hint");
+        if (hint) {
+          if (mode === "all")
+            hint.textContent =
+              "Через VPN идёт ВЕСЬ UDP, кроме «прямого» whitelist и DNS. QUIC (UDP/443) всех зарубежных сайтов тоже пойдёт в туннель — больше нагрузки и латентности. Нужен рабочий VPN.";
+          else if (mode === "list")
+            hint.textContent =
+              "Через VPN идёт только UDP к адресам/портам из списка ниже (игры, голос и т.п.). Нужен рабочий VPN.";
+          else
+            hint.textContent = "Весь UDP идёт напрямую (по умолчанию).";
+        }
+      }
+
+      async function setUdpVpnMode(mode) {
+        var txt = document.getElementById("udpvpn-status-text");
         if (txt) txt.textContent = "применяю…";
+        renderUdpVpnMode(mode); // instant feedback (show/hide list)
         try {
-          var d = await api(
-            "discord_voice",
-            "POST",
-            JSON.stringify({ enabled: on ? 1 : 0 })
-          );
+          var d = await api("udp_vpn", "POST", JSON.stringify({ mode: mode }));
           if (d && d.ok) {
             toast(
-              on ? "Голос Discord через VPN включён" : "Выключено",
+              mode === "off"
+                ? "UDP через VPN выключен"
+                : mode === "list"
+                ? "UDP через VPN: по списку"
+                : "UDP через VPN: весь UDP кроме прямых",
               "success"
             );
           } else {
@@ -14676,7 +14750,22 @@
         } catch (e) {
           toast("Ошибка: " + e.message, "error");
         }
-        loadDiscordVoice();
+        loadUdpVpn();
+      }
+
+      async function saveUdpVpnList() {
+        var ta = document.getElementById("udpvpn-list");
+        if (!ta) return;
+        var txt = document.getElementById("udpvpn-status-text");
+        if (txt) txt.textContent = "сохраняю…";
+        try {
+          var d = await api("udp_vpn_list", "POST", ta.value);
+          if (d && d.ok) toast("Список UDP через VPN сохранён", "success");
+          else toast("Ошибка: " + ((d && d.error) || ""), "error");
+        } catch (e) {
+          toast("Ошибка: " + e.message, "error");
+        }
+        loadUdpVpn();
       }
 
       // Tabs

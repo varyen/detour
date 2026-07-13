@@ -35,19 +35,27 @@ KEEPFW_FLAG=/tmp/.singbox-keepfw
 # switch from ~100s to a few seconds. Full restart still does all of it.
 FASTSWITCH_FLAG=/tmp/.singbox-fastswitch
 
-# ---- Discord voice via VPN (UDP TPROXY, OpenWrt only) ----
-# TSPU blocks Discord voice by (1) injecting fake IP-discovery responses (SSRC=0 →
-# NO_ROUTE) and (2) throttling the media (5000 ms ping). Neither DPI-desync nor a
-# TCP REDIRECT helps (voice media is UDP; redirect is TCP-only). The fix funnels the
-# Discord/Cloudflare voice UDP ports through the VPN via a sing-box `tproxy` inbound
-# (emitted into config.json by the CGI only when this is on) so TSPU sees only the
-# encrypted tunnel. The fwmark MUST be masked ($VOICE_MARK/$VOICE_MARK): GL firmware
-# already marks some flows 0x8000, so an exact-match `ip rule` would miss them.
-VOICE_TPROXY_PORT=12350        # sing-box tproxy-voice inbound (config.json)
-VOICE_MARK=0x1e                # masked fwmark → local-delivery routing table
-VOICE_TABLE=106                # policy-routing table (local default dev lo)
-VOICE_PORTS=19294:19344        # Discord voice UDP port range (Cloudflare)
-VOICE_CHAIN=DISCORD_VPN        # mangle chain holding the TPROXY rule
+# ---- UDP через VPN (TPROXY, OpenWrt only) ----
+# Игровой/голосовой UDP к зарубежным адресам режется провайдером/ТСПУ (инъекция
+# фейкового IP-discovery, троттлинг медиа), а TCP-redirect его не спасает — UDP
+# нельзя REDIRECT'ить в sing-box. Фикс: перехватить нужный UDP через TPROXY в
+# локальный sing-box `tproxy` inbound (появляется в config.json, только когда режим
+# != off — демон и есть «гейт»), он релеит его через активный VPN-outbound. ТСПУ
+# видит лишь зашифрованный туннель. Три режима (settings.json → udp_vpn_mode):
+#   off  — ничего не трогаем;
+#   list — только хосты/подсети/домены/порты из $UDP_VPN_LIST;
+#   all  — весь UDP кроме «прямого списка» (whitelist) + private/DNS.
+# Голос Discord — больше не отдельная фича: его диапазон 19294:19344 живёт как
+# обычная запись списка (сидируется по умолчанию). Маска fwmark ОБЯЗАТЕЛЬНА
+# ($UDP_VPN_MARK/$UDP_VPN_MARK): GL-прошивка уже метит часть потоков 0x8000, и
+# exact-match `ip rule` их бы промахнул.
+UDP_VPN_LIST=/etc/sing-box/udp-vpn.list   # хосты/подсети/домены/порты → VPN (list)
+UDP_VPN_TPROXY_PORT=12350                 # sing-box tproxy-udp inbound (config.json)
+UDP_VPN_MARK=0x1e                         # masked fwmark → local-delivery table
+UDP_VPN_TABLE=106                         # policy-routing table (local default dev lo)
+UDP_VPN_CHAIN=UDP_VPN                     # mangle-цепочка с TPROXY-правилами
+UDP_VPN_IPSET=singbox_udp_vpn             # ipset для IP/CIDR/доменов списка
+UDP_VPN_LEGACY_CHAIN=DISCORD_VPN          # чистим при апгрейде с v1.27.0
 
 # Detect whether nftables (fw4) is available on this router.
 # OpenWrt 23.05+ uses nftables; older firmwares (e.g. GL.iNet 21.02 builds) use fw3+iptables only.
@@ -99,12 +107,17 @@ get_routing_mode() {
     echo "$m"
 }
 
-# Read discord_voice_vpn (0/1) from settings.json — route Discord voice UDP through
-# the VPN via TPROXY. Default off. See VOICE_* constants above.
-discord_voice_vpn() {
+# Read udp_vpn_mode (off|list|all) from settings.json — route UDP through the VPN via
+# TPROXY. Default off. Migrates the legacy discord_voice_vpn=1 flag → "list" (its
+# port range is seeded into $UDP_VPN_LIST). See UDP_VPN_* constants above.
+udp_vpn_mode() {
     local v=""
-    [ -f "$SETTINGS_FILE" ] && v=$(sed -n 's/.*"discord_voice_vpn"[[:space:]]*:[[:space:]]*"\?\([01]\)"\?.*/\1/p' "$SETTINGS_FILE" | head -1)
-    [ "$v" = "1" ] && echo 1 || echo 0
+    [ -f "$SETTINGS_FILE" ] && v=$(sed -n 's/.*"udp_vpn_mode"[[:space:]]*:[[:space:]]*"\?\([a-z]*\)"\?.*/\1/p' "$SETTINGS_FILE" | head -1)
+    case "$v" in off|list|all) echo "$v"; return ;; esac
+    # legacy migration: old discord_voice_vpn flag
+    local d=""
+    [ -f "$SETTINGS_FILE" ] && d=$(sed -n 's/.*"discord_voice_vpn"[[:space:]]*:[[:space:]]*"\?\([01]\)"\?.*/\1/p' "$SETTINGS_FILE" | head -1)
+    [ "$d" = 1 ] && echo list || echo off
 }
 
 # Extra input interfaces (besides br-lan) that should receive the same sing-box
@@ -418,44 +431,138 @@ teardown_intercept() {
     iptables -t nat -X SINGBOX_INTERCEPT 2>/dev/null
 }
 
-# ---- Discord voice via VPN (UDP TPROXY) ----
-# TPROXY the Discord voice UDP ports on br-lan (+ vpn_redirect_ifaces) into the local
-# sing-box tproxy-voice inbound, which relays them through the active outbound. The
-# tproxy-voice inbound only exists in config.json when the CGI rendered it (setting on),
-# so the daemon is the gate; here we just (un)install the firewall + policy routing.
-voice_tproxy_up() {
+# ---- UDP через VPN (TPROXY) ----
+# Emit per-entry TPROXY rules for PORT (":8211", ":19294-19344") and HOST:PORT
+# ("37.27.109.49:8211", "1.2.3.0/24:27015") lines in $UDP_VPN_LIST. Plain IP/CIDR
+# and domain lines are handled via the ipset (setup_domains_file), not here. $1 is
+# the shared TPROXY target args ($TP) — passed unquoted so it word-splits.
+udp_vpn_port_rules() {
+    local TP="$1"
+    [ -f "$UDP_VPN_LIST" ] || return 0
+    # NB: the while runs in a pipe subshell — vars are subshell-scoped, no `local`
+    # (busybox ash rejects `local` outside a direct function body). Port ranges accept
+    # both "N-M" and "N:M"; iptables wants "N:M". Recognized here:
+    #   :port  / :port-port     → any destination
+    #   ip[/cidr]:port          → that host + port
+    #   port   / port-port      → any destination (bare, no dots)
+    # IP/CIDR and domain lines carry no port → handled via the ipset, skipped here.
+    sed 's|//.*||; s|#.*||' "$UDP_VPN_LIST" | tr -d '\r' | while IFS= read -r raw; do
+        line=$(echo "$raw" | xargs)
+        [ -n "$line" ] || continue
+        case "$line" in *[a-zA-Z]*) continue ;; esac   # has letters → domain (ipset)
+        host=""; p=""
+        case "$line" in
+            :*)      p=${line#:} ;;                     # ":port"
+            *.*:*)   host=${line%:*}; p=${line##*:} ;;  # "ip[/cidr]:port"
+            *.*)     continue ;;                        # "ip"/"cidr" → ipset, skip
+            *)       p=$line ;;                         # bare "port"/"port-port"
+        esac
+        p=$(echo "$p" | tr '-' ':')
+        echo "$p" | grep -qE '^[0-9]+(:[0-9]+)?$' || continue
+        if [ -n "$host" ]; then
+            echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' || continue
+            iptables -t mangle -A "$UDP_VPN_CHAIN" -p udp -m udp -d "$host" --dport "$p" $TP
+        else
+            iptables -t mangle -A "$UDP_VPN_CHAIN" -p udp -m udp --dport "$p" $TP
+        fi
+    done
+}
+
+# Install policy-routing (fwmark→table) + the mangle UDP_VPN chain and hook it onto
+# PREROUTING for br-lan (+ vpn_redirect_ifaces). Chain content depends on $1 (mode):
+#   list — RETURN exclusions, then per-entry port/host rules + ipset match → TPROXY;
+#   all  — RETURN exclusions (+ DNS + whitelist), then catch-all udp → TPROXY.
+# The tproxy-udp inbound only exists in config.json when the CGI rendered it (mode
+# != off), so the daemon is the gate; here we only (un)install firewall + routing.
+# The $UDP_VPN_IPSET set is created+populated in start_service (before the dnsmasq
+# restart) so domain entries resolve; here we just reference it.
+udp_vpn_up() {
+    local mode="$1"
     modprobe nft_tproxy 2>/dev/null; modprobe xt_TPROXY 2>/dev/null
-    ip -4 rule del fwmark "$VOICE_MARK/$VOICE_MARK" lookup "$VOICE_TABLE" 2>/dev/null
-    ip -4 rule add fwmark "$VOICE_MARK/$VOICE_MARK" lookup "$VOICE_TABLE" pref 12106
-    ip -4 route replace local default dev lo table "$VOICE_TABLE"
-    iptables -t mangle -N "$VOICE_CHAIN" 2>/dev/null
-    iptables -t mangle -F "$VOICE_CHAIN"
-    iptables -t mangle -A "$VOICE_CHAIN" -p udp -m udp --dport "$VOICE_PORTS" \
-        -j TPROXY --on-ip 127.0.0.1 --on-port "$VOICE_TPROXY_PORT" --tproxy-mark "$VOICE_MARK/$VOICE_MARK"
+    ip -4 rule del fwmark "$UDP_VPN_MARK/$UDP_VPN_MARK" lookup "$UDP_VPN_TABLE" 2>/dev/null
+    ip -4 rule add fwmark "$UDP_VPN_MARK/$UDP_VPN_MARK" lookup "$UDP_VPN_TABLE" pref 12106
+    ip -4 route replace local default dev lo table "$UDP_VPN_TABLE"
+
+    iptables -t mangle -N "$UDP_VPN_CHAIN" 2>/dev/null
+    iptables -t mangle -F "$UDP_VPN_CHAIN"
+
+    # Purge the legacy v1.27.0 DISCORD_VPN chain + its PREROUTING jumps (renamed →
+    # UDP_VPN). A KEEPFW restart-based upgrade skips stop_service's teardown, so clean
+    # it here on every `up` too — else it lingers double-jumped alongside UDP_VPN.
+    local LIF
+    for LIF in br-lan $(vpn_redirect_ifaces); do
+        [ -n "$LIF" ] && iptables -t mangle -D PREROUTING -i "$LIF" -j "$UDP_VPN_LEGACY_CHAIN" 2>/dev/null
+    done
+    iptables -t mangle -F "$UDP_VPN_LEGACY_CHAIN" 2>/dev/null
+    iptables -t mangle -X "$UDP_VPN_LEGACY_CHAIN" 2>/dev/null
+
+    # Shared TPROXY target (word-split on use — keep unquoted at call sites).
+    local TP="-j TPROXY --on-ip 127.0.0.1 --on-port $UDP_VPN_TPROXY_PORT --tproxy-mark $UDP_VPN_MARK/$UDP_VPN_MARK"
+
+    # Exclusions FIRST (both modes): never TPROXY LAN/link-local/multicast/broadcast
+    # or the VPN server itself (would loop the tunnel through itself).
+    local ip OLD_IFS PROXY_IPS
+    for ip in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 \
+              169.254.0.0/16 224.0.0.0/4 255.255.255.255; do
+        iptables -t mangle -A "$UDP_VPN_CHAIN" -d "$ip" -j RETURN
+    done
+    PROXY_IPS=$(get_upstream_ips)
+    if [ -n "$PROXY_IPS" ]; then
+        OLD_IFS="$IFS"; IFS=','; set -- $PROXY_IPS; IFS="$OLD_IFS"
+        for ip in "$@"; do
+            [ -n "$ip" ] && iptables -t mangle -A "$UDP_VPN_CHAIN" -d "$ip" -j RETURN
+        done
+    fi
+
+    if [ "$mode" = all ]; then
+        # Keep DNS direct/local so the panel's domain routing + ipset population
+        # aren't disrupted.
+        iptables -t mangle -A "$UDP_VPN_CHAIN" -p udp -m udp --dport 53 -j RETURN
+        # "Прямой список" = the same whitelist TCP uses (exists only in all-except
+        # routing mode; guard so a missing set doesn't error).
+        if ipset list -n 2>/dev/null | grep -qx "$IPSET_WL"; then
+            iptables -t mangle -A "$UDP_VPN_CHAIN" -m set --match-set "$IPSET_WL" dst -j RETURN
+        fi
+        iptables -t mangle -A "$UDP_VPN_CHAIN" -p udp $TP
+    else
+        # list mode: per-entry port/host rules, then IP/CIDR/domain via the ipset.
+        ipset create "$UDP_VPN_IPSET" hash:net -exist
+        udp_vpn_port_rules "$TP"
+        iptables -t mangle -A "$UDP_VPN_CHAIN" -p udp -m set --match-set "$UDP_VPN_IPSET" dst $TP
+    fi
+
     local IIF
     for IIF in br-lan $(vpn_redirect_ifaces); do
         [ -n "$IIF" ] || continue
-        iptables -t mangle -D PREROUTING -i "$IIF" -j "$VOICE_CHAIN" 2>/dev/null
-        iptables -t mangle -I PREROUTING 1 -i "$IIF" -j "$VOICE_CHAIN"
+        iptables -t mangle -D PREROUTING -i "$IIF" -j "$UDP_VPN_CHAIN" 2>/dev/null
+        iptables -t mangle -I PREROUTING 1 -i "$IIF" -j "$UDP_VPN_CHAIN"
     done
 }
 
-voice_tproxy_down() {
+udp_vpn_down() {
     local IIF
     for IIF in br-lan $(vpn_redirect_ifaces); do
         [ -n "$IIF" ] || continue
-        iptables -t mangle -D PREROUTING -i "$IIF" -j "$VOICE_CHAIN" 2>/dev/null
+        iptables -t mangle -D PREROUTING -i "$IIF" -j "$UDP_VPN_CHAIN" 2>/dev/null
+        iptables -t mangle -D PREROUTING -i "$IIF" -j "$UDP_VPN_LEGACY_CHAIN" 2>/dev/null
     done
-    iptables -t mangle -F "$VOICE_CHAIN" 2>/dev/null
-    iptables -t mangle -X "$VOICE_CHAIN" 2>/dev/null
-    ip -4 rule del fwmark "$VOICE_MARK/$VOICE_MARK" lookup "$VOICE_TABLE" 2>/dev/null
-    ip -4 route flush table "$VOICE_TABLE" 2>/dev/null
+    iptables -t mangle -F "$UDP_VPN_CHAIN" 2>/dev/null
+    iptables -t mangle -X "$UDP_VPN_CHAIN" 2>/dev/null
+    # legacy v1.27.0 chain cleanup (rename DISCORD_VPN → UDP_VPN)
+    iptables -t mangle -F "$UDP_VPN_LEGACY_CHAIN" 2>/dev/null
+    iptables -t mangle -X "$UDP_VPN_LEGACY_CHAIN" 2>/dev/null
+    ip -4 rule del fwmark "$UDP_VPN_MARK/$UDP_VPN_MARK" lookup "$UDP_VPN_TABLE" 2>/dev/null
+    ip -4 route flush table "$UDP_VPN_TABLE" 2>/dev/null
+    ipset flush "$UDP_VPN_IPSET" 2>/dev/null
+    ipset destroy "$UDP_VPN_IPSET" 2>/dev/null
+    rm -f /tmp/dnsmasq.d/singbox-udp-vpn.conf
 }
 
-# Reconcile TPROXY firewall to the current setting on every (re)start — so toggling
-# the setting off then restarting (incl. KEEPFW) cleanly removes stale rules.
-voice_tproxy_apply() {
-    if [ "$(discord_voice_vpn)" = 1 ]; then voice_tproxy_up; else voice_tproxy_down; fi
+# Reconcile the TPROXY firewall to the current mode on every (re)start — so switching
+# the mode off then restarting (incl. KEEPFW) cleanly removes stale rules.
+udp_vpn_apply() {
+    local m=$(udp_vpn_mode)
+    if [ "$m" = off ]; then udp_vpn_down; else udp_vpn_up "$m"; fi
 }
 
 start_service() {
@@ -512,6 +619,19 @@ start_service() {
         setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
     fi
 
+    # ---- UDP-через-VPN ipset + dnsmasq (list mode; populated BEFORE the dnsmasq
+    # restart below so domain entries resolve into $UDP_VPN_IPSET). "all" mode needs
+    # no ipset (catch-all); "off" leaves no conf. udp_vpn_apply installs the firewall
+    # later (after the redirect chains). See UDP_VPN_* / udp_vpn_up().
+    local UDP_VPN_MODE=$(udp_vpn_mode)
+    if [ "$UDP_VPN_MODE" = list ]; then
+        ipset create "$UDP_VPN_IPSET" hash:net -exist
+        ipset flush "$UDP_VPN_IPSET" 2>/dev/null
+        setup_domains_file "$UDP_VPN_LIST" "$UDP_VPN_IPSET" "/tmp/dnsmasq.d/singbox-udp-vpn.conf"
+    else
+        rm -f /tmp/dnsmasq.d/singbox-udp-vpn.conf
+    fi
+
     # ---- Per-target route ipsets + dnsmasq (one set/port per route target) ----
     rm -f /tmp/dnsmasq.d/singbox-singbox_t*.conf
     route_map_slots > "$INST_TMP"
@@ -540,6 +660,7 @@ start_service() {
         sleep 1
         resolve_domains "$DOMAINS_FILE"
         [ "$ROUTING_MODE" = "all-except" ] && resolve_domains "$WHITELIST_FILE"
+        [ "$UDP_VPN_MODE" = list ] && resolve_domains "$UDP_VPN_LIST"
         [ -s /tmp/routemap-all.list ] && resolve_domains /tmp/routemap-all.list
         sleep 1
     fi
@@ -631,9 +752,9 @@ start_service() {
     # sits above the routing chains for the intercepted proxy endpoints.
     setup_intercept
 
-    # Discord voice → VPN (UDP TPROXY). Reconcile to the current setting; installed
-    # after the redirect chains so the mangle TPROXY sits at PREROUTING top.
-    voice_tproxy_apply
+    # UDP → VPN (TPROXY). Reconcile to the current mode; installed after the redirect
+    # chains so the mangle TPROXY sits at PREROUTING top. ipset already populated above.
+    udp_vpn_apply
 
     # Connections already pinned (conntrack) to the old route for IPs now in the
     # redirect/whitelist sets keep flowing the old way until the entry dies —
@@ -716,9 +837,10 @@ stop_service() {
     # restart keeps them so the daemon gap fails CLOSED, same as the other REDIRECTs).
     teardown_intercept
 
-    # Discord voice TPROXY: full teardown only. A KEEPFW restart returns above and
-    # keeps it up, so the daemon gap fails CLOSED (voice UDP → dead :12350, refused).
-    voice_tproxy_down
+    # UDP→VPN TPROXY: full teardown only. A KEEPFW restart returns above and keeps it
+    # up, so the daemon gap fails CLOSED (tunneled UDP → dead :12350, refused). Also
+    # purges the legacy DISCORD_VPN chain on upgrade from v1.27.0.
+    udp_vpn_down
 
     # MULTI: remove EVERY per-target REDIRECT (match-set singbox_t*), independent
     # of the current route-map, BEFORE destroying the sets they reference.

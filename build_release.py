@@ -287,6 +287,7 @@ $BEGIN
 /etc/sing-box/settings.json
 /etc/sing-box/proxy-domains.list
 /etc/sing-box/whitelist-domains.list
+/etc/sing-box/udp-vpn.list
 /etc/sing-box/health-urls.list
 /etc/sing-box/route-map.list
 /etc/sing-box/autoswitch-exclude.list
@@ -362,6 +363,24 @@ YouTube|https://www.youtube.com/generate_204
 YouTube видео|https://redirector.googlevideo.com/generate_204
 Google|https://www.google.com/generate_204
 HURLS
+fi
+
+# 2b') Seed the UDP-через-VPN target list on first install (preserved on upgrade via
+# the keeplist + this guard). Only used when udp_vpn_mode=list (default off). The
+# Discord voice range is seeded so, if the operator switches to list mode, voice
+# already works. OpenWrt only (Keenetic has no TPROXY; the CGI/UI gate it off).
+if [ ! -f /etc/sing-box/udp-vpn.list ]; then
+    mkdir -p /etc/sing-box
+    cat > /etc/sing-box/udp-vpn.list <<'UDPL'
+# UDP через VPN — какой UDP заворачивать в активный VPN через TPROXY.
+# Действует в режиме «По списку». Форматы (комментарии // и #):
+#   1.2.3.4            — весь UDP к этому IP
+#   1.2.3.4:8211       — только порт 8211 у этого IP (диапазон 8211-8250)
+#   10.0.0.0/24        — подсеть
+#   game.example.com   — домен (весь UDP к его адресам)
+#   :27015             — порт с любого адреса
+19294:19344            // Discord voice (Cloudflare) — голос через VPN
+UDPL
 fi
 
 # 2c) Pre-generate the VAPID keypair for Web Push (lazy-generated otherwise on the
