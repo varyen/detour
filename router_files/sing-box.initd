@@ -471,7 +471,8 @@ udp_vpn_port_rules() {
 # Install policy-routing (fwmark→table) + the mangle UDP_VPN chain and hook it onto
 # PREROUTING for br-lan (+ vpn_redirect_ifaces). Chain content depends on $1 (mode):
 #   list — RETURN exclusions, then per-entry port/host rules + ipset match → TPROXY;
-#   all  — RETURN exclusions (+ DNS + whitelist), then catch-all udp → TPROXY.
+#   all  — RETURN exclusions + DNS, then force-list (port/host rules + ipset match →
+#          TPROXY, wins over the whitelist), then whitelist RETURN, then catch-all.
 # The tproxy-udp inbound only exists in config.json when the CGI rendered it (mode
 # != off), so the daemon is the gate; here we only (un)install firewall + routing.
 # The $UDP_VPN_IPSET set is created+populated in start_service (before the dnsmasq
@@ -518,6 +519,12 @@ udp_vpn_up() {
         # Keep DNS direct/local so the panel's domain routing + ipset population
         # aren't disrupted.
         iptables -t mangle -A "$UDP_VPN_CHAIN" -p udp -m udp --dport 53 -j RETURN
+        # Force-list (udp-vpn.list) BEFORE the whitelist RETURN: entries there must
+        # win over the RU-whitelist, so a whitelisted (e.g. RU) game server can still
+        # be pinned into the VPN. Without this the list is dead in "all" mode.
+        ipset create "$UDP_VPN_IPSET" hash:net -exist
+        udp_vpn_port_rules "$TP"
+        iptables -t mangle -A "$UDP_VPN_CHAIN" -p udp -m set --match-set "$UDP_VPN_IPSET" dst $TP
         # "Прямой список" = the same whitelist TCP uses (exists only in all-except
         # routing mode; guard so a missing set doesn't error).
         if ipset list -n 2>/dev/null | grep -qx "$IPSET_WL"; then
@@ -619,12 +626,13 @@ start_service() {
         setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
     fi
 
-    # ---- UDP-через-VPN ipset + dnsmasq (list mode; populated BEFORE the dnsmasq
-    # restart below so domain entries resolve into $UDP_VPN_IPSET). "all" mode needs
-    # no ipset (catch-all); "off" leaves no conf. udp_vpn_apply installs the firewall
+    # ---- UDP-через-VPN ipset + dnsmasq (populated BEFORE the dnsmasq restart below
+    # so domain entries resolve into $UDP_VPN_IPSET). Both "list" AND "all" need it:
+    # in "all" the list acts as a force-list that overrides the whitelist RETURN
+    # (see udp_vpn_up). "off" leaves no conf. udp_vpn_apply installs the firewall
     # later (after the redirect chains). See UDP_VPN_* / udp_vpn_up().
     local UDP_VPN_MODE=$(udp_vpn_mode)
-    if [ "$UDP_VPN_MODE" = list ]; then
+    if [ "$UDP_VPN_MODE" != off ] && [ -n "$UDP_VPN_MODE" ]; then
         ipset create "$UDP_VPN_IPSET" hash:net -exist
         ipset flush "$UDP_VPN_IPSET" 2>/dev/null
         setup_domains_file "$UDP_VPN_LIST" "$UDP_VPN_IPSET" "/tmp/dnsmasq.d/singbox-udp-vpn.conf"

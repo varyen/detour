@@ -375,6 +375,10 @@ if idf then
         if obj and obj.outbound then
           n = n + 1
           local ob = obj.outbound
+          -- uTLS is TCP-only: QUIC outbounds (hysteria/hysteria2/tuic) with tls.utls
+          -- fail every dial ("unsupported usage for uTLS"); mirror detour-api's strip
+          if (ob.type == "hysteria" or ob.type == "hysteria2" or ob.type == "tuic")
+             and type(ob.tls) == "table" then ob.tls.utls = nil end
           local tag = "h" .. n
           ob.tag = tag
           outbounds[#outbounds + 1] = ob
@@ -430,6 +434,8 @@ if not h then os.exit(1) end
 local obj = cjson.decode(h:read("*a") or ""); h:close()
 if not (obj and obj.outbound) then os.exit(1) end
 local ob = obj.outbound; ob.tag = "vpn"
+if (ob.type == "hysteria" or ob.type == "hysteria2" or ob.type == "tuic")
+   and type(ob.tls) == "table" then ob.tls.utls = nil end
 local conf = {
   log = { level = "error", timestamp = false },
   experimental = { clash_api = { external_controller = clash } },

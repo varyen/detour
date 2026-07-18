@@ -332,6 +332,20 @@ csv_contains() {
     echo ",$csv," | grep -q ",${needle},"
 }
 
+# uTLS is TCP-only in sing-box: a QUIC outbound (hysteria/hysteria2/tuic) carrying
+# tls.utls fails EVERY dial with "unsupported usage for uTLS". Subscriptions commonly
+# put fp= on hy2 links anyway, so strip utls at render time; the stored profile keeps
+# the field for share-link round-trip. detour-health does the same in its cfg-builder.
+strip_quic_utls() {
+    local line
+    line=$(cat)
+    if printf '%s' "$line" | grep -qE '"type"[[:space:]]*:[[:space:]]*"(hysteria2?|tuic)"'; then
+        line=$(printf '%s' "$line" | tr '\n' ' ' \
+            | sed 's/,[[:space:]]*"utls"[[:space:]]*:[[:space:]]*{[^{}]*}//g; s/"utls"[[:space:]]*:[[:space:]]*{[^{}]*}[[:space:]]*,\{0,1\}//g')
+    fi
+    printf '%s\n' "$line"
+}
+
 extract_profile_outbound() {
     local profile_file="$1"
     awk '
@@ -352,7 +366,7 @@ extract_profile_outbound() {
                 }
             }
         }
-    }' "$profile_file"
+    }' "$profile_file" | strip_quic_utls
 }
 
 translate_wireguard_profile() {
