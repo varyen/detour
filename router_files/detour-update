@@ -184,7 +184,7 @@ prev_field() {
 }
 
 write_state() {
-    local status="$1" message="$2" available="$3"
+    local status="$1" message="$2" available="$3" changelog_b64="$4"
     local cur now
     cur=$(current_version)
     now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -195,7 +195,8 @@ write_state() {
   "available_version": "$(json_escape "$available")",
   "last_check": "$now",
   "status": "$(json_escape "$status")",
-  "message": "$(json_escape "$message")"
+  "message": "$(json_escape "$message")",
+  "changelog_b64": "$(json_escape "$changelog_b64")"
 }
 EOF
 }
@@ -254,16 +255,34 @@ gh_assets() {
         --max-time 30 \
         -o "$tmp" "$url" || { rm -f "$tmp"; die "GH API request failed"; }
     # Tiny Lua JSON parser (lua-cjson is a hard dep).
+    # Prints on stdout:
+    # line 1: <tag_name>
+    # line 2: <body> (multi-line encoded to base64, so it takes exactly 1 line)
+    # lines 3..N: <asset_name>\t<browser_download_url>
     lua - <<'LUA' "$tmp"
--- Entware/Keenetic ships a pure-Lua cjson.safe under /opt/share/lua/5.1/ (no C
--- lua-cjson in the feed). Prepend that path so require finds it; harmless on
--- OpenWrt (dir absent → falls through to the system cjson).
 package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
 local cjson = require("cjson.safe")
 local f = io.open(arg[1], "r"); if not f then os.exit(1) end
 local raw = f:read("*a"); f:close()
 local doc = cjson.decode(raw); if not doc then os.exit(1) end
+
+-- Base64 encoder in pure Lua (for busybox/keenetic compat where base64 might be missing)
+local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+local function b64(data)
+    return ((data:gsub('.', function(x) 
+        local r,b='',x:byte()
+        for i=8,1,-1 do r=r..(b%2^i-b%2^(i-1)>0 and '1' or '0') end
+        return r;
+    end)..'0000'):gsub('%d%d%d?%d?%d?%d?', function(x)
+        if (#x < 6) return '' end
+        local c=0
+        for i=1,6 do c=c+(x:sub(i,i)=='1' and 2^(6-i) or 0) end
+        return b:sub(c+1,c+1)
+    end)..({ '', '==', '=' })[#data%3+1])
+end
+
 print(doc.tag_name or "")
+print(b64(doc.body or ""))
 for _, a in ipairs(doc.assets or {}) do
     if a.name and a.browser_download_url then
         print(a.name .. "\t" .. a.browser_download_url)
@@ -296,12 +315,31 @@ local cjson = require("cjson.safe")
 local f = io.open(arg[1], "r"); if not f then os.exit(1) end
 local raw = f:read("*a"); f:close()
 local doc = cjson.decode(raw); if not doc then os.exit(1) end
+
+local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+local function b64(data)
+    return ((data:gsub('.', function(x) 
+        local r,b='',x:byte()
+        for i=8,1,-1 do r=r..(b%2^i-b%2^(i-1)>0 and '1' or '0') end
+        return r;
+    end)..'0000'):gsub('%d%d%d?%d?%d?%d?', function(x)
+        if (#x < 6) return '' end
+        local c=0
+        for i=1,6 do c=c+(x:sub(i,i)=='1' and 2^(6-i) or 0) end
+        return b:sub(c+1,c+1)
+    end)..({ '', '==', '=' })[#data%3+1])
+end
+
 print(doc.tag_name or "")
+print(b64(doc.body or ""))
 LUA
 )
     rm -f "$tmp"
     [ -n "$tag" ] || return 1
-    printf '%s' "${tag#v}"
+    
+    local name=$(printf '%s\n' "$tag" | sed -n 1p)
+    local changelog=$(printf '%s\n' "$tag" | sed -n 2p)
+    printf '%s\n%s' "${name#v}" "$changelog"
 }
 
 # select_url "<assets>" "<name-regex>" → URL of first asset whose name matches.
@@ -447,9 +485,10 @@ notify_update_available() {
 
 cmd_check() {
     log "checking GitHub for latest release..."
-    local assets tag ipk_url cur newver
+    local assets tag body_b64 ipk_url cur newver
     assets=$(gh_assets) || exit 1
     tag=$(printf '%s\n' "$assets" | sed -n 1p)
+    body_b64=$(printf '%s\n' "$assets" | sed -n 2p)
     ipk_url=$(select_url "$assets" "$ASSET_RE")
     [ -n "$tag" ] || die "no tag_name in GH response"
     [ -n "$ipk_url" ] || die "no panel .ipk asset on release $tag"
@@ -457,11 +496,11 @@ cmd_check() {
     cur=$(current_version)
     if version_gt "$newver" "$cur"; then
         log "update available: $cur -> $newver"
-        write_state "update_available" "v$cur -> v$newver" "$newver"
+        write_state "update_available" "v$cur -> v$newver" "$newver" "$body_b64"
         notify_update_available "$newver" "$cur"
     else
         log "up to date (current=$cur, latest=$newver)"
-        write_state "up_to_date" "v$cur is the latest" "$newver"
+        write_state "up_to_date" "v$cur is the latest" "$newver" "$body_b64"
     fi
 }
 
@@ -517,11 +556,11 @@ verify_and_install_ipk() {
 # Write the sing-box update-state file the panel reads. Keeps the legacy keys
 # (current/available) so the CGI + UI need no schema change.
 write_bins_state() {
-    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" now
+    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" changelog="${5:-}" now
     now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
     mkdir -p "$(dirname "$BINS_STATE_FILE")"
     cat > "$BINS_STATE_FILE" <<EOF
-{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$SINGBOX_PKG","last_check":"$now"}
+{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$SINGBOX_PKG","last_check":"$now","changelog_b64":"$changelog"}
 EOF
 }
 
@@ -547,14 +586,24 @@ cmd_bins_check() {
     # upstream on GitHub" amber chip is actionable everywhere — bumping the feed is all
     # it takes. (Previously suppressed on Keenetic, where sing-box came from Entware's
     # uncontrollable sing-box-go and the chip would pin amber with nothing to install.)
-    upstream=$(gh_latest_tag "$SINGBOX_UPSTREAM_REPO") || upstream=$(prev_field "$BINS_STATE_FILE" upstream)
+    
+    local tag_output name changelog
+    tag_output=$(gh_latest_tag "$SINGBOX_UPSTREAM_REPO") && {
+        name=$(printf '%s\n' "$tag_output" | sed -n 1p)
+        changelog=$(printf '%s\n' "$tag_output" | sed -n 2p)
+        upstream="$name"
+    } || {
+        upstream=$(prev_field "$BINS_STATE_FILE" upstream)
+        changelog=$(prev_field "$BINS_STATE_FILE" "\bchangelog_b64\b" 1)
+    }
+
     upnew=false
     # "Newer upstream" = upstream beats what the FEED serves (avail), not what's
     # installed (cur). Comparing against cur lit the amber chip permanently when our
     # package wasn't installed yet (cur=0.0.0 < every upstream) even though the feed
     # was already current — exactly the bogus "в фиде нет 1.13.14" the owner saw.
     [ -n "$upstream" ] && [ "$avail" != "0.0.0" ] && version_gt "$upstream" "${avail%-*}" && upnew=true
-    write_bins_state "$cur" "$avail" "$upstream" "$upnew"
+    write_bins_state "$cur" "$avail" "$upstream" "$upnew" "$changelog"
     if [ "$cur" != "$avail" ]; then
         log "sing-box update available (feed): $cur -> $avail"
     elif [ "$upnew" = true ]; then
@@ -672,11 +721,11 @@ ensure_tpws() {
 
 # Write the tpws update-state file the panel reads (same shape as bins state).
 write_tpws_state() {
-    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" now
+    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" changelog="${5:-}" now
     now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
     mkdir -p "$(dirname "$TPWS_STATE_FILE")"
     cat > "$TPWS_STATE_FILE" <<EOF
-{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$TPWS_PKG","last_check":"$now"}
+{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$TPWS_PKG","last_check":"$now","changelog_b64":"$changelog"}
 EOF
 }
 
@@ -695,10 +744,18 @@ cmd_tpws_check() {
         [ -n "$cur" ] || cur="0.0.0"
         avail=$(tpws_upgrade_version); [ -n "$avail" ] || avail="$cur"
     fi
-    upstream=$(gh_latest_tag "$TPWS_UPSTREAM_REPO") || upstream=$(prev_field "$TPWS_STATE_FILE" upstream)
+    local tag_output name changelog
+    tag_output=$(gh_latest_tag "$TPWS_UPSTREAM_REPO") && {
+        name=$(printf '%s\n' "$tag_output" | sed -n 1p)
+        changelog=$(printf '%s\n' "$tag_output" | sed -n 2p)
+        upstream="$name"
+    } || {
+        upstream=$(prev_field "$TPWS_STATE_FILE" upstream)
+        changelog=$(prev_field "$TPWS_STATE_FILE" "\bchangelog_b64\b" 1)
+    }
     upnew=false
     [ -n "$upstream" ] && [ "$avail" != "0.0.0" ] && version_gt "$upstream" "${avail%-*}" && upnew=true
-    write_tpws_state "$cur" "$avail" "$upstream" "$upnew"
+    write_tpws_state "$cur" "$avail" "$upstream" "$upnew" "$changelog"
     if [ "$cur" != "$avail" ]; then
         log "tpws-zapret update available (feed): $cur -> $avail"
     elif [ "$upnew" = true ]; then
@@ -752,11 +809,11 @@ nfqws2_upgrade_version() {
 
 # Write the nfqws2 update-state file the panel reads (same shape as bins/tpws).
 write_nfqws2_state() {
-    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" now
+    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" changelog="${5:-}" now
     now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
     mkdir -p "$(dirname "$NFQWS2_STATE_FILE")"
     cat > "$NFQWS2_STATE_FILE" <<EOF
-{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$NFQWS2_PKG","last_check":"$now"}
+{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$NFQWS2_PKG","last_check":"$now","changelog_b64":"$changelog"}
 EOF
 }
 
@@ -769,13 +826,20 @@ cmd_nfqws2_check() {
     log "checking the opkg feed for a newer nfqws2 (zapret2)..."
     ensure_feed
     opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
-    local cur avail upstream upnew
+    local cur avail upstream upnew tag_output name changelog
     cur=$(nfqws2_installed_version); [ -n "$cur" ] || cur="0.0.0"
     avail=$(nfqws2_upgrade_version); [ -n "$avail" ] || avail="$cur"
-    upstream=$(gh_latest_tag "$NFQWS2_UPSTREAM_REPO") || upstream=$(prev_field "$NFQWS2_STATE_FILE" upstream)
+    tag_output=$(gh_latest_tag "$NFQWS2_UPSTREAM_REPO") && {
+        name=$(printf '%s\n' "$tag_output" | sed -n 1p)
+        changelog=$(printf '%s\n' "$tag_output" | sed -n 2p)
+        upstream="$name"
+    } || {
+        upstream=$(prev_field "$NFQWS2_STATE_FILE" upstream)
+        changelog=$(prev_field "$NFQWS2_STATE_FILE" "\bchangelog_b64\b" 1)
+    }
     upnew=false
     [ -n "$upstream" ] && version_gt "$upstream" "${cur%-*}" && upnew=true
-    write_nfqws2_state "$cur" "$avail" "$upstream" "$upnew"
+    write_nfqws2_state "$cur" "$avail" "$upstream" "$upnew" "$changelog"
     if [ "$cur" != "$avail" ]; then
         log "nfqws2 update available (feed): $cur -> $avail"
     elif [ "$upnew" = true ]; then

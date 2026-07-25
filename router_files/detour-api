@@ -2494,18 +2494,21 @@ updates_overview)
         # Suppress when the feed already offers the upgrade — green chip wins.
         if [ "$v" = true ] && [ "$(feed_upd "$1")" != true ]; then echo true; else echo false; fi
     }
+    up_log() { [ -f "$1" ] && json_val changelog_b64 "$1" || true; }
     P_UPD=false; [ "$P_STATUS" = "update_available" ] && P_UPD=true
+    P_LOG=""
+    [ -f "$UPDATE_STATE" ] && P_LOG=$(json_val changelog_b64 "$UPDATE_STATE")
     SB_UPD=$(feed_upd "$BINS_STATE")
     TPWS_UPD=$(feed_upd "$TPWS_STATE")
     NFQWS2_UPD=$(feed_upd "$NFQWS2_STATE")
-    SB_UPV=$(up_ver "$BINS_STATE");   SB_UPN=$(up_new "$BINS_STATE")
-    TPWS_UPV=$(up_ver "$TPWS_STATE"); TPWS_UPN=$(up_new "$TPWS_STATE")
-    NFQWS2_UPV=$(up_ver "$NFQWS2_STATE"); NFQWS2_UPN=$(up_new "$NFQWS2_STATE")
-    printf '{"panel":{"update_available":%s,"available_version":"%s"},"singbox":{"update_available":%s,"upstream":"%s","upstream_newer":%s},"tpws":{"update_available":%s,"upstream":"%s","upstream_newer":%s},"nfqws2":{"update_available":%s,"upstream":"%s","upstream_newer":%s}}\n' \
-        "$P_UPD" "$P_AVAIL" \
-        "$SB_UPD" "$SB_UPV" "$SB_UPN" \
-        "$TPWS_UPD" "$TPWS_UPV" "$TPWS_UPN" \
-        "$NFQWS2_UPD" "$NFQWS2_UPV" "$NFQWS2_UPN"
+    SB_UPV=$(up_ver "$BINS_STATE");   SB_UPN=$(up_new "$BINS_STATE");   SB_LOG=$(up_log "$BINS_STATE")
+    TPWS_UPV=$(up_ver "$TPWS_STATE"); TPWS_UPN=$(up_new "$TPWS_STATE"); TPWS_LOG=$(up_log "$TPWS_STATE")
+    NFQWS2_UPV=$(up_ver "$NFQWS2_STATE"); NFQWS2_UPN=$(up_new "$NFQWS2_STATE"); NFQWS2_LOG=$(up_log "$NFQWS2_STATE")
+    printf '{"panel":{"update_available":%s,"available_version":"%s","changelog_b64":"%s"},"singbox":{"update_available":%s,"upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"tpws":{"update_available":%s,"upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"nfqws2":{"update_available":%s,"upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"}}\n' \
+        "$P_UPD" "$P_AVAIL" "$P_LOG" \
+        "$SB_UPD" "$SB_UPV" "$SB_UPN" "$SB_LOG" \
+        "$TPWS_UPD" "$TPWS_UPV" "$TPWS_UPN" "$TPWS_LOG" \
+        "$NFQWS2_UPD" "$NFQWS2_UPV" "$NFQWS2_UPN" "$NFQWS2_LOG"
     ;;
 
 # ==================== DPI-BYPASS ENGINE SWITCH (zapret | zapret2 | off) ====================

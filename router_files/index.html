@@ -13764,6 +13764,21 @@
         }
       }
 
+      function base64ToUtf8(str) {
+        try {
+          return decodeURIComponent(
+            atob(str)
+              .split("")
+              .map(function (c) {
+                return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2);
+              })
+              .join("")
+          );
+        } catch (e) {
+          return "";
+        }
+      }
+
       function showUpdateModal() {
         document.getElementById("update-modal").style.display = "flex";
         var v = (
@@ -13773,6 +13788,16 @@
         document.getElementById("upd-github-status").textContent = "";
         document.getElementById("upd-local-status").textContent = "";
         document.getElementById("upd-autocheck-status").textContent = "";
+        
+        var panelInfo = (window.lastUpdatesOverview || {}).panel || {};
+        if (panelInfo.update_available && panelInfo.available_version) {
+          var msg = "Доступно обновление: v" + v + " -> v" + panelInfo.available_version;
+          if (panelInfo.changelog_b64) {
+            msg += "\n\nЧто нового:\n" + base64ToUtf8(panelInfo.changelog_b64).trim();
+          }
+          document.getElementById("upd-github-status").textContent = msg;
+        }
+        
         var updLog = document.getElementById("upd-apply-log");
         if (updLog) {
           updLog.style.display = "none";
@@ -14181,6 +14206,10 @@
         }
         var newer = !!info.upstream_newer && !feedHas;
         el.style.display = "block";
+        var changelogHtml = "";
+        if (info.changelog_b64) {
+          changelogHtml = "<div style='margin-top: 6px; font-size: 11px; max-height: 120px; overflow-y: auto; white-space: pre-wrap; color: var(--text); background: rgba(0,0,0,0.1); padding: 4px; border-radius: 4px;'>" + escapeHtml(base64ToUtf8(info.changelog_b64).trim()) + "</div>";
+        }
         if (newer) {
           el.style.background = "rgba(224, 167, 64, 0.14)";
           el.style.color = "var(--yellow)";
@@ -14189,7 +14218,7 @@
             "🟡 Новая версия вышла на GitHub: <strong>v" +
             escapeHtml(up) +
             "</strong>. В нашем фиде её пока нет — появится автоматически " +
-            "(авто-публикация) или соберите фид вручную (build_feed.py).";
+            "(авто-публикация) или соберите фид вручную (build_feed.py)." + changelogHtml;
         } else {
           el.style.background = "transparent";
           el.style.color = "var(--text-muted)";
@@ -14200,7 +14229,7 @@
             "</strong>" +
             (feedHas
               ? " — доступна в фиде, можно установить."
-              : " — актуально.");
+              : " — актуально.") + changelogHtml;
         }
       }
 
