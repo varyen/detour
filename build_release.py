@@ -397,6 +397,21 @@ if [ -x /usr/sbin/detour-bootstrap-install ]; then
     ( sleep 5; /usr/sbin/detour-bootstrap-install ) </dev/null >/dev/null 2>&1 &
 fi
 
+# 2e) Migrate GL.iNet Secure DNS to have fallback (add Google DoH).
+# GeoHide DoH alone can cause SERVFAIL on transient timeouts. Since GL dnsproxy
+# uses upstream-mode=parallel, adding a second upstream acts as a fast fallback.
+if [ "$(uci -q get gl-dns-v2.@dns[0].mode)" = "secure" ] && [ "$(uci -q get gl-dns-v2.@dns[0].provider)" = "manual" ]; then
+    LIST="$(uci -q get gl-dns-v2.@dns[0].secure_manual_list)"
+    if (echo "$LIST" | grep -q "dns.geohide.ru") && ! (echo "$LIST" | grep -q "dns.google"); then
+        uci del gl-dns-v2.@dns[0].secure_manual_list
+        uci add_list gl-dns-v2.@dns[0].secure_manual_list='https://dns.geohide.ru:444/dns-query'
+        uci add_list gl-dns-v2.@dns[0].secure_manual_list='https://dns.google/dns-query'
+        uci set gl-dns-v2.@dns[0].config_syn=1
+        uci commit gl-dns-v2
+        /etc/init.d/gl_dns boot >/dev/null 2>&1
+    fi
+fi
+
 # 3) Enable + (re)start services, but HONOUR the operator's «Автозапуск» choice
 # so a panel REINSTALL never resurrects a service the user turned off. The panel
 # writes /etc/detour/autostart.{{singbox,zapret}} (1|0) on toggle; /etc/detour is

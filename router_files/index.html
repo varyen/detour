@@ -4681,6 +4681,29 @@
         <div class="tab-content" id="tab-hosts-dns">
           <div class="editor-section">
             <div class="editor-header">
+              <h3>Шифрованный глобальный DNS (Secure DNS)</h3>
+            </div>
+            <p class="helper-text-block">
+              Управление протоколом DNS для всей сети роутера. В режиме «Зашифрованный» запросы защищены от провайдера по протоколам DoH/DoT.
+            </p>
+            <label
+              style="
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin: 8px 0 24px 0;
+                cursor: pointer;
+              "
+            >
+              <input
+                type="checkbox"
+                id="secure-dns-enabled"
+                onchange="toggleSecureDns()"
+              />
+              <span>Включить шифрованный DNS (mode: secure)</span>
+            </label>
+
+            <div class="editor-header" style="border-top: 1px solid var(--border); padding-top: 24px;">
               <h3>Приоритетный hosts-файл (DNS-обход)</h3>
               <div class="flex-gap">
                 <button class="btn" onclick="refreshHostsDns()">
@@ -12795,8 +12818,36 @@
         if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " КБ";
         return (n / 1024 / 1024).toFixed(1) + " МБ";
       }
+      
+      async function toggleSecureDns() {
+        var secEn = document.getElementById("secure-dns-enabled");
+        if (!secEn) return;
+        var mode = secEn.checked ? "secure" : "auto";
+        try {
+          var d = await api("secure_dns_set", "POST", JSON.stringify({ mode: mode }));
+          if (d.ok) {
+            toast(mode === "secure" ? "Глобальный DNS: зашифрованный" : "Глобальный DNS: от провайдера (auto)", "success");
+          } else {
+            toast("Ошибка: " + d.error, "error");
+          }
+        } catch (e) {
+          toast("Ошибка: " + e.message, "error");
+        }
+      }
+
       function renderHostsDns(d) {
         d = d || {};
+        
+        var secEn = document.getElementById("secure-dns-enabled");
+        if (secEn) {
+          if (typeof d.secure_dns_mode !== "undefined" && d.secure_dns_mode !== "") {
+            secEn.parentElement.style.display = "";
+            secEn.checked = d.secure_dns_mode === "secure";
+          } else {
+            secEn.parentElement.style.display = "none";
+          }
+        }
+
         var unsupported = d.supported === false;
         document.getElementById("hosts-dns-unsupported").style.display =
           unsupported ? "block" : "none";
@@ -14704,7 +14755,7 @@
 
       function renderUdpVpnMode(mode) {
         var wrap = document.getElementById("udpvpn-list-wrap");
-        if (wrap) wrap.style.display = mode === "list" ? "" : "none";
+        if (wrap) wrap.style.display = mode !== "off" ? "" : "none";
         var dot = document.getElementById("udpvpn-dot");
         if (dot)
           dot.className = "status-dot " + (mode !== "off" ? "running" : "stopped");
@@ -14720,7 +14771,7 @@
         if (hint) {
           if (mode === "all")
             hint.textContent =
-              "Через VPN идёт ВЕСЬ UDP, кроме «прямого» whitelist и DNS. QUIC (UDP/443) всех зарубежных сайтов тоже пойдёт в туннель — больше нагрузки и латентности. Нужен рабочий VPN.";
+              "Через VPN идёт ВЕСЬ UDP, кроме «прямого» whitelist и DNS. QUIC (UDP/443) всех зарубежных сайтов тоже пойдёт в туннель — больше нагрузки и латентности. Список ниже принудительно заворачивает указанные адреса/порты в VPN — даже если они в «прямом» whitelist (напр. RU-игросервер). Нужен рабочий VPN.";
           else if (mode === "list")
             hint.textContent =
               "Через VPN идёт только UDP к адресам/портам из списка ниже (игры, голос и т.п.). Нужен рабочий VPN.";

@@ -3079,11 +3079,39 @@ whitelist_save_restart)
 # go directly to the pinned IP, not through sing-box/zapret. All logic lives in
 # /usr/sbin/detour-hosts; these handlers are thin wrappers relaying its JSON.
 hosts_status)
-    if [ -x "$HOSTS_BIN" ]; then
-        "$HOSTS_BIN" status 2>/dev/null
-    else
-        printf '{"supported":false,"enabled":false,"error":"detour-hosts not installed"}'
+    local secure_mode="auto"
+    if uci -q get gl-dns-v2.@dns[0].mode >/dev/null 2>&1; then
+        secure_mode=$(uci -q get gl-dns-v2.@dns[0].mode)
     fi
+    local secure_dns_json="\"secure_dns_mode\":\"$secure_mode\""
+    
+    if [ -x "$HOSTS_BIN" ]; then
+        # Merge our secure_dns property with detour-hosts status JSON
+        # Output of detour-hosts status is e.g. {"supported":true,"enabled":false,...}
+        local hs_st="$("$HOSTS_BIN" status 2>/dev/null)"
+        printf '%s' "$hs_st" | sed "s/^{/{$secure_dns_json,/"
+    else
+        printf '{%s,"supported":false,"enabled":false,"error":"detour-hosts not installed"}' "$secure_dns_json"
+    fi
+    ;;
+
+secure_dns_set)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    case "$POST_DATA" in
+        *'"mode":"secure"'*|*'"mode": "secure"'*) 
+            uci set gl-dns-v2.@dns[0].mode=secure 2>/dev/null
+            uci commit gl-dns-v2 2>/dev/null
+            /etc/init.d/gl_dns boot >/dev/null 2>&1
+            json_ok
+            ;;
+        *'"mode":"auto"'*|*'"mode": "auto"'*) 
+            uci set gl-dns-v2.@dns[0].mode=auto 2>/dev/null
+            uci commit gl-dns-v2 2>/dev/null
+            /etc/init.d/gl_dns boot >/dev/null 2>&1
+            json_ok
+            ;;
+        *) json_err "invalid mode" ;;
+    esac
     ;;
 
 hosts_set)
