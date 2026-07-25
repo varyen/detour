@@ -3080,10 +3080,12 @@ whitelist_save_restart)
 # /usr/sbin/detour-hosts; these handlers are thin wrappers relaying its JSON.
 hosts_status)
     local secure_mode="auto"
+    local secure_list=""
     if uci -q get gl-dns-v2.@dns[0].mode >/dev/null 2>&1; then
         secure_mode=$(uci -q get gl-dns-v2.@dns[0].mode)
+        secure_list=$(uci -q get gl-dns-v2.@dns[0].secure_manual_list | sed "s/'//g" | tr ' ' '\n' | json_escape)
     fi
-    local secure_dns_json="\"secure_dns_mode\":\"$secure_mode\""
+    local secure_dns_json="\"secure_dns_mode\":\"$secure_mode\",\"secure_dns_list\":\"$secure_list\""
     
     if [ -x "$HOSTS_BIN" ]; then
         # Merge our secure_dns property with detour-hosts status JSON
@@ -3097,21 +3099,23 @@ hosts_status)
 
 secure_dns_set)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    case "$POST_DATA" in
-        *'"mode":"secure"'*|*'"mode": "secure"'*) 
-            uci set gl-dns-v2.@dns[0].mode=secure 2>/dev/null
-            uci commit gl-dns-v2 2>/dev/null
-            /etc/init.d/gl_dns boot >/dev/null 2>&1
-            json_ok
-            ;;
-        *'"mode":"auto"'*|*'"mode": "auto"'*) 
-            uci set gl-dns-v2.@dns[0].mode=auto 2>/dev/null
-            uci commit gl-dns-v2 2>/dev/null
-            /etc/init.d/gl_dns boot >/dev/null 2>&1
-            json_ok
-            ;;
-        *) json_err "invalid mode" ;;
-    esac
+    SD_MODE=$(printf '%s' "$POST_DATA" | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    SD_LIST=$(printf '%s' "$POST_DATA" | sed -n 's/.*"list"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    if [ -n "$SD_MODE" ]; then
+        uci set gl-dns-v2.@dns[0].mode="$SD_MODE" 2>/dev/null
+        uci del gl-dns-v2.@dns[0].secure_manual_list 2>/dev/null
+        if [ "$SD_MODE" = "secure" ] && [ -n "$SD_LIST" ]; then
+            printf '%b\n' "$SD_LIST" | while IFS= read -r url; do
+                url=$(echo "$url" | tr -d '\r\n\t ')
+                [ -n "$url" ] && uci add_list gl-dns-v2.@dns[0].secure_manual_list="$url" 2>/dev/null
+            done
+        fi
+        uci commit gl-dns-v2 2>/dev/null
+        /etc/init.d/gl_dns boot >/dev/null 2>&1
+        json_ok
+    else
+        json_err "invalid mode"
+    fi
     ;;
 
 hosts_set)

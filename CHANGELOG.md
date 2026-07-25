@@ -5,6 +5,11 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.30.1] — 2026-07-25
+
+### Добавлено
+- Управление списком серверов DoH/DoT для Secure DNS прямо из панели (вкладка Hosts-DNS).
+
 ## [1.30.0] — 2026-07-25
 
 ### Добавлено

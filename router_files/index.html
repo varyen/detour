@@ -4680,28 +4680,39 @@
         <!-- Tab: Hosts-DNS (priority hosts file via dnsmasq addn-hosts) -->
         <div class="tab-content" id="tab-hosts-dns">
           <div class="editor-section">
-            <div class="editor-header">
-              <h3>Шифрованный глобальный DNS (Secure DNS)</h3>
+            <div id="secure-dns-block">
+              <div class="editor-header">
+                <h3>Шифрованный глобальный DNS (Secure DNS)</h3>
+                <button class="btn primary" onclick="saveSecureDns()">💾 Сохранить DNS</button>
+              </div>
+              <p class="helper-text-block">
+                Управление протоколом DNS для всей сети роутера. В режиме «Зашифрованный» запросы защищены от провайдера по протоколам DoH/DoT.
+              </p>
+              <label
+                style="
+                  display: flex;
+                  align-items: center;
+                  gap: 8px;
+                  margin: 8px 0 8px 0;
+                  cursor: pointer;
+                "
+              >
+                <input
+                  type="checkbox"
+                  id="secure-dns-enabled"
+                  onchange="toggleSecureDns()"
+                />
+                <span>Включить шифрованный DNS (mode: secure)</span>
+              </label>
+              <p class="helper-text-block" style="margin-top: 4px; margin-bottom: 4px;">Список серверов DoH/DoT (по одному на строку):</p>
+              <textarea
+                class="domains"
+                id="secure-dns-list"
+                spellcheck="false"
+                placeholder="https://dns.google/dns-query&#10;https://dns.quad9.net/dns-query"
+                style="height: 60px; margin-bottom: 24px;"
+              ></textarea>
             </div>
-            <p class="helper-text-block">
-              Управление протоколом DNS для всей сети роутера. В режиме «Зашифрованный» запросы защищены от провайдера по протоколам DoH/DoT.
-            </p>
-            <label
-              style="
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                margin: 8px 0 24px 0;
-                cursor: pointer;
-              "
-            >
-              <input
-                type="checkbox"
-                id="secure-dns-enabled"
-                onchange="toggleSecureDns()"
-              />
-              <span>Включить шифрованный DNS (mode: secure)</span>
-            </label>
 
             <div class="editor-header" style="border-top: 1px solid var(--border); padding-top: 24px;">
               <h3>Приоритетный hosts-файл (DNS-обход)</h3>
@@ -12821,12 +12832,21 @@
       
       async function toggleSecureDns() {
         var secEn = document.getElementById("secure-dns-enabled");
+        var secList = document.getElementById("secure-dns-list");
+        if (secList && secEn) secList.disabled = !secEn.checked;
+      }
+      
+      async function saveSecureDns() {
+        var secEn = document.getElementById("secure-dns-enabled");
+        var secList = document.getElementById("secure-dns-list");
         if (!secEn) return;
         var mode = secEn.checked ? "secure" : "auto";
+        var list = secList ? secList.value.trim().replace(/\r?\n/g, "\\n") : "";
         try {
-          var d = await api("secure_dns_set", "POST", JSON.stringify({ mode: mode }));
+          var d = await api("secure_dns_set", "POST", '{"mode":"' + mode + '","list":"' + list + '"}');
           if (d.ok) {
             toast(mode === "secure" ? "Глобальный DNS: зашифрованный" : "Глобальный DNS: от провайдера (auto)", "success");
+            loadHostsDns(); // to refresh status
           } else {
             toast("Ошибка: " + d.error, "error");
           }
@@ -12838,13 +12858,21 @@
       function renderHostsDns(d) {
         d = d || {};
         
-        var secEn = document.getElementById("secure-dns-enabled");
-        if (secEn) {
+        var secBlock = document.getElementById("secure-dns-block");
+        if (secBlock) {
           if (typeof d.secure_dns_mode !== "undefined" && d.secure_dns_mode !== "") {
-            secEn.parentElement.style.display = "";
-            secEn.checked = d.secure_dns_mode === "secure";
+            secBlock.style.display = "";
+            var secEn = document.getElementById("secure-dns-enabled");
+            var secList = document.getElementById("secure-dns-list");
+            if (secEn) secEn.checked = d.secure_dns_mode === "secure";
+            if (secList) {
+              if (document.activeElement !== secList) {
+                secList.value = d.secure_dns_list || "";
+              }
+              secList.disabled = !(secEn && secEn.checked);
+            }
           } else {
-            secEn.parentElement.style.display = "none";
+            secBlock.style.display = "none";
           }
         }
 
