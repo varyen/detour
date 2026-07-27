@@ -104,6 +104,13 @@ while :; do
         /opt/sbin/detour-cert renew >"$LOGDIR/detour-cert.log" 2>&1
     fi
 
+    # Managed RU-subnet list — offset half a cycle from the update/cert slot above so
+    # the ticks don't bunch. `update-cron` self-limits to a weekly refresh and no-ops
+    # when auto is off, so a ~6 h cadence here just means a missed window catches up.
+    if [ $((n % 72)) -eq 36 ] && [ -x /opt/sbin/detour-rulist ]; then
+        /opt/sbin/detour-rulist update-cron >"$LOGDIR/detour-rulist.log" 2>&1
+    fi
+
     n=$(((n + 1) % 72))
     sleep "$TICK"
 done

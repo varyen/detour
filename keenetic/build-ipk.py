@@ -70,6 +70,9 @@ FILES = [
     # Hosts-DNS manager (shared source, already has a /opt platform shim) — serves
     # addn-hosts via the detour dnsmasq (S50detour-dns). fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-hosts"), "opt/sbin/detour-hosts", 0o755, True),
+    # Managed RU-subnet block of the all-except direct list (shared source, /opt shim).
+    # S50detour-dns calls `detour-rulist ipset-load` after building the whitelist ipset.
+    (os.path.join(ROUTER_FILES, "detour-rulist"), "opt/sbin/detour-rulist", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-bootstrap-install"), "opt/sbin/detour-bootstrap-install", 0o755, True),
     # Self-update (shared source, /opt shim for Keenetic): pulls detour-keenetic_*.ipk.
     (os.path.join(ROUTER_FILES, "detour-update"), "opt/sbin/detour-update", 0o755, True),
@@ -204,7 +207,7 @@ touch /opt/etc/detour/platform            # the panel CGI's platform shim keys o
 if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
     printf 'prefer_family = IPv4\\ntimeout = 30\\ntries = 3\\n' >> /opt/etc/wgetrc
 fi
-chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
+chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \
     /opt/sbin/detour-wan-link \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\

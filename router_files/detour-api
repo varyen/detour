@@ -74,8 +74,13 @@ TPWS_BIN="/usr/bin/tpws-zapret"
 NFQWS_BIN="/usr/bin/nfqws2"
 SUBREFRESH_BIN="/usr/sbin/subscription-refresh"
 HOSTS_BIN="/usr/sbin/detour-hosts"
+RULIST_BIN="/usr/sbin/detour-rulist"        # managed RU-subnet list — backs the rulist_* actions
 LAN_IF="br-lan"
 DETOUR_DIR="/etc/detour"
+BLOCKED_EGRESS_LIST="/etc/detour/blocked-egress-ips.list"
+FIREWALL_USER="/etc/firewall.user"
+FW_BLOCK_BEGIN="# DETOUR_EGRESS_BLOCK_BEGIN"
+FW_BLOCK_END="# DETOUR_EGRESS_BLOCK_END"
 # Init action for a panel-driven manual start. On OpenWrt the rc.common `start`
 # always starts; on Keenetic boot-`start` is gated by the autostart flag, so manual
 # starts use `force-start` to start regardless (overridden in the shim below).
@@ -123,6 +128,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     NFQWS2_STATE="$OPT/var/state/detour-nfqws2.json"
     AUTH_FILE="$OPT/etc/detour.auth"
     DETOUR_DIR="$OPT/etc/detour"
+    BLOCKED_EGRESS_LIST="$OPT/etc/detour/blocked-egress-ips.list"
     # «Все через VPN» marker — the NDM netfilter.d hook re-asserts SINGBOX_ALLVPN
     # from this so the chain survives KeeneticOS firewall rebuilds (no fw4 on NDM).
     ALLVPN_MARK="$OPT/etc/detour/allvpn.enabled"
@@ -131,6 +137,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     NFQWS_BIN="$OPT/sbin/nfqws2"
     SUBREFRESH_BIN="$OPT/sbin/subscription-refresh"
     HOSTS_BIN="$OPT/sbin/detour-hosts"
+    RULIST_BIN="$OPT/sbin/detour-rulist"
     HEALTH_URLS="$OPT/etc/sing-box/health-urls.list"  # HEALTH_DB/SWITCH stay /tmp (not remapped, like PING_DB)
     HEALTH_BIN="$OPT/sbin/detour-health"
     PUSH_BIN="$OPT/sbin/detour-push"   # PUSH_MSG stays /tmp (not remapped, like HEALTH_DB)
@@ -197,6 +204,65 @@ read_autostart() {   # $1 = singbox|zapret, $2 = rc.d symlink path, $3 = out var
         [ -L "$2" ] 2>/dev/null && val="true"
     fi
     eval "$3=$val"
+}
+
+sanitize_ipv4_list() {
+    awk '
+    {
+        line=$0
+        sub(/#.*/, "", line)
+        sub(/\/\/.*/, "", line)
+        gsub(/\r/, "", line)
+        gsub(/^[ \t]+|[ \t]+$/, "", line)
+        if (line ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print line
+    }' | awk '!seen[$0]++'
+}
+
+render_openwrt_firewall_user_block() {
+    {
+        echo "$FW_BLOCK_BEGIN"
+        echo "iptables -t filter -D OUTPUT -j DETOUR_EGRESS_BLOCK 2>/dev/null || true"
+        echo "iptables -t filter -D FORWARD -j DETOUR_EGRESS_BLOCK 2>/dev/null || true"
+        echo "iptables -t filter -F DETOUR_EGRESS_BLOCK 2>/dev/null || true"
+        echo "iptables -t filter -X DETOUR_EGRESS_BLOCK 2>/dev/null || true"
+        echo "iptables -t filter -N DETOUR_EGRESS_BLOCK_OUT 2>/dev/null"
+        echo "iptables -t filter -F DETOUR_EGRESS_BLOCK_OUT 2>/dev/null"
+        echo "iptables -t filter -N DETOUR_EGRESS_BLOCK_FWD 2>/dev/null"
+        echo "iptables -t filter -F DETOUR_EGRESS_BLOCK_FWD 2>/dev/null"
+        echo "iptables -t filter -A DETOUR_EGRESS_BLOCK_FWD -m set --match-set singbox_whitelist dst -j RETURN 2>/dev/null || true"
+        echo "iptables -t filter -C OUTPUT -j DETOUR_EGRESS_BLOCK_OUT 2>/dev/null || iptables -t filter -I OUTPUT 1 -j DETOUR_EGRESS_BLOCK_OUT"
+        echo "iptables -t filter -C FORWARD -j DETOUR_EGRESS_BLOCK_FWD 2>/dev/null || iptables -t filter -I FORWARD 1 -j DETOUR_EGRESS_BLOCK_FWD"
+        if [ -f "$BLOCKED_EGRESS_LIST" ]; then
+            sanitize_ipv4_list < "$BLOCKED_EGRESS_LIST" | while IFS= read -r ip; do
+                [ -n "$ip" ] || continue
+                echo "iptables -t filter -A DETOUR_EGRESS_BLOCK_OUT -d $ip -j REJECT --reject-with icmp-port-unreachable"
+                echo "iptables -t filter -A DETOUR_EGRESS_BLOCK_FWD -d $ip -j REJECT --reject-with icmp-port-unreachable"
+            done
+        fi
+        echo "$FW_BLOCK_END"
+    }
+}
+
+upsert_openwrt_firewall_user_block() {
+    local tmp="$FIREWALL_USER.tmp.$$"
+    [ -f "$FIREWALL_USER" ] || : > "$FIREWALL_USER"
+    awk -v b="$FW_BLOCK_BEGIN" -v e="$FW_BLOCK_END" '
+        $0==b {skip=1; next}
+        $0==e {skip=0; next}
+        skip!=1 {print}
+    ' "$FIREWALL_USER" > "$tmp" 2>/dev/null
+    render_openwrt_firewall_user_block >> "$tmp"
+    mv "$tmp" "$FIREWALL_USER"
+    chmod 644 "$FIREWALL_USER" 2>/dev/null
+}
+
+apply_egress_blocklist_now() {
+    if [ "$PLATFORM" = "keenetic" ]; then
+        [ -x /opt/etc/ndm/netfilter.d/50-detour.sh ] && /opt/etc/ndm/netfilter.d/50-detour.sh iptables nat >/dev/null 2>&1
+        return 0
+    fi
+    upsert_openwrt_firewall_user_block
+    sh "$FIREWALL_USER" >/dev/null 2>&1 || /etc/init.d/firewall restart >/dev/null 2>&1
 }
 
 # Run a shell command line fully detached from this CGI's session/process group.
@@ -2172,6 +2238,24 @@ health_urls)
     fi
     ;;
 
+# Egress IP deny-list (one IPv4 per line). Blocks both router-originated OUTPUT and
+# client FORWARD traffic to these IPs. OpenWrt: persisted via a managed block in
+# /etc/firewall.user. Keenetic: consumed by /opt/etc/ndm/netfilter.d/50-detour.sh.
+egress_blocklist)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        mkdir -p "$(dirname "$BLOCKED_EGRESS_LIST")" 2>/dev/null
+        printf '%s' "$POST_DATA" | sanitize_ipv4_list > "$BLOCKED_EGRESS_LIST"
+        apply_egress_blocklist_now
+        json_ok
+    else
+        if [ -f "$BLOCKED_EGRESS_LIST" ]; then
+            printf '{"list":"%s"}' "$(cat "$BLOCKED_EGRESS_LIST" | json_escape)"
+        else
+            printf '{"list":""}'
+        fi
+    fi
+    ;;
+
 # Toggle the two health flags WITHOUT a sing-box restart. POST {"enabled":0|1,
 # "auto_switch":0|1} (missing key keeps its current value). write_settings
 # re-emits the whole settings file (preserving the rest) with our overrides.
@@ -3076,27 +3160,82 @@ whitelist_save_restart)
     fi
     ;;
 
+# ==================== RU-SUBNET LIST (managed part of the direct list) ====================
+# The country block of the "all-except" direct list is owned by /usr/sbin/detour-rulist:
+# its own file, refreshed from a public source, with `nomatch` exceptions. These handlers
+# are thin wrappers relaying its JSON — all logic lives in the script.
+rulist_status)
+    [ -x "$RULIST_BIN" ] || { echo '{"supported":false,"error":"detour-rulist not installed"}'; exit 0; }
+    "$RULIST_BIN" status 2>/dev/null | sed 's|^{|{"supported":true,|'
+    ;;
+
+rulist_update)
+    # POST {"source":"maxmind"|"rir"} — source optional, defaults to the stored one.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$RULIST_BIN" ] || { json_err "detour-rulist not installed"; exit 0; }
+    RL_SRC=$(printf '%s' "$POST_DATA" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    case "$RL_SRC" in
+        maxmind|rir) "$RULIST_BIN" update --source "$RL_SRC" 2>/dev/null ;;
+        "")          "$RULIST_BIN" update 2>/dev/null ;;
+        *)           json_err "unknown source" ;;
+    esac
+    ;;
+
+rulist_set)
+    # POST {"source":"…"} and/or {"auto":bool} and/or {"enabled":bool}. Switching the
+    # source only stores the choice — the operator still presses «Обновить» to fetch it.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$RULIST_BIN" ] || { json_err "detour-rulist not installed"; exit 0; }
+    RL_SRC=$(printf '%s' "$POST_DATA" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    case "$RL_SRC" in
+        maxmind|rir) "$RULIST_BIN" source "$RL_SRC" >/dev/null 2>&1 ;;
+        "") ;;
+        *) json_err "unknown source"; exit 0 ;;
+    esac
+    case "$POST_DATA" in
+        *'"auto":true'*|*'"auto": true'*)   "$RULIST_BIN" auto 1 >/dev/null 2>&1 ;;
+        *'"auto":false'*|*'"auto": false'*) "$RULIST_BIN" auto 0 >/dev/null 2>&1 ;;
+    esac
+    case "$POST_DATA" in
+        *'"enabled":true'*|*'"enabled": true'*)   "$RULIST_BIN" enabled 1 >/dev/null 2>&1 ;;
+        *'"enabled":false'*|*'"enabled": false'*) "$RULIST_BIN" enabled 0 >/dev/null 2>&1 ;;
+    esac
+    "$RULIST_BIN" status 2>/dev/null
+    ;;
+
+rulist_exclude)
+    # GET  -> {"exclude":"<file>"}
+    # POST -> raw body replaces the exception list, then it is applied live.
+    [ -x "$RULIST_BIN" ] || { json_err "detour-rulist not installed"; exit 0; }
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        printf '%s' "$POST_DATA" | "$RULIST_BIN" exclude-save 2>/dev/null
+    else
+        CONTENT=$("$RULIST_BIN" exclude-get 2>/dev/null | json_escape)
+        printf '{"exclude":"%s"}' "$CONTENT"
+    fi
+    ;;
+
 # ==================== HOSTS-DNS (priority hosts file via dnsmasq addn-hosts) ====================
 # A "hosts override" (e.g. GeoHide DNS) pins domains to fixed IPs that dnsmasq
 # serves with priority over upstream. This is a PARALLEL bypass — pinned domains
 # go directly to the pinned IP, not through sing-box/zapret. All logic lives in
 # /usr/sbin/detour-hosts; these handlers are thin wrappers relaying its JSON.
 hosts_status)
-    local secure_mode="auto"
-    local secure_list=""
+    SECURE_MODE="auto"
+    SECURE_LIST=""
     if uci -q get gl-dns-v2.@dns[0].mode >/dev/null 2>&1; then
-        secure_mode=$(uci -q get gl-dns-v2.@dns[0].mode)
-        secure_list=$(uci -q get gl-dns-v2.@dns[0].secure_manual_list | sed "s/'//g" | tr ' ' '\n' | json_escape)
+        SECURE_MODE=$(uci -q get gl-dns-v2.@dns[0].mode)
+        SECURE_LIST=$(uci -q get gl-dns-v2.@dns[0].secure_manual_list | sed "s/'//g" | tr '\n' ' ' | sed 's/ *$//' | json_escape)
     fi
-    local secure_dns_json="\"secure_dns_mode\":\"$secure_mode\",\"secure_dns_list\":\"$secure_list\""
+    SECURE_DNS_JSON="\"secure_dns_mode\":\"$SECURE_MODE\",\"secure_dns_list\":\"$SECURE_LIST\""
     
     if [ -x "$HOSTS_BIN" ]; then
         # Merge our secure_dns property with detour-hosts status JSON
         # Output of detour-hosts status is e.g. {"supported":true,"enabled":false,...}
-        local hs_st="$("$HOSTS_BIN" status 2>/dev/null)"
-        printf '%s' "$hs_st" | sed "s/^{/{$secure_dns_json,/"
+        HS_ST="$("$HOSTS_BIN" status 2>/dev/null)"
+        printf '%s' "$HS_ST" | sed "s|^{|{$SECURE_DNS_JSON,|"
     else
-        printf '{%s,"supported":false,"enabled":false,"error":"detour-hosts not installed"}' "$secure_dns_json"
+        printf '{%s,"supported":false,"enabled":false,"error":"detour-hosts not installed"}' "$SECURE_DNS_JSON"
     fi
     ;;
 

@@ -27,6 +27,7 @@ DNS_PORT="${DETOUR_DNS_PORT:-5354}"
 ALLVPN_MARK="/opt/etc/detour/allvpn.enabled"   # «Все через VPN» (set by the panel)
 DNS_MARK="/opt/etc/detour/dns.enabled"         # detour dnsmasq up (set by S50detour-dns)
 ROUTE_MAP="${SINGBOX_ROUTEMAP_LIST:-/opt/etc/sing-box/route-map.list}"
+BLOCKED_EGRESS_LIST="${DETOUR_BLOCKED_EGRESS_LIST:-/opt/etc/detour/blocked-egress-ips.list}"
 
 # Extra inbound ifaces (besides LAN_IF) that get the same redirect — VPN
 # road-warriors. From settings.json "vpn_redirect_ifaces" (space/comma list);
@@ -288,5 +289,33 @@ fi
 
 # --- filter INPUT: let the LAN reach the panel (lighttpd :PANEL_PORT) ---
 add filter INPUT -i "$LAN_IF" -p tcp --dport "$PANEL_PORT" -j ACCEPT
+
+# --- egress deny-list: block selected destination IPs globally (router OUTPUT +
+# client FORWARD). Source list: /opt/etc/detour/blocked-egress-ips.list, one IPv4
+# per line, comments (# or //) allowed.
+# IMPORTANT: FORWARD has one exception — destinations from the Detour "white list"
+# (singbox_whitelist ipset / "Исключения") are allowed direct and bypass this block.
+iptables -t filter -N DETOUR_EGRESS_BLOCK_OUT 2>/dev/null
+iptables -t filter -F DETOUR_EGRESS_BLOCK_OUT 2>/dev/null
+iptables -t filter -N DETOUR_EGRESS_BLOCK_FWD 2>/dev/null
+iptables -t filter -F DETOUR_EGRESS_BLOCK_FWD 2>/dev/null
+iptables -t filter -A DETOUR_EGRESS_BLOCK_FWD -m set --match-set "$WL_IPSET" dst -j RETURN 2>/dev/null
+if [ -f "$BLOCKED_EGRESS_LIST" ]; then
+    awk '
+    {
+        line=$0
+        sub(/#.*/, "", line)
+        sub(/\/\/.*/, "", line)
+        gsub(/\r/, "", line)
+        gsub(/^[ \t]+|[ \t]+$/, "", line)
+        if (line ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print line
+    }' "$BLOCKED_EGRESS_LIST" | awk '!seen[$0]++' | while IFS= read -r ip; do
+        [ -n "$ip" ] || continue
+        add filter DETOUR_EGRESS_BLOCK_OUT -d "$ip" -j REJECT --reject-with icmp-port-unreachable
+        add filter DETOUR_EGRESS_BLOCK_FWD -d "$ip" -j REJECT --reject-with icmp-port-unreachable
+    done
+fi
+add filter OUTPUT -j DETOUR_EGRESS_BLOCK_OUT
+add filter FORWARD -j DETOUR_EGRESS_BLOCK_FWD
 
 exit 0

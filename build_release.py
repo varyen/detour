@@ -97,6 +97,8 @@ PROTECTED_PATHS = (
     "etc/detour/version",         # set by postinst on install
     "etc/detour/subscription.json",
     "etc/sing-box/route-map.list",     # per-profile routing rules (user state)
+    "etc/sing-box/ru-subnets.list",         # downloaded by detour-rulist, never shipped
+    "etc/sing-box/ru-subnets-exclude.list",  # operator's exceptions to that list
 )
 
 
@@ -139,6 +141,8 @@ PANEL_FILES = [
     (("router_files", "detour-wan-link"), "usr/sbin/detour-wan-link", 0o755),
     (("router_files", "detour-hosts"), "usr/sbin/detour-hosts", 0o755),
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
+    # Managed RU-subnet block of the all-except direct list (own file + refresher).
+    (("router_files", "detour-rulist"), "usr/sbin/detour-rulist", 0o755),
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
     (("router_files", "detour-bypass"), "usr/sbin/detour-bypass", 0o755),
     (("router_files", "detour-bypass.initd"), "etc/init.d/detour-bypass", 0o755),
@@ -291,6 +295,8 @@ $BEGIN
 /etc/sing-box/health-urls.list
 /etc/sing-box/route-map.list
 /etc/sing-box/autoswitch-exclude.list
+/etc/sing-box/ru-subnets.list
+/etc/sing-box/ru-subnets-exclude.list
 /etc/zapret-tpws.conf
 /etc/zapret-tpws/domains.list
 $END
@@ -346,6 +352,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
     /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-offload /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
+    /usr/sbin/detour-rulist \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
     /www/cgi-bin/detour-api 2>/dev/null
@@ -464,7 +471,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -476,6 +483,9 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   # in-flight sing-box and the old odd/even-minute split is no longer needed.
   echo "* * * * * /usr/sbin/detour-health active >/dev/null 2>&1"
   echo "23 */12 * * * /usr/sbin/detour-hosts refresh-cron >/var/log/detour-hosts.log 2>&1"
+  # Managed RU-subnet list. Runs twice a day but self-limits to a weekly refresh
+  # (and no-ops entirely when auto is off), so a missed window still catches up.
+  echo "41 4 * * * /usr/sbin/detour-rulist update-cron >/var/log/detour-rulist.log 2>&1"
   # HW-offload watchdog — QCA/ipq53xx only; a safe no-op on non-QCA hardware. Detects a
   # wedged NSS/PPE accelerator (LAN<->WAN forwarding fell to the CPU → ~100 Mbit until a
   # reboot) and recovers it in place. Mode lives in /etc/detour/offload.conf (default auto).
@@ -530,6 +540,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-hosts' \\
                       | grep -v 'detour-offload' \\
                       | grep -v 'detour-wan-link' \\
+                      | grep -v 'detour-rulist' \\
                       | crontab - 2>/dev/null
 echo "=== detour prerm end pid=$$ args:$* ==="
 exit 0

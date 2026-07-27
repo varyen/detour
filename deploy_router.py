@@ -334,6 +334,29 @@ def step_hosts(ssh):
     print("  selftest:\n    " + "\n    ".join(l for l in out.splitlines() if l.strip()))
 
 
+def step_rulist(ssh):
+    """Managed RU-subnet block of the all-except direct list.
+
+    Ships /usr/sbin/detour-rulist plus its cron entry. Nothing is downloaded here:
+    the list arrives on the first `update` (panel button) or when the cron slot
+    comes round, and the one-shot migration that lifts a legacy hand-pasted RU
+    block out of whitelist-domains.list runs with it.
+    """
+    step("Deploying RU-subnet list manager")
+    with open(os.path.join(ROUTER_FILES, "detour-rulist"), "rb") as f:
+        n = upload(ssh, f.read(), "/usr/sbin/detour-rulist", "0755")
+    print(f"  /usr/sbin/detour-rulist: {n} bytes")
+    cron_line = "41 4 * * * /usr/sbin/detour-rulist update-cron >/var/log/detour-rulist.log 2>&1"
+    exec_cmd(
+        ssh,
+        "( crontab -l 2>/dev/null | grep -v 'detour-rulist' ; "
+        f"echo '{cron_line}' ) | crontab -",
+    )
+    exec_cmd(ssh, "/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1")
+    out, _, _ = exec_cmd(ssh, "/usr/sbin/detour-rulist selftest 2>&1")
+    print("  selftest:\n    " + "\n    ".join(l for l in out.splitlines() if l.strip()))
+
+
 def step_auth(ssh, cfg, reset=False):
     step("Setting up panel auth")
     panel_user = cfg.get("panel_user", DEFAULT_PANEL_USER)
@@ -679,6 +702,7 @@ def main():
     step_zapret_configs(ssh, force=args.full)
     step_panel(ssh)
     step_hosts(ssh)
+    step_rulist(ssh)
     step_auth(ssh, cfg, reset=args.reset_panel_auth)
     step_updater(ssh, cfg, global_cfg, enable_autocheck=not args.no_autocheck)
     step_hotplug_guard(ssh)

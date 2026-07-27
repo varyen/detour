@@ -616,6 +616,10 @@ start_service() {
         ipset create $IPSET_WL hash:net maxelem 131072 -exist
         ipset flush $IPSET_WL 2>/dev/null
         setup_domains_file "$WHITELIST_FILE" "$IPSET_WL" "/tmp/dnsmasq.d/singbox-whitelist.conf"
+        # Managed country block (RU subnets) + its exceptions — same ipset, own file.
+        # detour-rulist owns /etc/sing-box/ru-subnets.list and pushes the exceptions
+        # as `nomatch` members, which hash:net resolves longest-prefix-first.
+        [ -x /usr/sbin/detour-rulist ] && /usr/sbin/detour-rulist ipset-load
         setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
         # Keep the browser's Web Push channel OFF the VPN: push endpoints resolve into the
         # whitelist ipset (→ RETURN/direct) so a LAN/WG client still gets the "VPN down"
@@ -911,6 +915,7 @@ reload_service() {
     if [ "$ROUTING_MODE" = "all-except" ]; then
         ipset flush $IPSET_WL 2>/dev/null
         setup_domains_file "$WHITELIST_FILE" "$IPSET_WL" "/tmp/dnsmasq.d/singbox-whitelist.conf"
+        [ -x /usr/sbin/detour-rulist ] && /usr/sbin/detour-rulist ipset-load
         # Re-affirm the Web Push VPN-bypass (see start_service); dnsmasq restart below loads it.
         [ -x /usr/sbin/detour-push ] && /usr/sbin/detour-push bypass-apply --no-reload
     fi

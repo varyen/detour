@@ -1,0 +1,463 @@
+#!/bin/sh
+# detour-rulist — managed country-subnet list (RU) for the "direct" list.
+#
+# In routing mode «все кроме указанных» every destination in the singbox_whitelist
+# ipset goes DIRECT, bypassing the VPN. The bulk of that set is "all Russian
+# subnets" — thousands of CIDRs that used to be pasted into the operator's own
+# whitelist-domains.list by hand and then went stale. This script owns that block:
+# it lives in its own file, refreshes from a public source with one button, and
+# supports per-prefix exceptions.
+#
+# WHY TWO SOURCES — they disagree, and the disagreement is the whole point:
+#   maxmind — geolocation of the ANNOUNCED prefix (MaxMind GeoLite2, via the
+#             Loyalsoldier/geoip text export). Reflects where a host actually is.
+#   rir     — RIPE *allocation* country (ipdeny / ipverse). A prefix allocated to a
+#             Russian LIR but announced from abroad still counts as RU here, so such
+#             hosts get sent direct — and if the direct path to them is filtered,
+#             they break while looking perfectly "Russian".
+# Default is maxmind; rir stays available for the registry view.
+#
+# EXCEPTIONS ($EXCL) are pushed into the SAME ipset with the `nomatch` flag, which
+# hash:net honours as "longest prefix wins" — so `5.101.82.0/24 nomatch` punches a
+# hole in a covering 5.101.64.0/19 without disturbing the rest of it. A hole means
+# "not direct", i.e. that prefix goes through the VPN like any foreign destination.
+#
+# Subcommands:
+#   status                — JSON state (panel)
+#   update [--source ID]  — fetch, validate, migrate (once), write, apply
+#   update-cron           — same, but a no-op unless auto is on and the list is stale
+#   source <maxmind|rir>  — switch source (no download)
+#   auto <0|1>            — weekly refresh on/off
+#   enabled <0|1>         — use the list at all
+#   exclude-get           — print the exception list
+#   exclude-save          — replace the exception list from stdin, then apply
+#   ipset-load            — push list+exceptions into a freshly built ipset (boot hook)
+#   apply                 — patch the LIVE ipset to match the files (diff, no restart)
+#   selftest              — environment checks
+
+# ==================== PATHS ====================
+DETOUR_DIR="/etc/detour"
+SINGBOX_DIR="/etc/sing-box"
+WHITELIST="$SINGBOX_DIR/whitelist-domains.list"
+
+# Platform shim (mirrors detour-api / detour-hosts): KeeneticOS/Entware lives in /opt.
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DETOUR_DIR="/opt/etc/detour"
+    SINGBOX_DIR="/opt/etc/sing-box"
+    WHITELIST="$SINGBOX_DIR/whitelist-domains.list"
+fi
+
+LIST="$SINGBOX_DIR/ru-subnets.list"              # managed CIDR list (this script owns it)
+EXCL="$SINGBOX_DIR/ru-subnets-exclude.list"      # operator exceptions -> ipset nomatch
+CONF="$DETOUR_DIR/rulist.json"                   # state
+APPLIED="$DETOUR_DIR/rulist.applied"             # CIDRs currently pushed into the ipset
+APPLIED_X="$DETOUR_DIR/rulist.applied-excl"      # nomatch entries currently pushed
+PENDING_DEL="$DETOUR_DIR/rulist.pending-del"     # CIDRs migration stripped, still live
+IPSET_WL="singbox_whitelist"
+STALE_AFTER=518400                               # 6 days — update-cron refresh threshold
+
+# ==================== HELPERS ====================
+now() { date +%s 2>/dev/null || echo 0; }
+json_escape() { sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\r\n'; }
+jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONF" 2>/dev/null | head -1; }
+jraw() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([^,}\"]*\).*/\1/p" "$CONF" 2>/dev/null | head -1 | tr -d ' '; }
+
+# Source id -> download URLs, primary first. Mirrors are same-data fallbacks, so a
+# single unreachable host never blocks the button.
+src_urls() {
+    case "$1" in
+        rir)
+            echo "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone"
+            echo "https://raw.githubusercontent.com/ipverse/rir-ip/master/country/ru/ipv4-aggregated.txt"
+            ;;
+        *)
+            echo "https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/ru.txt"
+            echo "https://cdn.jsdelivr.net/gh/Loyalsoldier/geoip@release/text/ru.txt"
+            ;;
+    esac
+}
+
+src_label() {
+    case "$1" in
+        rir) echo "RIPE/RIR (регистрация)" ;;
+        *)   echo "MaxMind GeoLite2 (геолокация)" ;;
+    esac
+}
+
+load_conf() {
+    SOURCE=""; ENABLED=""; AUTO=""; COUNT=""; UPDATED=""; URL=""; LAST_ERR=""; MIGRATED=""
+    if [ -f "$CONF" ]; then
+        SOURCE=$(jstr source); URL=$(jstr url); LAST_ERR=$(jstr error)
+        ENABLED=$(jraw enabled); AUTO=$(jraw auto)
+        COUNT=$(jraw count); UPDATED=$(jraw updated); MIGRATED=$(jraw migrated)
+    fi
+    case "$SOURCE" in maxmind|rir) ;; *) SOURCE=maxmind ;; esac
+    [ "$ENABLED" = "false" ] && ENABLED=false || ENABLED=true
+    [ "$AUTO" = "false" ] && AUTO=false || AUTO=true
+    [ -n "$COUNT" ] || COUNT=0
+    [ -n "$UPDATED" ] || UPDATED=0
+    [ -n "$MIGRATED" ] || MIGRATED=-1     # -1 = migration never ran
+}
+
+write_conf() {
+    mkdir -p "$DETOUR_DIR"
+    printf '{"source":"%s","url":"%s","enabled":%s,"auto":%s,"count":%s,"updated":%s,"migrated":%s,"error":"%s"}\n' \
+        "$SOURCE" "$(printf '%s' "$URL" | json_escape)" "$ENABLED" "$AUTO" \
+        "$COUNT" "$UPDATED" "$MIGRATED" "$(printf '%s' "$LAST_ERR" | json_escape)" \
+        > "$CONF.tmp" 2>/dev/null && mv "$CONF.tmp" "$CONF"
+}
+
+print_status() {
+    excl_n=0
+    [ -f "$EXCL" ] && excl_n=$(grep -cE '^[[:space:]]*[0-9]' "$EXCL" 2>/dev/null)
+    [ -n "$excl_n" ] || excl_n=0
+    live=0
+    if ipset list -n 2>/dev/null | grep -qx "$IPSET_WL"; then
+        live=$(ipset list "$IPSET_WL" -t 2>/dev/null | sed -n 's/^Number of entries: *//p')
+    fi
+    [ -n "$live" ] || live=0
+    printf '{"source":"%s","source_label":"%s","url":"%s","enabled":%s,"auto":%s,"count":%s,"updated":%s,"migrated":%s,"excluded":%s,"live_entries":%s,"error":"%s"}\n' \
+        "$SOURCE" "$(src_label "$SOURCE")" "$(printf '%s' "$URL" | json_escape)" \
+        "$ENABLED" "$AUTO" "$COUNT" "$UPDATED" "$MIGRATED" "$excl_n" "$live" \
+        "$(printf '%s' "$LAST_ERR" | json_escape)"
+}
+
+fetch_url() {
+    _u="$1"; _o="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -sS -L --max-time 90 -A "detour-rulist" -o "$_o" "$_u" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$_o" "$_u" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+# Keep IPv4 CIDR/host entries only, strip comments, dedupe. IPv6 is dropped: the
+# whitelist ipset is hash:net inet, and the redirect path is IPv4-only anyway.
+# A /0../7 prefix would swallow the planet, so those are refused as corrupt input.
+normalize() {
+    awk '
+    {
+        sub(/\/\/.*/, ""); sub(/#.*/, ""); sub(/;.*/, "")
+        gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
+        if ($0 == "") next
+        if ($0 !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/) next
+        if ($0 ~ /\//) { split($0, p, "/"); if (p[2] + 0 < 8 || p[2] + 0 > 32) next }
+        print
+    }' "$1" 2>/dev/null | sort -u
+}
+
+# A plausible country list: real CIDRs, in bulk, and not an HTML error page.
+validate_list() {
+    _f="$1"
+    [ -s "$_f" ] || return 1
+    head -c 64 "$_f" | grep -qi '<!doctype\|<html\|<head\|<body' && return 1
+    _n=$(wc -l < "$_f" 2>/dev/null | tr -d ' ')
+    [ -n "$_n" ] && [ "$_n" -ge 1000 ]
+}
+
+# ==================== MIGRATION (one-shot) ====================
+# The RU block used to live at the bottom of the operator's own whitelist file,
+# under a "// Подсети РФ ..." header. Lift it out so the manual list holds only
+# hand-picked entries and this script can own the country block.
+# Stripped CIDRs are remembered in $PENDING_DEL: whatever the new source does NOT
+# re-add has to leave the live ipset too, or a stale prefix keeps routing direct.
+migrate_whitelist() {
+    # NOTE: sh has no locals — every variable here is prefixed _m* so it cannot
+    # clobber the caller's ($_n and $_tmp in do_update both live across this call).
+    [ -f "$WHITELIST" ] || { MIGRATED=0; return 0; }
+    _mmark=$(grep -nE '^[[:space:]]*(//|#).*([Пп]одсети[[:space:]]+РФ|RU subnets)' "$WHITELIST" 2>/dev/null | head -1 | cut -d: -f1)
+    _mtmp="$WHITELIST.rulist.tmp"
+    if [ -n "$_mmark" ]; then
+        # Everything from the marker to EOF is the managed block.
+        awk -v m="$_mmark" 'NR >= m' "$WHITELIST" > "$PENDING_DEL.raw" 2>/dev/null
+        awk -v m="$_mmark" 'NR < m' "$WHITELIST" > "$_mtmp" 2>/dev/null
+    else
+        # No marker (hand-assembled file): fall back to "drop CIDRs the reference
+        # RIR list also has". Only bare CIDRs qualify, so single IPs and domains
+        # the operator added stay untouched.
+        _mref="/tmp/rulist-ref.$$"
+        fetch_url "$(src_urls rir | head -1)" "$_mref" || fetch_url "$(src_urls rir | tail -1)" "$_mref" || {
+            rm -f "$_mref"; MIGRATED=0; return 0; }
+        validate_list "$_mref" || { rm -f "$_mref"; MIGRATED=0; return 0; }
+        awk -v drop="$PENDING_DEL.raw" \
+            'NR==FNR { ref[$1]=1; next }
+             { l=$0; gsub(/\r/,"",l); gsub(/^[ \t]+|[ \t]+$/,"",l)
+               if (l ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/ && (l in ref)) print l >> drop; else print }' \
+            "$_mref" "$WHITELIST" > "$_mtmp" 2>/dev/null
+        rm -f "$_mref"
+    fi
+    _mn=0
+    if [ -f "$PENDING_DEL.raw" ]; then
+        normalize "$PENDING_DEL.raw" > "$PENDING_DEL"
+        _mn=$(wc -l < "$PENDING_DEL" 2>/dev/null | tr -d ' ')
+    fi
+    rm -f "$PENDING_DEL.raw"
+    [ -n "$_mn" ] || _mn=0
+    # Safety: a migration that would strip almost nothing is more likely a bad
+    # match than a real block — leave the operator's file alone.
+    if [ "$_mn" -lt 100 ]; then
+        rm -f "$_mtmp" "$PENDING_DEL"
+        MIGRATED=0
+        return 0
+    fi
+    cp "$WHITELIST" "$WHITELIST.pre-rulist" 2>/dev/null
+    mv "$_mtmp" "$WHITELIST"
+    MIGRATED="$_mn"
+    logger -t detour-rulist "migrated $_mn RU CIDRs out of whitelist-domains.list (backup: $WHITELIST.pre-rulist)" 2>/dev/null
+}
+
+# ==================== IPSET ====================
+wl_exists() { ipset list -n 2>/dev/null | grep -qx "$IPSET_WL"; }
+
+# Drop conntrack entries whose destination sits in one of the changed CIDRs. The
+# nat verdict (REDIRECT vs direct) is cached per flow, so without this a prefix we
+# just moved keeps its old route until every existing connection dies.
+flush_changed_conntrack() {
+    _chg="$1"
+    command -v conntrack >/dev/null 2>&1 || return 0
+    [ -s "$_chg" ] || return 0
+    ipset create detour_rulchg hash:net maxelem 131072 -exist 2>/dev/null || return 0
+    ipset flush detour_rulchg 2>/dev/null
+    awk '{print "add detour_rulchg " $0}' "$_chg" | ipset restore -exist 2>/dev/null
+    conntrack -L 2>/dev/null | grep -oE 'dst=[0-9.]+' | sed 's/^dst=//' | sort -u | while read -r _ip; do
+        ipset test detour_rulchg "$_ip" >/dev/null 2>&1 && conntrack -D -d "$_ip" >/dev/null 2>&1
+    done
+    ipset destroy detour_rulchg 2>/dev/null
+    return 0
+}
+
+# Patch the live ipset so it matches the files, touching only what changed. Used
+# after every update/exception edit — a full rebuild would need a sing-box restart
+# and would also evict the domain-resolved members dnsmasq put in the same set.
+do_apply() {
+    mkdir -p "$DETOUR_DIR"
+    _new="/tmp/rulist-new.$$"; _newx="/tmp/rulist-newx.$$"
+    _restore="/tmp/rulist-restore.$$"; _chg="/tmp/rulist-chg.$$"
+    if [ "$ENABLED" = "true" ] && [ -f "$LIST" ]; then
+        normalize "$LIST" > "$_new"
+    else
+        : > "$_new"
+    fi
+    if [ "$ENABLED" = "true" ] && [ -f "$EXCL" ]; then
+        normalize "$EXCL" > "$_newx"
+    else
+        : > "$_newx"
+    fi
+
+    if ! wl_exists; then
+        # sing-box is stopped or not in all-except mode: nothing live to patch. The
+        # init script rebuilds the whole set from these same files when it starts,
+        # so recording the state here keeps the next diff honest.
+        cp "$_new" "$APPLIED" 2>/dev/null; cp "$_newx" "$APPLIED_X" 2>/dev/null
+        rm -f "$_new" "$_newx" "$_restore" "$_chg" "$PENDING_DEL"
+        return 0
+    fi
+
+    : > "$_restore"; : > "$_chg"
+    [ -f "$APPLIED_X" ] || : > "$APPLIED_X"
+    # NOTE on the awk calls below: the `p=1` argument between the two file operands
+    # is a positional assignment awk performs *after* finishing the first file, so
+    # "am I still reading file 1?" is `p==0`. The usual NR==FNR idiom would misfire
+    # here — on a first run $APPLIED is empty, and with an empty first file NR==FNR
+    # stays true into the second one, silently swallowing the whole list.
+    # Redirections use `>>`: each awk is a new process and `>` would truncate $chg,
+    # losing what the previous call recorded.
+    #
+    # Removals: previously applied (plus anything migration stripped) minus the new list.
+    { [ -f "$APPLIED" ] && cat "$APPLIED"; [ -f "$PENDING_DEL" ] && cat "$PENDING_DEL"; } 2>/dev/null \
+        | sort -u > "$_restore.old"
+    awk -v chg="$_chg" -v set="$IPSET_WL" \
+        'p==0 { keep[$1]=1; next } !($1 in keep) { print "del " set " " $1; print $1 >> chg }' \
+        "$_new" p=1 "$_restore.old" >> "$_restore"
+    # Additions: -exist makes re-adding an existing member a no-op, so push all.
+    awk -v chg="$_chg" -v set="$IPSET_WL" \
+        'p==0 { old[$1]=1; next } { print "add " set " " $1; if (!($1 in old)) print $1 >> chg }' \
+        "$_restore.old" p=1 "$_new" >> "$_restore"
+    # Exceptions: `nomatch` on a more specific prefix wins over the covering net.
+    awk -v chg="$_chg" -v set="$IPSET_WL" \
+        '{ print "add " set " " $1 " nomatch"; print $1 >> chg }' "$_newx" >> "$_restore"
+    # An exception that was removed must lose its nomatch element entirely,
+    # otherwise the hole stays punched.
+    awk -v chg="$_chg" -v set="$IPSET_WL" \
+        'p==0 { keep[$1]=1; next } !($1 in keep) { print "del " set " " $1; print $1 >> chg }' \
+        "$_newx" p=1 "$APPLIED_X" >> "$_restore"
+
+    [ -s "$_restore" ] && ipset restore -exist < "$_restore" 2>/dev/null
+    # BusyBox sort has no -o: in-place has to go through a temp file, or the
+    # sorted list lands on stdout and corrupts this command's JSON output.
+    sort -u "$_chg" > "$_chg.s" 2>/dev/null && mv "$_chg.s" "$_chg"
+    flush_changed_conntrack "$_chg"
+
+    cp "$_new" "$APPLIED" 2>/dev/null; cp "$_newx" "$APPLIED_X" 2>/dev/null
+    rm -f "$_new" "$_newx" "$_restore" "$_restore.old" "$_chg" "$PENDING_DEL"
+    return 0
+}
+
+# Boot hook: the init script has just created an empty ipset and filled it from the
+# manual whitelist, so push the whole managed block in one restore — no diffing.
+do_ipset_load() {
+    [ "$ENABLED" = "true" ] || return 0
+    wl_exists || return 0
+    _restore="/tmp/rulist-load.$$"
+    : > "$_restore"
+    [ -f "$LIST" ] && normalize "$LIST" | awk '{print "add '"$IPSET_WL"' " $1}' >> "$_restore"
+    [ -f "$EXCL" ] && normalize "$EXCL" | awk '{print "add '"$IPSET_WL"' " $1 " nomatch"}' >> "$_restore"
+    [ -s "$_restore" ] && ipset restore -exist < "$_restore" 2>/dev/null
+    rm -f "$_restore"
+    mkdir -p "$DETOUR_DIR"
+    if [ -f "$LIST" ]; then normalize "$LIST" > "$APPLIED" 2>/dev/null; else : > "$APPLIED"; fi
+    if [ -f "$EXCL" ]; then normalize "$EXCL" > "$APPLIED_X" 2>/dev/null; else : > "$APPLIED_X"; fi
+    rm -f "$PENDING_DEL"
+    return 0
+}
+
+# ==================== UPDATE ====================
+do_update() {
+    _want="$1"
+    [ -n "$_want" ] && SOURCE="$_want"
+    _tmp="/tmp/rulist-dl.$$"
+    _got=""
+    for _u in $(src_urls "$SOURCE"); do
+        if fetch_url "$_u" "$_tmp" && validate_list "$_tmp"; then _got="$_u"; break; fi
+        rm -f "$_tmp"
+    done
+    if [ -z "$_got" ]; then
+        rm -f "$_tmp"
+        LAST_ERR="не удалось скачать список ($(src_label "$SOURCE"))"
+        write_conf
+        print_status
+        return 1
+    fi
+    _norm="/tmp/rulist-norm.$$"
+    normalize "$_tmp" > "$_norm"
+    rm -f "$_tmp"
+    _n=$(wc -l < "$_norm" 2>/dev/null | tr -d ' ')
+    [ -n "$_n" ] || _n=0
+    if [ "$_n" -lt 1000 ]; then
+        rm -f "$_norm"
+        LAST_ERR="источник вернул слишком мало подсетей ($_n)"
+        write_conf
+        print_status
+        return 1
+    fi
+
+    # First successful update also lifts the legacy block out of the manual list.
+    if [ "$MIGRATED" = "-1" ]; then migrate_whitelist; fi
+
+    mkdir -p "$SINGBOX_DIR"
+    {
+        echo "// Подсети РФ — управляется detour-rulist, НЕ редактировать вручную."
+        echo "// Правки вносите в исключения: $EXCL"
+        echo "// Источник: $(src_label "$SOURCE") — $_got"
+        echo "// Обновлено: $(date '+%Y-%m-%d %H:%M' 2>/dev/null) · записей: $_n"
+        cat "$_norm"
+    } > "$LIST.tmp" 2>/dev/null && mv "$LIST.tmp" "$LIST"
+    chmod 0644 "$LIST" 2>/dev/null
+    rm -f "$_norm"
+
+    COUNT="$_n"; URL="$_got"; UPDATED=$(now); LAST_ERR=""
+    write_conf
+    do_apply
+    logger -t detour-rulist "updated: $_n subnets from $_got" 2>/dev/null
+    print_status
+    return 0
+}
+
+# ==================== MAIN ====================
+load_conf
+CMD="$1"; shift 2>/dev/null
+
+case "$CMD" in
+    status)
+        print_status
+        ;;
+
+    update)
+        WANT=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --source) WANT="$2"; shift 2 ;;
+                --source=*) WANT="${1#--source=}"; shift ;;
+                *) shift ;;
+            esac
+        done
+        case "$WANT" in maxmind|rir|"") ;; *) echo '{"error":"unknown source"}'; exit 1 ;; esac
+        do_update "$WANT"
+        ;;
+
+    update-cron)
+        [ "$AUTO" = "true" ] || exit 0
+        [ "$ENABLED" = "true" ] || exit 0
+        AGE=$(( $(now) - UPDATED ))
+        [ "$UPDATED" -gt 0 ] && [ "$AGE" -lt "$STALE_AFTER" ] && exit 0
+        do_update "" >/dev/null 2>&1
+        ;;
+
+    source)
+        case "$1" in
+            maxmind|rir) SOURCE="$1"; write_conf; print_status ;;
+            *) echo '{"error":"usage: source <maxmind|rir>"}'; exit 1 ;;
+        esac
+        ;;
+
+    auto)
+        case "$1" in
+            1|on|true)  AUTO=true ;;
+            0|off|false) AUTO=false ;;
+            *) echo '{"error":"usage: auto <0|1>"}'; exit 1 ;;
+        esac
+        write_conf; print_status
+        ;;
+
+    enabled)
+        case "$1" in
+            1|on|true)  ENABLED=true ;;
+            0|off|false) ENABLED=false ;;
+            *) echo '{"error":"usage: enabled <0|1>"}'; exit 1 ;;
+        esac
+        write_conf
+        do_apply
+        print_status
+        ;;
+
+    exclude-get)
+        [ -f "$EXCL" ] && cat "$EXCL"
+        ;;
+
+    exclude-save)
+        mkdir -p "$SINGBOX_DIR"
+        cat > "$EXCL.tmp" && mv "$EXCL.tmp" "$EXCL"
+        chmod 0644 "$EXCL" 2>/dev/null
+        do_apply
+        print_status
+        ;;
+
+    ipset-load)
+        do_ipset_load
+        ;;
+
+    apply)
+        do_apply
+        print_status
+        ;;
+
+    selftest)
+        echo "platform:  $([ -d /opt/etc/ndm ] && echo keenetic || echo openwrt)"
+        echo "curl:      $(command -v curl || echo MISSING)"
+        echo "wget:      $(command -v wget || echo MISSING)"
+        echo "ipset:     $(command -v ipset || echo MISSING)"
+        echo "conntrack: $(command -v conntrack || echo 'missing (conntrack flush skipped)')"
+        echo "list:      $LIST ($([ -f "$LIST" ] && normalize "$LIST" | wc -l | tr -d ' ' || echo 0) subnets)"
+        echo "exclude:   $EXCL ($([ -f "$EXCL" ] && normalize "$EXCL" | wc -l | tr -d ' ' || echo 0) entries)"
+        echo "ipset set: $(wl_exists && echo "$IPSET_WL present" || echo "$IPSET_WL absent (not all-except / stopped)")"
+        echo "source:    $SOURCE — $(src_label "$SOURCE")"
+        ;;
+
+    *)
+        echo "usage: detour-rulist {status|update [--source maxmind|rir]|update-cron|source <id>|auto <0|1>|enabled <0|1>|exclude-get|exclude-save|ipset-load|apply|selftest}" >&2
+        exit 1
+        ;;
+esac

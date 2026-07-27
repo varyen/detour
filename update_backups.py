@@ -37,6 +37,10 @@ FILES_TO_BACKUP = [
     ("/etc/sing-box/proxy-domains.list", "etc/sing-box/proxy-domains.list"),
     ("/etc/sing-box/settings.json", "etc/sing-box/settings.json"),
     ("/etc/sing-box/whitelist-domains.list", "etc/sing-box/whitelist-domains.list"),
+    # The RU-subnet list itself is derived data (re-downloadable, ~450 KB) and is
+    # deliberately not mirrored — only the operator's exceptions and the state.
+    ("/etc/sing-box/ru-subnets-exclude.list", "etc/sing-box/ru-subnets-exclude.list"),
+    ("/etc/detour/rulist.json", "etc/detour/rulist.json"),
     ("/etc/init.d/sing-box", "etc/init.d/sing-box"),
     ("/etc/config/sing-box", "etc/config/sing-box"),
     # zapret-tpws

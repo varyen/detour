@@ -167,9 +167,15 @@ regen() {
 
     gen_list "$SINGBOX_DOMAINS_LIST"  "$SINGBOX_IPSET"    "$DNSMASQ_CONF_DIR/singbox-domains.conf"
     gen_list "$ZAPRET_DOMAINS_LIST"   "$ZAPRET_IPSET"     "$DNSMASQ_CONF_DIR/zapret-domains.conf"
-    [ "$(routing_mode)" = "all-except" ] && \
-        gen_list "$SINGBOX_WHITELIST_LIST" "$SINGBOX_WL_IPSET" "$DNSMASQ_CONF_DIR/singbox-whitelist.conf" || \
+    if [ "$(routing_mode)" = "all-except" ]; then
+        gen_list "$SINGBOX_WHITELIST_LIST" "$SINGBOX_WL_IPSET" "$DNSMASQ_CONF_DIR/singbox-whitelist.conf"
+        # Managed country block (RU subnets) + exceptions — parity with OpenWrt's
+        # sing-box.initd. detour-rulist owns ru-subnets.list and adds the exception
+        # prefixes as `nomatch`, which hash:net resolves longest-prefix-first.
+        [ -x /opt/sbin/detour-rulist ] && /opt/sbin/detour-rulist ipset-load
+    else
         : > "$DNSMASQ_CONF_DIR/singbox-whitelist.conf"
+    fi
 
     rm -f "$DNSMASQ_CONF_DIR"/singbox-singbox_t*.conf
     route_map_slots | while read -r n id ipset; do
