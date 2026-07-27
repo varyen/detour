@@ -624,10 +624,14 @@ api_activate() {
 # off / no healthy candidate / on cooldown / activation failed). The caller uses this
 # to decide whether to additionally send a standalone "VPN недоступен" alert — so a
 # single down event yields exactly one push.
+# Also sets ASW_REASON to the human-readable reason we did NOT switch, so the caller's
+# "VPN недоступен" push can say why we're still sitting on the dead profile instead of
+# leaving the operator to guess.
 autoswitch_active() {
     _a="$1"; _aname="$2"
-    case "$AUTOSWITCH" in 1|on|true|yes) ;; *) return 1 ;; esac
-    [ -x "$API_BIN" ] || return 1
+    ASW_REASON="автопереключение не сработало"
+    case "$AUTOSWITCH" in 1|on|true|yes) ;; *) ASW_REASON="автопереключение выключено"; return 1 ;; esac
+    [ -x "$API_BIN" ] || { ASW_REASON="активатор профилей недоступен"; return 1; }
     # Cooldown: at most one auto-switch per SWITCH_COOLDOWN. A run of cache-healthy-
     # but-actually-dead candidates would otherwise switch+push every iteration.
     if [ -f "$SWITCH_MARK" ]; then
@@ -635,23 +639,27 @@ autoswitch_active() {
         case "$_lastsw" in ''|*[!0-9]*) _lastsw=0 ;; esac
         if [ "$((NOW - _lastsw))" -lt "$SWITCH_COOLDOWN" ]; then
             log "active-check: $_a down, auto-switch on cooldown ($((NOW - _lastsw))s<${SWITCH_COOLDOWN}s) — staying put"
+            ASW_REASON="автопереключение на паузе после недавнего переключения"
             return 1
         fi
     fi
     _cand=$(pick_switch_candidate "$_a")
     if [ -z "$_cand" ]; then
         log "active-check: $_a down, no healthy ELIGIBLE candidate — staying put"
+        ASW_REASON="нет исправного профиля для переключения"
         return 1
     fi
     log "active-check AUTO-SWITCH: $_a → $_cand"
     if api_activate "$_cand"; then
         printf '{"from":"%s","to":"%s","ts":%s}\n' "$_a" "$_cand" "$NOW" > "$SWITCH_MARK"
         _cname=$(profile_name "$_cand")
-        push_alert "VPN переключён" "«$_aname» не работал — переключился на «$_cname»."
+        push_alert "VPN: «$_aname» → «$_cname»" \
+            "Профиль «$_aname» перестал работать (проверочные адреса не открывались через VPN) — автоматически переключился на «$_cname»."
         log "active-check AUTO-SWITCH ok: $_a → $_cand"
         return 0
     fi
     log "active-check AUTO-SWITCH failed ($_a → $_cand): $OUT"
+    ASW_REASON="переключение на «$(profile_name "$_cand")» не удалось"
     return 1
 }
 
@@ -702,7 +710,8 @@ active_check_once() {
         elif ! { [ "$_PREVID" = "$_A" ] && [ "$_PREVOK" = "0" ]; }; then
             # Not switched (off / no candidate / cooldown) and this is a NEW down for
             # this profile (was up, or just connected to it, or boot) → alert once.
-            push_alert "VPN недоступен" "Профиль «$_ANAME» не работает — проверочные адреса не открываются через VPN."
+            push_alert "VPN недоступен: «$_ANAME»" \
+                "Профиль «$_ANAME» не работает — проверочные адреса не открываются через VPN. Остаёмся на нём: $ASW_REASON."
             log "active-check: $_A DOWN — push sent"
         fi
     elif ! { [ "$_PREVID" = "$_A" ] && [ "$_PREVOK" = "1" ]; }; then
@@ -1038,7 +1047,9 @@ fi
 log "AUTO-SWITCH: active $ACTIVE failed health check → activating $CAND"
 if api_activate "$CAND"; then
     printf '{"from":"%s","to":"%s","ts":%s}\n' "$ACTIVE" "$CAND" "$NOW" > "$SWITCH_MARK"
-    push_alert "VPN переключён" "«$(profile_name "$ACTIVE")» не работал — переключился на «$(profile_name "$CAND")»."
+    ANAME=$(profile_name "$ACTIVE"); CNAME=$(profile_name "$CAND")
+    push_alert "VPN: «$ANAME» → «$CNAME»" \
+        "Профиль «$ANAME» перестал работать (проверочные адреса не открывались через VPN) — автоматически переключился на «$CNAME»."
     log "AUTO-SWITCH ok: $ACTIVE → $CAND"
 else
     log "AUTO-SWITCH failed ($ACTIVE → $CAND): $OUT"

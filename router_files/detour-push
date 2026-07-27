@@ -23,6 +23,7 @@
 #   count                 print number of stored subscriptions
 #   add                   read a PushSubscription JSON from stdin, store (dedup by endpoint)
 #   remove <endpoint>     drop the subscription with this endpoint
+#   has <endpoint>        exit 0 if that endpoint is subscribed (used to auth the SW)
 #   send <title> <body>   record the message + push (empty body) to ALL subscriptions
 #   test                  send a test notification to all subscriptions
 
@@ -300,6 +301,26 @@ bypass_status() {
     else echo "n/a"; fi
 }
 
+# Is this endpoint one of the stored subscriptions? detour-api uses it to authenticate
+# the service worker's `push_message` fetch when the session cookie is gone: the
+# endpoint is the long random capability URL the push service issued to that browser,
+# and it only lands in $SUBS through a logged-in subscribe.
+has_sub() {
+    [ -n "$1" ] || return 2
+    [ -f "$SUBS" ] || return 1
+    lua - "$SUBS" "$1" <<'LUA'
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); local d = f and f:read("*a"); if f then f:close() end
+local arr = cjson.decode(d or "") or {}
+if type(arr) == "table" then
+  for _, s in ipairs(arr) do
+    if type(s) == "table" and s.endpoint == arg[2] then os.exit(0) end
+  end
+end
+os.exit(1)
+LUA
+}
+
 remove_sub() {
     [ -n "$1" ] || return 2
     [ -f "$SUBS" ] || return 0
@@ -326,10 +347,11 @@ case "$CMD" in
     count)       count ;;
     add)         add_sub && bypass_apply ;;       # new subscriber → ensure push channel bypasses the VPN
     remove)      remove_sub "$2"; bypass_apply ;; # auto-clears the bypass when the last sub goes
+    has)         has_sub "$2" ;;                  # exit 0 = this endpoint is subscribed
     send)        send "$2" "$3" ;;
     test)        send "Detour: тест" "Тестовое уведомление работает ✅" ;;
     bypass-apply) bypass_apply "$2" ;;            # [--no-reload] — also called from sing-box.initd on start
     bypass-clear) bypass_clear ;;
     bypass-status) bypass_status ;;
-    *) echo "usage: detour-push {ensure-keys|pubkey|count|add|remove <ep>|send <title> <body>|test|bypass-apply [--no-reload]|bypass-clear|bypass-status}" >&2; exit 2 ;;
+    *) echo "usage: detour-push {ensure-keys|pubkey|count|add|remove <ep>|has <ep>|send <title> <body>|test|bypass-apply [--no-reload]|bypass-clear|bypass-status}" >&2; exit 2 ;;
 esac

@@ -1668,6 +1668,32 @@ if [ "$REQUEST_METHOD" = "OPTIONS" ]; then
     exit 0
 fi
 
+# ============ PUSH MESSAGE (subscription-authed, no session) ============
+# The service worker fetches the notification text on EVERY push (payload-less push),
+# and a push routinely arrives long after the session cookie expired (Max-Age 7d) or
+# from a browser that never carried it into the SW. Behind the session gate that fetch
+# 401s and the SW silently degrades every alert to its generic fallback text — which is
+# why "VPN переключён: «A» → «B»" reached the phone as "Состояние VPN изменилось".
+# So accept the browser's OWN push endpoint (POST body) as the credential: it's the
+# long random capability URL the push service issued, it only enters push-subs.json
+# through an authenticated subscribe, and it grants nothing but the last alert text.
+# GET + cookie still works via the branch further down.
+if [ "$ACTION" = "push_message" ] && [ "$REQUEST_METHOD" = "POST" ] && ! check_auth; then
+    reply_json
+    echo ""
+    SW_EP=$(printf '%s' "$POST_DATA" | tr -d '\r\n' | head -c 1024)
+    if [ -n "$SW_EP" ] && [ -x "$PUSH_BIN" ] && "$PUSH_BIN" has "$SW_EP" >/dev/null 2>&1; then
+        if [ -f "$PUSH_MSG" ]; then
+            cat "$PUSH_MSG"
+        else
+            printf '{"title":"Detour VPN","body":"Состояние VPN изменилось"}'
+        fi
+    else
+        printf '{"ok":false,"error":"auth"}'
+    fi
+    exit 0
+fi
+
 # ==================== AUTH CHECK ====================
 if ! check_auth; then
     echo "Status: 401 Unauthorized"
