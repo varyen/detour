@@ -6462,17 +6462,54 @@
         if (!text) return "";
         if (text.indexOf("://") >= 0) return text;
 
+        function inferImplicitProxyScheme(host, port) {
+          var h = String(host || "").toLowerCase();
+          var p = String(port || "");
+          if (h.indexOf("socks") >= 0) return "socks5";
+          if (h.indexOf("http") >= 0 || h.indexOf("proxy") >= 0) return "http";
+          if (/^(1080|1085|2080)$/.test(p)) return "socks5";
+          if (/^(80|443|8000|8080|8443|8888|3128)$/.test(p)) return "http";
+          return "http";
+        }
+
+        var authHostPortMatch = text.match(
+          /^([^:\s@]+):([^@\s]+)@(\[[^\]]+\]|[^:\s]+):(\d+)$/,
+        );
+        if (authHostPortMatch) {
+          var authUsername = authHostPortMatch[1];
+          var authPassword = authHostPortMatch[2];
+          var authHost = authHostPortMatch[3];
+          var authPort = authHostPortMatch[4];
+          var authScheme = inferImplicitProxyScheme(authHost, authPort);
+          var authHashName = encodeURIComponent(
+            authScheme.toUpperCase() + " " + authHost + ":" + authPort,
+          );
+          return (
+            authScheme + "://" +
+            encodeURIComponent(authUsername) +
+            ":" +
+            encodeURIComponent(authPassword) +
+            "@" +
+            authHost +
+            ":" +
+            authPort +
+            "#" +
+            authHashName
+          );
+        }
+
         var colonMatch = text.match(/^([^:\s]+):(\d+):([^:\s]+):(.+)$/);
         if (colonMatch) {
           var colonHost = colonMatch[1];
           var colonPort = colonMatch[2];
           var colonUsername = colonMatch[3];
           var colonPassword = colonMatch[4];
+          var colonScheme = inferImplicitProxyScheme(colonHost, colonPort);
           var colonHashName = encodeURIComponent(
-            "HTTP " + colonHost + ":" + colonPort,
+            colonScheme.toUpperCase() + " " + colonHost + ":" + colonPort,
           );
           return (
-            "http://" +
+            colonScheme + "://" +
             encodeURIComponent(colonUsername) +
             ":" +
             encodeURIComponent(colonPassword) +
