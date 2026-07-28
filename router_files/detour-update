@@ -184,7 +184,10 @@ prev_field() {
 }
 
 write_state() {
-    local status="$1" message="$2" available="$3" changelog_b64="$4"
+    # changelog_b64 is optional — most callers (apply/rollback) pass only 3 args.
+    # Under `set -u`, a bare "$4" would abort with "4: parameter not set", so
+    # default it to empty.
+    local status="$1" message="$2" available="$3" changelog_b64="${4-}"
     local cur now
     cur=$(current_version)
     now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
