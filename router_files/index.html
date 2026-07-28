@@ -14059,28 +14059,6 @@
           .join("\n\n");
       }
 
-      function routeRuleProfileOptions(select, selectedId) {
-        select.innerHTML = "";
-        if (
-          selectedId &&
-          !currentProfiles.some(function (p) {
-            return p.id === selectedId;
-          })
-        ) {
-          var missing = document.createElement("option");
-          missing.value = selectedId;
-          missing.textContent = selectedId + " (профиль не найден)";
-          select.appendChild(missing);
-        }
-        currentProfiles.forEach(function (p) {
-          var option = document.createElement("option");
-          option.value = p.id;
-          option.textContent = (p.name || p.id) + " (" + (p.type || "?") + ")";
-          select.appendChild(option);
-        });
-        select.value = selectedId || "";
-      }
-
       function renderRouteRules() {
         var list = document.getElementById("route-rules-list");
         if (!list) return;
@@ -14099,22 +14077,47 @@
           header.style.cssText =
             "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
 
-          var select = document.createElement("select");
-          select.style.minWidth = "260px";
-          routeRuleProfileOptions(select, rule.id);
-          select.onchange = function () {
-            var nextId = select.value;
-            var duplicate = routeRules.some(function (item, itemIndex) {
-              return itemIndex !== index && item.id === nextId;
+          // Per-rule profile picker — a searchable DetourCombo (like the "add
+          // route" picker above), not a bare <select>. No valueId: several rule
+          // cards coexist, so they must not share a hidden-input id; the choice is
+          // read via onChange instead. Any profile is selectable — the duplicate
+          // check runs on change (a profile may back only one route).
+          var picker = document.createElement("div");
+          picker.className = "profile-combobox";
+          picker.style.cssText = "min-width:260px;max-width:380px;flex:1;";
+          var ruleCombo = new DetourCombo(picker, {
+            placeholder: "Профиль маршрута…",
+            emptyText: "Нет профилей",
+            onChange: function (nextId) {
+              var duplicate = routeRules.some(function (item, itemIndex) {
+                return itemIndex !== index && item.id === nextId;
+              });
+              if (duplicate) {
+                toast("Для этого профиля уже есть отдельный маршрут", "error");
+                ruleCombo.setValue(rule.id, false);
+                return;
+              }
+              rule.id = nextId;
+              renderRouteProfileSelect();
+            },
+          });
+          var ruleItems = currentProfiles.map(comboItemFromProfile);
+          if (
+            rule.id &&
+            !currentProfiles.some(function (p) {
+              return p.id === rule.id;
+            })
+          ) {
+            // Saved profile no longer exists — keep it visible as a stray entry.
+            ruleItems.push({
+              id: rule.id,
+              group: "",
+              label: rule.id + " (профиль не найден)",
+              search: String(rule.id).toLowerCase(),
             });
-            if (duplicate) {
-              toast("Для этого профиля уже есть отдельный маршрут", "error");
-              select.value = rule.id;
-              return;
-            }
-            rule.id = nextId;
-            renderRouteProfileSelect();
-          };
+          }
+          ruleCombo.setItems(ruleItems);
+          ruleCombo.setValue(rule.id || "", false);
 
           var removeBtn = document.createElement("button");
           removeBtn.className = "btn danger";
@@ -14125,7 +14128,7 @@
             renderRouteRules();
           };
 
-          header.appendChild(select);
+          header.appendChild(picker);
           header.appendChild(removeBtn);
 
           var toggles = document.createElement("div");
