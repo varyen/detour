@@ -190,13 +190,47 @@
       body {
         height: 100%;
       }
+      /* Base colour lives on <html> so the fixed background canvas (behind body,
+         z-index:-2) shows through — body itself is transparent. */
+      html {
+        background: var(--bg);
+      }
       body {
         font-family: var(--sans);
-        background: var(--bg);
+        background: transparent;
         color: var(--text);
         line-height: 1.5;
         font-size: 14px;
         -webkit-font-smoothing: antialiased;
+      }
+      /* ===== Animated "matrix rain" background (varyen.net-style) ===== */
+      #bg-rain {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+        z-index: -2;
+        pointer-events: none;
+      }
+      /* Vignette wash over the rain so cards/text stay readable; theme-aware. */
+      .bg-veil {
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        background: radial-gradient(
+          ellipse 75% 65% at 50% 42%,
+          transparent 0%,
+          color-mix(in srgb, var(--bg) 55%, transparent) 100%
+        );
+      }
+      /* No color-mix support → fall back to a flat, barely-there wash. */
+      @supports not (background: color-mix(in srgb, red, blue)) {
+        .bg-veil {
+          background: var(--bg-elev);
+          opacity: 0.35;
+        }
       }
       body::before {
         content: "";
@@ -2357,6 +2391,9 @@
     </style>
   </head>
   <body>
+    <!-- Animated background (matrix rain). Honors prefers-reduced-motion. -->
+    <canvas id="bg-rain" aria-hidden="true"></canvas>
+    <div class="bg-veil" aria-hidden="true"></div>
     <!-- ===== LOGIN OVERLAY ===== -->
     <div id="login-overlay">
       <div class="login-box">
@@ -4595,10 +4632,11 @@
               к указанной цели.
             </p>
             <div class="flex-gap" style="margin-bottom: 8px">
-              <select
-                id="route-profile-select"
-                style="min-width: 220px"
-              ></select>
+              <div
+                id="route-profile-combo"
+                class="profile-combobox"
+                style="min-width: 240px; max-width: 380px"
+              ></div>
               <button class="btn" onclick="addRouteRule()">
                 + Добавить маршрут
               </button>
@@ -5200,7 +5238,14 @@
             <table class="vpn-table">
               <thead>
                 <tr>
-                  <th>VPN</th>
+                  <th
+                    class="vpn-th-sort"
+                    data-sort="name"
+                    onclick="setVpnSort('name')"
+                    title="Сортировать по имени (A→Я)"
+                  >
+                    VPN<span class="vpn-sort-ind" data-sortind="name"></span>
+                  </th>
                   <th class="col-server">Сервер</th>
                   <th
                     class="vpn-th-sort"
@@ -6016,7 +6061,7 @@
         <div class="chain-toolbar">
           <div style="flex: 1">
             <label>Добавить профиль в цепочку</label>
-            <select id="chain-profile-picker"></select>
+            <div id="chain-profile-combo" class="profile-combobox"></div>
           </div>
           <button class="btn primary" onclick="addSelectedProfileToChain()">
             ＋ Добавить
@@ -6138,6 +6183,146 @@
             else if (mq.addListener) mq.addListener(onChange);
           }
         } catch (e) {}
+      })();
+
+      // ===== ANIMATED BACKGROUND ("matrix rain", varyen.net-style) =====
+      // A full-viewport <canvas> behind the app (z-index:-2). Glyph colours are
+      // read from the active theme so it works in both light and dark. It honours
+      // prefers-reduced-motion (renders a single static sparse frame, no loop),
+      // and re-reads its palette when the theme toggles (MutationObserver on the
+      // <html data-theme> attribute).
+      (function bgRain() {
+        var canvas = document.getElementById("bg-rain");
+        if (!canvas || !canvas.getContext) return;
+        var ctx = canvas.getContext("2d", { alpha: false });
+        var reduced =
+          window.matchMedia &&
+          window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        var GLYPHS =
+          "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲabcdefghijklmnopqrstuvwxyz0123456789<>[]{}/*+-=$#@%&";
+        var FONT_SIZE = 16;
+        var cols = 0,
+          drops = [],
+          speeds = [],
+          dpr = 1,
+          rafId = 0,
+          runToken = 0;
+        var pal = null;
+
+        // Pull the base bg + a pair of glyph colours from the current theme.
+        function readPalette() {
+          var isLight =
+            document.documentElement.getAttribute("data-theme") === "light";
+          var base = "#0b0f17";
+          try {
+            var c = getComputedStyle(document.documentElement).backgroundColor;
+            if (c) base = c;
+          } catch (e) {}
+          var m = base.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+          var rgb = m ? [m[1], m[2], m[3]] : isLight ? [244, 246, 251] : [11, 15, 23];
+          return {
+            base: base,
+            fade:
+              "rgba(" +
+              rgb[0] +
+              "," +
+              rgb[1] +
+              "," +
+              rgb[2] +
+              "," +
+              (isLight ? 0.12 : 0.085) +
+              ")",
+            lead: isLight ? "rgba(37,99,235,0.34)" : "rgba(130,170,220,0.72)",
+            trail: isLight ? "rgba(37,99,235,0.16)" : "rgba(74,100,128,0.5)",
+          };
+        }
+
+        function resize() {
+          pal = readPalette();
+          dpr = Math.min(window.devicePixelRatio || 1, 2);
+          canvas.width = Math.floor(innerWidth * dpr);
+          canvas.height = Math.floor(innerHeight * dpr);
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.fillStyle = pal.base;
+          ctx.fillRect(0, 0, innerWidth, innerHeight);
+          cols = Math.ceil(innerWidth / FONT_SIZE);
+          drops = new Array(cols);
+          speeds = new Array(cols);
+          for (var i = 0; i < cols; i++) {
+            drops[i] = (Math.random() * -innerHeight) / FONT_SIZE;
+            speeds[i] = 0.35 + Math.random() * 0.75;
+          }
+        }
+
+        function frame(token) {
+          if (token !== runToken) return; // a newer loop superseded us
+          ctx.fillStyle = pal.fade; // translucent wash → fading tails
+          ctx.fillRect(0, 0, innerWidth, innerHeight);
+          ctx.font =
+            FONT_SIZE + "px ui-monospace, SFMono-Regular, Menlo, monospace";
+          ctx.textBaseline = "top";
+          var rows = innerHeight / FONT_SIZE;
+          for (var i = 0; i < cols; i++) {
+            var ch = GLYPHS[(Math.random() * GLYPHS.length) | 0];
+            var x = i * FONT_SIZE;
+            var y = drops[i] * FONT_SIZE;
+            if (y > -FONT_SIZE) {
+              ctx.fillStyle = pal.lead;
+              ctx.fillText(ch, x, y);
+              ctx.fillStyle = pal.trail;
+              ctx.fillText(GLYPHS[(Math.random() * GLYPHS.length) | 0], x, y - FONT_SIZE);
+            }
+            drops[i] += speeds[i];
+            if (y > innerHeight && Math.random() > 0.975) {
+              drops[i] = -Math.random() * rows * 0.6;
+              speeds[i] = 0.35 + Math.random() * 0.75;
+            }
+          }
+          rafId = requestAnimationFrame(function () {
+            frame(token);
+          });
+        }
+
+        // One static, sparse frame for reduced-motion users.
+        function staticFrame() {
+          ctx.font = FONT_SIZE + "px ui-monospace, monospace";
+          ctx.fillStyle = pal.trail;
+          for (var i = 0; i < cols; i++) {
+            for (var y = 0; y < innerHeight; y += FONT_SIZE * 3) {
+              if (Math.random() > 0.7)
+                ctx.fillText(
+                  GLYPHS[(Math.random() * GLYPHS.length) | 0],
+                  i * FONT_SIZE,
+                  y,
+                );
+            }
+          }
+        }
+
+        function start() {
+          if (rafId) cancelAnimationFrame(rafId);
+          runToken++;
+          resize();
+          if (reduced) staticFrame();
+          else {
+            var tok = runToken;
+            frame(tok);
+          }
+        }
+
+        addEventListener("resize", start, { passive: true });
+        // Re-read the palette (and repaint the base) when the theme changes.
+        try {
+          new MutationObserver(function () {
+            pal = readPalette();
+            ctx.fillStyle = pal.base;
+            ctx.fillRect(0, 0, innerWidth, innerHeight);
+          }).observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: ["data-theme"],
+          });
+        } catch (e) {}
+        start();
       })();
 
       // UTF-8 safe base64 encode
@@ -8065,7 +8250,7 @@
       var vpnRefreshAllBusy = false;
       var vpnAgoTimerStarted = false;
       // User-controlled sort for the table. col: "ping" | "checked"; dir: 1 asc / -1 desc.
-      var vpnSort = { col: "ping", dir: 1 };
+      var vpnSort = { col: "name", dir: 1 };
 
       // Relative "last checked" using the server clock (pingClockSkew) so router
       // vs. browser clock drift doesn't distort it.
@@ -8096,6 +8281,9 @@
       // asc/desc only reshuffles the rows that actually have a value.
       function vpnCompare(a, b) {
         var dir = vpnSort.dir;
+        if (vpnSort.col === "name") {
+          return profileNameCompare(a, b) * dir;
+        }
         if (vpnSort.col === "checked") {
           var ta = (pingResults[a.id] && pingResults[a.id].ts) || 0;
           var tb = (pingResults[b.id] && pingResults[b.id].ts) || 0;
@@ -8682,6 +8870,279 @@
           (p.type || "")
         ).toLowerCase();
       }
+      // Locale-aware alphabetical compare of two profiles by display name
+      // (numeric-aware so "srv2" < "srv10"); id as a stable tiebreak.
+      function profileNameCompare(a, b) {
+        return (
+          (a.name || a.id || "").localeCompare(b.name || b.id || "", undefined, {
+            numeric: true,
+            sensitivity: "base",
+          }) || (a.id || "").localeCompare(b.id || "")
+        );
+      }
+      // Canonical ordering for every profile list in the UI: groups alphabetical
+      // (ungrouped last), names alphabetical within each group. Returns a copy.
+      function sortProfilesForList(list) {
+        return list.slice().sort(function (a, b) {
+          var ga = (a.group || "").trim();
+          var gb = (b.group || "").trim();
+          if (ga !== gb) {
+            if (!ga) return 1;
+            if (!gb) return -1;
+            var g = ga.localeCompare(gb, undefined, {
+              numeric: true,
+              sensitivity: "base",
+            });
+            if (g) return g;
+          }
+          return profileNameCompare(a, b);
+        });
+      }
+
+      // ===== Reusable searchable profile dropdown (DetourCombo) =====
+      // A self-contained combobox that mirrors the main "Профиль" picker: a text
+      // input drives a filterable, alphabetically-grouped dropdown with ping +
+      // health badges and full keyboard navigation. Used for every place a VPN is
+      // chosen (route-map, chain builder) so none of them is a bare <select>. The
+      // selected id is mirrored into a hidden <input id=opts.valueId> so existing
+      // `.value` call sites keep working unchanged.
+      // items shape: [{ id, group, label, search }].
+      function comboItemFromProfile(p) {
+        return {
+          id: p.id,
+          group: (p.group || "").trim(),
+          label: profileItemLabel(p),
+          search: profileSearchText(p),
+        };
+      }
+      function sortComboItems(items) {
+        return items.slice().sort(function (a, b) {
+          var ga = (a.group || "").trim();
+          var gb = (b.group || "").trim();
+          if (ga !== gb) {
+            if (!ga) return 1;
+            if (!gb) return -1;
+            var g = ga.localeCompare(gb, undefined, {
+              numeric: true,
+              sensitivity: "base",
+            });
+            if (g) return g;
+          }
+          return (a.label || "").localeCompare(b.label || "", undefined, {
+            numeric: true,
+            sensitivity: "base",
+          });
+        });
+      }
+      function DetourCombo(mount, opts) {
+        opts = opts || {};
+        var self = this;
+        this.items = [];
+        this.rendered = [];
+        this.activeIdx = -1;
+        this.value = "";
+        this.onChange = opts.onChange || function () {};
+        this.badges = opts.badges !== false;
+        this.emptyText = opts.emptyText || "Ничего не найдено";
+        mount.classList.add("profile-combobox");
+        mount.innerHTML =
+          '<input type="hidden" />' +
+          '<input type="text" class="profile-search-input" autocomplete="off" ' +
+          'spellcheck="false" role="combobox" aria-autocomplete="list" ' +
+          'aria-expanded="false" />' +
+          '<span class="profile-combobox-caret">▾</span>' +
+          '<div class="profile-dropdown" role="listbox"></div>';
+        this.hidden = mount.children[0];
+        this.input = mount.children[1];
+        this.caret = mount.children[2];
+        this.dd = mount.children[3];
+        if (opts.valueId) this.hidden.id = opts.valueId;
+        this.input.placeholder = opts.placeholder || "Поиск или выбор…";
+        this.input.addEventListener("input", function () {
+          self.render(self.input.value);
+          self.open();
+        });
+        this.input.addEventListener("focus", function () {
+          self.render("");
+          self.open();
+          self.input.select();
+        });
+        this.input.addEventListener("blur", function () {
+          setTimeout(function () {
+            if (mount.contains(document.activeElement)) return;
+            if (self.dd.classList.contains("open")) self.close(true);
+          }, 120);
+        });
+        this.input.addEventListener("keydown", function (e) {
+          self.onKeydown(e);
+        });
+        this.caret.addEventListener("mousedown", function (e) {
+          e.preventDefault();
+        });
+        this.caret.addEventListener("click", function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (self.dd.classList.contains("open")) self.close(true);
+          else {
+            self.input.focus();
+            self.render("");
+            self.open();
+            self.input.select();
+          }
+        });
+        mount._combo = this;
+      }
+      DetourCombo.prototype.itemById = function (id) {
+        for (var i = 0; i < this.items.length; i++)
+          if (this.items[i].id === id) return this.items[i];
+        return null;
+      };
+      DetourCombo.prototype.collapsedLabel = function (id) {
+        var it = this.itemById(id);
+        if (!it) return "";
+        return (it.group ? "[" + it.group + "] " : "") + it.label;
+      };
+      DetourCombo.prototype.getValue = function () {
+        return this.hidden.value;
+      };
+      DetourCombo.prototype.setValue = function (id, fire) {
+        this.value = id || "";
+        this.hidden.value = this.value;
+        this.input.value = this.collapsedLabel(this.value);
+        if (fire) this.onChange(this.value);
+      };
+      // Replace the candidate list; keep the current selection if still present,
+      // else fall back to the first item ("" when the list is empty).
+      DetourCombo.prototype.setItems = function (items) {
+        this.items = sortComboItems(items || []);
+        var keep =
+          this.value && this.itemById(this.value)
+            ? this.value
+            : this.items[0]
+              ? this.items[0].id
+              : "";
+        this.setValue(keep, false);
+        if (this.dd.classList.contains("open")) this.render(this.input.value);
+      };
+      DetourCombo.prototype.open = function () {
+        this.dd.classList.add("open");
+        this.input.setAttribute("aria-expanded", "true");
+      };
+      DetourCombo.prototype.close = function (restore) {
+        this.dd.classList.remove("open");
+        this.input.setAttribute("aria-expanded", "false");
+        if (restore) this.input.value = this.collapsedLabel(this.value);
+      };
+      DetourCombo.prototype.choose = function (id) {
+        this.setValue(id, true);
+        this.close(false);
+        this.input.blur();
+      };
+      DetourCombo.prototype.setActive = function (idx) {
+        this.activeIdx = idx;
+        var els = this.dd.querySelectorAll(".profile-dropdown-item");
+        for (var i = 0; i < els.length; i++) {
+          if (i === idx) {
+            els[i].classList.add("active");
+            els[i].scrollIntoView({ block: "nearest" });
+          } else els[i].classList.remove("active");
+        }
+      };
+      DetourCombo.prototype.render = function (query) {
+        var self = this;
+        this.dd.innerHTML = "";
+        this.rendered = [];
+        var q = (query || "").trim().toLowerCase();
+        var matches = this.items.filter(function (it) {
+          return !q || it.search.indexOf(q) >= 0;
+        });
+        if (!matches.length) {
+          var empty = document.createElement("div");
+          empty.className = "profile-dropdown-empty";
+          empty.textContent = this.items.length
+            ? "Ничего не найдено"
+            : this.emptyText;
+          this.dd.appendChild(empty);
+          this.activeIdx = -1;
+          return;
+        }
+        var lastGroup = null,
+          selIdx = -1;
+        matches.forEach(function (it) {
+          var g = (it.group || "").trim();
+          if (g !== lastGroup) {
+            lastGroup = g;
+            var head = document.createElement("div");
+            head.className = "profile-dropdown-group";
+            head.textContent = g || "Без группы";
+            self.dd.appendChild(head);
+          }
+          var idx = self.rendered.length;
+          var item = document.createElement("div");
+          item.className =
+            "profile-dropdown-item" + (it.id === self.value ? " selected" : "");
+          item.setAttribute("role", "option");
+          item.innerHTML =
+            '<span class="pdi-label">' +
+            highlightMatch(it.label, query) +
+            "</span>" +
+            (self.badges ? pingBadgeHtml(it.id) + healthBadgeHtml(it.id) : "");
+          item.addEventListener("mousedown", function (e) {
+            e.preventDefault();
+          });
+          item.addEventListener(
+            "click",
+            (function (id) {
+              return function () {
+                self.choose(id);
+              };
+            })(it.id),
+          );
+          item.addEventListener(
+            "mouseenter",
+            (function (i) {
+              return function () {
+                self.setActive(i);
+              };
+            })(idx),
+          );
+          self.dd.appendChild(item);
+          if (it.id === self.value) selIdx = idx;
+          self.rendered.push(it);
+        });
+        this.setActive(selIdx >= 0 ? selIdx : 0);
+      };
+      DetourCombo.prototype.onKeydown = function (e) {
+        var open = this.dd.classList.contains("open");
+        var n = this.rendered.length;
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          if (!open) {
+            this.render("");
+            this.open();
+            return;
+          }
+          if (n) this.setActive((this.activeIdx + 1) % n);
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          if (!open) {
+            this.render("");
+            this.open();
+            return;
+          }
+          if (n) this.setActive((this.activeIdx - 1 + n) % n);
+        } else if (e.key === "Enter") {
+          if (open && this.activeIdx >= 0 && this.rendered[this.activeIdx]) {
+            e.preventDefault();
+            this.choose(this.rendered[this.activeIdx].id);
+          }
+        } else if (e.key === "Escape") {
+          if (open) {
+            e.preventDefault();
+            this.close(true);
+          }
+        }
+      };
       // Escape text, then wrap query occurrences in <mark> (both in escaped space).
       function highlightMatch(text, query) {
         var esc = escapeHtml(text);
@@ -8805,9 +9266,7 @@
         dd.innerHTML = "";
         profileComboRendered = [];
         var q = (query || "").trim().toLowerCase();
-        var ordered = q
-          ? profileComboVisible
-          : sortProfilesByGroup(profileComboVisible);
+        var ordered = sortProfilesForList(profileComboVisible);
         var matches = ordered.filter(function (p) {
           return !q || profileSearchText(p).indexOf(q) >= 0;
         });
@@ -11056,7 +11515,7 @@
       }
       function renderBulkProfilesList() {
         var list = document.getElementById("bulk-profiles-list");
-        var visible = bulkVisibleProfiles();
+        var visible = sortProfilesForList(bulkVisibleProfiles());
         if (!visible.length) {
           list.innerHTML =
             '<div class="empty-state">Нет профилей под текущий фильтр.</div>';
@@ -11424,16 +11883,20 @@
         document.getElementById("chain-modal").style.display = "none";
       }
 
+      var chainCombo = null;
       function syncChainProfilePicker() {
-        var picker = document.getElementById("chain-profile-picker");
-        picker.innerHTML = "";
-        currentProfiles.forEach(function (profile) {
-          if (editingChain.indexOf(profile.id) >= 0) return;
-          var opt = document.createElement("option");
-          opt.value = profile.id;
-          opt.textContent = profile.name + " (" + profile.type + ")";
-          picker.appendChild(opt);
+        var mount = document.getElementById("chain-profile-combo");
+        if (!mount) return;
+        if (!chainCombo)
+          chainCombo = new DetourCombo(mount, {
+            valueId: "chain-profile-picker",
+            placeholder: "Поиск профиля для цепочки…",
+            emptyText: "Нет доступных профилей",
+          });
+        var avail = currentProfiles.filter(function (profile) {
+          return editingChain.indexOf(profile.id) < 0;
         });
+        chainCombo.setItems(avail.map(comboItemFromProfile));
       }
 
       function renderChainEditor() {
@@ -13487,36 +13950,28 @@
         }
       }
 
+      var routeCombo = null;
       function renderRouteProfileSelect() {
-        var sel = document.getElementById("route-profile-select");
-        if (!sel) return;
-        sel.innerHTML = "";
-        if (!currentProfiles.length) {
-          var o = document.createElement("option");
-          o.value = "";
-          o.textContent = "(нет профилей)";
-          sel.appendChild(o);
-          return;
-        }
+        var mount = document.getElementById("route-profile-combo");
+        if (!mount) return;
+        if (!routeCombo)
+          routeCombo = new DetourCombo(mount, {
+            valueId: "route-profile-select",
+            placeholder: "Поиск профиля для маршрута…",
+            emptyText: currentProfiles.length
+              ? "Свободных профилей нет"
+              : "Нет профилей",
+          });
+        routeCombo.emptyText = currentProfiles.length
+          ? "Свободных профилей нет"
+          : "Нет профилей";
         var usedIds = routeRules.map(function (rule) {
           return rule.id;
         });
         var available = currentProfiles.filter(function (p) {
           return usedIds.indexOf(p.id) === -1;
         });
-        if (!available.length) {
-          var busy = document.createElement("option");
-          busy.value = "";
-          busy.textContent = "(свободных профилей нет)";
-          sel.appendChild(busy);
-          return;
-        }
-        available.forEach(function (p) {
-          var o = document.createElement("option");
-          o.value = p.id;
-          o.textContent = (p.name || p.id) + " (" + (p.type || "?") + ")";
-          sel.appendChild(o);
-        });
+        routeCombo.setItems(available.map(comboItemFromProfile));
         renderRouteRules();
       }
 
