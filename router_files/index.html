@@ -15132,7 +15132,7 @@
           '<span class="helper-text">Загрузка…</span>';
         await loadChains();
         await refreshWarpDevices();
-        syncWarpViaPicker();
+        syncWarpViaPicker(true);
         renderWarpList();
       }
       function closeWarpModal() {
@@ -15147,7 +15147,11 @@
       // цепочек, уже кончающихся на WARP — регистрировать WARP «через WARP» незачем).
       // Для профиля значение комбобокса = его id; для цепочки = CSV её хопов, который
       // бэкенд принимает как есть.
-      function syncWarpViaPicker() {
+      // resetDefault=true (на каждом открытии диалога) — предвыбрать ТЕКУЩИЙ
+      // подключённый VPN, чтобы выбор всегда отражал актуальное подключение, а не
+      // залипшее прошлое значение. WARP чаще всего и регистрируют «на основе» того,
+      // что сейчас работает.
+      function syncWarpViaPicker(resetDefault) {
         var mount = document.getElementById("warp-via-combo");
         if (!mount) return;
         if (!warpViaCombo)
@@ -15173,9 +15177,22 @@
           });
         });
         warpViaCombo.setItems(items);
-        // Разумный дефолт — последний хоп активной цепочки, если это не WARP.
+
+        // Текущий подключённый VPN = последний хоп активной цепочки (фактический
+        // выход); loadProfiles кладёт его в currentActiveProfileId.
+        var connected = currentActiveProfileId;
+        if (connected && isWarpProfileId(connected)) connected = "";
+        var connectedInList =
+          connected &&
+          items.some(function (it) {
+            return it.id === connected;
+          });
         var cur = document.getElementById("warp-via-select").value;
-        if (!cur && currentActiveChain.length) {
+        if ((resetDefault || !cur) && connectedInList) {
+          warpViaCombo.setValue(connected);
+        } else if (!cur && currentActiveChain.length) {
+          // Фолбэк: активный профиль почему-то не в списке (напр. сам WARP) —
+          // берём последний не-WARP хоп активной цепочки.
           var last = currentActiveChain[currentActiveChain.length - 1];
           if (last && !isWarpProfileId(last)) warpViaCombo.setValue(last);
         }
@@ -15392,7 +15409,7 @@
             await loadProfiles();
             await refreshWarpDevices();
             renderWarpList();
-            syncWarpViaPicker();
+            syncWarpViaPicker(true);
             return;
           }
           if (last.state === "error") {
