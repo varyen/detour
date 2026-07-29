@@ -1622,6 +1622,56 @@
         color: var(--text-muted);
       }
 
+      /* ===== СОХРАНЁННЫЕ ЦЕПОЧКИ ===== */
+      .saved-chains-list {
+        margin-top: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .saved-chains-title {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-muted);
+        margin-bottom: 2px;
+      }
+      .saved-chain-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--bg-elev-solid);
+      }
+      .saved-chain-row.active {
+        border-color: var(--accent);
+      }
+      .saved-chain-info {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .saved-chain-name {
+        font-weight: 600;
+        font-size: 13px;
+      }
+      .saved-chain-hops {
+        font-size: 11px;
+        color: var(--text-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .saved-chain-actions {
+        display: flex;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+
       /* ===== ВСЕ ЧЕРЕЗ VPN ===== */
       .allvpn-row {
         display: flex;
@@ -3168,6 +3218,32 @@
                 </svg>
                 Вернуть предупреждение о WAN
               </button>
+              <!-- Cloudflare WARP — обе платформы (WireGuard из нашего фида). -->
+              <div class="hdr-menu-sep"></div>
+              <div class="hdr-menu-title">Cloudflare WARP</div>
+              <button
+                class="hdr-menu-item"
+                role="menuitem"
+                onclick="hdrMenuRun(openWarpModal)"
+                title="Зарегистрировать бесплатное устройство WARP через выбранный VPN и получить готовую цепочку «VPN → WARP»"
+              >
+                <svg
+                  class="i"
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path
+                    d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"
+                  />
+                </svg>
+                Регистрация WARP
+              </button>
               <!-- HTTPS/LE cert — OpenWrt only; hidden on Keenetic (uses KeenDNS). -->
               <div id="hdr-https-group" style="display: contents">
                 <div class="hdr-menu-sep"></div>
@@ -4117,6 +4193,60 @@
         </div>
       </div>
 
+      <!-- ===== CLOUDFLARE WARP (регистрация через выбранный VPN) ===== -->
+      <div
+        class="modal-overlay"
+        id="warp-modal"
+        style="display: none"
+        onclick="backdropClose(event, closeWarpModal)"
+      >
+        <div class="modal" style="max-width: 600px">
+          <h3>☁ Регистрация Cloudflare WARP</h3>
+          <p class="helper-text-block">
+            WARP — бесплатный WireGuard-туннель Cloudflare. Он ставится
+            <b>последним хопом</b> после вашего VPN: клиент → VPN → WARP → сайт.
+            Выходной адрес становится адресом Cloudflare, а не «сервера в
+            дата-центре», — это и требуется, чтобы заработали ИИ-сервисы (Gemini,
+            AI&nbsp;Studio), отказывающие хостингам.
+          </p>
+          <p class="helper-text-block">
+            Выберите VPN, через который регистрироваться. Cloudflare не отвечает
+            на прямые запросы из России, поэтому запрос идёт
+            <b>через этот VPN</b> — и учётка привязывается именно к нему. Панель
+            сразу сохранит готовую цепочку «выбранный&nbsp;VPN&nbsp;→&nbsp;WARP».
+            Для разных выходов регистрируйте отдельно — так можно собрать
+            несколько цепочек, ни разу не переключая активный VPN.
+          </p>
+          <div class="editor-section" style="margin-bottom: 14px">
+            <label>VPN для регистрации (окружение)</label>
+            <div id="warp-via-combo" class="profile-combobox"></div>
+            <div class="helper-text mt-8">
+              Поднимается во временном экземпляре только на время запроса —
+              активный трафик и текущий профиль не трогаются. Занимает 15–40&nbsp;с.
+            </div>
+            <div class="flex-gap mt-12">
+              <button
+                class="btn primary"
+                id="warp-register-btn"
+                onclick="warpRegister()"
+              >
+                Зарегистрировать через выбранный VPN
+              </button>
+            </div>
+            <div id="warp-status" class="helper-text mt-12"></div>
+          </div>
+          <div class="editor-section">
+            <label>Зарегистрированные устройства WARP</label>
+            <div id="warp-list" class="mt-8">
+              <span class="helper-text">Загрузка…</span>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn" onclick="closeWarpModal()">Закрыть</button>
+          </div>
+        </div>
+      </div>
+
       <!-- ===== HTTPS / LET'S ENCRYPT CERTIFICATE (settings under the gear) ===== -->
       <div
         class="modal-overlay"
@@ -4732,6 +4862,8 @@
               <div class="chain-hint">
                 Порядок: Клиент → VPN1/Proxy1 → VPN2/Proxy2 → Интернет
               </div>
+              <!-- Сохранённые цепочки: включаются одним кликом, как профиль. -->
+              <div id="sb-chains-list" class="saved-chains-list"></div>
             </div>
 
             <div class="allvpn-row" id="sb-allvpn-row">
@@ -6320,7 +6452,7 @@
           <button
             class="modal-tab"
             data-panel="modal-warp"
-            onclick="switchModalTab(this, 'modal-warp'); refreshWarpPanel()"
+            onclick="switchModalTab(this, 'modal-warp')"
           >
             ☁ WARP
           </button>
@@ -6537,20 +6669,20 @@
             становится адресом Cloudflare — это то, что обычно требуется, чтобы
             заработали ИИ-сервисы (Gemini, AI Studio), отказывающие хостингам.
             <br /><br />
-            Часть сервисов, наоборот, режет диапазоны Cloudflare, поэтому
-            надёжнее назначить WARP <b>точечно</b> в «Карте маршрутов» на нужные
-            домены (с галкой «через цепочку»), а не гнать через него весь трафик.
-            <br /><br />
-            Регистрация идёт через активный VPN — Cloudflare не отвечает на
-            прямые запросы из России. Занимает 15–40 секунд.
+            У WARP нет ссылки-конфига: устройство регистрируется на роутере через
+            выбранный VPN (Cloudflare не отвечает на прямые запросы из России), и
+            панель сразу собирает готовую цепочку «VPN → WARP». Поэтому регистрация
+            вынесена в отдельный диалог.
           </div>
-          <div id="warp-list" class="helper-text"></div>
           <div class="flex-gap mt-12">
-            <button class="btn" id="warp-register-btn" onclick="warpRegister()">
-              Зарегистрировать устройство
+            <button
+              class="btn primary"
+              type="button"
+              onclick="closeProfileModal(); openWarpModal();"
+            >
+              ☁ Открыть регистрацию WARP
             </button>
           </div>
-          <div id="warp-status" class="helper-text mt-12"></div>
         </div>
         <div class="modal-panel" id="modal-proxy">
           <div class="form-grid">
@@ -6719,6 +6851,13 @@
         <div id="chain-builder-list" class="chain-builder-list"></div>
         <div class="modal-footer">
           <button class="btn" onclick="closeChainModal()">Отмена</button>
+          <button
+            class="btn"
+            onclick="saveCurrentChain()"
+            title="Сохранить эту цепочку под именем, чтобы включать её одним кликом и назначать на домены"
+          >
+            💾 Сохранить
+          </button>
           <button class="btn primary" onclick="applyChainFromModal()">
             ✓ Применить цепочку
           </button>
@@ -6791,6 +6930,7 @@
       var pendingAutoswitchFlags = Object.create(null);
       var pendingSpeedcheckFlags = Object.create(null);
       var currentActiveChain = [];
+      var currentChains = [];
       var editingChain = [];
       var lastParsedProfileType = "";
       var currentEditingProfileId = "";
@@ -8372,6 +8512,19 @@
       // ===== PROFILES =====
       var currentActiveProfileId = "";
 
+      // Сохранённые цепочки (именованный порядок профилей). Живут отдельно от
+      // профилей, но в том же пространстве id — их можно активировать и назначать
+      // целью в «Карте маршрутов» наравне с профилем.
+      async function loadChains() {
+        try {
+          var d = await api("chains_list");
+          currentChains = Array.isArray(d.chains) ? d.chains : [];
+        } catch (e) {
+          currentChains = [];
+        }
+        return currentChains;
+      }
+
       async function loadProfiles() {
         try {
           var d = await api("profiles_list");
@@ -8411,11 +8564,15 @@
               : d.active
                 ? [d.active]
                 : currentActiveChain;
+          // Цепочки нужны рядом с профилями (список + пикер маршрута), поэтому
+          // подтягиваем их в том же цикле загрузки.
+          await loadChains();
           populateGroupsUI();
           renderProfileSelect();
           renderChainPreview(currentActiveChain);
           renderRouteProfileSelect();
           renderRouteRules();
+          renderChainsList();
         } catch (e) {
           if (e.message !== "Not authenticated")
             console.error("Profiles error:", e);
@@ -9777,6 +9934,35 @@
           label: profileItemLabel(p),
           search: profileSearchText(p),
         };
+      }
+      // Цепочку можно выбрать там же, где профиль (цель маршрута): в комбобоксе она
+      // идёт отдельной группой «Цепочки», а её id живёт в одном пространстве с id
+      // профилей, поэтому дальше по коду обрабатывается единообразно.
+      function comboItemFromChain(c) {
+        var hops = Array.isArray(c.hops) ? c.hops : [];
+        var names = hops.map(function (h) {
+          var m = getProfileMeta(h);
+          return m ? m.name : h;
+        });
+        return {
+          id: c.id,
+          group: "Цепочки",
+          label: "🔗 " + (c.name || c.id),
+          search: (
+            (c.name || "") +
+            " " +
+            c.id +
+            " " +
+            names.join(" ") +
+            " " +
+            hops.join(" ")
+          ).toLowerCase(),
+        };
+      }
+      function isChainId(id) {
+        return currentChains.some(function (c) {
+          return c.id === id;
+        });
       }
       function sortComboItems(items) {
         return items.slice().sort(function (a, b) {
@@ -13169,6 +13355,105 @@
         el.innerHTML = parts.join("");
       }
 
+      // Активна ли сейчас именно эта сохранённая цепочка (совпадает порядок хопов).
+      function chainMatchesActive(chain) {
+        var hops = Array.isArray(chain.hops) ? chain.hops : [];
+        return (
+          hops.length > 0 && hops.join(",") === currentActiveChain.join(",")
+        );
+      }
+
+      // Сохранённые цепочки в основном экране: включаются одним кликом, как профиль.
+      function renderChainsList() {
+        var el = document.getElementById("sb-chains-list");
+        if (!el) return;
+        if (!currentChains.length) {
+          el.innerHTML = "";
+          return;
+        }
+        var rows = currentChains
+          .slice()
+          .sort(function (a, b) {
+            return (a.name || a.id).localeCompare(b.name || b.id, undefined, {
+              numeric: true,
+              sensitivity: "base",
+            });
+          })
+          .map(function (c) {
+            var hops = Array.isArray(c.hops) ? c.hops : [];
+            var preview = hops
+              .map(function (h) {
+                var m = getProfileMeta(h);
+                return escapeHtml(m ? m.name : h);
+              })
+              .join(" → ");
+            var active = chainMatchesActive(c);
+            return (
+              '<div class="saved-chain-row' +
+              (active ? " active" : "") +
+              '">' +
+              '<div class="saved-chain-info">' +
+              '<span class="saved-chain-name">🔗 ' +
+              escapeHtml(c.name || c.id) +
+              (active ? ' <span class="tag">активна</span>' : "") +
+              "</span>" +
+              '<span class="saved-chain-hops">' +
+              preview +
+              "</span>" +
+              "</div>" +
+              '<div class="saved-chain-actions">' +
+              (active
+                ? ""
+                : '<button class="btn" onclick="activateSavedChain(\'' +
+                  c.id +
+                  "')\">Включить</button>") +
+              '<button class="btn danger" onclick="deleteSavedChain(\'' +
+              c.id +
+              "')\">✕</button>" +
+              "</div></div>"
+            );
+          });
+        el.innerHTML =
+          '<div class="saved-chains-title">Сохранённые цепочки</div>' +
+          rows.join("");
+      }
+
+      async function activateSavedChain(id) {
+        var chain = currentChains.filter(function (c) {
+          return c.id === id;
+        })[0];
+        if (!chain || !chain.hops || !chain.hops.length) {
+          toast("Цепочка не найдена", "error");
+          return;
+        }
+        try {
+          var d = await api("chain_activate", "POST", chain.hops.join(","));
+          if (d && d.ok === false)
+            throw new Error(d.error || "не удалось применить");
+          toast("Цепочка «" + (chain.name || id) + "» активна", "success");
+          await loadProfiles();
+          await loadStatus();
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      }
+
+      async function deleteSavedChain(id) {
+        var chain = currentChains.filter(function (c) {
+          return c.id === id;
+        })[0];
+        var name = chain ? chain.name || id : id;
+        if (!confirm('Удалить сохранённую цепочку «' + name + '»?')) return;
+        try {
+          var d = await api("chain_delete", "POST", JSON.stringify({ id: id }));
+          if (!d.ok) throw new Error(d.error || "не удалось удалить");
+          toast("Цепочка удалена", "success");
+          await loadProfiles();
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      }
+
       function showChainModal() {
         editingChain = currentActiveChain.length
           ? currentActiveChain.slice()
@@ -13284,6 +13569,45 @@
         } catch (e) {
           if (e.message !== "Not authenticated")
             toast("Ошибка: " + e.message, "error");
+        }
+      }
+
+      // Сохранить собранную цепочку под именем (не применяя). Дальше её можно
+      // включить одним кликом из основного экрана или назначить целью маршрута.
+      async function saveCurrentChain() {
+        if (editingChain.length < 2) {
+          toast("В цепочке должно быть минимум два хопа", "error");
+          return;
+        }
+        var name = prompt(
+          "Название цепочки:",
+          editingChain
+            .map(function (id) {
+              var m = getProfileMeta(id);
+              return m ? m.name : id;
+            })
+            .join(" → "),
+        );
+        if (name === null) return;
+        name = name.trim();
+        if (!name) {
+          toast("Введите название", "error");
+          return;
+        }
+        var id = makeProfileId(name);
+        try {
+          var d = await api(
+            "chain_save",
+            "POST",
+            JSON.stringify({ id: id, name: name, hops: editingChain.slice() }),
+          );
+          if (!d.ok) throw new Error(d.error || "не удалось сохранить");
+          toast("Цепочка «" + name + "» сохранена", "success");
+          await loadChains();
+          renderChainsList();
+          renderRouteProfileSelect();
+        } catch (e) {
+          toast(e.message, "error");
         }
       }
 
@@ -14793,50 +15117,95 @@
       }
 
       // ---- Cloudflare WARP -------------------------------------------------
-      // Профиль создаётся НА РОУТЕРЕ (detour-warp register), а не в браузере:
-      // регистрация требует похода на api.cloudflareclient.com через активный VPN.
-      // Поэтому вкладка не участвует в общем «Сохранить», а работает своей кнопкой
-      // и опрашивает warp_status — как выпуск сертификата.
+      // Устройство создаётся НА РОУТЕРЕ (detour-warp register): регистрация требует
+      // похода на api.cloudflareclient.com через выбранный VPN (из РФ напрямую CF
+      // молчит). Поэтому диалог не участвует в общем «Сохранить профиль», а работает
+      // своей кнопкой и опрашивает warp_status — как выпуск сертификата. Одновременно
+      // роутер сохраняет готовую цепочку «выбранный VPN → WARP».
       var warpPollTimer = null;
+      var warpViaCombo = null;
 
-      async function refreshWarpPanel() {
-        var list = document.getElementById("warp-list");
-        if (!list) return;
-        try {
-          var s = await api("warp_status");
-          var profiles = Array.isArray(s.profiles) ? s.profiles : [];
-          if (!profiles.length) {
-            list.innerHTML =
-              '<span style="color:var(--text-dim)">Устройств WARP пока нет.</span>';
-            return;
-          }
-          list.innerHTML =
-            "<b>Уже зарегистрированы:</b><br />" +
-            profiles
-              .map(function (p) {
-                return (
-                  "• " +
-                  escapeHtml(p.name || p.id) +
-                  ' <span style="color:var(--text-dim)">(' +
-                  escapeHtml(p.id) +
-                  (p.address ? ", " + escapeHtml(p.address) : "") +
-                  ")</span>"
-                );
-              })
-              .join("<br />");
-        } catch (e) {
-          list.innerHTML = "";
+      async function openWarpModal() {
+        document.getElementById("warp-modal").style.display = "flex";
+        document.getElementById("warp-status").innerHTML = "";
+        document.getElementById("warp-list").innerHTML =
+          '<span class="helper-text">Загрузка…</span>';
+        await loadChains();
+        await refreshWarpDevices();
+        syncWarpViaPicker();
+        renderWarpList();
+      }
+      function closeWarpModal() {
+        if (warpPollTimer) {
+          clearTimeout(warpPollTimer);
+          warpPollTimer = null;
+        }
+        document.getElementById("warp-modal").style.display = "none";
+      }
+
+      // Окружение = один VPN-профиль ИЛИ сохранённая цепочка (кроме самих WARP-ов и
+      // цепочек, уже кончающихся на WARP — регистрировать WARP «через WARP» незачем).
+      // Для профиля значение комбобокса = его id; для цепочки = CSV её хопов, который
+      // бэкенд принимает как есть.
+      function syncWarpViaPicker() {
+        var mount = document.getElementById("warp-via-combo");
+        if (!mount) return;
+        if (!warpViaCombo)
+          warpViaCombo = new DetourCombo(mount, {
+            valueId: "warp-via-select",
+            placeholder: "Поиск VPN или цепочки…",
+            emptyText: "Нет доступных VPN",
+          });
+        var items = currentProfiles
+          .filter(function (p) {
+            return p.type !== "wireguard" || !isWarpProfile(p);
+          })
+          .map(comboItemFromProfile);
+        currentChains.forEach(function (c) {
+          var hops = Array.isArray(c.hops) ? c.hops : [];
+          if (!hops.length) return;
+          if (isWarpProfileId(hops[hops.length - 1])) return; // уже ...→WARP
+          items.push({
+            id: hops.join(","),
+            group: "Цепочки",
+            label: c.name || c.id,
+            search: (c.name || "") + " " + c.id + " " + hops.join(" "),
+          });
+        });
+        warpViaCombo.setItems(items);
+        // Разумный дефолт — последний хоп активной цепочки, если это не WARP.
+        var cur = document.getElementById("warp-via-select").value;
+        if (!cur && currentActiveChain.length) {
+          var last = currentActiveChain[currentActiveChain.length - 1];
+          if (last && !isWarpProfileId(last)) warpViaCombo.setValue(last);
         }
       }
 
+      function isWarpProfile(p) {
+        return !!(p && (p.warp || /(^|_)warp/i.test(p.id || "")));
+      }
+      function isWarpProfileId(id) {
+        var p = getProfileMeta(id);
+        return p ? isWarpProfile(p) : /(^|_)warp/i.test(id || "");
+      }
+
       async function warpRegister() {
+        var via = document.getElementById("warp-via-select").value;
         var btn = document.getElementById("warp-register-btn");
         var status = document.getElementById("warp-status");
+        if (!via) {
+          toast("Выберите VPN, через который регистрироваться", "error");
+          return;
+        }
         btn.disabled = true;
         status.innerHTML =
-          '<span style="color:var(--text-dim)">Регистрация устройства… нужен работающий VPN. Это 15–40 секунд.</span>';
+          '<span style="color:var(--text-dim)">Регистрация через выбранный VPN… это 15–40 секунд.</span>';
         try {
-          var resp = await api("warp_register", "POST", "{}");
+          var resp = await api(
+            "warp_register",
+            "POST",
+            JSON.stringify({ via: via }),
+          );
           if (!resp.ok) throw new Error(resp.error || "не удалось запустить");
           pollWarpStatus(0);
         } catch (e) {
@@ -14848,7 +15217,153 @@
         }
       }
 
-      // Опрос warp_status до состояния done/error или таймаута (~90 с).
+      async function warpVerify(id) {
+        var btn = document.getElementById("warp-register-btn");
+        var status = document.getElementById("warp-status");
+        btn.disabled = true;
+        status.innerHTML =
+          '<span style="color:var(--text-dim)">Проверка цепочки через временный экземпляр…</span>';
+        try {
+          var resp = await api(
+            "warp_verify",
+            "POST",
+            JSON.stringify({ id: id }),
+          );
+          if (!resp.ok) throw new Error(resp.error || "не удалось запустить");
+          pollWarpStatus(0);
+        } catch (e) {
+          btn.disabled = false;
+          status.innerHTML =
+            '<span style="color:var(--red)">Ошибка: ' +
+            escapeHtml(e.message) +
+            "</span>";
+        }
+      }
+
+      async function warpDelete(id) {
+        var dev = warpDevices.filter(function (d) {
+          return d.id === id;
+        })[0];
+        var name = dev ? dev.name || id : id;
+        if (
+          !confirm(
+            'Удалить WARP-устройство «' +
+              name +
+              '»? Сохранённая цепочка с ним тоже перестанет работать.',
+          )
+        )
+          return;
+        try {
+          var resp = await api("warp_delete", "POST", JSON.stringify({ id: id }));
+          if (!resp.ok) throw new Error(resp.error || "не удалось удалить");
+          toast("WARP-устройство удалено", "success");
+          await loadChains();
+          await loadProfiles();
+          renderWarpList();
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      }
+
+      // Активировать цепочку «VPN → WARP» целиком (тот же путь, что и обычная
+      // активация цепочки — её хопы это обычный CSV).
+      async function warpActivateChain(chainId) {
+        var chain = currentChains.filter(function (c) {
+          return c.id === chainId;
+        })[0];
+        if (!chain || !chain.hops || !chain.hops.length) {
+          toast("Цепочка не найдена", "error");
+          return;
+        }
+        try {
+          var d = await api(
+            "chain_activate",
+            "POST",
+            chain.hops.join(","),
+          );
+          if (d && d.ok === false)
+            throw new Error(d.error || "не удалось применить");
+          toast("Цепочка «" + (chain.name || chainId) + "» активна", "success");
+          await loadProfiles();
+          renderWarpList();
+        } catch (e) {
+          toast(e.message, "error");
+        }
+      }
+
+      function renderWarpList() {
+        var list = document.getElementById("warp-list");
+        if (!list) return;
+        var profiles = warpDevices;
+        if (!profiles.length) {
+          list.innerHTML =
+            '<span class="helper-text">Устройств WARP пока нет — зарегистрируйте первое.</span>';
+          return;
+        }
+        list.innerHTML = profiles
+          .map(function (p) {
+            var line =
+              '<b>' +
+              escapeHtml(p.name || p.id) +
+              "</b>" +
+              (p.address
+                ? ' <span class="helper-text">' +
+                  escapeHtml(p.address) +
+                  "</span>"
+                : "");
+            var chainLine = p.chain_name
+              ? '<div class="helper-text">Цепочка: ' +
+                escapeHtml(p.chain_name) +
+                "</div>"
+              : '<div class="helper-text" style="color:var(--amber)">Цепочка не сохранена — WARP работает только за VPN.</div>';
+            // id-шники WARP-цепочек и профилей — из безопасного набора
+            // [a-zA-Z0-9._-] (см. next_free_id / sanitize_name), поэтому их можно
+            // инлайнить в onclick без экранирования. Имя внутрь не передаём —
+            // warpDelete берёт его из warpDevices, чтобы кавычки в названии не рвали
+            // разметку.
+            var btns = [];
+            if (p.chain_id)
+              btns.push(
+                '<button class="btn" onclick="warpActivateChain(\'' +
+                  p.chain_id +
+                  "')\">Активировать</button>",
+              );
+            btns.push(
+              '<button class="btn" onclick="warpVerify(\'' +
+                (p.chain_id || p.id) +
+                "')\">Проверить</button>",
+            );
+            btns.push(
+              '<button class="btn danger" onclick="warpDelete(\'' +
+                p.id +
+                "')\">Удалить</button>",
+            );
+            return (
+              '<div class="editor-row" style="flex-direction:column;align-items:stretch;gap:6px;margin-bottom:8px">' +
+              "<div>" +
+              line +
+              "</div>" +
+              chainLine +
+              '<div class="flex-gap">' +
+              btns.join("") +
+              "</div></div>"
+            );
+          })
+          .join("");
+      }
+
+      var warpDevices = [];
+      async function refreshWarpDevices() {
+        try {
+          var s = await api("warp_status");
+          warpDevices = Array.isArray(s.profiles) ? s.profiles : [];
+        } catch (e) {
+          warpDevices = [];
+        }
+      }
+
+      // Опрос warp_status до состояния done/error или таймаута (~90 с). Общий для
+      // регистрации и проверки — обе пишут один и тот же файл состояния.
       async function pollWarpStatus(attempt) {
         var status = document.getElementById("warp-status");
         var btn = document.getElementById("warp-register-btn");
@@ -14856,7 +15371,7 @@
         if (attempt > 45) {
           btn.disabled = false;
           status.innerHTML =
-            '<span style="color:var(--red)">Регистрация не ответила вовремя. Проверьте, что VPN включён, и попробуйте ещё раз.</span>';
+            '<span style="color:var(--red)">Не ответило вовремя. Проверьте, что выбранный VPN работает, и попробуйте ещё раз.</span>';
           return;
         }
         try {
@@ -14864,12 +15379,20 @@
           var last = s.last || {};
           if (last.state === "done") {
             btn.disabled = false;
+            var extra = last.chain
+              ? " Цепочка сохранена — её можно включить кнопкой «Активировать» ниже или назначить на домены в «Карте маршрутов»."
+              : " Профиль добавлен.";
             status.innerHTML =
               '<span style="color:var(--green)">Готово. ' +
               escapeHtml(last.message || "") +
-              "</span><br /><span style=\"color:var(--text-dim)\">Профиль добавлен. Поставьте его последним в цепочке или назначьте на домены в «Карте маршрутов» с галкой «через цепочку».</span>";
-            await refreshWarpPanel();
+              "</span><br /><span class=\"helper-text\">" +
+              escapeHtml(extra) +
+              "</span>";
+            await loadChains();
             await loadProfiles();
+            await refreshWarpDevices();
+            renderWarpList();
+            syncWarpViaPicker();
             return;
           }
           if (last.state === "error") {
@@ -14878,8 +15401,10 @@
               '<span style="color:var(--red)">' +
               escapeHtml(last.message || "не удалось") +
               "</span>";
-            await refreshWarpPanel();
+            await loadChains();
             await loadProfiles();
+            await refreshWarpDevices();
+            renderWarpList();
             return;
           }
           if (last.message) {
@@ -16092,10 +16617,19 @@
         var usedIds = routeRules.map(function (rule) {
           return rule.id;
         });
-        var available = currentProfiles.filter(function (p) {
-          return usedIds.indexOf(p.id) === -1;
-        });
-        routeCombo.setItems(available.map(comboItemFromProfile));
+        var available = currentProfiles
+          .filter(function (p) {
+            return usedIds.indexOf(p.id) === -1;
+          })
+          .map(comboItemFromProfile)
+          .concat(
+            currentChains
+              .filter(function (c) {
+                return usedIds.indexOf(c.id) === -1;
+              })
+              .map(comboItemFromChain),
+          );
+        routeCombo.setItems(available);
         renderRouteRules();
       }
 
@@ -16225,14 +16759,17 @@
               renderRouteProfileSelect();
             },
           });
-          var ruleItems = currentProfiles.map(comboItemFromProfile);
+          var ruleItems = currentProfiles
+            .map(comboItemFromProfile)
+            .concat(currentChains.map(comboItemFromChain));
           if (
             rule.id &&
             !currentProfiles.some(function (p) {
               return p.id === rule.id;
-            })
+            }) &&
+            !isChainId(rule.id)
           ) {
-            // Saved profile no longer exists — keep it visible as a stray entry.
+            // Saved target no longer exists — keep it visible as a stray entry.
             ruleItems.push({
               id: rule.id,
               group: "",
@@ -16274,18 +16811,24 @@
           strictLabel.appendChild(strict);
           strictLabel.appendChild(strictText);
 
+          var targetIsChain = isChainId(rule.id);
           var chainLabel = document.createElement("label");
           chainLabel.style.cssText =
             "display:flex;align-items:flex-start;gap:8px;cursor:pointer;";
           var chain = document.createElement("input");
           chain.type = "checkbox";
-          chain.checked = !!rule.viaChain;
+          chain.checked = !targetIsChain && !!rule.viaChain;
+          // Сохранённая цепочка сама задаёт порядок хопов, поэтому «через активную
+          // цепочку» к ней неприменимо — бэкенд это поле для цепочки игнорирует.
+          chain.disabled = targetIsChain;
           chain.onchange = function () {
             rule.viaChain = chain.checked;
           };
           var chainText = document.createElement("span");
-          chainText.textContent =
-            "Через активную цепочку: сначала текущий VPN/прокси, затем выбранный маршрутный VPN/прокси";
+          chainText.textContent = targetIsChain
+            ? "Цель — сохранённая цепочка: порядок хопов уже задан ею (эта опция не применяется)"
+            : "Через активную цепочку: сначала текущий VPN/прокси, затем выбранный маршрутный VPN/прокси";
+          if (targetIsChain) chainLabel.style.opacity = "0.6";
           chainLabel.appendChild(chain);
           chainLabel.appendChild(chainText);
 

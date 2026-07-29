@@ -32,6 +32,7 @@
 
 DETOUR_DIR=/etc/detour
 PROFILES=/etc/sing-box/profiles
+CHAINS=/etc/sing-box/chains.json
 SETTINGS=/etc/sing-box/settings.json
 SINGBOX_BIN=/usr/bin/sing-box
 API_BIN=/www/cgi-bin/detour-api
@@ -46,6 +47,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PLATFORM=keenetic
     DETOUR_DIR=/opt/etc/detour
     PROFILES=/opt/etc/sing-box/profiles
+    CHAINS=/opt/etc/sing-box/chains.json
     SETTINGS=/opt/etc/sing-box/settings.json
     SINGBOX_BIN=/opt/bin/sing-box
     API_BIN=/opt/share/www/cgi-bin/detour-api
@@ -76,10 +78,10 @@ NOW() { _n=$(date +%s 2>/dev/null); case "$_n" in ''|*[!0-9]*) _n=0 ;; esac; pri
 json_escape() { sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr -d '\r\n'; }
 
 # Панель читает этот файл, пока регистрация идёт в фоне (CGI её детачит).
-write_state() { # $1=state $2=message $3=profile-id $4=egress-ip $5=warp-on
+write_state() { # $1=state $2=message $3=profile-id $4=egress-ip $5=warp-on $6=chain-id
     _m=$(printf '%s' "$2" | json_escape)
-    printf '{"ok":true,"state":"%s","message":"%s","id":"%s","ip":"%s","warp":"%s","ts":%s}\n' \
-        "$1" "$_m" "${3-}" "${4-}" "${5-}" "$(NOW)" > "$STATE" 2>/dev/null
+    printf '{"ok":true,"state":"%s","message":"%s","id":"%s","ip":"%s","warp":"%s","chain":"%s","ts":%s}\n' \
+        "$1" "$_m" "${3-}" "${4-}" "${5-}" "${6-}" "$(NOW)" > "$STATE" 2>/dev/null
 }
 
 die() { log "ERROR: $*"; write_state error "$*" "${WID-}"; printf '{"ok":false,"error":"%s"}\n' "$(printf '%s' "$*" | json_escape)"; cleanup; exit 1; }
@@ -128,26 +130,68 @@ active_chain() {
     sed -n 's/.*"active_chain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -1
 }
 
-# Свободный id профиля: warp, warp2, warp3, …
-next_id() {
-    if [ ! -f "$PROFILES/warp.json" ]; then printf 'warp'; return; fi
-    _i=2
+last_hop() { printf '%s' "${1##*,}"; }
+
+profile_display_name() { # $1 = profile id
+    [ -f "$PROFILES/$1.json" ] || { printf '%s' "$1"; return; }
+    lua - "$PROFILES/$1.json" "$1" <<'LUA' 2>/dev/null || printf '%s' "$1"
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); if not f then io.write(arg[2]) return end
+local o = cjson.decode(f:read("*a") or ""); f:close()
+io.write((o and type(o.name) == "string" and o.name ~= "") and o.name or arg[2])
+LUA
+}
+
+# Только чтение chains.json — писать туда имеет право лишь detour-api
+# (chain_store_save), сюда мы ходим через его внутренний CLI chain-save.
+chain_hops_of() { # $1 = chain id
+    [ -f "$CHAINS" ] || return 0
+    lua - "$CHAINS" "$1" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); if not f then return end
+local o = cjson.decode(f:read("*a") or ""); f:close()
+for _, c in ipairs((o or {}).chains or {}) do
+  if c.id == arg[2] and type(c.hops) == "table" then io.write(table.concat(c.hops, ",")) return end
+end
+LUA
+}
+
+# Свободный id: base, base2, base3… $2 = profile|chain (где искать занятость).
+next_free_id() {
+    _base=$(printf '%s' "$1" | cut -c1-48)
+    _i=1
     while [ "$_i" -lt 50 ]; do
-        [ -f "$PROFILES/warp$_i.json" ] || { printf 'warp%s' "$_i"; return; }
+        if [ "$_i" = 1 ]; then _cand="$_base"; else _cand="$_base$_i"; fi
+        if [ "$2" = chain ]; then
+            if [ -z "$(chain_hops_of "$_cand")" ] && [ ! -f "$PROFILES/$_cand.json" ]; then
+                printf '%s' "$_cand"; return
+            fi
+        else
+            [ -f "$PROFILES/$_cand.json" ] || { printf '%s' "$_cand"; return; }
+        fi
         _i=$((_i + 1))
     done
-    printf 'warp%s' "$(NOW)"
+    printf '%s%s' "$_base" "$(NOW)"
 }
 
 # --- register --------------------------------------------------------------
+# $1 — цепочка/профиль, ЧЕРЕЗ который регистрироваться (пусто = активная цепочка).
+# Учётка WARP заводится ОТДЕЛЬНАЯ на каждое окружение: один и тот же приватный
+# ключ, поднятый одновременно за двумя разными выходами (а так бывает — карта
+# маршрутов разводит домены по разным цепочкам), Cloudflare видит как одно
+# устройство в двух местах, и туннель начинает рвать сам себя.
 cmd_register() {
     mkdir -p "$PROFILES" "$(dirname "$STATE")" 2>/dev/null
     mkdir "$LOCK" 2>/dev/null || { printf '{"ok":false,"error":"регистрация уже идёт"}\n'; exit 1; }
     trap 'cleanup' EXIT INT TERM HUP
 
-    WID=$(next_id)
+    VIA=$(printf '%s' "$1" | tr -cd 'A-Za-z0-9_.,-')
+    [ -n "$VIA" ] || VIA=$(active_chain)
+    VIA_LAST=$(last_hop "$VIA")
+    VIA_NAME=$(profile_display_name "$VIA_LAST")
+    WID=$(next_free_id "warp_$VIA_LAST" profile)
     write_state running "Генерация ключей" "$WID"
-    log "register: id=$WID platform=$PLATFORM"
+    log "register: id=$WID via='$VIA' platform=$PLATFORM"
 
     command -v curl >/dev/null 2>&1 || die "нужен curl"
     [ -x "$SINGBOX_BIN" ] || die "sing-box не установлен"
@@ -163,17 +207,13 @@ cmd_register() {
     BODY="{\"key\":\"$PUB\",\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$TOS\",\"model\":\"PC\",\"serial_number\":\"\",\"locale\":\"en_US\"}"
     REG="/tmp/detour-warp-reg.$$.json"
 
-    # 1) Прямой путь — работает там, где CF не заблокирован.
-    write_state running "Регистрация устройства" "$WID"
-    reg_curl "" "$BODY" > "$REG" 2>/dev/null
-    VIA="напрямую"
-    if ! reg_valid "$REG"; then
-        # 2) Через активную цепочку. Это основной путь: из РФ CF-API молчит.
-        CHAIN=$(active_chain)
-        [ -n "$CHAIN" ] || die "CF недоступен напрямую, а активной цепочки VPN нет — включите VPN и повторите"
-        log "register: direct failed, retrying via chain '$CHAIN'"
-        write_state running "Регистрация через VPN" "$WID"
-        proxy_up "$CHAIN" || die "не удалось поднять временный прокси на активной цепочке"
+    # Регистрируемся ИМЕННО через выбранное окружение. Учётка привязывается к
+    # тому выходу, за которым потом будет жить: параметры, выданные Cloudflare с
+    # российского адреса, для схемы «VPN → WARP» бесполезны. Прямой путь остаётся
+    # только как запасной — если цепочки нет вовсе.
+    if [ -n "$VIA" ]; then
+        write_state running "Регистрация через «$VIA_NAME»" "$WID"
+        proxy_up "$VIA" || die "не удалось поднять временный прокси на «$VIA_NAME» — проверьте, что этот VPN работает"
         _try=0
         while [ "$_try" -lt 3 ]; do
             reg_curl "socks5h://127.0.0.1:$PROXY_PORT" "$BODY" > "$REG" 2>/dev/null
@@ -182,22 +222,42 @@ cmd_register() {
             sleep 2
         done
         proxy_down
-        VIA="через VPN"
-        reg_valid "$REG" || die "Cloudflare не отдал регистрацию (ни напрямую, ни через VPN)"
+        reg_valid "$REG" || die "Cloudflare не ответил через «$VIA_NAME»"
+        log "register: got registration via '$VIA'"
+    else
+        write_state running "Регистрация устройства" "$WID"
+        reg_curl "" "$BODY" > "$REG" 2>/dev/null
+        reg_valid "$REG" || die "нет активного VPN, а напрямую Cloudflare не отвечает"
+        log "register: got registration directly (no chain configured)"
     fi
-    log "register: got registration $VIA"
 
     # Разбор ответа + запись профиля — одним lua-шагом, чтобы не таскать base64
     # ключи через шелл-кавычки. reserved считается из client_id (см. build_profile).
     write_state running "Сохранение профиля" "$WID"
-    OUT=$(build_profile "$REG" "$PRIV" "$WID") || die "не удалось разобрать ответ Cloudflare"
+    if [ -n "$VIA" ]; then WNAME="WARP · $VIA_NAME"; else WNAME="Cloudflare WARP"; fi
+    OUT=$(build_profile "$REG" "$PRIV" "$WID" "$WNAME") || die "не удалось разобрать ответ Cloudflare"
     rm -f "$REG" 2>/dev/null
     WV4=$(printf '%s' "$OUT" | cut -f1)
     log "register: profile $WID written (v4=$WV4)"
 
-    # Проверка боем: цепочка «активная + WARP» и трейс Cloudflare.
+    # Готовая цепочка «VPN → WARP» — то, ради чего всё и затевалось. Пишет её
+    # detour-api (единственный владелец chains.json), мы только называем.
+    FULL="$WID"
+    [ -n "$VIA" ] && FULL="$VIA,$WID"
+    CID=""
+    if [ -n "$VIA" ] && [ -x "$API_BIN" ]; then
+        CID=$(next_free_id "${VIA_LAST}_warp" chain)
+        if "$API_BIN" chain-save "$CID" "$VIA_NAME → WARP" "$FULL" >/dev/null 2>&1; then
+            log "register: chain $CID saved ($FULL)"
+        else
+            log "register: WARNING chain-save failed for $CID"
+            CID=""
+        fi
+    fi
+
+    # Проверка боем: собранная цепочка и трейс Cloudflare.
     write_state running "Проверка цепочки" "$WID"
-    do_verify "$WID"
+    do_verify "$WID" "$FULL" "$CID"
     exit 0
 }
 
@@ -216,10 +276,11 @@ reg_curl() { # $1 = proxy ("" = direct), $2 = body
 reg_valid() { [ -s "$1" ] && grep -q '"public_key"' "$1" 2>/dev/null; }
 
 # Парсит ответ регистрации и пишет профиль. Печатает "v4<TAB>device_id".
-build_profile() { # $1=reg.json $2=private_key $3=id
-    lua - "$1" "$2" "$3" "$PROFILES" "$WARP_PEER_HOST" "$WARP_PEER_PORT" "$WARP_MTU" <<'LUA'
+build_profile() { # $1=reg.json $2=private_key $3=id $4=имя профиля
+    lua - "$1" "$2" "$3" "$PROFILES" "$WARP_PEER_HOST" "$WARP_PEER_PORT" "$WARP_MTU" "$4" <<'LUA'
 local cjson = require("cjson.safe")
 local regf, priv, id, pdir, phost, pport, mtu = arg[1], arg[2], arg[3], arg[4], arg[5], tonumber(arg[6]), tonumber(arg[7])
+local pname = (arg[8] and arg[8] ~= "") and arg[8] or "Cloudflare WARP"
 local h = io.open(regf, "r"); if not h then os.exit(1) end
 local o = cjson.decode(h:read("*a") or ""); h:close()
 if not o or not o.config then os.exit(1) end
@@ -263,7 +324,7 @@ local res = reserved_from(cfg.client_id)
 if res then p.reserved = res end
 
 local prof = {
-  id = id, name = "Cloudflare WARP", type = "wireguard", uri = "",
+  id = id, name = pname, type = "wireguard", uri = "",
   -- Метаданные устройства живут прямо в профиле: отдельный файл потребовал бы
   -- своей записи в keeplist, а так они переживают sysupgrade вместе с профилем.
   warp = { device_id = o.id, account_type = (o.account or {}).account_type,
@@ -284,13 +345,17 @@ LUA
 # --- verify ----------------------------------------------------------------
 # Поднимает «активная цепочка + WARP» и смотрит, что отвечает Cloudflare: warp=on
 # и IP из диапазона Cloudflare = цепочка реально работает.
-do_verify() { # $1 = warp profile id
+do_verify() { # $1=warp profile id, $2=полная цепочка (пусто = активная+профиль), $3=id цепочки
     _id="$1"
+    _full="$2"
+    _cid="$3"
     [ -f "$PROFILES/$_id.json" ] || die "профиль $_id не найден"
-    _chain=$(active_chain)
-    if [ -n "$_chain" ]; then _full="$_chain,$_id"; else _full="$_id"; fi
+    if [ -z "$_full" ]; then
+        _chain=$(active_chain)
+        if [ -n "$_chain" ]; then _full="$_chain,$_id"; else _full="$_id"; fi
+    fi
     if ! proxy_up "$_full"; then
-        write_state error "не удалось собрать цепочку «$_full»" "$_id"
+        write_state error "не удалось собрать цепочку «$_full»" "$_id" "" "" "$_cid"
         printf '{"ok":false,"error":"не удалось собрать цепочку"}\n'
         return 1
     fi
@@ -300,33 +365,54 @@ do_verify() { # $1 = warp profile id
     _wp=$(printf '%s' "$_tr" | sed -n 's/^warp=\(.*\)/\1/p' | head -1 | tr -d '\r')
     _loc=$(printf '%s' "$_tr" | sed -n 's/^loc=\(.*\)/\1/p' | head -1 | tr -d '\r')
     if [ "$_wp" = "on" ]; then
-        log "verify: $_id OK ip=$_ip loc=$_loc"
-        write_state done "WARP работает: выход $_ip ($_loc)" "$_id" "$_ip" "on"
-        printf '{"ok":true,"id":"%s","ip":"%s","loc":"%s","warp":"on"}\n' "$_id" "$_ip" "$_loc"
+        log "verify: $_id OK ip=$_ip loc=$_loc chain='$_full'"
+        write_state done "WARP работает: выход $_ip ($_loc)" "$_id" "$_ip" "on" "$_cid"
+        printf '{"ok":true,"id":"%s","chain":"%s","ip":"%s","loc":"%s","warp":"on"}\n' "$_id" "$_cid" "$_ip" "$_loc"
         return 0
     fi
     # Туннель не встал. Самая частая причина — предыдущий хоп не умеет UDP-relay.
-    log "verify: $_id FAILED (warp=$_wp ip=$_ip)"
-    write_state error "WARP не отвечает через текущую цепочку — вероятно, VPN не пропускает UDP" "$_id" "$_ip" "${_wp:-off}"
-    printf '{"ok":false,"id":"%s","ip":"%s","warp":"%s","error":"WARP не поднялся через активную цепочку (проверьте, что VPN умеет UDP)"}\n' \
-        "$_id" "$_ip" "${_wp:-off}"
+    log "verify: $_id FAILED (warp=$_wp ip=$_ip chain='$_full')"
+    write_state error "WARP не отвечает через эту цепочку — вероятно, VPN не пропускает UDP" "$_id" "$_ip" "${_wp:-off}" "$_cid"
+    printf '{"ok":false,"id":"%s","chain":"%s","ip":"%s","warp":"%s","error":"WARP не поднялся через цепочку (проверьте, что VPN умеет UDP)"}\n' \
+        "$_id" "$_cid" "$_ip" "${_wp:-off}"
     return 1
 }
 
+# Принимает id ЛИБО сохранённой цепочки (проверяем её целиком), ЛИБО WARP-профиля
+# (тогда достраиваем активной цепочкой) — панели удобно звать одинаково для обоих.
 cmd_verify() {
-    [ -n "$1" ] || { printf '{"ok":false,"error":"нужен id профиля"}\n'; exit 1; }
+    [ -n "$1" ] || { printf '{"ok":false,"error":"нужен id профиля или цепочки"}\n'; exit 1; }
     mkdir "$LOCK" 2>/dev/null || { printf '{"ok":false,"error":"проверка уже идёт"}\n'; exit 1; }
     trap 'cleanup' EXIT INT TERM HUP
-    write_state running "Проверка цепочки" "$1"
-    do_verify "$1"
+    _hops=$(chain_hops_of "$1")
+    if [ -n "$_hops" ]; then
+        _wid=$(last_hop "$_hops")
+        write_state running "Проверка цепочки" "$_wid" "" "" "$1"
+        do_verify "$_wid" "$_hops" "$1"
+    else
+        write_state running "Проверка цепочки" "$1"
+        do_verify "$1" "" ""
+    fi
 }
 
 # --- status ----------------------------------------------------------------
 cmd_status() {
-    lua - "$PROFILES" "$STATE" <<'LUA' 2>/dev/null || printf '{"ok":true,"profiles":[],"last":{}}\n'
+    lua - "$PROFILES" "$STATE" "$CHAINS" <<'LUA' 2>/dev/null || printf '{"ok":true,"profiles":[],"last":{}}\n'
 local cjson = require("cjson.safe")
-local pdir, statef = arg[1], arg[2]
+local pdir, statef, chainf = arg[1], arg[2], arg[3]
 local out = { ok = true, profiles = {} }
+-- Цепочка, в которой уже стоит этот WARP: панели надо показать не голый профиль,
+-- а готовую связку «VPN → WARP», которую можно включить одним кликом.
+local chain_of = {}
+local cf = io.open(chainf, "r")
+if cf then
+  local co = cjson.decode(cf:read("*a") or "") or {}; cf:close()
+  for _, c in ipairs(co.chains or {}) do
+    for _, h in ipairs(c.hops or {}) do
+      if not chain_of[h] then chain_of[h] = { id = c.id, name = c.name } end
+    end
+  end
+end
 local p = io.popen('ls "' .. pdir .. '"/*.json 2>/dev/null')
 if p then
   for f in p:lines() do
@@ -335,11 +421,14 @@ if p then
       local obj = cjson.decode(h:read("*a") or ""); h:close()
       if obj and obj.warp and obj.id then
         local peer = ((obj.outbound or {}).peers or {})[1] or {}
+        local ch = chain_of[obj.id]
         out.profiles[#out.profiles + 1] = {
           id = obj.id, name = obj.name,
           created = obj.warp.created, account_type = obj.warp.account_type,
           address = ((obj.outbound or {}).address or {})[1],
           reserved = peer.reserved ~= nil,
+          chain_id = ch and ch.id or nil,
+          chain_name = ch and ch.name or nil,
         }
       end
     end
@@ -363,6 +452,22 @@ cmd_delete() {
     grep -q '"warp"' "$PROFILES/$_id.json" 2>/dev/null || { printf '{"ok":false,"error":"это не WARP-профиль"}\n'; exit 1; }
     _ach=$(active_chain)
     case ",$_ach," in *",$_id,"*) printf '{"ok":false,"error":"профиль в активной цепочке"}\n'; exit 1 ;; esac
+    # Тот же запрет, что и в detour-api: сохранённая цепочка ссылается на профиль
+    # по id, поэтому тихое удаление оставило бы её несобираемой.
+    _used=$(lua - "$CHAINS" "$_id" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); if not f then return end
+local o = cjson.decode(f:read("*a") or "") or {}; f:close()
+local out = {}
+for _, c in ipairs(o.chains or {}) do
+  for _, h in ipairs(c.hops or {}) do
+    if h == arg[2] then out[#out + 1] = c.name or c.id break end
+  end
+end
+io.write(table.concat(out, ", "))
+LUA
+)
+    [ -n "$_used" ] && { printf '{"ok":false,"error":"профиль используется в цепочке: %s"}\n' "$_used"; exit 1; }
     rm -f "$PROFILES/$_id.json"
     log "deleted $_id"
     printf '{"ok":true}\n'
@@ -380,7 +485,7 @@ cmd_selftest() {
 }
 
 case "$1" in
-    register)  cmd_register ;;
+    register)  cmd_register "$2" ;;
     verify)    cmd_verify "$2" ;;
     status)    cmd_status ;;
     delete)    cmd_delete "$2" ;;

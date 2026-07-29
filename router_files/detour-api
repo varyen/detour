@@ -6,6 +6,11 @@ SINGBOX_CONFIG_DIR="/etc/sing-box"
 SINGBOX_DOMAINS="/etc/sing-box/proxy-domains.list"
 SINGBOX_CONFIG="/etc/sing-box/config.json"
 SINGBOX_ROUTEMAP="/etc/sing-box/route-map.list"
+# Именованные цепочки: {"chains":[{"id","name","hops":[...],"created"}]}. Цепочка —
+# это ПОРЯДОК профилей, а не новый вид прокси, поэтому она хранится отдельно от
+# профилей: id цепочки живёт в том же пространстве имён, что и id профилей (см.
+# chain_save), и её можно назначить целью в «Карте маршрутов» наравне с профилем.
+SINGBOX_CHAINS="/etc/sing-box/chains.json"
 # Self-proxy "smart intercept" map (one line per intercepted SOCKS/HTTP proxy:
 # "<server_ip>\t<server_port>\t<local_socks_inbound_port>"). Written by
 # compute_intercept_inbounds; read by sing-box.initd to install the LAN REDIRECT
@@ -111,6 +116,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_DOMAINS="$OPT/etc/sing-box/proxy-domains.list"
     SINGBOX_CONFIG="$OPT/etc/sing-box/config.json"
     SINGBOX_ROUTEMAP="$OPT/etc/sing-box/route-map.list"
+    SINGBOX_CHAINS="$OPT/etc/sing-box/chains.json"
     SINGBOX_INTERCEPT_MAP="$OPT/etc/sing-box/intercept.map"
     SINGBOX_LOG="$OPT/var/log/sing-box.log"
     SINGBOX_INITD="$OPT/etc/init.d/S52detour-singbox"
@@ -860,6 +866,136 @@ route_target_chain() {
     fi
 }
 
+# ==================== ИМЕНОВАННЫЕ ЦЕПОЧКИ ====================
+# Хопы цепочки по id (CSV; пусто, если цепочки нет). Это единственный способ
+# развернуть id цепочки в профили — им пользуются и генератор конфига, и
+# detour-warp через внутренний CLI.
+chain_hops_csv() {
+    [ -n "$1" ] || return 0
+    [ -f "$SINGBOX_CHAINS" ] || return 0
+    lua - "$SINGBOX_CHAINS" "$1" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); if not f then return end
+local o = cjson.decode(f:read("*a") or ""); f:close()
+for _, c in ipairs((o or {}).chains or {}) do
+  if c.id == arg[2] and type(c.hops) == "table" then io.write(table.concat(c.hops, ",")) return end
+end
+LUA
+}
+
+chain_exists() { [ -n "$(chain_hops_csv "$1")" ]; }
+
+# Создать/перезаписать цепочку. Печатает текст ошибки и возвращает 1, если что-то
+# не так. Единственный писатель chains.json — сюда же ходит detour-warp.
+chain_store_save() { # $1=id $2=name $3=hops CSV
+    local id="$1" name="$2" hops="$3" hop
+    case "$id" in ''|*[!a-zA-Z0-9._-]*) echo "плохой id цепочки"; return 1 ;; esac
+    # id цепочки и id профиля живут в одном пространстве имён: цепочку можно
+    # назначить целью маршрута там же, где профиль, поэтому совпадение сделало бы
+    # цель неоднозначной.
+    if [ -f "$SINGBOX_PROFILES_DIR/$id.json" ]; then echo "id занят профилем"; return 1; fi
+    hops=$(normalize_profile_list "$hops")
+    [ -n "$hops" ] || { echo "цепочка пуста"; return 1; }
+    local old_ifs="$IFS"; IFS=','; set -- $hops; IFS="$old_ifs"
+    for hop in "$@"; do
+        [ -f "$SINGBOX_PROFILES_DIR/$hop.json" ] || { echo "профиль «$hop» не найден"; return 1; }
+    done
+    [ -n "$name" ] || name="$id"
+    mkdir -p "$(dirname "$SINGBOX_CHAINS")" 2>/dev/null
+    lua - "$SINGBOX_CHAINS" "$id" "$name" "$hops" "$(date +%s 2>/dev/null)" <<'LUA' || { echo "не удалось записать chains.json"; return 1; }
+local cjson = require("cjson.safe")
+local path, id, name, hops, now = arg[1], arg[2], arg[3], arg[4], tonumber(arg[5]) or 0
+local o = {}
+local f = io.open(path, "r")
+if f then o = cjson.decode(f:read("*a") or "") or {}; f:close() end
+if type(o.chains) ~= "table" then o.chains = {} end
+local list = {}
+for _, c in ipairs(o.chains) do
+  if type(c) == "table" and c.id and c.id ~= id then list[#list + 1] = c end
+end
+local hop = {}
+for h in hops:gmatch("[^,]+") do hop[#hop + 1] = h end
+list[#list + 1] = { id = id, name = name, hops = hop, created = now }
+o.chains = list
+local w = io.open(path, "w"); if not w then os.exit(1) end
+-- пустой список должен остаться массивом, а не {}
+local s = cjson.encode(o)
+if #list == 0 then s = s:gsub('"chains":%{%}', '"chains":[]') end
+w:write(s); w:close()
+LUA
+    return 0
+}
+
+chain_store_delete() { # $1=id
+    local id="$1"
+    case "$id" in ''|*[!a-zA-Z0-9._-]*) echo "плохой id цепочки"; return 1 ;; esac
+    [ -f "$SINGBOX_CHAINS" ] || { echo "цепочка не найдена"; return 1; }
+    lua - "$SINGBOX_CHAINS" "$id" <<'LUA' || { echo "не удалось записать chains.json"; return 1; }
+local cjson = require("cjson.safe")
+local path, id = arg[1], arg[2]
+local f = io.open(path, "r"); if not f then os.exit(1) end
+local o = cjson.decode(f:read("*a") or "") or {}; f:close()
+local list = {}
+for _, c in ipairs(o.chains or {}) do
+  if type(c) == "table" and c.id ~= id then list[#list + 1] = c end
+end
+o.chains = list
+local w = io.open(path, "w"); if not w then os.exit(1) end
+local s = cjson.encode(o)
+if #list == 0 then s = s:gsub('"chains":%{%}', '"chains":[]') end
+w:write(s); w:close()
+LUA
+    return 0
+}
+
+# Цепочки, ссылающиеся на профиль (CSV id) — profile_delete отказывается рвать
+# сохранённую цепочку молча.
+chains_using_profile() { # $1 = profile id
+    [ -f "$SINGBOX_CHAINS" ] || return 0
+    lua - "$SINGBOX_CHAINS" "$1" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "r"); if not f then return end
+local o = cjson.decode(f:read("*a") or "") or {}; f:close()
+local out = {}
+for _, c in ipairs(o.chains or {}) do
+  for _, h in ipairs(c.hops or {}) do
+    if h == arg[2] then out[#out + 1] = c.name or c.id break end
+  end
+end
+io.write(table.concat(out, ", "))
+LUA
+}
+
+# Собрать outbound'ы/endpoint'ы многохоповой цепочки в RX_OB/RX_EP: последний хоп
+# получает $2, предыдущие — "<$3>_<n>" и связываются через detour. Это тот же
+# порядок, что и в render_chain_config, но для ЦЕЛИ МАРШРУТА внутри общего конфига.
+emit_route_chain() { # $1=hops CSV, $2=final tag, $3=tag prefix
+    local hops="$1" final="$2" prefix="$3"
+    local old_ifs total i pname pfile payload ptype tag detour
+    old_ifs="$IFS"; IFS=','; set -- $hops; IFS="$old_ifs"
+    total=$#; i=0; detour=""
+    for pname in "$@"; do
+        i=$((i + 1))
+        pfile="$SINGBOX_PROFILES_DIR/$pname.json"
+        [ -f "$pfile" ] || return 1
+        payload=$(extract_profile_outbound "$pfile")
+        [ -n "$payload" ] || return 1
+        ptype=$(json_val "type" "$pfile")
+        if [ "$i" -eq "$total" ]; then tag="$final"; else tag="${prefix}_$i"; fi
+        payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
+        if [ "$ptype" = "wireguard" ]; then
+            payload=$(translate_wireguard_profile "$payload")
+            RX_EP="$RX_EP,
+    $payload"
+        else
+            RX_OB="$RX_OB,
+    $payload"
+        fi
+        detour="$tag"
+    done
+    return 0
+}
+
 # Resolve the outbound tag a route target should use. If the target id is a
 # member of the active chain, reuse that chain tag (no duplicate outbound).
 # Otherwise the target gets a dedicated "out_<id>" outbound.
@@ -885,21 +1021,36 @@ route_tag_for() {
 compute_route_extras() {
     local chain="$1"
     local target tag payload ptype dom_arr dom_exact_objs ip_arr robj rule_objs host_override
-    local idx inport in_tag fallback_objs via_chain strict detour
+    local idx inport in_tag fallback_objs via_chain strict detour thops
     RX_OB=""; RX_EP=""; RX_RULES=""; RX_INBOUNDS=""
     rule_objs=""
     fallback_objs=""
     idx=0
     for target in $(route_map_targets); do
         route_map_section "$target" | grep -q . || continue
-        [ -f "$SINGBOX_PROFILES_DIR/$target.json" ] || continue
+        # Цель — либо профиль, либо ИМЕНОВАННАЯ ЦЕПОЧКА. Во втором случае порядок
+        # хопов задан самой цепочкой, поэтому «через цепочку» к ней неприменимо:
+        # подставлять сверху ещё и активную цепочку было бы уже третьим мнением.
+        thops=""
+        if [ ! -f "$SINGBOX_PROFILES_DIR/$target.json" ]; then
+            thops=$(chain_hops_csv "$target")
+            [ -n "$thops" ] || continue
+        fi
         idx=$((idx + 1))
         inport=$((12345 + idx))
         in_tag="in_rt_$idx"
         strict=$(route_map_bool_option "$target" strict 1)
-        via_chain=$(route_map_bool_option "$target" via_chain 0)
-        tag=$(route_tag_for "$target" "$chain")
-        ptype=$(json_val "type" "$SINGBOX_PROFILES_DIR/$target.json")
+        if [ -n "$thops" ]; then
+            via_chain=0
+            tag="out_$target"
+            # host_override решается по ПОСЛЕДНЕМУ хопу — именно он дозванивается
+            # до сайта, и только ему важно имя хоста вместо уже готового IP.
+            ptype=$(json_val "type" "$SINGBOX_PROFILES_DIR/$(get_last_csv_item "$thops").json")
+        else
+            via_chain=$(route_map_bool_option "$target" via_chain 0)
+            tag=$(route_tag_for "$target" "$chain")
+            ptype=$(json_val "type" "$SINGBOX_PROFILES_DIR/$target.json")
+        fi
         host_override=0
         case "$ptype" in
             socks|socks4|socks4a|socks5|http|http-proxy|https-proxy) host_override=1 ;;
@@ -920,7 +1071,9 @@ compute_route_extras() {
         fi
         ip_arr=$(route_map_section "$target" | awk '$1=="I"{ if(n++)printf","; printf "\"%s\"",$2 }')
         [ -z "$dom_exact_objs" ] && [ -z "$dom_arr" ] && [ -z "$ip_arr" ] && continue
-        if [ "$tag" = "out_$target" ]; then
+        if [ -n "$thops" ]; then
+            emit_route_chain "$thops" "$tag" "rc$idx" || continue
+        elif [ "$tag" = "out_$target" ]; then
             payload=$(extract_profile_outbound "$SINGBOX_PROFILES_DIR/$target.json")
             [ -n "$payload" ] || continue
             detour=""
@@ -1250,7 +1403,7 @@ build_config() {
     local mode="$1"
     local chain="$2"
     local tmp_default="${SINGBOX_CONFIG}.tmp.$$"
-    local err rc target tmp_t port idx pair src dst base tid target_chain
+    local err rc target tmp_t port idx pair src dst base tid target_chain thops
     local commit_list keep_targets
 
     commit_list=""
@@ -1272,12 +1425,19 @@ build_config() {
 
         idx=0
         for target in $(route_map_targets); do
-            [ -f "$SINGBOX_PROFILES_DIR/$target.json" ] || continue
+            thops=""
+            if [ ! -f "$SINGBOX_PROFILES_DIR/$target.json" ]; then
+                thops=$(chain_hops_csv "$target")
+                [ -n "$thops" ] || continue
+            fi
             route_map_section "$target" | grep -q . || continue
             idx=$((idx + 1))
             port=$((12345 + idx))
             tmp_t="${SINGBOX_CONFIG_DIR}/config-$target.json.tmp.$$"
-            if [ "$(route_map_bool_option "$target" via_chain 0)" = "1" ]; then
+            if [ -n "$thops" ]; then
+                # именованная цепочка задаёт порядок сама (см. compute_route_extras)
+                target_chain="$thops"
+            elif [ "$(route_map_bool_option "$target" via_chain 0)" = "1" ]; then
                 target_chain=$(route_target_chain "$chain" "$target")
             else
                 target_chain="$target"
@@ -1536,6 +1696,15 @@ if [ "$1" = "activate" ]; then
     write_settings "$CHAIN" "$RMODE" "$UPSTREAM_IPS" "$SBMODE"
     $SINGBOX_INITD reconfigure >/dev/null 2>&1
     echo "activate: $CHAIN"
+    exit 0
+fi
+if [ "$1" = "chain-save" ]; then
+    # detour-warp зовёт это после регистрации, чтобы сохранить «VPN → WARP».
+    # Единственный писатель chains.json — chain_store_save, второй копии нет.
+    if ! CS_ERR=$(chain_store_save "$2" "$3" "$4"); then
+        echo "chain-save: $CS_ERR" >&2; exit 1
+    fi
+    echo "chain-save: $2"
     exit 0
 fi
 if [ "$1" = "render-mixed" ]; then
@@ -3133,6 +3302,12 @@ profile_delete)
     if [ -z "$PNAME" ]; then json_err "name required"; exit 0; fi
         ACTIVE_CHAIN=$(get_active_chain)
         if csv_contains "$ACTIVE_CHAIN" "$PNAME"; then json_err "cannot delete active chain profile"; exit 0; fi
+    # Сохранённая цепочка ссылается на профиль по id: удалить профиль молча —
+    # значит оставить цепочку, которая не соберётся при следующей активации.
+    PUSED=$(chains_using_profile "$PNAME")
+    if [ -n "$PUSED" ]; then
+        json_err "профиль используется в цепочке: $(printf '%s' "$PUSED" | json_escape)"; exit 0
+    fi
     PFILE="$SINGBOX_PROFILES_DIR/$PNAME.json"
     if [ ! -f "$PFILE" ]; then json_err "profile not found"; exit 0; fi
     rm -f "$PFILE"
@@ -3161,6 +3336,50 @@ chain_activate)
         sleep 3
         json_ok
         ;;
+
+# ==================== ИМЕНОВАННЫЕ ЦЕПОЧКИ ====================
+# Цепочка = сохранённый порядок профилей. Применяется тем же chain_activate
+# (её хопы — обычный CSV), поэтому отдельного «применить» здесь нет.
+chains_list)
+    if [ -f "$SINGBOX_CHAINS" ]; then
+        cat "$SINGBOX_CHAINS"
+    else
+        printf '{"chains":[]}'
+    fi
+    ;;
+
+chain_save)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    CINFO=$(printf '%s' "$POST_DATA" | lua -e '
+        local c = require("cjson.safe")
+        local o = c.decode(io.read("*a")) or {}
+        local hops = {}
+        if type(o.hops) == "table" then for _, h in ipairs(o.hops) do hops[#hops+1] = tostring(h) end end
+        io.write((type(o.id)=="string" and o.id or ""), "\t",
+                 (type(o.name)=="string" and o.name or ""), "\t",
+                 table.concat(hops, ","))' 2>/dev/null)
+    CH_ID=$(printf '%s' "$CINFO" | cut -f1)
+    CH_NAME=$(printf '%s' "$CINFO" | cut -f2)
+    CH_HOPS=$(printf '%s' "$CINFO" | cut -f3)
+    if ! CH_ERR=$(chain_store_save "$CH_ID" "$CH_NAME" "$CH_HOPS"); then
+        json_err "$(printf '%s' "$CH_ERR" | json_escape)"; exit 0
+    fi
+    json_ok
+    ;;
+
+chain_delete)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    CH_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    # Удалять цепочку, которой сейчас ходит трафик, нельзя: активной осталась бы
+    # ссылка в никуда, и следующая пересборка конфига упала бы.
+    if [ "$(get_active_chain)" = "$(chain_hops_csv "$CH_ID")" ]; then
+        json_err "цепочка сейчас активна"; exit 0
+    fi
+    if ! CH_ERR=$(chain_store_delete "$CH_ID"); then
+        json_err "$(printf '%s' "$CH_ERR" | json_escape)"; exit 0
+    fi
+    json_ok
+    ;;
 
 profile_activate)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
@@ -3938,9 +4157,16 @@ warp_status)
     ;;
 
 warp_register)
+    # Body = {"via":"<профиль или цепочка CSV>"}; пусто = активная цепочка.
+    # Регистрация ОБЯЗАНА идти через тот VPN, за которым WARP потом будет жить,
+    # поэтому окружение выбирается здесь, а не берётся из активного профиля.
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$WARP_BIN" ] || { json_err "detour-warp not installed"; exit 0; }
-    detach_bg "/tmp/detour-warp-bg.log" "$WARP_BIN" register
+    WVIA=$(printf '%s' "$POST_DATA" | sed -n 's/.*"via"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    # Уезжает в `sh -c` строку detach_bg — пускаем только id-шный набор.
+    case "$WVIA" in *[!a-zA-Z0-9._,-]*) json_err "bad via"; exit 0 ;; esac
+    WVIA=$(normalize_profile_list "$WVIA")
+    detach_bg "/tmp/detour-warp-bg.log" "$WARP_BIN" register "$WVIA"
     printf '{"ok":true,"started":true}'
     ;;
 

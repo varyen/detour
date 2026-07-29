@@ -97,6 +97,7 @@ PROTECTED_PATHS = (
     "etc/detour/version",         # set by postinst on install
     "etc/detour/subscription.json",
     "etc/sing-box/route-map.list",     # per-profile routing rules (user state)
+    "etc/sing-box/chains.json",        # именованные цепочки (пользовательское состояние)
     "etc/sing-box/ru-subnets.list",         # downloaded by detour-rulist, never shipped
     "etc/sing-box/ru-subnets-exclude.list",  # operator's exceptions to that list
 )
@@ -304,6 +305,7 @@ $BEGIN
 /etc/sing-box/udp-vpn.list
 /etc/sing-box/health-urls.list
 /etc/sing-box/route-map.list
+/etc/sing-box/chains.json
 /etc/sing-box/autoswitch-exclude.list
 /etc/sing-box/ru-subnets.list
 /etc/sing-box/ru-subnets-exclude.list
