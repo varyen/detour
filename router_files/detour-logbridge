@@ -102,10 +102,35 @@ kill_tree() {
         _frontier="$_next"
     done
     for _p in $_all; do
+        # NB: the kernel truncates /proc/<pid>/comm to 15 chars, so our own
+        # subshells show up as "detour-logbridg" — matching the full 16-char name
+        # here never fired, the follow subshells survived every restart, and each
+        # one re-spawned its tail|logger pipeline 5 s later. Hence the glob.
         case "$(cat "/proc/$_p/comm" 2>/dev/null)" in
-            sh|ash|bash|busybox|tail|logger|detour-logbridge) kill "$_p" 2>/dev/null ;;
+            sh|ash|bash|busybox|tail|logger|detour-logbridg*) kill "$_p" 2>/dev/null ;;
         esac
     done
+}
+
+# Kill follower generations that CHILDREN_FILE no longer knows about. It only ever
+# tracks the CURRENT run, so anything left behind by a run that died on SIGKILL
+# (trap never fired) is invisible to it and would keep forwarding forever.
+# A `follow` subshell is a fork of this script, so its /proc cmdline is identical
+# to the main instance's — that is exactly what we match on. Safe only because it
+# runs BEFORE we spawn our own followers: at that point no legitimate process of
+# ours exists yet besides $$ and our supervisor.
+sweep_strays() {
+    _stray=""
+    for _d in /proc/[0-9]*; do
+        _pid="${_d#/proc/}"
+        [ "$_pid" = "$$" ] && continue
+        [ "$_pid" = "$PPID" ] && continue
+        case "$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null)" in
+            *detour-logbridge*run*) _stray="$_stray $_pid" ;;
+        esac
+    done
+    [ -n "$_stray" ] && kill_tree "$_stray"
+    return 0
 }
 
 cleanup() {
@@ -122,8 +147,10 @@ run() {
     mkdir -p "$LOGDIR" "$PIDDIR" 2>/dev/null
 
     # Reap any followers left over from a previous run killed with SIGKILL (trap
-    # didn't fire) so we never end up double-forwarding.
+    # didn't fire) so we never end up double-forwarding. The /proc sweep is the
+    # backstop: it also catches generations CHILDREN_FILE was overwritten past.
     [ -f "$CHILDREN_FILE" ] && kill_tree "$(tr '\n' ' ' < "$CHILDREN_FILE")"
+    sweep_strays
     : > "$CHILDREN_FILE"
 
     trap cleanup TERM INT

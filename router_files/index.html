@@ -6796,19 +6796,43 @@
           runToken = 0;
         var pal = null;
 
+        // "#rgb" / "#rrggbb" / "rgb(r, g, b)" → [r, g, b].
+        function parseColor(s) {
+          if (!s) return null;
+          var h = String(s).trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+          if (h) {
+            h = h[1];
+            if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+            return [
+              parseInt(h.slice(0, 2), 16),
+              parseInt(h.slice(2, 4), 16),
+              parseInt(h.slice(4, 6), 16),
+            ];
+          }
+          var m = String(s).match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+          return m ? [+m[1], +m[2], +m[3]] : null;
+        }
+
         // Pull the base bg + a pair of glyph colours from the current theme.
         function readPalette() {
           var isLight =
             document.documentElement.getAttribute("data-theme") === "light";
-          var base = "#0b0f17";
+          var rgb = null;
           try {
-            var c = getComputedStyle(document.documentElement).backgroundColor;
-            if (c) base = c;
+            var cs = getComputedStyle(document.documentElement);
+            // Read the --bg TOKEN, not backgroundColor. toggleTheme() puts a
+            // 0.25s background-color transition on <html> BEFORE flipping
+            // data-theme, so backgroundColor still reports the OLD colour when
+            // the observer fires — the rain then kept washing itself in the
+            // previous theme's colour until the next resize. Custom properties
+            // aren't animated, so this token switches instantly.
+            rgb =
+              parseColor(cs.getPropertyValue("--bg")) ||
+              parseColor(cs.backgroundColor);
           } catch (e) {}
-          var m = base.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-          var rgb = m ? [m[1], m[2], m[3]] : isLight ? [244, 246, 251] : [11, 15, 23];
+          if (!rgb) rgb = isLight ? [244, 246, 251] : [11, 15, 23];
           return {
-            base: base,
+            base: "rgb(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ")",
             rgb: rgb,
             // Light theme needs a slightly hungrier wash — dark glyphs on a
             // bright base linger longer at the same alpha.
