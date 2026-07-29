@@ -622,6 +622,15 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=True):
             n = upload(ssh, f.read(), "/usr/sbin/detour-cert", "0755")
         print(f"  /usr/sbin/detour-cert: {n} bytes")
 
+    # 8f. Cloudflare WARP helper — регистрирует бесплатное устройство WARP и кладёт
+    #     его обычным wireguard-профилем (последний хоп цепочки). Никакого cron:
+    #     запускается только из панели / вручную.
+    warp_local = os.path.join(ROUTER_FILES, "detour-warp")
+    if os.path.isfile(warp_local):
+        with open(warp_local, "rb") as f:
+            n = upload(ssh, f.read(), "/usr/sbin/detour-warp", "0755")
+        print(f"  /usr/sbin/detour-warp: {n} bytes")
+
 
 def step_hotplug_guard(ssh):
     step("Installing hotplug guard")

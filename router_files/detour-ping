@@ -124,6 +124,13 @@ probe_one() {
     server=$(jstr server "$pfile")
     port=$(jnum server_port "$pfile")
     ptype=$(jstr type "$pfile")
+    # wireguard (в т.ч. Cloudflare WARP) хранится в endpoint-форме: ключа "server" у
+    # него нет вовсе, адрес узла лежит в peers[].address. Без этого у таких профилей
+    # пинг всегда пустой. Адрес интерфейса — массив ("address":[...]), под шаблон
+    # со строкой он не попадает, поэтому совпадение только одно — пировское.
+    if [ -z "$server" ] && [ "$ptype" = "wireguard" ]; then
+        server=$(sed -n 's/.*"address"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pfile" 2>/dev/null | head -1)
+    fi
     rtt=-1; okv=0
     if [ -n "$server" ]; then
         pt=$(ping -c1 -W2 "$server" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -1)

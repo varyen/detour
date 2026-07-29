@@ -107,6 +107,12 @@ FILES = [
     # Let's Encrypt helper (acme.sh, /opt shim). Best-effort on Keenetic: :80 is the
     # stock router UI, so HTTP-01 needs :80 forwarded to lighttpd. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-cert"), "opt/sbin/detour-cert", 0o755, True),
+    # Cloudflare WARP (shared source, /opt шим): регистрирует бесплатное устройство
+    # и кладёт его обычным wireguard-профилем — последним хопом цепочки. Работает
+    # ровно так же, как на OpenWrt: sing-box из нашего mipsel-фида собран с
+    # with_wireguard, а регистрация ходит curl'ом через активную цепочку.
+    # fix_shebang → /opt/bin/sh.
+    (os.path.join(ROUTER_FILES, "detour-warp"), "opt/sbin/detour-warp", 0o755, True),
     # Публикация LAN-сервисов наружу (shared source, /opt shim): HTTPS-реверс-прокси
     # через lighttpd mod_proxy + DNAT через ndm/netfilter.d. fix_shebang → /opt/bin/sh.
     # ⚠ НЕ проверено на живом Keenetic — см. keenetic/README.md.
@@ -222,7 +228,7 @@ if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
 fi
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \
-    /opt/sbin/detour-wan-link /opt/sbin/detour-portmap \
+    /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\

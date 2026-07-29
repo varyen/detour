@@ -1,0 +1,392 @@
+#!/bin/sh
+# detour-warp — Cloudflare WARP как ПОСЛЕДНИЙ хоп цепочки.
+#
+# ЗАЧЕМ. Выходные адреса обычных VPN принадлежат хостерам и распознаются как
+# «дата-центр» — часть сервисов (в первую очередь ИИ: Gemini/AI Studio) по этому
+# признаку отказывает. WARP уводит финальный трафик в сеть Cloudflare, чей
+# потребительский диапазон 1.1.1.1-клиента репутационно считается «обычным
+# пользователем», а не хостингом. Схема: клиент → VPN → WARP → сайт.
+#
+# ВАЖНО, чем это НЕ является: WARP не даёт «домашний» IP — он даёт Cloudflare-IP.
+# Часть сервисов, наоборот, режет WARP-диапазоны, поэтому включать его разумно
+# точечно (карта маршрутов на нужные домены), а не на весь трафик.
+#
+# КАК УСТРОЕНО. WARP — это обычный WireGuard, а панель уже умеет wireguard-профили
+# (sing-box кладёт их в "endpoints" и вешает "detour" на предыдущий хоп цепочки).
+# Поэтому здесь нет ничего про маршрутизацию: скрипт только ДОБЫВАЕТ учётные
+# данные бесплатного устройства WARP и кладёт их обычным профилем. Дальше профиль
+# живёт как любой другой — его можно поставить последним в цепочку или назначить
+# на домены в карте маршрутов с опцией «через цепочку».
+#
+# ПОЧЕМУ РЕГИСТРАЦИЯ ИДЁТ ЧЕРЕЗ VPN. api.cloudflareclient.com из РФ не отвечает
+# (проверено: таймаут). Поэтому регистрация поднимает временный sing-box с mixed-
+# инбаундом на активной цепочке (конфиг рендерит сам detour-api, чтобы не держать
+# вторую копию логики цепочек) и ходит на CF через него. Если прямой путь
+# доступен — используется он.
+#
+# ТРЕБОВАНИЕ К ВНЕШНЕМУ VPN: WARP — это UDP-туннель, поэтому предыдущий хоп обязан
+# уметь UDP-relay (vless/trojan/ss умеют; часть HTTP/SOCKS-прокси — нет). Шаг
+# `verify` это и проверяет, отдавая понятный вердикт вместо молчаливой поломки.
+#
+# Subcommands: register | verify <id> | status | delete <id> | selftest
+
+DETOUR_DIR=/etc/detour
+PROFILES=/etc/sing-box/profiles
+SETTINGS=/etc/sing-box/settings.json
+SINGBOX_BIN=/usr/bin/sing-box
+API_BIN=/www/cgi-bin/detour-api
+STATE=/var/state/detour-warp.json
+LOG=/var/log/detour-warp.log
+LOCK=/tmp/detour-warp.lock
+PLATFORM=openwrt
+
+# Keenetic/Entware platform shim (mirrors detour-cert / detour-health).
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    PLATFORM=keenetic
+    DETOUR_DIR=/opt/etc/detour
+    PROFILES=/opt/etc/sing-box/profiles
+    SETTINGS=/opt/etc/sing-box/settings.json
+    SINGBOX_BIN=/opt/bin/sing-box
+    API_BIN=/opt/share/www/cgi-bin/detour-api
+    STATE=/opt/var/state/detour-warp.json
+    LOG=/opt/var/log/detour-warp.log
+    mkdir -p /opt/var/state /opt/var/log 2>/dev/null
+fi
+
+# --- Константы WARP -------------------------------------------------------
+# Порт/адрес: anycast-вход Cloudflare. Через detour он приземляется в PoP рядом с
+# ВЫХОДОМ внешнего VPN, поэтому гео не «разъезжается» (проверено: выход в Бельгии
+# → colo BRU). Числовой адрес, а не engage.cloudflareclient.com, — чтобы не
+# зависеть от резолва имени внутри туннеля.
+WARP_PEER_HOST=162.159.192.1
+WARP_PEER_PORT=2408
+WARP_API=https://api.cloudflareclient.com/v0a2158/reg
+WARP_CV="a-6.30-3596"
+WARP_UA="okhttp/3.12.1"
+# 1280 — как в официальном Android-клиенте и в wgcf. Запас на двойную упаковку
+# (WireGuard внутри VLESS/trojan): при 1420 крупные пакеты режутся и рвут TLS.
+WARP_MTU=1280
+PROXY_PORT=19482
+VERIFY_URL=https://www.cloudflare.com/cdn-cgi/trace
+
+log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+NOW() { _n=$(date +%s 2>/dev/null); case "$_n" in ''|*[!0-9]*) _n=0 ;; esac; printf '%s' "$_n"; }
+
+json_escape() { sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr -d '\r\n'; }
+
+# Панель читает этот файл, пока регистрация идёт в фоне (CGI её детачит).
+write_state() { # $1=state $2=message $3=profile-id $4=egress-ip $5=warp-on
+    _m=$(printf '%s' "$2" | json_escape)
+    printf '{"ok":true,"state":"%s","message":"%s","id":"%s","ip":"%s","warp":"%s","ts":%s}\n' \
+        "$1" "$_m" "${3-}" "${4-}" "${5-}" "$(NOW)" > "$STATE" 2>/dev/null
+}
+
+die() { log "ERROR: $*"; write_state error "$*" "${WID-}"; printf '{"ok":false,"error":"%s"}\n' "$(printf '%s' "$*" | json_escape)"; cleanup; exit 1; }
+
+# --- Временный sing-box с mixed-инбаундом на заданной цепочке --------------
+SBPID=""
+SBCONF=""
+SBDATA=""
+cleanup() {
+    [ -n "$SBPID" ] && kill "$SBPID" 2>/dev/null
+    [ -n "$SBPID" ] && kill -9 "$SBPID" 2>/dev/null
+    SBPID=""
+    [ -n "$SBCONF" ] && rm -f "$SBCONF" 2>/dev/null
+    [ -n "$SBDATA" ] && rm -rf "$SBDATA" 2>/dev/null
+    rm -rf "$LOCK" 2>/dev/null
+}
+
+# $1 = цепочка CSV ("" = активная). Поднимает прокси на 127.0.0.1:$PROXY_PORT.
+proxy_up() {
+    [ -x "$API_BIN" ] || return 1
+    [ -x "$SINGBOX_BIN" ] || return 1
+    SBCONF="/tmp/detour-warp.conf.$$"
+    SBDATA="/tmp/detour-warp.data.$$"
+    "$API_BIN" render-mixed "$1" "$PROXY_PORT" > "$SBCONF" 2>/dev/null || return 1
+    [ -s "$SBCONF" ] || return 1
+    "$SINGBOX_BIN" check -c "$SBCONF" >/dev/null 2>&1 || return 1
+    "$SINGBOX_BIN" run -c "$SBCONF" -D "$SBDATA" >/tmp/detour-warp-sb.log 2>&1 &
+    SBPID=$!
+    # Инбаунд поднимается практически мгновенно; даём ему фору и проверяем, что
+    # процесс жив (битый профиль в цепочке → мгновенный exit).
+    sleep 2
+    kill -0 "$SBPID" 2>/dev/null || { SBPID=""; return 1; }
+    return 0
+}
+
+proxy_down() {
+    [ -n "$SBPID" ] && kill "$SBPID" 2>/dev/null
+    [ -n "$SBPID" ] && { sleep 1; kill -9 "$SBPID" 2>/dev/null; }
+    SBPID=""
+    [ -n "$SBCONF" ] && rm -f "$SBCONF" 2>/dev/null
+    [ -n "$SBDATA" ] && rm -rf "$SBDATA" 2>/dev/null
+    SBCONF=""; SBDATA=""
+}
+
+active_chain() {
+    sed -n 's/.*"active_chain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -1
+}
+
+# Свободный id профиля: warp, warp2, warp3, …
+next_id() {
+    if [ ! -f "$PROFILES/warp.json" ]; then printf 'warp'; return; fi
+    _i=2
+    while [ "$_i" -lt 50 ]; do
+        [ -f "$PROFILES/warp$_i.json" ] || { printf 'warp%s' "$_i"; return; }
+        _i=$((_i + 1))
+    done
+    printf 'warp%s' "$(NOW)"
+}
+
+# --- register --------------------------------------------------------------
+cmd_register() {
+    mkdir -p "$PROFILES" "$(dirname "$STATE")" 2>/dev/null
+    mkdir "$LOCK" 2>/dev/null || { printf '{"ok":false,"error":"регистрация уже идёт"}\n'; exit 1; }
+    trap 'cleanup' EXIT INT TERM HUP
+
+    WID=$(next_id)
+    write_state running "Генерация ключей" "$WID"
+    log "register: id=$WID platform=$PLATFORM"
+
+    command -v curl >/dev/null 2>&1 || die "нужен curl"
+    [ -x "$SINGBOX_BIN" ] || die "sing-box не установлен"
+    lua -e 'require("cjson.safe")' 2>/dev/null || die "нужен lua-cjson"
+
+    KP=$("$SINGBOX_BIN" generate wg-keypair 2>/dev/null)
+    PRIV=$(printf '%s' "$KP" | awk '/PrivateKey/{print $2}')
+    PUB=$(printf '%s' "$KP" | awk '/PublicKey/{print $2}')
+    [ -n "$PRIV" ] && [ -n "$PUB" ] || die "sing-box generate wg-keypair не сработал"
+
+    TOS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null)
+    [ -n "$TOS" ] || TOS="2024-01-01T00:00:00.000Z"
+    BODY="{\"key\":\"$PUB\",\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$TOS\",\"model\":\"PC\",\"serial_number\":\"\",\"locale\":\"en_US\"}"
+    REG="/tmp/detour-warp-reg.$$.json"
+
+    # 1) Прямой путь — работает там, где CF не заблокирован.
+    write_state running "Регистрация устройства" "$WID"
+    reg_curl "" "$BODY" > "$REG" 2>/dev/null
+    VIA="напрямую"
+    if ! reg_valid "$REG"; then
+        # 2) Через активную цепочку. Это основной путь: из РФ CF-API молчит.
+        CHAIN=$(active_chain)
+        [ -n "$CHAIN" ] || die "CF недоступен напрямую, а активной цепочки VPN нет — включите VPN и повторите"
+        log "register: direct failed, retrying via chain '$CHAIN'"
+        write_state running "Регистрация через VPN" "$WID"
+        proxy_up "$CHAIN" || die "не удалось поднять временный прокси на активной цепочке"
+        _try=0
+        while [ "$_try" -lt 3 ]; do
+            reg_curl "socks5h://127.0.0.1:$PROXY_PORT" "$BODY" > "$REG" 2>/dev/null
+            reg_valid "$REG" && break
+            _try=$((_try + 1))
+            sleep 2
+        done
+        proxy_down
+        VIA="через VPN"
+        reg_valid "$REG" || die "Cloudflare не отдал регистрацию (ни напрямую, ни через VPN)"
+    fi
+    log "register: got registration $VIA"
+
+    # Разбор ответа + запись профиля — одним lua-шагом, чтобы не таскать base64
+    # ключи через шелл-кавычки. reserved считается из client_id (см. build_profile).
+    write_state running "Сохранение профиля" "$WID"
+    OUT=$(build_profile "$REG" "$PRIV" "$WID") || die "не удалось разобрать ответ Cloudflare"
+    rm -f "$REG" 2>/dev/null
+    WV4=$(printf '%s' "$OUT" | cut -f1)
+    log "register: profile $WID written (v4=$WV4)"
+
+    # Проверка боем: цепочка «активная + WARP» и трейс Cloudflare.
+    write_state running "Проверка цепочки" "$WID"
+    do_verify "$WID"
+    exit 0
+}
+
+reg_curl() { # $1 = proxy ("" = direct), $2 = body
+    if [ -n "$1" ]; then
+        curl -sS -m 25 -x "$1" \
+            -H "CF-Client-Version: $WARP_CV" -H "User-Agent: $WARP_UA" \
+            -H 'Content-Type: application/json' -X POST -d "$2" "$WARP_API" 2>/dev/null
+    else
+        curl -sS -m 8 \
+            -H "CF-Client-Version: $WARP_CV" -H "User-Agent: $WARP_UA" \
+            -H 'Content-Type: application/json' -X POST -d "$2" "$WARP_API" 2>/dev/null
+    fi
+}
+
+reg_valid() { [ -s "$1" ] && grep -q '"public_key"' "$1" 2>/dev/null; }
+
+# Парсит ответ регистрации и пишет профиль. Печатает "v4<TAB>device_id".
+build_profile() { # $1=reg.json $2=private_key $3=id
+    lua - "$1" "$2" "$3" "$PROFILES" "$WARP_PEER_HOST" "$WARP_PEER_PORT" "$WARP_MTU" <<'LUA'
+local cjson = require("cjson.safe")
+local regf, priv, id, pdir, phost, pport, mtu = arg[1], arg[2], arg[3], arg[4], arg[5], tonumber(arg[6]), tonumber(arg[7])
+local h = io.open(regf, "r"); if not h then os.exit(1) end
+local o = cjson.decode(h:read("*a") or ""); h:close()
+if not o or not o.config then os.exit(1) end
+local cfg = o.config
+local addrs = (cfg.interface or {}).addresses or {}
+local peer = (cfg.peers or {})[1] or {}
+if not peer.public_key or not addrs.v4 then os.exit(1) end
+
+-- reserved = 3 байта из base64-декодированного client_id. Cloudflare этим полем
+-- маршрутизирует пакеты к нужному устройству; без него туннель встаёт, но трафик
+-- не ходит. Своя реализация decode: на роутере нет ни `od`, ни base64 -d в нужном
+-- виде, а тащить зависимость ради 4 символов незачем.
+local function reserved_from(cid)
+  if type(cid) ~= "string" or #cid < 4 then return nil end
+  cid = cid:gsub("-", "+"):gsub("_", "/")
+  local b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  local bits = ""
+  for i = 1, 4 do
+    local idx = b64:find(cid:sub(i, i), 1, true)
+    if not idx then return nil end
+    idx = idx - 1
+    for b = 5, 0, -1 do bits = bits .. tostring(math.floor(idx / 2 ^ b) % 2) end
+  end
+  local r = {}
+  for i = 1, 3 do
+    local v = 0
+    for b = 0, 7 do v = v * 2 + tonumber(bits:sub((i - 1) * 8 + b + 1, (i - 1) * 8 + b + 1)) end
+    r[i] = v
+  end
+  return r
+end
+
+local addr = { addrs.v4 .. "/32" }
+if addrs.v6 and addrs.v6 ~= "" then addr[#addr + 1] = addrs.v6 .. "/128" end
+local p = {
+  address = phost, port = pport, public_key = peer.public_key,
+  allowed_ips = { "0.0.0.0/0", "::/0" },
+  persistent_keepalive_interval = 25,
+}
+local res = reserved_from(cfg.client_id)
+if res then p.reserved = res end
+
+local prof = {
+  id = id, name = "Cloudflare WARP", type = "wireguard", uri = "",
+  -- Метаданные устройства живут прямо в профиле: отдельный файл потребовал бы
+  -- своей записи в keeplist, а так они переживают sysupgrade вместе с профилем.
+  warp = { device_id = o.id, account_type = (o.account or {}).account_type,
+           client_id = cfg.client_id, created = os.time() },
+  outbound = {
+    type = "wireguard", tag = "proxy", mtu = mtu,
+    address = addr, private_key = priv,
+    peers = { p },
+  },
+}
+local f = io.open(pdir .. "/" .. id .. ".json", "w")
+if not f then os.exit(1) end
+f:write(cjson.encode(prof)); f:close()
+io.write((addrs.v4 or "") .. "\t" .. tostring(o.id or ""))
+LUA
+}
+
+# --- verify ----------------------------------------------------------------
+# Поднимает «активная цепочка + WARP» и смотрит, что отвечает Cloudflare: warp=on
+# и IP из диапазона Cloudflare = цепочка реально работает.
+do_verify() { # $1 = warp profile id
+    _id="$1"
+    [ -f "$PROFILES/$_id.json" ] || die "профиль $_id не найден"
+    _chain=$(active_chain)
+    if [ -n "$_chain" ]; then _full="$_chain,$_id"; else _full="$_id"; fi
+    if ! proxy_up "$_full"; then
+        write_state error "не удалось собрать цепочку «$_full»" "$_id"
+        printf '{"ok":false,"error":"не удалось собрать цепочку"}\n'
+        return 1
+    fi
+    _tr=$(curl -sS -m 25 -x "socks5h://127.0.0.1:$PROXY_PORT" "$VERIFY_URL" 2>/dev/null)
+    proxy_down
+    _ip=$(printf '%s' "$_tr" | sed -n 's/^ip=\(.*\)/\1/p' | head -1 | tr -d '\r')
+    _wp=$(printf '%s' "$_tr" | sed -n 's/^warp=\(.*\)/\1/p' | head -1 | tr -d '\r')
+    _loc=$(printf '%s' "$_tr" | sed -n 's/^loc=\(.*\)/\1/p' | head -1 | tr -d '\r')
+    if [ "$_wp" = "on" ]; then
+        log "verify: $_id OK ip=$_ip loc=$_loc"
+        write_state done "WARP работает: выход $_ip ($_loc)" "$_id" "$_ip" "on"
+        printf '{"ok":true,"id":"%s","ip":"%s","loc":"%s","warp":"on"}\n' "$_id" "$_ip" "$_loc"
+        return 0
+    fi
+    # Туннель не встал. Самая частая причина — предыдущий хоп не умеет UDP-relay.
+    log "verify: $_id FAILED (warp=$_wp ip=$_ip)"
+    write_state error "WARP не отвечает через текущую цепочку — вероятно, VPN не пропускает UDP" "$_id" "$_ip" "${_wp:-off}"
+    printf '{"ok":false,"id":"%s","ip":"%s","warp":"%s","error":"WARP не поднялся через активную цепочку (проверьте, что VPN умеет UDP)"}\n' \
+        "$_id" "$_ip" "${_wp:-off}"
+    return 1
+}
+
+cmd_verify() {
+    [ -n "$1" ] || { printf '{"ok":false,"error":"нужен id профиля"}\n'; exit 1; }
+    mkdir "$LOCK" 2>/dev/null || { printf '{"ok":false,"error":"проверка уже идёт"}\n'; exit 1; }
+    trap 'cleanup' EXIT INT TERM HUP
+    write_state running "Проверка цепочки" "$1"
+    do_verify "$1"
+}
+
+# --- status ----------------------------------------------------------------
+cmd_status() {
+    lua - "$PROFILES" "$STATE" <<'LUA' 2>/dev/null || printf '{"ok":true,"profiles":[],"last":{}}\n'
+local cjson = require("cjson.safe")
+local pdir, statef = arg[1], arg[2]
+local out = { ok = true, profiles = {} }
+local p = io.popen('ls "' .. pdir .. '"/*.json 2>/dev/null')
+if p then
+  for f in p:lines() do
+    local h = io.open(f, "r")
+    if h then
+      local obj = cjson.decode(h:read("*a") or ""); h:close()
+      if obj and obj.warp and obj.id then
+        local peer = ((obj.outbound or {}).peers or {})[1] or {}
+        out.profiles[#out.profiles + 1] = {
+          id = obj.id, name = obj.name,
+          created = obj.warp.created, account_type = obj.warp.account_type,
+          address = ((obj.outbound or {}).address or {})[1],
+          reserved = peer.reserved ~= nil,
+        }
+      end
+    end
+  end
+  p:close()
+end
+local h = io.open(statef, "r")
+if h then out.last = cjson.decode(h:read("*a") or "") or {}; h:close() end
+-- cjson кодирует пустую таблицу как {}, а панель ждёт массив — правим строкой.
+local s = cjson.encode(out)
+if #out.profiles == 0 then s = s:gsub('"profiles":%{%}', '"profiles":[]') end
+io.write(s)
+LUA
+}
+
+# --- delete ----------------------------------------------------------------
+cmd_delete() {
+    _id="$1"
+    case "$_id" in ''|*[!a-zA-Z0-9._-]*) printf '{"ok":false,"error":"плохой id"}\n'; exit 1 ;; esac
+    [ -f "$PROFILES/$_id.json" ] || { printf '{"ok":false,"error":"профиль не найден"}\n'; exit 1; }
+    grep -q '"warp"' "$PROFILES/$_id.json" 2>/dev/null || { printf '{"ok":false,"error":"это не WARP-профиль"}\n'; exit 1; }
+    _ach=$(active_chain)
+    case ",$_ach," in *",$_id,"*) printf '{"ok":false,"error":"профиль в активной цепочке"}\n'; exit 1 ;; esac
+    rm -f "$PROFILES/$_id.json"
+    log "deleted $_id"
+    printf '{"ok":true}\n'
+}
+
+# --- selftest --------------------------------------------------------------
+cmd_selftest() {
+    _c=0; _l=0; _s=0; _r=0
+    command -v curl >/dev/null 2>&1 && _c=1
+    lua -e 'require("cjson.safe")' 2>/dev/null && _l=1
+    [ -x "$SINGBOX_BIN" ] && "$SINGBOX_BIN" generate wg-keypair >/dev/null 2>&1 && _s=1
+    [ -x "$API_BIN" ] && _r=1
+    printf '{"ok":true,"curl":%s,"lua_cjson":%s,"wg_keypair":%s,"api":%s,"platform":"%s"}\n' \
+        "$_c" "$_l" "$_s" "$_r" "$PLATFORM"
+}
+
+case "$1" in
+    register)  cmd_register ;;
+    verify)    cmd_verify "$2" ;;
+    status)    cmd_status ;;
+    delete)    cmd_delete "$2" ;;
+    selftest)  cmd_selftest ;;
+    *)
+        echo "usage: detour-warp register|verify <id>|status|delete <id>|selftest" >&2
+        exit 2
+        ;;
+esac

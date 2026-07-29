@@ -137,6 +137,9 @@ PANEL_FILES = [
     (("router_files", "detour-diagnose-vpn"), "usr/sbin/detour-diagnose-vpn", 0o755),
     (("router_files", "detour-push"), "usr/sbin/detour-push", 0o755),
     (("router_files", "detour-cert"), "usr/sbin/detour-cert", 0o755),
+    # Cloudflare WARP: регистрирует бесплатное устройство и кладёт его обычным
+    # wireguard-профилем (последний хоп цепочки → выход из дата-центра в CF).
+    (("router_files", "detour-warp"), "usr/sbin/detour-warp", 0o755),
     (("router_files", "detour-offload"), "usr/sbin/detour-offload", 0o755),
     # Публикация LAN-сервисов наружу (HTTPS-реверс-прокси на nginx / DNAT через uci).
     (("router_files", "detour-portmap"), "usr/sbin/detour-portmap", 0o755),
@@ -358,7 +361,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/detour-bootstrap-install \
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
-    /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-offload /usr/sbin/detour-portmap /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
+    /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-warp /usr/sbin/detour-offload /usr/sbin/detour-portmap /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /usr/sbin/detour-rulist \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\

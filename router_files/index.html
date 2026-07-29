@@ -6317,6 +6317,13 @@
           >
             HTTP/SOCKS
           </button>
+          <button
+            class="modal-tab"
+            data-panel="modal-warp"
+            onclick="switchModalTab(this, 'modal-warp'); refreshWarpPanel()"
+          >
+            ☁ WARP
+          </button>
         </div>
         <div class="modal-panel active" id="modal-uri">
           <label
@@ -6521,6 +6528,29 @@
               <input type="text" id="wg-reserved" placeholder="0,0,0" />
             </div>
           </div>
+        </div>
+        <div class="modal-panel" id="modal-warp">
+          <div class="helper-text" style="margin-bottom: 12px">
+            <b>Cloudflare WARP</b> — бесплатный WireGuard-туннель Cloudflare.
+            Ставится <b>последним</b> хопом: клиент → ваш VPN → WARP → сайт.
+            Выходной адрес перестаёт выглядеть как «сервер в дата-центре» и
+            становится адресом Cloudflare — это то, что обычно требуется, чтобы
+            заработали ИИ-сервисы (Gemini, AI Studio), отказывающие хостингам.
+            <br /><br />
+            Часть сервисов, наоборот, режет диапазоны Cloudflare, поэтому
+            надёжнее назначить WARP <b>точечно</b> в «Карте маршрутов» на нужные
+            домены (с галкой «через цепочку»), а не гнать через него весь трафик.
+            <br /><br />
+            Регистрация идёт через активный VPN — Cloudflare не отвечает на
+            прямые запросы из России. Занимает 15–40 секунд.
+          </div>
+          <div id="warp-list" class="helper-text"></div>
+          <div class="flex-gap mt-12">
+            <button class="btn" id="warp-register-btn" onclick="warpRegister()">
+              Зарегистрировать устройство
+            </button>
+          </div>
+          <div id="warp-status" class="helper-text mt-12"></div>
         </div>
         <div class="modal-panel" id="modal-proxy">
           <div class="form-grid">
@@ -10761,7 +10791,7 @@
             return null;
           }
         }
-        if (active("modal-wireguard")) {
+        if (active("modal-wireguard") || active("modal-warp")) {
           toast("Для WireGuard стандартная ссылка не формируется", "error");
           return null;
         }
@@ -13643,6 +13673,16 @@
             toast(e.message, "error");
             return;
           }
+        } else if (
+          document.getElementById("modal-warp").classList.contains("active")
+        ) {
+          // Профиль WARP создаётся на роутере своей кнопкой — общее «Сохранить»
+          // для него не работает, поэтому говорим об этом прямо.
+          toast(
+            "Нажмите «Зарегистрировать устройство» — профиль создаст роутер",
+            "error",
+          );
+          return;
         } else {
           toast("Не удалось определить форму профиля", "error");
           return;
@@ -14750,6 +14790,110 @@
         } catch (e) {
           toast(e.message, "error");
         }
+      }
+
+      // ---- Cloudflare WARP -------------------------------------------------
+      // Профиль создаётся НА РОУТЕРЕ (detour-warp register), а не в браузере:
+      // регистрация требует похода на api.cloudflareclient.com через активный VPN.
+      // Поэтому вкладка не участвует в общем «Сохранить», а работает своей кнопкой
+      // и опрашивает warp_status — как выпуск сертификата.
+      var warpPollTimer = null;
+
+      async function refreshWarpPanel() {
+        var list = document.getElementById("warp-list");
+        if (!list) return;
+        try {
+          var s = await api("warp_status");
+          var profiles = Array.isArray(s.profiles) ? s.profiles : [];
+          if (!profiles.length) {
+            list.innerHTML =
+              '<span style="color:var(--text-dim)">Устройств WARP пока нет.</span>';
+            return;
+          }
+          list.innerHTML =
+            "<b>Уже зарегистрированы:</b><br />" +
+            profiles
+              .map(function (p) {
+                return (
+                  "• " +
+                  escapeHtml(p.name || p.id) +
+                  ' <span style="color:var(--text-dim)">(' +
+                  escapeHtml(p.id) +
+                  (p.address ? ", " + escapeHtml(p.address) : "") +
+                  ")</span>"
+                );
+              })
+              .join("<br />");
+        } catch (e) {
+          list.innerHTML = "";
+        }
+      }
+
+      async function warpRegister() {
+        var btn = document.getElementById("warp-register-btn");
+        var status = document.getElementById("warp-status");
+        btn.disabled = true;
+        status.innerHTML =
+          '<span style="color:var(--text-dim)">Регистрация устройства… нужен работающий VPN. Это 15–40 секунд.</span>';
+        try {
+          var resp = await api("warp_register", "POST", "{}");
+          if (!resp.ok) throw new Error(resp.error || "не удалось запустить");
+          pollWarpStatus(0);
+        } catch (e) {
+          btn.disabled = false;
+          status.innerHTML =
+            '<span style="color:var(--red)">Ошибка: ' +
+            escapeHtml(e.message) +
+            "</span>";
+        }
+      }
+
+      // Опрос warp_status до состояния done/error или таймаута (~90 с).
+      async function pollWarpStatus(attempt) {
+        var status = document.getElementById("warp-status");
+        var btn = document.getElementById("warp-register-btn");
+        if (warpPollTimer) clearTimeout(warpPollTimer);
+        if (attempt > 45) {
+          btn.disabled = false;
+          status.innerHTML =
+            '<span style="color:var(--red)">Регистрация не ответила вовремя. Проверьте, что VPN включён, и попробуйте ещё раз.</span>';
+          return;
+        }
+        try {
+          var s = await api("warp_status");
+          var last = s.last || {};
+          if (last.state === "done") {
+            btn.disabled = false;
+            status.innerHTML =
+              '<span style="color:var(--green)">Готово. ' +
+              escapeHtml(last.message || "") +
+              "</span><br /><span style=\"color:var(--text-dim)\">Профиль добавлен. Поставьте его последним в цепочке или назначьте на домены в «Карте маршрутов» с галкой «через цепочку».</span>";
+            await refreshWarpPanel();
+            await loadProfiles();
+            return;
+          }
+          if (last.state === "error") {
+            btn.disabled = false;
+            status.innerHTML =
+              '<span style="color:var(--red)">' +
+              escapeHtml(last.message || "не удалось") +
+              "</span>";
+            await refreshWarpPanel();
+            await loadProfiles();
+            return;
+          }
+          if (last.message) {
+            status.innerHTML =
+              '<span style="color:var(--text-dim)">' +
+              escapeHtml(last.message) +
+              "…</span>";
+          }
+        } catch (e) {
+          /* сеть моргнула — просто пробуем снова */
+        }
+        warpPollTimer = setTimeout(function () {
+          pollWarpStatus(attempt + 1);
+        }, 2000);
       }
 
       function parseVlessUri(uri) {

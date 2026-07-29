@@ -61,6 +61,8 @@ CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written b
 OFFLOAD_BIN="/usr/sbin/detour-offload"      # QCA HW-offload watchdog/recovery — backs the offload_* actions
 PORTMAP_BIN="/usr/sbin/detour-portmap"      # публикация внутренних сервисов наружу — backs the portmap_* actions
 WANLINK_BIN="/usr/sbin/detour-wan-link"     # WAN PHY/link-speed monitor — warns on 100M negotiation (not offload-related)
+WARP_BIN="/usr/sbin/detour-warp"            # Cloudflare WARP (последний хоп цепочки) — backs the warp_* actions
+WARP_STATE="/var/state/detour-warp.json"    # ход регистрации WARP (пишет detour-warp; CGI её детачит)
 # Swap file (Keenetic/Entware only — /opt on a USB flash needs swap or the stack
 # gets OOM-killed). Managed via the S05swap init script; backs the swap_* actions.
 SWAPFILE="/opt/swapfile"
@@ -154,6 +156,8 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     OFFLOAD_BIN="$OPT/sbin/detour-offload"   # QCA-only; no-op on Keenetic (no NSS accelerator)
     PORTMAP_BIN="$OPT/sbin/detour-portmap"
     WANLINK_BIN="$OPT/sbin/detour-wan-link"
+    WARP_BIN="$OPT/sbin/detour-warp"
+    WARP_STATE="$OPT/var/state/detour-warp.json"
     SWAPFILE="$OPT/swapfile"
     SWAP_INITD="$OPT/etc/init.d/S05swap"
     SWAP_STATE="$OPT/var/state/detour-swap.json"
@@ -1534,6 +1538,19 @@ if [ "$1" = "activate" ]; then
     echo "activate: $CHAIN"
     exit 0
 fi
+if [ "$1" = "render-mixed" ]; then
+    # Печатает конфиг sing-box с mixed-инбаундом для заданной цепочки ($2; пусто =
+    # активная) на порту $3. Нужен detour-warp: регистрация WARP и проверка цепочки
+    # ходят наружу через временный экземпляр, а рендер цепочек должен остаться в
+    # ОДНОМ месте — иначе вторая копия логики разъедется с этой при первой же правке.
+    CHAIN=$(normalize_profile_list "$2")
+    [ -z "$CHAIN" ] && CHAIN=$(get_active_chain)
+    [ -n "$CHAIN" ] || { echo "render-mixed: no chain" >&2; exit 1; }
+    _rmport="$3"
+    case "$_rmport" in ''|*[!0-9]*) _rmport=19482 ;; esac
+    render_chain_config "$CHAIN" "" "" "" "$_rmport" mixed || exit 1
+    exit 0
+fi
 if [ "$1" = "egress-ip-refresh" ]; then
     CHAIN=$(normalize_profile_list "$2")
     [ -z "$CHAIN" ] && CHAIN=$(get_active_chain)
@@ -2230,6 +2247,10 @@ ping_check)
     PSRV=$(json_val "server" "$PFILE")
     PPORT=$(numeric_json_val "server_port" "$PFILE")
     PTYPE=$(json_val "type" "$PFILE")
+    # wireguard/WARP: ключа "server" нет, узел лежит в peers[].address (см. detour-ping).
+    if [ -z "$PSRV" ] && [ "$PTYPE" = "wireguard" ]; then
+        PSRV=$(sed -n 's/.*"address"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PFILE" 2>/dev/null | head -1)
+    fi
     RTT=-1; OKV=0; METHOD="none"
     if [ -n "$PSRV" ]; then
         # ICMP gives latency + reachability in one shot (cheap, ~instant if up).
@@ -3899,6 +3920,46 @@ cert_issue)
     case "$CEML" in ''|*[!a-zA-Z0-9.@_+-]*) json_err "bad email"; exit 0 ;; esac
     detach_bg "/tmp/detour-cert-bg.log" "$CERT_BIN" issue "$CDOM" "$CEML"
     printf '{"ok":true,"started":true}'
+    ;;
+
+# ==================== CLOUDFLARE WARP ====================
+# Тонкая обёртка над /usr/sbin/detour-warp. WARP — обычный wireguard-профиль
+# (панель их уже умеет), поэтому здесь только ДОБЫЧА учётки бесплатного устройства
+# и проверка цепочки; маршрутизацией занимаются штатные «цепочки»/«карта маршрутов».
+# Регистрация ходит на api.cloudflareclient.com через временный sing-box на активной
+# цепочке (из РФ CF-API напрямую молчит) и занимает 15-40 с — поэтому она детачится,
+# а панель опрашивает warp_status, как с выпуском сертификата.
+warp_status)
+    if [ -x "$WARP_BIN" ]; then
+        "$WARP_BIN" status
+    else
+        printf '{"ok":true,"supported":false,"profiles":[],"last":{}}'
+    fi
+    ;;
+
+warp_register)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$WARP_BIN" ] || { json_err "detour-warp not installed"; exit 0; }
+    detach_bg "/tmp/detour-warp-bg.log" "$WARP_BIN" register
+    printf '{"ok":true,"started":true}'
+    ;;
+
+warp_verify)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$WARP_BIN" ] || { json_err "detour-warp not installed"; exit 0; }
+    WID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    # Уезжает в `sh -c` строку detach_bg — пускаем только безопасный набор.
+    case "$WID" in ''|*[!a-zA-Z0-9._-]*) json_err "bad id"; exit 0 ;; esac
+    detach_bg "/tmp/detour-warp-bg.log" "$WARP_BIN" verify "$WID"
+    printf '{"ok":true,"started":true}'
+    ;;
+
+warp_delete)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$WARP_BIN" ] || { json_err "detour-warp not installed"; exit 0; }
+    WID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    case "$WID" in ''|*[!a-zA-Z0-9._-]*) json_err "bad id"; exit 0 ;; esac
+    "$WARP_BIN" delete "$WID"
     ;;
 
 # ==================== HW OFFLOAD WATCHDOG (QCA NSS/PPE) ====================

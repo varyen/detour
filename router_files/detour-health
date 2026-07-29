@@ -185,6 +185,13 @@ case "$MODE" in
         ONEID=$(printf '%s' "$ONEID" | tr -cd 'A-Za-z0-9_.-')
         [ -n "$ONEID" ] || { echo "usage: detour-health one <id>" >&2; exit 2; }
         [ -f "$PROFILES/$ONEID.json" ] || { echo "profile not found" >&2; exit 2; }
+        # Cloudflare WARP не проверяется в одиночку (он работает только ПОСЛЕДНИМ
+        # хопом за VPN — см. сборку списка id ниже). Иначе ручная проверка писала бы
+        # в кэш красную строку, которую следующий свип всё равно выкинет.
+        if grep -q '"warp"[[:space:]]*:' "$PROFILES/$ONEID.json" 2>/dev/null; then
+            echo "WARP проверяется через detour-warp verify (только в цепочке)" >&2
+            exit 0
+        fi
         ;;
     *) echo "usage: detour-health [tick | sweep | active | one <id>]" >&2; exit 2 ;;
 esac
@@ -330,6 +337,12 @@ end
 uf:close()
 
 -- Every profile carrying a decodable outbound.
+-- КРОМЕ Cloudflare WARP: он существует только как ПОСЛЕДНИЙ хоп за VPN, а
+-- одиночная проверка дозванивается до Cloudflare напрямую. Из РФ такой звонок
+-- глушится (проверено: WARP без VPN не поднимается вовсе), и профиль вечно горел
+-- бы красным, хотя в цепочке работает. Свою проверку WARP делает сам —
+-- `detour-warp verify` поднимает «активная цепочка + WARP» и смотрит трейс.
+-- Признак — ключ "warp" в профиле; обычные wireguard-профили проверяются как все.
 local ids = {}
 local p = io.popen('ls "' .. pdir .. '"/*.json 2>/dev/null')
 if p then
@@ -338,7 +351,7 @@ if p then
     if h then
       local obj = cjson.decode(h:read("*a") or "")
       h:close()
-      if obj and obj.outbound and obj.id then ids[#ids+1] = obj.id end
+      if obj and obj.outbound and obj.id and not obj.warp then ids[#ids+1] = obj.id end
     end
   end
   p:close()
@@ -361,8 +374,33 @@ build_cfg() { # $1 = ids file, writes $SB_CONF + $SB_MAP
 local cjson = require("cjson.safe")
 local pdir, idfile, clash, cout, mout = arg[1], arg[2], arg[3], arg[4], arg[5]
 local outbounds = { { type = "direct", tag = "direct" } }
+local endpoints = {}
 local map = {}
 local n = 0
+
+-- WireGuard (в т.ч. Cloudflare WARP) НЕ является outbound'ом: в sing-box 1.11 его
+-- перенесли в "endpoints", а в 1.13 старую форму удалили совсем. Один такой профиль
+-- в outbounds[] роняет ВЕСЬ конфиг чанка ("unknown field") — то есть до полусотни
+-- профилей разом остаются без функциональной проверки. Приводим к endpoint-форме
+-- (заодно понимая старую запись с server/local_address) и кладём куда положено.
+local function to_endpoint(ob)
+  if ob.local_address and not ob.address then ob.address = ob.local_address end
+  ob.local_address = nil
+  if not ob.peers and ob.server then
+    ob.peers = { {
+      address = ob.server, port = ob.server_port,
+      public_key = ob.peer_public_key, pre_shared_key = ob.pre_shared_key,
+      reserved = ob.reserved, allowed_ips = { "0.0.0.0/0", "::/0" },
+    } }
+    ob.server, ob.server_port, ob.peer_public_key = nil, nil, nil
+    ob.pre_shared_key, ob.reserved = nil, nil
+  end
+  -- поля старого outbound'а, которых у endpoint'а нет
+  ob.system_interface, ob.interface_name, ob.gso, ob.network = nil, nil, nil, nil
+  if type(ob.peers) ~= "table" or #ob.peers == 0 then return nil end
+  return ob
+end
+
 local idf = io.open(idfile, "r")
 if idf then
   for id in idf:lines() do
@@ -373,16 +411,25 @@ if idf then
         local obj = cjson.decode(h:read("*a") or "")
         h:close()
         if obj and obj.outbound then
-          n = n + 1
           local ob = obj.outbound
           -- uTLS is TCP-only: QUIC outbounds (hysteria/hysteria2/tuic) with tls.utls
           -- fail every dial ("unsupported usage for uTLS"); mirror detour-api's strip
           if (ob.type == "hysteria" or ob.type == "hysteria2" or ob.type == "tuic")
              and type(ob.tls) == "table" then ob.tls.utls = nil end
-          local tag = "h" .. n
-          ob.tag = tag
-          outbounds[#outbounds + 1] = ob
-          map[#map + 1] = id .. "\t" .. tag
+          if ob.type == "wireguard" then ob = to_endpoint(ob) end
+          -- ob == nil → профиль непредставим (битый wireguard); пропускаем ЕГО,
+          -- а не весь чанк.
+          if ob then
+            n = n + 1
+            local tag = "h" .. n
+            ob.tag = tag
+            if ob.type == "wireguard" then
+              endpoints[#endpoints + 1] = ob
+            else
+              outbounds[#outbounds + 1] = ob
+            end
+            map[#map + 1] = id .. "\t" .. tag
+          end
         end
       end
     end
@@ -395,6 +442,7 @@ local conf = {
   outbounds = outbounds,
   route = { final = "direct" },
 }
+if #endpoints > 0 then conf.endpoints = endpoints end
 local cf = io.open(cout, "w"); cf:write(cjson.encode(conf)); cf:close()
 local mf = io.open(mout, "w"); mf:write(table.concat(map, "\n")); if #map > 0 then mf:write("\n") end; mf:close()
 LUA
@@ -440,9 +488,20 @@ local conf = {
   log = { level = "error", timestamp = false },
   experimental = { clash_api = { external_controller = clash } },
   inbounds = { { type = "mixed", tag = "in", listen = "127.0.0.1", listen_port = inport } },
-  outbounds = { ob, { type = "direct", tag = "direct" } },
+  outbounds = { { type = "direct", tag = "direct" } },
   route = { final = "vpn" },
 }
+-- wireguard живёт в endpoints[], а не в outbounds[] (см. build_cfg): в outbounds
+-- он валит конфиг целиком, и замер скорости молча превращается в «нет данных».
+if ob.type == "wireguard" then
+  if ob.local_address and not ob.address then ob.address = ob.local_address end
+  ob.local_address = nil
+  ob.system_interface, ob.interface_name, ob.gso, ob.network = nil, nil, nil, nil
+  if type(ob.peers) ~= "table" or #ob.peers == 0 then os.exit(1) end
+  conf.endpoints = { ob }
+else
+  table.insert(conf.outbounds, 1, ob)
+end
 local cf = io.open(cout, "w"); cf:write(cjson.encode(conf)); cf:close()
 LUA
     [ -s "$SB_CONF" ]
