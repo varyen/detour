@@ -2053,6 +2053,66 @@
         align-items: center;
         gap: 10px;
       }
+      /* ===== QR-сканер (импорт профиля с камеры телефона) ===== */
+      .qr-scan-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 8px;
+        flex-wrap: wrap;
+      }
+      .qr-scan-hint {
+        font-size: 12px;
+        color: var(--text-dim);
+      }
+      .qr-stage {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 4 / 3;
+        background: #000;
+        border-radius: var(--radius);
+        overflow: hidden;
+        border: 1px solid var(--border);
+      }
+      .qr-stage video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      /* Рамка прицела: квадрат по центру, чтобы было понятно, куда наводить. */
+      .qr-frame {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .qr-frame::before {
+        content: "";
+        width: min(62%, 260px);
+        aspect-ratio: 1;
+        border: 2px solid rgba(255, 255, 255, 0.85);
+        border-radius: 14px;
+        box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.35);
+      }
+      .qr-status {
+        font-size: 13px;
+        margin-top: 10px;
+        min-height: 20px;
+        line-height: 1.45;
+      }
+      .qr-status.err {
+        color: var(--red);
+      }
+      .qr-status.ok {
+        color: var(--green);
+      }
+      .qr-cam-select {
+        flex: 1;
+        min-width: 0;
+      }
       .modal-tabs {
         display: flex;
         gap: 2px;
@@ -5753,6 +5813,18 @@
             oninput="parseProfileUri()"
             placeholder="vless://uuid@host:port?security=reality&amp;...#Name"
           ></textarea>
+          <div class="qr-scan-row">
+            <button
+              type="button"
+              class="btn sm"
+              id="qr-scan-btn"
+              onclick="openQrScanner()"
+              title="Навести камеру телефона на QR-код с ссылкой профиля или подписки"
+            >
+              📷 Сканировать QR
+            </button>
+            <span class="qr-scan-hint" id="qr-scan-hint"></span>
+          </div>
           <div
             id="uri-parse-status"
             style="font-size: 12px; margin-top: 4px; min-height: 18px"
@@ -6077,6 +6149,31 @@
           <button class="btn primary" onclick="applyChainFromModal()">
             ✓ Применить цепочку
           </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      class="modal-overlay"
+      id="qr-scan-modal"
+      style="display: none"
+      onclick="backdropClose(event, closeQrScanner)"
+    >
+      <div class="modal" style="max-width: 520px">
+        <h3>📷 Сканирование QR</h3>
+        <div class="qr-stage">
+          <video id="qr-video" playsinline muted autoplay></video>
+          <div class="qr-frame"></div>
+        </div>
+        <div class="qr-status" id="qr-status">Запрашиваю доступ к камере…</div>
+        <div class="modal-footer">
+          <select
+            id="qr-cam-select"
+            class="qr-cam-select"
+            style="display: none"
+            onchange="switchQrCamera(this.value)"
+          ></select>
+          <button class="btn" onclick="closeQrScanner()">Закрыть</button>
         </div>
       </div>
     </div>
@@ -12101,6 +12198,7 @@
       function showProfileModal(profile, profileId) {
         resetProfileModalState();
         document.getElementById("profile-modal").style.display = "flex";
+        refreshQrHint();
         document.getElementById("profile-modal-group").value = "";
         document
           .querySelectorAll("input[name='profile-routing-mode']")
@@ -12199,6 +12297,7 @@
 
       function closeProfileModal() {
         document.getElementById("profile-modal").style.display = "none";
+        closeQrScanner(); // не оставляем камеру включённой, если её закрыли «через голову»
       }
 
       function switchModalTab(btn, panelId) {
@@ -12656,6 +12755,296 @@
             e.message +
             "</span>";
           previewEl.textContent = "";
+        }
+      }
+
+      // ===== QR-СКАНЕР (импорт профиля с камеры телефона) =====
+      // Декодер выбирается по возможностям браузера: нативный BarcodeDetector
+      // (Android Chrome/Edge) — бесплатно; иначе лениво подгружается вендоренный
+      // jsQR.min.js (Safari/iOS, Firefox). См. docs/vendor-jsqr.md
+      var qrState = {
+        stream: null,
+        timer: null,
+        detector: null,
+        jsqrLoading: null,
+        canvas: null,
+        active: false,
+      };
+
+      function qrStatus(msg, cls) {
+        var el = document.getElementById("qr-status");
+        if (!el) return;
+        el.textContent = msg;
+        el.className = "qr-status" + (cls ? " " + cls : "");
+      }
+
+      // getUserMedia живёт только в secure context. Панель по http://192.168.x.x
+      // таковым НЕ считается — камера доступна лишь через HTTPS (Let's Encrypt /
+      // KeenDNS) или с localhost. Проверяем заранее, чтобы не ловить туманный
+      // NotAllowedError и объяснить причину по-человечески.
+      function qrUnavailableReason() {
+        if (!window.isSecureContext)
+          return (
+            "Камера доступна только по HTTPS. Сейчас панель открыта по " +
+            location.protocol +
+            "// — откройте её по HTTPS-адресу (сертификат выпускается в «Настройках»), " +
+            "либо вставьте ссылку вручную."
+          );
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+          return "Браузер не умеет работать с камерой (нет mediaDevices.getUserMedia).";
+        return null;
+      }
+
+      function loadJsQr() {
+        if (window.jsQR) return Promise.resolve(window.jsQR);
+        if (qrState.jsqrLoading) return qrState.jsqrLoading;
+        qrState.jsqrLoading = new Promise(function (resolve, reject) {
+          var s = document.createElement("script");
+          // Путь относительно index.html: оба манифеста кладут файл рядом с ней
+          // (/www/detour/ на OpenWrt, /opt/share/www/detour/ на Keenetic).
+          s.src = "jsQR.min.js";
+          s.onload = function () {
+            window.jsQR
+              ? resolve(window.jsQR)
+              : reject(new Error("jsQR.min.js загрузился, но не отдал функцию"));
+          };
+          s.onerror = function () {
+            reject(new Error("не удалось загрузить jsQR.min.js"));
+          };
+          document.head.appendChild(s);
+        });
+        return qrState.jsqrLoading;
+      }
+
+      // Нативный детектор бывает объявлен, но без поддержки qr_code — проверяем список.
+      async function pickQrDecoder() {
+        if (window.BarcodeDetector) {
+          try {
+            var fmts = await window.BarcodeDetector.getSupportedFormats();
+            if (fmts && fmts.indexOf("qr_code") >= 0) {
+              qrState.detector = new window.BarcodeDetector({
+                formats: ["qr_code"],
+              });
+              return "native";
+            }
+          } catch (e) {
+            /* падаем в jsQR */
+          }
+        }
+        await loadJsQr();
+        return "jsqr";
+      }
+
+      async function listQrCameras() {
+        var sel = document.getElementById("qr-cam-select");
+        if (!sel || !navigator.mediaDevices.enumerateDevices) return;
+        try {
+          var devs = await navigator.mediaDevices.enumerateDevices();
+          var cams = devs.filter(function (d) {
+            return d.kind === "videoinput";
+          });
+          if (cams.length < 2) {
+            sel.style.display = "none";
+            return;
+          }
+          sel.innerHTML = "";
+          cams.forEach(function (c, i) {
+            var o = document.createElement("option");
+            o.value = c.deviceId;
+            o.textContent = c.label || "Камера " + (i + 1);
+            sel.appendChild(o);
+          });
+          var cur =
+            qrState.stream &&
+            qrState.stream.getVideoTracks()[0] &&
+            qrState.stream.getVideoTracks()[0].getSettings().deviceId;
+          if (cur) sel.value = cur;
+          sel.style.display = "";
+        } catch (e) {
+          sel.style.display = "none";
+        }
+      }
+
+      async function startQrStream(constraints) {
+        stopQrStream();
+        qrState.stream =
+          await navigator.mediaDevices.getUserMedia(constraints);
+        var v = document.getElementById("qr-video");
+        v.srcObject = qrState.stream;
+        await v.play().catch(function () {});
+      }
+
+      function stopQrStream() {
+        if (qrState.stream) {
+          qrState.stream.getTracks().forEach(function (t) {
+            t.stop();
+          });
+          qrState.stream = null;
+        }
+        var v = document.getElementById("qr-video");
+        if (v) v.srcObject = null;
+      }
+
+      async function openQrScanner() {
+        var modal = document.getElementById("qr-scan-modal");
+        modal.style.display = "flex";
+        qrState.active = true;
+        qrStatus("Запрашиваю доступ к камере…");
+
+        var why = qrUnavailableReason();
+        if (why) {
+          qrStatus(why, "err");
+          return;
+        }
+
+        try {
+          // Камеру запрашиваем ПЕРВОЙ, до ленивой загрузки декодера: Safari на iOS
+          // привязывает разрешение к пользовательскому жесту, а await на загрузке
+          // скрипта эту цепочку рвёт.
+          // facingMode как ideal, а не exact: на ноутбуке задней камеры нет,
+          // exact там уронил бы getUserMedia с OverconstrainedError.
+          await startQrStream({
+            video: { facingMode: { ideal: "environment" } },
+          });
+        } catch (e) {
+          var msg = "Не удалось включить камеру: " + (e.message || e);
+          if (e.name === "NotAllowedError")
+            msg =
+              "Доступ к камере запрещён. Разрешите его в настройках сайта и откройте сканер заново.";
+          else if (e.name === "NotFoundError")
+            msg = "Камера не найдена.";
+          else if (e.name === "NotReadableError")
+            msg = "Камера занята другим приложением.";
+          qrStatus(msg, "err");
+          stopQrStream();
+          return;
+        }
+
+        qrStatus("Камера включена, готовлю декодер…");
+        var mode;
+        try {
+          mode = await pickQrDecoder();
+        } catch (e) {
+          qrStatus(
+            "Камера работает, но декодер QR недоступен: " +
+              (e.message || e) +
+              ". Вставьте ссылку вручную.",
+            "err",
+          );
+          stopQrStream();
+          return;
+        }
+
+        qrStatus(
+          "Наведите камеру на QR-код" +
+            (mode === "jsqr" ? " (программный декодер)" : ""),
+        );
+        await listQrCameras();
+        qrLoop(mode);
+      }
+
+      async function switchQrCamera(deviceId) {
+        if (!deviceId || !qrState.active) return;
+        try {
+          var wasNative = !!qrState.detector;
+          await startQrStream({ video: { deviceId: { exact: deviceId } } });
+          qrStatus("Наведите камеру на QR-код");
+          qrLoop(wasNative ? "native" : "jsqr");
+        } catch (e) {
+          qrStatus("Не удалось переключить камеру: " + (e.message || e), "err");
+        }
+      }
+
+      function qrLoop(mode) {
+        if (qrState.timer) clearInterval(qrState.timer);
+        var v = document.getElementById("qr-video");
+        var busy = false;
+        // 200 мс — компромисс: быстрее человек всё равно не наводит, а jsQR на
+        // слабом телефоне при каждом кадре греет батарею.
+        qrState.timer = setInterval(async function () {
+          if (!qrState.active || busy) return;
+          if (!v.videoWidth) return;
+          busy = true;
+          try {
+            var text = null;
+            if (mode === "native" && qrState.detector) {
+              var codes = await qrState.detector.detect(v);
+              if (codes && codes.length) text = codes[0].rawValue;
+            } else {
+              if (!qrState.canvas) qrState.canvas = document.createElement("canvas");
+              var c = qrState.canvas;
+              // Ограничиваем сторону 640 px: jsQR по полному 1080p кадру заметно тормозит.
+              var scale = Math.min(1, 640 / Math.max(v.videoWidth, v.videoHeight));
+              c.width = Math.round(v.videoWidth * scale);
+              c.height = Math.round(v.videoHeight * scale);
+              var ctx = c.getContext("2d", { willReadFrequently: true });
+              ctx.drawImage(v, 0, 0, c.width, c.height);
+              var img = ctx.getImageData(0, 0, c.width, c.height);
+              // attemptBoth, а не dontInvert: QR нередко показывают в тёмной теме —
+              // белый код на чёрном фоне без инверсии не читается.
+              var r = window.jsQR(img.data, img.width, img.height, {
+                inversionAttempts: "attemptBoth",
+              });
+              if (r && r.data) text = r.data;
+            }
+            if (text) onQrDecoded(text);
+          } catch (e) {
+            /* один сбойный кадр — не повод останавливать цикл */
+          } finally {
+            busy = false;
+          }
+        }, 200);
+      }
+
+      function onQrDecoded(text) {
+        text = (text || "").trim();
+        if (!text) return;
+        qrState.active = false;
+        qrStatus("Код распознан", "ok");
+        closeQrScanner();
+
+        var input = document.getElementById("profile-uri-input");
+        // Несколько сканов подряд — накапливаем список, парсер и так умеет пакет.
+        var prev = input.value.trim();
+        input.value = prev && prev !== text ? prev + "\n" + text : text;
+        parseProfileUri();
+        input.focus();
+
+        var known = /^(vless|trojan|vmess|ss|socks5?|https?):\/\//i.test(text);
+        toast(
+          known ? "QR распознан: " + text.slice(0, 40) + "…" : "QR распознан",
+          known ? "success" : "info",
+        );
+      }
+
+      function closeQrScanner() {
+        qrState.active = false;
+        if (qrState.timer) {
+          clearInterval(qrState.timer);
+          qrState.timer = null;
+        }
+        stopQrStream();
+        var m = document.getElementById("qr-scan-modal");
+        if (m) m.style.display = "none";
+      }
+
+      // Подпись под кнопкой: заранее объясняем, почему сканер не заработает,
+      // чтобы пользователь не тыкал кнопку впустую.
+      function refreshQrHint() {
+        var hint = document.getElementById("qr-scan-hint");
+        var btn = document.getElementById("qr-scan-btn");
+        if (!hint || !btn) return;
+        var why = qrUnavailableReason();
+        if (why) {
+          btn.disabled = true;
+          hint.textContent = window.isSecureContext
+            ? "камера недоступна в этом браузере"
+            : "нужен HTTPS-доступ к панели";
+          hint.title = why;
+        } else {
+          btn.disabled = false;
+          hint.textContent = "";
+          hint.title = "";
         }
       }
 
@@ -14517,6 +14906,9 @@
         if (e.key === "Escape") {
           closeHdrMenu();
           closeSysStats();
+          // Сканер держит камеру — гасим его первым и не пробрасываем Esc дальше.
+          var qr = document.getElementById("qr-scan-modal");
+          if (qr && qr.style.display === "flex") closeQrScanner();
         }
       });
 
