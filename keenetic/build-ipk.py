@@ -107,6 +107,10 @@ FILES = [
     # Let's Encrypt helper (acme.sh, /opt shim). Best-effort on Keenetic: :80 is the
     # stock router UI, so HTTP-01 needs :80 forwarded to lighttpd. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-cert"), "opt/sbin/detour-cert", 0o755, True),
+    # Публикация LAN-сервисов наружу (shared source, /opt shim): HTTPS-реверс-прокси
+    # через lighttpd mod_proxy + DNAT через ndm/netfilter.d. fix_shebang → /opt/bin/sh.
+    # ⚠ НЕ проверено на живом Keenetic — см. keenetic/README.md.
+    (os.path.join(ROUTER_FILES, "detour-portmap"), "opt/sbin/detour-portmap", 0o755, True),
     # Read-only preflight for the cert flow (diagnose env + print next steps). Keenetic-only.
     (os.path.join(HERE, "detour-cert-preflight.sh"), "opt/sbin/detour-cert-preflight", 0o755, True),
     # Standalone scheduler daemon (Keenetic-only): replaces the broken crond for
@@ -139,6 +143,10 @@ FILES = [
     # #!/opt/bin/sh shebang (fix=False — fix_shebang would turn it into /opt/opt/bin/sh).
     # See lighttpd/detour-ssl-helper.sh for why the inline `cat … 2>/dev/null` crashed lighttpd.
     (os.path.join(HERE, "lighttpd", "detour-ssl-helper.sh"), "opt/etc/lighttpd/conf.d/detour-ssl-helper.sh", 0o755, False),
+    # Тот же приём для конфига «Проброса сервисов» — detour-portmap пишет
+    # conf.d/detour-portmap.conf, а detour.conf подключает его через этот шим
+    # (include_shell должен всегда завершаться нулём, иначе lighttpd не стартует).
+    (os.path.join(HERE, "lighttpd", "detour-portmap-helper.sh"), "opt/etc/lighttpd/conf.d/detour-portmap-helper.sh", 0o755, False),
     (os.path.join(HERE, "etc", "detour.conf"), "opt/etc/detour/detour.conf", 0o644, False),
 ]
 
@@ -214,11 +222,11 @@ if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
 fi
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \
-    /opt/sbin/detour-wan-link \
+    /opt/sbin/detour-wan-link /opt/sbin/detour-portmap \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\
-    /opt/etc/lighttpd/conf.d/detour-ssl-helper.sh \\
+    /opt/etc/lighttpd/conf.d/detour-ssl-helper.sh /opt/etc/lighttpd/conf.d/detour-portmap-helper.sh \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
 # Swap file is NO LONGER created automatically — the operator creates it on demand
 # from the panel's SWAP modal (Detour → меню → «SWAP-файл»). Here we only ACTIVATE
@@ -234,6 +242,13 @@ fi
 if [ ! -f /opt/etc/detour/update.conf ]; then
     printf 'GH_OWNER=varyen\\nGH_REPO=detour\\nGH_TOKEN=\\nAUTO_CHECK=1\\n' > /opt/etc/detour/update.conf
     chmod 600 /opt/etc/detour/update.conf
+fi
+# Re-apply the published-services config (lighttpd conf.d block + iptables chains) —
+# the generated artefacts are not part of the package, so a reinstall would otherwise
+# leave the mappings listed in the panel with nothing actually listening. No-op when
+# nothing is published.
+if [ -s /opt/etc/detour/portmap.conf ] && [ -x /opt/sbin/detour-portmap ]; then
+    /opt/sbin/detour-portmap apply >/dev/null 2>&1
 fi
 # First-install bootstrap for the mipsel feed + runtime binaries. Delayed start
 # avoids the outer opkg lock; the helper itself skips when feed + packages already exist.

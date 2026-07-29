@@ -104,6 +104,30 @@ The **CGI itself needs a platform shim**: a header that detects Entware
 (`nft …` → the netfilter.d hook + `iptables`), and all `/etc|/www|/usr/bin` paths to
 their `/opt` equivalents. (Not yet written — most device-dependent piece.)
 
+### 5b. Проброс сервисов (`detour-portmap`) — ⚠ NOT YET VERIFIED ON DEVICE
+Publishing a LAN service to the internet from the panel. Two modes, both ported:
+
+* **https** — TLS-terminating reverse proxy. `detour-portmap` writes one
+  `$SERVER["socket"] == ":<port>"` block with `proxy.server` per enabled mapping into
+  `/opt/etc/lighttpd/conf.d/detour-portmap.conf`, pulled in by `detour.conf` through
+  `conf.d/detour-portmap-helper.sh` (the same always-exit-0 `include_shell` shim the
+  TLS overlay uses — an inline `cat … 2>/dev/null` is fatal to lighttpd). Cert comes
+  from `detour-cert` (`combined.pem`). Guarded by `lighttpd -tt` with rollback.
+* **dnat** — `DETOUR_PORTMAP_DNAT` / `DETOUR_PORTMAP_IN` / `DETOUR_PORTMAP_FWD` chains
+  in `ndm/netfilter.d/50-detour.sh`, rebuilt from `/opt/etc/detour/portmap.conf` on
+  every NDM reconfig (flushed each run, so deleting a mapping removes its rule).
+
+**Validate on device:**
+* `opkg install lighttpd-mod-proxy` — is it present in the Entware feed for this
+  arch, and does `proxy.header = ( "upgrade" => "enable" )` actually pass WebSockets
+  on the bundled lighttpd version? (`detour-portmap` refuses the https mode when
+  `mod_proxy.so` is absent, so the failure mode is a message, not a dead panel.)
+* Whether an arbitrary external port is reachable at all when the router is published
+  through **KeenDNS** — KeenDNS fronts only :80/:443, so `https://<домен>:8443/` may
+  need a direct public IP or a KeeneticOS port-forward instead.
+* The DNAT rules carry no `-i <wan>`; they exclude the LAN source CIDR instead
+  (`! -s $LAN_CIDR`). Confirm that matches how NDM builds `nat PREROUTING`.
+
 ### 6. Deploy/release tooling
 Add `platform: "keenetic"` to the router entry in `routers.local.json`;
 `deploy_router.py` branches to a Keenetic path (Entware install instead of uci/opkg-system).

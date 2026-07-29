@@ -2290,6 +2290,7 @@
       }
       .modal input[type="text"],
       .modal input[type="password"],
+      .modal input[type="number"],
       .modal textarea,
       .modal select,
       #view-groups input[type="text"],
@@ -2309,12 +2310,25 @@
       }
       .modal input[type="text"]:focus,
       .modal input[type="password"]:focus,
+      .modal input[type="number"]:focus,
       .modal textarea:focus,
       .modal select:focus,
       #view-groups input[type="text"]:focus,
       #view-groups select:focus {
         border-color: var(--accent);
         box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+      /* Нативные стрелки number-инпута рисуются светлой плашкой поверх тёмного
+         поля и ломают ряд (поле становится уже соседнего select'а) — гасим их,
+         поле остаётся обычным текстовым на вид, но с числовой клавиатурой. */
+      .modal input[type="number"]::-webkit-outer-spin-button,
+      .modal input[type="number"]::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .modal input[type="number"] {
+        -moz-appearance: textfield;
+        appearance: textfield;
       }
       .modal textarea {
         min-height: 80px;
@@ -3056,6 +3070,37 @@
                     <path d="M7 11V7a5 5 0 0 1 10 0v4" />
                   </svg>
                   HTTPS-сертификат
+                </button>
+              </div>
+              <!-- Проброс сервисов — обе платформы (на Keenetic доступность
+                   режимов приходит из portmap_status, а не из currentPlatform). -->
+              <div id="hdr-portmap-group" style="display: contents">
+                <div class="hdr-menu-sep"></div>
+                <div class="hdr-menu-title">Сервисы</div>
+                <button
+                  class="hdr-menu-item"
+                  role="menuitem"
+                  onclick="hdrMenuRun(openPortmapModal)"
+                  title="Опубликовать сервис с домашнего устройства наружу: HTTPS-прокси на сертификате панели или обычный проброс порта"
+                >
+                  <svg
+                    class="i"
+                    width="15"
+                    height="15"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M4 4h16v6H4z" />
+                    <path d="M12 10v4" />
+                    <path d="M6 20h4v-6H6z" />
+                    <path d="M14 20h4v-6h-4z" />
+                    <path d="M8 14v-2h8v2" />
+                  </svg>
+                  Проброс сервисов
                 </button>
               </div>
               <!-- Аппаратное ускорение (offload) — только QCA (home); показывается по offload_status.supported -->
@@ -4188,6 +4233,212 @@
           </p>
           <div class="modal-footer">
             <button class="btn" onclick="closeOffloadModal()">Закрыть</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== Проброс сервисов (portmap) ===== -->
+      <div
+        class="modal-overlay"
+        id="portmap-modal"
+        style="display: none"
+        onclick="backdropClose(event, closePortmapModal)"
+      >
+        <div class="modal" style="max-width: 720px">
+          <h3>
+            <svg
+              class="i"
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M4 4h16v6H4z" />
+              <path d="M12 10v4" />
+              <path d="M6 20h4v-6H6z" />
+              <path d="M14 20h4v-6h-4z" />
+              <path d="M8 14v-2h8v2" />
+            </svg>
+            Проброс сервисов наружу
+          </h3>
+          <p class="helper-text-block">
+            Публикация сервиса с домашнего устройства в интернет через роутер.
+            <b>HTTPS-прокси</b> — роутер слушает выбранный порт с сертификатом
+            панели и проксирует на <code>IP:порт</code> в локальной сети, так что
+            обычный HTTP-сервис снаружи открывается по HTTPS (WebSocket
+            поддерживается). <b>Проброс порта</b> — обычный DNAT для любого
+            протокола (SSH, RDP, игровой сервер), без шифрования.
+          </p>
+          <div
+            class="editor-section"
+            id="portmap-caps"
+            style="margin-bottom: 12px"
+          >
+            <p class="helper-text-block" id="portmap-caps-text">Загрузка…</p>
+          </div>
+
+          <div id="portmap-list" style="margin-bottom: 12px"></div>
+
+          <div class="editor-section" id="portmap-form-wrap">
+            <div
+              style="
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 8px;
+              "
+            >
+              <b id="portmap-form-title">Новый проброс</b>
+              <button class="btn sm" onclick="portmapResetForm()">
+                Очистить
+              </button>
+            </div>
+            <div class="form-grid">
+              <div class="full">
+                <label for="pm-name">Название</label>
+                <input
+                  type="text"
+                  id="pm-name"
+                  placeholder="Домашний сервер"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="full">
+                <label for="pm-mode">Режим</label>
+                <select id="pm-mode" onchange="portmapModeChanged()">
+                  <option value="https">
+                    HTTPS-прокси (TLS на роутере → HTTP внутрь)
+                  </option>
+                  <option value="dnat">
+                    Проброс порта (DNAT, любой протокол, без TLS)
+                  </option>
+                </select>
+              </div>
+              <div>
+                <label for="pm-lport">Внешний порт</label>
+                <input
+                  type="number"
+                  id="pm-lport"
+                  min="1"
+                  max="65535"
+                  placeholder="8443"
+                />
+              </div>
+              <div id="pm-proto-wrap" style="display: none">
+                <label for="pm-proto">Протокол</label>
+                <select id="pm-proto">
+                  <option value="tcp">TCP</option>
+                  <option value="udp">UDP</option>
+                  <option value="tcp udp">TCP + UDP</option>
+                </select>
+              </div>
+              <!-- Селект живёт отдельной полной строкой, а не в ячейке над полем
+                   IP: иначе ячейка становится выше соседней и «Порт устройства»
+                   съезжает вверх относительно IP. -->
+              <div class="full" id="pm-tip-pick-wrap" style="display: none">
+                <label for="pm-tip-pick">Устройство в сети</label>
+                <select id="pm-tip-pick" onchange="portmapPickClient()"></select>
+              </div>
+              <div>
+                <label for="pm-tip">IP устройства в LAN</label>
+                <input
+                  type="text"
+                  id="pm-tip"
+                  placeholder="192.168.8.100"
+                  autocomplete="off"
+                  spellcheck="false"
+                  oninput="portmapSyncClientPick()"
+                />
+              </div>
+              <div>
+                <label for="pm-tport">Порт устройства</label>
+                <input
+                  type="number"
+                  id="pm-tport"
+                  min="1"
+                  max="65535"
+                  placeholder="5000"
+                />
+              </div>
+              <div id="pm-scheme-wrap">
+                <label for="pm-scheme">Сервис внутри работает по</label>
+                <select id="pm-scheme">
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS (самоподписанный ок)</option>
+                </select>
+              </div>
+              <div>
+                <label for="pm-src">Откуда пускать</label>
+                <select id="pm-src">
+                  <option value="any">Из интернета</option>
+                  <option value="lan">Только из локальной сети</option>
+                </select>
+              </div>
+            </div>
+            <div id="pm-auth-wrap" style="margin-top: 10px">
+              <div class="form-grid">
+                <div>
+                  <label for="pm-user">Логин (HTTP Basic, необязательно)</label>
+                  <input
+                    type="text"
+                    id="pm-user"
+                    placeholder="без авторизации"
+                    autocomplete="off"
+                  />
+                </div>
+                <div>
+                  <label for="pm-pass">Пароль</label>
+                  <input
+                    type="password"
+                    id="pm-pass"
+                    autocomplete="new-password"
+                  />
+                </div>
+              </div>
+              <p
+                class="helper-text-block"
+                id="pm-auth-note"
+                style="font-size: 11px; color: var(--text-dim)"
+              >
+                Пароль запрашивается прокси до того, как запрос дойдёт до
+                устройства. Работает только в режиме HTTPS-прокси. Пустой логин —
+                снять авторизацию.
+              </p>
+            </div>
+            <button
+              class="btn primary"
+              id="pm-save-btn"
+              onclick="portmapSave()"
+              style="margin-top: 10px"
+            >
+              Сохранить проброс
+            </button>
+            <div
+              id="portmap-status"
+              style="
+                font-size: 12px;
+                color: var(--text-dim);
+                margin-top: 8px;
+                min-height: 16px;
+              "
+            ></div>
+          </div>
+
+          <p
+            class="helper-text-block"
+            style="color: var(--text-dim); font-size: 11px"
+          >
+            Публикуя сервис наружу, вы делаете его доступным всему интернету —
+            включайте авторизацию или ограничивайте источник, если у самого
+            сервиса нет своего логина. Порты роутера и панели (22, 53, 80, 443,
+            8080, 1081, 12345 и др.) занять нельзя.
+          </p>
+          <div class="modal-footer">
+            <button class="btn" onclick="closePortmapModal()">Закрыть</button>
           </div>
         </div>
       </div>
@@ -5972,11 +6223,16 @@
             вида <code>http login password host port</code> либо
             <code>host:port:login:password</code>:</label
           >
+          <!-- Картинку с QR можно вставить (Ctrl+V) или перетащить прямо сюда —
+               дальше тот же декодер, что и у кнопки «QR из файла». -->
           <textarea
             id="profile-uri-input"
             rows="3"
             spellcheck="false"
             oninput="parseProfileUri()"
+            onpaste="handleQrPaste(event)"
+            ondragover="event.preventDefault()"
+            ondrop="handleQrDrop(event)"
             placeholder="vless://uuid@host:port?security=reality&amp;...#Name"
           ></textarea>
           <div class="qr-scan-row">
@@ -5994,7 +6250,7 @@
               class="btn sm"
               id="qr-file-btn"
               onclick="pickQrFile()"
-              title="Выбрать фото или скриншот с QR-кодом — работает и без камеры/HTTPS"
+              title="Выбрать фото или скриншот с QR-кодом — работает и без камеры/HTTPS. Картинку можно и вставить (Ctrl+V) или перетащить в поле ссылки"
             >
               🖼 QR из файла
             </button>
@@ -6514,9 +6770,25 @@
         var GLYPHS =
           "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲabcdefghijklmnopqrstuvwxyz0123456789<>[]{}/*+-=$#@%&";
         var FONT_SIZE = 16;
+        // Speeds are in ROWS PER SECOND (not per frame) so the rain looks the
+        // same on 60/90/120 Hz screens. Each column picks a log-uniform speed
+        // in [SPEED_MIN, SPEED_MAX]: an even spread of *ratios*, so slow drifters
+        // and fast streaks are equally common instead of clumping near the top.
+        var SPEED_MIN = 3.8,
+          SPEED_MAX = 14;
+        // Alpha budget the fading wash spends per second (longer tails = less).
+        var FADE_PER_SEC = 1.5;
+        // ...but spend it in chunks: an rgba fill with alpha ≈0.02 rounds to a
+        // zero-pixel change on 8-bit canvas, which leaves trails that never die.
+        var FADE_MIN_STEP = 0.12;
+        var RESPAWN_PER_SEC = 1.2; // how eagerly a finished column restarts
         var cols = 0,
-          drops = [],
+          drops = [], // fractional row of the head
           speeds = [],
+          headRow = [], // integer row the head currently occupies
+          headChar = [], // its glyph — kept stable while the head sits still
+          fadeAcc = 0,
+          lastTs = 0,
           dpr = 1,
           rafId = 0,
           runToken = 0;
@@ -6535,19 +6807,27 @@
           var rgb = m ? [m[1], m[2], m[3]] : isLight ? [244, 246, 251] : [11, 15, 23];
           return {
             base: base,
-            fade:
-              "rgba(" +
-              rgb[0] +
-              "," +
-              rgb[1] +
-              "," +
-              rgb[2] +
-              "," +
-              (isLight ? 0.12 : 0.085) +
-              ")",
+            rgb: rgb,
+            // Light theme needs a slightly hungrier wash — dark glyphs on a
+            // bright base linger longer at the same alpha.
+            fadeScale: isLight ? 1.35 : 1,
             lead: isLight ? "rgba(37,99,235,0.34)" : "rgba(130,170,220,0.72)",
             trail: isLight ? "rgba(37,99,235,0.16)" : "rgba(74,100,128,0.5)",
           };
+        }
+
+        function fadeColor(a) {
+          return (
+            "rgba(" + pal.rgb[0] + "," + pal.rgb[1] + "," + pal.rgb[2] + "," + a + ")"
+          );
+        }
+
+        function randGlyph() {
+          return GLYPHS[(Math.random() * GLYPHS.length) | 0];
+        }
+
+        function randSpeed() {
+          return SPEED_MIN * Math.pow(SPEED_MAX / SPEED_MIN, Math.random());
         }
 
         function resize() {
@@ -6561,38 +6841,71 @@
           cols = Math.ceil(innerWidth / FONT_SIZE);
           drops = new Array(cols);
           speeds = new Array(cols);
+          headRow = new Array(cols);
+          headChar = new Array(cols);
+          fadeAcc = 0;
+          lastTs = 0;
+          var rows = innerHeight / FONT_SIZE;
           for (var i = 0; i < cols; i++) {
-            drops[i] = (Math.random() * -innerHeight) / FONT_SIZE;
-            speeds[i] = 0.35 + Math.random() * 0.75;
+            // Seed across (and above) the viewport — at these speeds a column
+            // starting a full screen up would take ~15 s to show itself.
+            drops[i] = (Math.random() * 1.4 - 0.7) * rows;
+            speeds[i] = randSpeed();
+            headRow[i] = Math.floor(drops[i]);
+            headChar[i] = randGlyph();
           }
         }
 
-        function frame(token) {
+        function frame(token, ts) {
           if (token !== runToken) return; // a newer loop superseded us
-          ctx.fillStyle = pal.fade; // translucent wash → fading tails
-          ctx.fillRect(0, 0, innerWidth, innerHeight);
+          // Elapsed seconds, clamped so a backgrounded tab doesn't teleport
+          // every column across the screen on the first frame back.
+          var dt = lastTs ? Math.min((ts - lastTs) / 1000, 0.1) : 1 / 60;
+          lastTs = ts;
+
+          fadeAcc += FADE_PER_SEC * pal.fadeScale * dt;
+          var washed = fadeAcc >= FADE_MIN_STEP;
+          if (washed) {
+            ctx.fillStyle = fadeColor(Math.min(fadeAcc, 0.5));
+            ctx.fillRect(0, 0, innerWidth, innerHeight);
+            fadeAcc = 0;
+          }
+
           ctx.font =
             FONT_SIZE + "px ui-monospace, SFMono-Regular, Menlo, monospace";
           ctx.textBaseline = "top";
           var rows = innerHeight / FONT_SIZE;
           for (var i = 0; i < cols; i++) {
-            var ch = GLYPHS[(Math.random() * GLYPHS.length) | 0];
             var x = i * FONT_SIZE;
-            var y = drops[i] * FONT_SIZE;
-            if (y > -FONT_SIZE) {
-              ctx.fillStyle = pal.lead;
-              ctx.fillText(ch, x, y);
-              ctx.fillStyle = pal.trail;
-              ctx.fillText(GLYPHS[(Math.random() * GLYPHS.length) | 0], x, y - FONT_SIZE);
+            drops[i] += speeds[i] * dt;
+            var row = Math.floor(drops[i]);
+            // Snap to the row grid: the head only picks a new glyph when it
+            // actually steps down a row. Re-rolling it every frame (as before,
+            // when a step took ~1 frame anyway) now reads as flicker.
+            var stepped = row !== headRow[i];
+            if (stepped) {
+              if (headRow[i] >= 0 && headRow[i] < rows) {
+                ctx.fillStyle = pal.trail; // demote the old head into the tail
+                ctx.fillText(headChar[i], x, headRow[i] * FONT_SIZE);
+              }
+              headRow[i] = row;
+              headChar[i] = randGlyph();
             }
-            drops[i] += speeds[i];
-            if (y > innerHeight && Math.random() > 0.975) {
+            // Repaint the head whenever the wash just dimmed it, so a slow
+            // column's head doesn't pulse while it waits out its row.
+            if ((stepped || washed) && row >= 0 && row < rows) {
+              ctx.fillStyle = pal.lead;
+              ctx.fillText(headChar[i], x, row * FONT_SIZE);
+            }
+            if (row > rows && Math.random() < RESPAWN_PER_SEC * dt) {
               drops[i] = -Math.random() * rows * 0.6;
-              speeds[i] = 0.35 + Math.random() * 0.75;
+              headRow[i] = Math.floor(drops[i]);
+              headChar[i] = randGlyph();
+              speeds[i] = randSpeed();
             }
           }
-          rafId = requestAnimationFrame(function () {
-            frame(token);
+          rafId = requestAnimationFrame(function (t) {
+            frame(token, t);
           });
         }
 
@@ -6619,7 +6932,10 @@
           if (reduced) staticFrame();
           else {
             var tok = runToken;
-            frame(tok);
+            // Enter through rAF so the first frame gets a real timestamp.
+            rafId = requestAnimationFrame(function (t) {
+              frame(tok, t);
+            });
           }
         }
 
@@ -6656,7 +6972,10 @@
         const opts = { method: method };
         if (body !== null) {
           opts.method = "POST";
-          opts.body = body;
+          // Часть вызовов передаёт уже готовую JSON-строку, часть — объект.
+          // Без сериализации объект уезжал бы как "[object Object]", и CGI не
+          // находил ни одного поля (так молча не работал offload_set).
+          opts.body = typeof body === "string" ? body : JSON.stringify(body);
           opts.headers = { "Content-Type": "text/plain" };
         }
         const r = await fetch(API + "?action=" + action, opts);
@@ -10924,6 +11243,396 @@
         }
       }
 
+      // ===== Проброс сервисов (portmap) =====
+      // Доступность режимов приходит от бэкенда (portmap_status), а не выводится
+      // из currentPlatform: «HTTPS-прокси» упирается в наличие nginx/lighttpd-
+      // mod-proxy И выпущенного сертификата, а не в саму платформу.
+      var portmapCaps = {
+        https: false,
+        dnat: false,
+        auth: false,
+        authReason: "",
+        domain: "",
+      };
+      var portmapEditId = null;
+
+      async function openPortmapModal() {
+        document.getElementById("portmap-modal").style.display = "flex";
+        document.getElementById("portmap-status").textContent = "";
+        portmapResetForm();
+        await portmapRefresh();
+        // Список клиентов — отдельным запросом: он не нужен для показа уже
+        // опубликованного и не должен задерживать отрисовку модала.
+        portmapLoadClients();
+      }
+      function closePortmapModal() {
+        document.getElementById("portmap-modal").style.display = "none";
+      }
+
+      // Пароль на прокси умеет не всякий веб-сервер: nginx у GL.iNet собран без
+      // auth_basic. Поля логина/пароля тогда гасим и пишем причину — иначе
+      // оператор решит, что сервис закрыт паролем, хотя проверять его нечем.
+      function portmapApplyAuthCap() {
+        var note = document.getElementById("pm-auth-note");
+        var dis = !portmapCaps.auth;
+        ["pm-user", "pm-pass"].forEach(function (id) {
+          var el = document.getElementById(id);
+          el.disabled = dis;
+          if (dis) el.value = "";
+        });
+        document.getElementById("pm-user").placeholder = dis
+          ? "недоступно на этом роутере"
+          : "без авторизации";
+        note.innerHTML = dis
+          ? '<span style="color:var(--amber)">Пароль на прокси недоступен: ' +
+            escapeHtml(portmapCaps.authReason) +
+            "</span>"
+          : "Пароль запрашивается прокси до того, как запрос дойдёт до устройства. " +
+            "Работает только в режиме HTTPS-прокси. Пустой логин — снять авторизацию.";
+      }
+
+      function portmapModeChanged() {
+        var mode = document.getElementById("pm-mode").value;
+        document.getElementById("pm-proto-wrap").style.display =
+          mode === "dnat" ? "" : "none";
+        // Схема бэкенда и Basic-авторизация осмысленны только для реверс-прокси.
+        document.getElementById("pm-scheme-wrap").style.display =
+          mode === "https" ? "" : "none";
+        document.getElementById("pm-auth-wrap").style.display =
+          mode === "https" ? "" : "none";
+      }
+
+      // Клиенты локальной сети — чтобы IP устройства не приходилось вспоминать
+      // руками. Источник — DHCP-аренды + ARP роутера (action lan_clients): на
+      // Keenetic аренды раздаёт сам NDM и из Entware не читаются, поэтому там
+      // список приходит из ARP — без имён, но с рабочими адресами. Пустой список
+      // не ошибка: селект прячем, ручной ввод остаётся единственным путём.
+      var portmapClients = [];
+
+      async function portmapLoadClients() {
+        var sel = document.getElementById("pm-tip-pick");
+        var wrap = document.getElementById("pm-tip-pick-wrap");
+        try {
+          var d = await api("lan_clients");
+          portmapClients = d.clients || [];
+        } catch (e) {
+          portmapClients = [];
+        }
+        if (!portmapClients.length) {
+          sel.innerHTML = "";
+          wrap.style.display = "none";
+          return;
+        }
+        sel.innerHTML =
+          '<option value="">— выбрать устройство в сети —</option>' +
+          portmapClients
+            .map(function (c) {
+              return (
+                '<option value="' +
+                escapeHtml(c.ip) +
+                '">' +
+                escapeHtml(c.ip) +
+                (c.host ? " · " + escapeHtml(c.host) : "") +
+                "</option>"
+              );
+            })
+            .join("");
+        wrap.style.display = "";
+        portmapSyncClientPick();
+      }
+
+      // Селект и поле IP — одно значение в двух видах: выбор подставляет адрес,
+      // ручной ввод подсвечивает совпавшее устройство (или сбрасывает выбор).
+      function portmapPickClient() {
+        var ip = document.getElementById("pm-tip-pick").value;
+        if (!ip) return;
+        document.getElementById("pm-tip").value = ip;
+        var name = document.getElementById("pm-name");
+        var c = portmapClients.filter(function (x) {
+          return x.ip === ip;
+        })[0];
+        if (c && c.host && !name.value.trim()) name.value = c.host;
+      }
+
+      function portmapSyncClientPick() {
+        var sel = document.getElementById("pm-tip-pick");
+        var ip = document.getElementById("pm-tip").value.trim();
+        var known = portmapClients.filter(function (c) {
+          return c.ip === ip;
+        }).length;
+        sel.value = known ? ip : "";
+      }
+
+      function portmapProtoLabel(p) {
+        if (p === "tcp udp") return "TCP+UDP";
+        return (p || "tcp").toUpperCase();
+      }
+
+      function portmapResetForm() {
+        portmapEditId = null;
+        document.getElementById("portmap-form-title").textContent =
+          "Новый проброс";
+        ["pm-name", "pm-lport", "pm-tip", "pm-tport", "pm-user", "pm-pass"].forEach(
+          function (id) {
+            document.getElementById(id).value = "";
+          },
+        );
+        document.getElementById("pm-mode").value = portmapCaps.https
+          ? "https"
+          : "dnat";
+        document.getElementById("pm-proto").value = "tcp";
+        document.getElementById("pm-scheme").value = "http";
+        document.getElementById("pm-src").value = "any";
+        portmapSyncClientPick();
+        portmapModeChanged();
+      }
+
+      function portmapUrl(m) {
+        if (m.mode !== "https") return "";
+        var host = portmapCaps.domain || location.hostname;
+        return "https://" + host + ":" + m.listen_port + "/";
+      }
+
+      async function portmapRefresh() {
+        var caps = document.getElementById("portmap-caps-text");
+        var list = document.getElementById("portmap-list");
+        try {
+          var d = await api("portmap_status");
+          portmapCaps = {
+            https: !!d.https_supported,
+            dnat: !!d.dnat_supported,
+            auth: !!d.auth_supported,
+            authReason: d.auth_reason || "",
+            domain: d.domain || "",
+          };
+          portmapApplyAuthCap();
+          var cp = [];
+          cp.push(
+            d.https_supported
+              ? "HTTPS-прокси: доступен" +
+                  (d.domain ? " (" + escapeHtml(d.domain) + ")" : "") +
+                  (d.engine ? ", движок " + escapeHtml(d.engine) : "")
+              : '<span style="color:var(--amber)">HTTPS-прокси недоступен: ' +
+                  escapeHtml(d.https_reason || "нет подходящего веб-сервера") +
+                  "</span>",
+          );
+          cp.push(
+            d.dnat_supported
+              ? "Проброс порта: доступен" +
+                  (d.dnat_reason ? " — " + escapeHtml(d.dnat_reason) : "")
+              : '<span style="color:var(--amber)">Проброс порта недоступен: ' +
+                  escapeHtml(d.dnat_reason || "нет доступа к файрволу") +
+                  "</span>",
+          );
+          if (d.lan_cidr)
+            cp.push("локальная сеть " + escapeHtml(d.lan_cidr));
+          caps.innerHTML = cp.join("<br>");
+
+          var ms = d.mappings || [];
+          if (!ms.length) {
+            list.innerHTML =
+              '<p class="helper-text-block" style="color:var(--text-dim)">Пока ничего не опубликовано.</p>';
+          } else {
+            list.innerHTML = ms
+              .map(function (m) {
+                var url = portmapUrl(m);
+                var target =
+                  escapeHtml(m.target_ip) + ":" + escapeHtml(String(m.target_port));
+                var badges = [];
+                badges.push(
+                  m.mode === "https"
+                    ? "HTTPS-прокси"
+                    : "DNAT/" + escapeHtml(portmapProtoLabel(m.proto)),
+                );
+                if (m.src === "lan") badges.push("только LAN");
+                if (m.auth)
+                  badges.push("вход: " + escapeHtml(m.auth_user || "basic"));
+                if (m.enabled && m.mode === "https" && !m.listening)
+                  badges.push(
+                    '<span style="color:var(--red)">порт не слушается</span>',
+                  );
+                return (
+                  '<div class="editor-section" style="margin-bottom:8px">' +
+                  '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">' +
+                  "<div><b>" +
+                  escapeHtml(m.name || m.id) +
+                  "</b>" +
+                  (m.enabled
+                    ? ""
+                    : ' <span style="color:var(--text-dim)">(выключен)</span>') +
+                  '<div style="font-size:12px;color:var(--text-dim);margin-top:2px">' +
+                  "порт " +
+                  escapeHtml(String(m.listen_port)) +
+                  " → " +
+                  target +
+                  " · " +
+                  badges.join(" · ") +
+                  "</div>" +
+                  (url
+                    ? '<div style="font-size:12px;margin-top:2px"><a href="' +
+                      escapeHtml(url) +
+                      '" target="_blank" rel="noopener">' +
+                      escapeHtml(url) +
+                      "</a></div>"
+                    : "") +
+                  "</div>" +
+                  '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+                  '<button class="btn sm" onclick="portmapToggle(\'' +
+                  escapeHtml(m.id) +
+                  "'," +
+                  (m.enabled ? "false" : "true") +
+                  ')">' +
+                  (m.enabled ? "Выключить" : "Включить") +
+                  "</button>" +
+                  '<button class="btn sm" onclick="portmapEdit(\'' +
+                  escapeHtml(m.id) +
+                  '\')">Изменить</button>' +
+                  '<button class="btn danger sm" onclick="portmapDelete(\'' +
+                  escapeHtml(m.id) +
+                  '\')">Удалить</button>' +
+                  "</div></div></div>"
+                );
+              })
+              .join("");
+          }
+          window.__portmapItems = ms;
+        } catch (e) {
+          if (e.message !== "Not authenticated")
+            caps.textContent = e.message || String(e);
+        }
+      }
+
+      function portmapEdit(id) {
+        var m = (window.__portmapItems || []).filter(function (x) {
+          return x.id === id;
+        })[0];
+        if (!m) return;
+        portmapEditId = id;
+        document.getElementById("portmap-form-title").textContent =
+          "Изменить: " + (m.name || m.id);
+        document.getElementById("pm-name").value = m.name || "";
+        document.getElementById("pm-mode").value = m.mode;
+        document.getElementById("pm-lport").value = m.listen_port;
+        document.getElementById("pm-proto").value = m.proto || "tcp";
+        document.getElementById("pm-tip").value = m.target_ip;
+        document.getElementById("pm-tport").value = m.target_port;
+        document.getElementById("pm-scheme").value = m.scheme || "http";
+        document.getElementById("pm-src").value = m.src || "any";
+        document.getElementById("pm-user").value = m.auth_user || "";
+        document.getElementById("pm-pass").value = "";
+        portmapSyncClientPick();
+        portmapModeChanged();
+        document
+          .getElementById("portmap-form-wrap")
+          .scrollIntoView({ block: "nearest" });
+      }
+
+      // id генерируем из названия — операторy незачем его придумывать, а бэкенду
+      // нужен стабильный ключ для конфига, htpasswd-файла и имени uci-правила.
+      function portmapMakeId(name) {
+        var base = (name || "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 20);
+        if (!base) base = "svc";
+        var taken = (window.__portmapItems || []).map(function (x) {
+          return x.id;
+        });
+        var id = base,
+          n = 2;
+        while (taken.indexOf(id) !== -1) id = base + "-" + n++;
+        return id;
+      }
+
+      async function portmapSave() {
+        var status = document.getElementById("portmap-status");
+        var btn = document.getElementById("pm-save-btn");
+        var mode = document.getElementById("pm-mode").value;
+        var name = document.getElementById("pm-name").value.trim();
+        var lport = parseInt(document.getElementById("pm-lport").value, 10);
+        var tip = document.getElementById("pm-tip").value.trim();
+        var tport = parseInt(document.getElementById("pm-tport").value, 10);
+        var user = document.getElementById("pm-user").value.trim();
+        var pass = document.getElementById("pm-pass").value;
+        if (!lport || !tport || !tip) {
+          status.innerHTML =
+            '<span style="color:var(--red)">Заполните внешний порт, IP и порт устройства.</span>';
+          return;
+        }
+        if (
+          mode === "https" &&
+          !user &&
+          document.getElementById("pm-src").value === "any" &&
+          !confirm(
+            "Сервис будет открыт всему интернету без пароля на прокси.\n" +
+              "Продолжить?",
+          )
+        )
+          return;
+        var id = portmapEditId || portmapMakeId(name);
+        btn.disabled = true;
+        status.textContent = "Сохранение…";
+        try {
+          await api("portmap_save", "POST", {
+            id: id,
+            name: name,
+            mode: mode,
+            listen_port: lport,
+            proto: document.getElementById("pm-proto").value,
+            target_ip: tip,
+            target_port: tport,
+            scheme: document.getElementById("pm-scheme").value,
+            src: document.getElementById("pm-src").value,
+            enabled: true,
+          });
+          // Учётку шлём отдельным вызовом: пароль не хранится в конфиге, а
+          // превращается в htpasswd-файл, и при правке его можно не трогать.
+          if (mode === "https" && (user || portmapEditId)) {
+            if (user && !pass && portmapEditId) {
+              // логин прежний, пароль не вводили — оставляем как есть
+            } else {
+              await api("portmap_auth", "POST", {
+                id: id,
+                user: user,
+                password: pass,
+              });
+            }
+          }
+          status.textContent = "Сохранено.";
+          toast("Проброс сохранён", "success");
+          portmapResetForm();
+          await portmapRefresh();
+        } catch (e) {
+          status.innerHTML =
+            '<span style="color:var(--red)">' +
+            escapeHtml(e.message || String(e)) +
+            "</span>";
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      async function portmapToggle(id, on) {
+        try {
+          await api("portmap_toggle", "POST", { id: id, enabled: !!on });
+          await portmapRefresh();
+        } catch (e) {
+          toast(e.message || String(e), "error");
+        }
+      }
+
+      async function portmapDelete(id) {
+        if (!confirm('Удалить проброс "' + id + '"?')) return;
+        try {
+          await api("portmap_delete", "POST", { id: id });
+          if (portmapEditId === id) portmapResetForm();
+          await portmapRefresh();
+        } catch (e) {
+          toast(e.message || String(e), "error");
+        }
+      }
+
       var swapPollTimer = null;
 
       async function openSwapModal() {
@@ -13321,6 +14030,30 @@
         if (inp) inp.click();
       }
 
+      // Скриншот QR в буфере обмена или перетащенный файл — на десктопе это
+      // самый частый сценарий, гоняем через тот же handleQrFile.
+      function firstImageFile(list) {
+        for (var i = 0; i < (list ? list.length : 0); i++) {
+          var f = list[i].getAsFile ? list[i].getAsFile() : list[i];
+          if (f && /^image\//.test(f.type || "")) return f;
+        }
+        return null;
+      }
+
+      function handleQrPaste(e) {
+        var f = e.clipboardData && firstImageFile(e.clipboardData.items);
+        if (!f) return; // обычный текст — пусть вставляется штатно
+        e.preventDefault();
+        handleQrFile({ files: [f] });
+      }
+
+      function handleQrDrop(e) {
+        var f = e.dataTransfer && firstImageFile(e.dataTransfer.files);
+        if (!f) return; // не картинка — не мешаем браузеру
+        e.preventDefault();
+        handleQrFile({ files: [f] });
+      }
+
       function loadQrImageEl(file) {
         return new Promise(function (resolve, reject) {
           var url = URL.createObjectURL(file);
@@ -13454,10 +14187,12 @@
           qrFileStatus("Не удалось прочитать файл: " + (e.message || e), "err");
           toast("Не удалось прочитать файл", "error");
         } finally {
-          btns.forEach(function (b) {
-            if (b) b.disabled = false;
-          });
-          refreshQrHint(); // вернуть кнопке камеры её штатное состояние
+          // Не через refreshQrHint(): он чистит строку статуса, а там уже может
+          // лежать сообщение об ошибке распознавания.
+          var fb = document.getElementById("qr-file-btn");
+          if (fb) fb.disabled = false;
+          var sb = document.getElementById("qr-scan-btn");
+          if (sb) sb.disabled = !!qrUnavailableReason();
         }
       }
 

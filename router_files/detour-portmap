@@ -1,0 +1,709 @@
+#!/bin/sh
+# detour-portmap — publish a LAN service to the outside world from the panel.
+#
+# Two independent modes per mapping:
+#
+#   https  — TLS-terminating reverse proxy on the router. The router listens on
+#            <listen_port> with the panel's Let's Encrypt cert (the one detour-cert
+#            already issued) and forwards to http[s]://<target_ip>:<target_port>.
+#            A plain-HTTP box on the LAN (Home Assistant, a NAS UI, a dev server)
+#            becomes https://<domain>:<port>/ from the internet, with WebSocket
+#            upgrade and optional HTTP Basic auth. Engine: nginx (GL.iNet) or
+#            lighttpd+mod_proxy (Keenetic). uhttpd cannot reverse-proxy at all, so
+#            on a uhttpd-only router this mode reports unsupported (see caps()).
+#
+#   dnat   — plain L4 port forward, WAN:<listen_port> → <target_ip>:<target_port>,
+#            any protocol (SSH, RDP, game servers), no TLS. Engine: uci firewall
+#            `redirect` (works on both fw4/nftables and fw3/iptables) or, on
+#            Keenetic, iptables rules re-asserted from the ndm netfilter.d hook.
+#
+# Config: $DETOUR_DIR/portmap.conf — one mapping per line, '|'-separated:
+#   id|enabled|mode|listen_port|proto|target_ip|target_port|scheme|src|user|sha|name
+# '|' is stripped from every free-text field on write, so the format can't be
+# broken by a name. Lives under /etc/detour → already covered by the sysupgrade
+# keeplist and by the panel's config export.
+#
+# Generated artefacts (all managed, marker-free — the whole file is ours):
+#   nginx     /etc/nginx/conf.d/zz-detour-portmap.conf
+#   lighttpd  /opt/etc/lighttpd/conf.d/detour-portmap.conf
+#   basic auth $DETOUR_DIR/portmap.d/<id>.htpasswd   ("user:{SHA}<base64 sha1>")
+#   firewall  uci firewall rules/redirects named "detour-pm-<id>" (OpenWrt), or
+#             iptables from 50-detour.sh (Keenetic).
+#
+# ⚠ The Keenetic branch (lighttpd mod_proxy + iptables DNAT) is implemented but
+#   NOT yet verified on a live device — see keenetic/README.md.
+
+DETOUR_DIR=/etc/detour
+CONF="$DETOUR_DIR/portmap.conf"
+AUTH_DIR="$DETOUR_DIR/portmap.d"
+CERT_CONF="$DETOUR_DIR/cert.conf"
+NGINX_CONFD=/etc/nginx/conf.d
+NGINX_CONF="$NGINX_CONFD/zz-detour-portmap.conf"
+NGINX_PANEL_VHOST="$NGINX_CONFD/zz-detour-panel-tls.conf"   # written by detour-cert
+LIGHTTPD_CONFD=/opt/etc/lighttpd/conf.d
+LIGHTTPD_CONF="$LIGHTTPD_CONFD/detour-portmap.conf"
+LOG=/var/log/detour-portmap.log
+LAN_IF=br-lan
+PLATFORM=openwrt
+
+# Ports the stack itself owns — refusing them up front beats a confusing
+# "nginx -t failed" or a silently dead panel. 443/8080 are the panel, 12345/1081
+# the transparent proxies, 5354 the Keenetic-side dnsmasq, 9090 the clash API
+# detour-health spins up.
+RESERVED_PORTS="22 53 80 443 853 1081 5353 5354 8080 9090 12345"
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DETOUR_DIR=/opt/etc/detour
+    CONF="$DETOUR_DIR/portmap.conf"
+    AUTH_DIR="$DETOUR_DIR/portmap.d"
+    CERT_CONF="$DETOUR_DIR/cert.conf"
+    LOG=/opt/var/log/detour-portmap.log
+    LAN_IF=br0
+    [ -f "$DETOUR_DIR/detour.conf" ] && . "$DETOUR_DIR/detour.conf" 2>/dev/null
+    mkdir -p /opt/var/log /opt/var/state 2>/dev/null
+fi
+
+mkdir -p "$DETOUR_DIR" "$AUTH_DIR" 2>/dev/null
+[ -f "$CONF" ] || : > "$CONF"
+
+log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"; }
+die_json() { printf '{"ok":false,"error":%s}\n' "$(json_str "$1")"; exit 0; }
+
+# ---- validation -------------------------------------------------------------
+valid_id()   { printf '%s' "$1" | grep -qE '^[a-z0-9][a-z0-9_-]{0,23}$'; }
+valid_port() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+valid_ipv4() {
+    printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+    # reject 999.x — the regex above only bounds the shape
+    for o in $(printf '%s' "$1" | tr '.' ' '); do [ "$o" -le 255 ] || return 1; done
+    return 0
+}
+is_reserved_port() {
+    for p in $RESERVED_PORTS; do [ "$1" = "$p" ] && return 0; done
+    return 1
+}
+# Free-text → safe for the '|'-separated store and for the generated configs.
+sanitize_text() { printf '%s' "$1" | tr -d '|\n\r\t"\\' | cut -c1-48; }
+
+# ---- config store -----------------------------------------------------------
+# field N of a stored line (1-based, '|'-separated)
+fld() { printf '%s' "$2" | cut -d'|' -f"$1"; }
+
+get_line() {  # $1 = id → echoes the stored line, or nothing
+    grep "^$1|" "$CONF" 2>/dev/null | head -1
+}
+
+del_line() {  # $1 = id
+    _tmp="$CONF.tmp.$$"
+    grep -v "^$1|" "$CONF" > "$_tmp" 2>/dev/null
+    mv "$_tmp" "$CONF" 2>/dev/null
+}
+
+# Is <port> already claimed by a DIFFERENT enabled mapping?
+port_taken_by_other() {  # $1 port  $2 id-to-ignore
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        case "$ln" in \#*) continue ;; esac
+        [ "$(fld 1 "$ln")" = "$2" ] && continue
+        [ "$(fld 4 "$ln")" = "$1" ] && return 0
+    done < "$CONF"
+    return 1
+}
+
+# ---- environment probing ----------------------------------------------------
+# Where the panel's TLS material lives. cert.conf is the modern source of truth, but
+# routers whose cert was issued by a pre-cert.conf detour-cert have a perfectly good
+# certificate and NO cert.conf (seen on the reference GL-BE9300). Falling back to the
+# managed panel vhost — which is what actually serves the panel over TLS — means those
+# routers can publish services instead of being told to "issue a certificate first".
+cert_dir() {
+    if [ -f "$CERT_CONF" ]; then
+        _cd=$( . "$CERT_CONF" 2>/dev/null; printf '%s' "$CERT_DIR" )
+        [ -n "$_cd" ] && { printf '%s' "$_cd"; return 0; }
+    fi
+    [ -f "$NGINX_PANEL_VHOST" ] || return 0
+    sed -n 's/^[[:space:]]*ssl_certificate[[:space:]]\+\([^;]*\)\/fullchain\.pem;.*/\1/p' \
+        "$NGINX_PANEL_VHOST" 2>/dev/null | head -1
+}
+cert_domain() {
+    if [ -f "$CERT_CONF" ]; then
+        _dm=$( . "$CERT_CONF" 2>/dev/null; printf '%s' "$DOMAIN" )
+        [ -n "$_dm" ] && { printf '%s' "$_dm"; return 0; }
+    fi
+    [ -f "$NGINX_PANEL_VHOST" ] || return 0
+    sed -n 's/^[[:space:]]*server_name[[:space:]]\+\([^;]*\);.*/\1/p' \
+        "$NGINX_PANEL_VHOST" 2>/dev/null | head -1 | awk '{print $1}'
+}
+
+have_nginx()   { command -v nginx >/dev/null 2>&1 && [ -d "$NGINX_CONFD" ]; }
+have_lighttpd(){ [ "$PLATFORM" = keenetic ] && [ -d "$LIGHTTPD_CONFD" ]; }
+
+# ---- nginx capability probing ------------------------------------------------
+# Router nginx builds are heavily stripped and a directive from a missing module is
+# a FATAL "unknown directive" that takes the ENTIRE nginx config down — including the
+# router's own web UI. Verified on the reference GL-BE9300 (nginx 1.26.1): built
+# --without-http_map_module, --without-http_access_module AND
+# --without-http_auth_basic_module. So: probe, never assume.
+NGINX_V_CACHE=""
+nginx_v() {
+    [ -n "$NGINX_V_CACHE" ] || NGINX_V_CACHE=$(nginx -V 2>&1)
+    printf '%s' "$NGINX_V_CACHE"
+}
+ngx_has_access()    { ! nginx_v | grep -q -- '--without-http_access_module'; }
+ngx_has_authbasic() { ! nginx_v | grep -q -- '--without-http_auth_basic_module'; }
+# GL's build ships an older lua-nginx-module: the `*_by_lua_block` forms don't exist,
+# but the string form (`access_by_lua '<code>'`) is accepted AND executed (verified on
+# GL-BE9300 — it really does return 401). Only trust it when nginx -V mentions lua.
+ngx_has_lua()       { nginx_v | grep -q 'lua'; }
+
+# How (if at all) this nginx can enforce HTTP Basic on a published service.
+# Echoes: basic | lua | none
+nginx_auth_engine() {
+    ngx_has_authbasic && { echo basic; return 0; }
+    ngx_has_lua       && { echo lua;   return 0; }
+    echo none
+}
+
+# One-line Lua for `access_by_lua '<code>'`: parse the Authorization header and compare
+# it against our "user:{SHA}<base64 sha1>" file. Written on ONE line and with Lua
+# long-bracket strings ([[…]]) for the patterns, so the generated code carries no
+# backslash (nginx unescapes those inside a quoted argument) and no '$' (nginx would
+# read it as a variable). Pattern anchors at the END are dropped for the same reason —
+# the captures are greedy to the end of the string, so `^…(.+)` matches what `^…(.+)$`
+# would. Used only where auth_basic is missing from the build.
+lua_auth_snippet() {  # $1 = htpasswd path
+    printf '%s' "local h=ngx.var.http_authorization; local ok=false; if h then local b=string.match(h,[[^[Bb]asic%s+(.+)]]); if b then local r=ngx.decode_base64(b); if r then local u,p=string.match(r,[[^([^:]*):(.*)]]); if u then local f=io.open([[$1]],[[r]]); if f then local l=f:read([[*l]]) or [[]]; f:close(); local fu,fs=string.match(l,[[^([^:]*):{SHA}(.*)]]); if fu==u and fs==ngx.encode_base64(ngx.sha1_bin(p)) then ok=true; end; end; end; end; end; end; if not ok then ngx.header[\"WWW-Authenticate\"]=[[Basic realm=\"Detour\"]]; ngx.exit(401); end"
+}
+
+lighttpd_has_auth() {
+    [ -f /opt/lib/lighttpd/mod_authn_file.so ] || [ -f /opt/lib/mod_authn_file.so ]
+}
+
+# Can a Basic-auth password be enforced at all here? Reported to the panel so the
+# UI can disable the credential fields instead of letting the operator believe a
+# published service is protected when nothing checks the password.
+CAP_AUTH=false; CAP_AUTH_WHY=""
+auth_caps() {
+    case "$(https_engine)" in
+        nginx)
+            case "$(nginx_auth_engine)" in
+                none) CAP_AUTH_WHY="nginx на этом роутере собран без auth_basic и без lua — проверять пароль нечем. Публикуйте только сервисы со своим входом либо ограничьте доступ локальной сетью" ;;
+                *)    CAP_AUTH=true ;;
+            esac ;;
+        lighttpd)
+            if lighttpd_has_auth; then CAP_AUTH=true
+            else CAP_AUTH_WHY="нужен пакет lighttpd-mod-auth (opkg install lighttpd-mod-auth)"; fi ;;
+        *) CAP_AUTH_WHY="нет реверс-прокси — авторизация неприменима" ;;
+    esac
+}
+
+
+# Which reverse-proxy engine (if any) can serve `https` mappings here.
+https_engine() {
+    if have_nginx; then echo nginx; return 0; fi
+    if have_lighttpd; then echo lighttpd; return 0; fi
+    echo none
+}
+
+# lighttpd mod_proxy is a separate Entware package; without it the generated
+# block is a fatal config error and the panel itself would fail to start.
+lighttpd_has_proxy() {
+    [ -f /opt/lib/lighttpd/mod_proxy.so ] || [ -f /opt/lib/mod_proxy.so ]
+}
+
+lan_cidr() {
+    ip -4 -o addr show "$LAN_IF" 2>/dev/null | awk '{print $4}' | head -1 | \
+        awk -F/ '{split($1,a,"."); print a[1]"."a[2]"."a[3]".0/"$2}'
+}
+
+# ---- capabilities -----------------------------------------------------------
+# Echoes: <https_supported> <https_reason> is not shell-friendly as one string, so
+# the two caps are exposed through globals set here and read by cmd_status().
+CAP_HTTPS=false; CAP_HTTPS_WHY=""; CAP_DNAT=false; CAP_DNAT_WHY=""; ENGINE=none
+caps() {
+    ENGINE=$(https_engine)
+    _cd=$(cert_dir)
+    case "$ENGINE" in
+        nginx)
+            if [ -n "$_cd" ] && [ -f "$_cd/fullchain.pem" ]; then CAP_HTTPS=true
+            else CAP_HTTPS_WHY="сначала выпустите HTTPS-сертификат (шапка → HTTPS-сертификат)"; fi ;;
+        lighttpd)
+            if ! lighttpd_has_proxy; then
+                CAP_HTTPS_WHY="нужен пакет lighttpd-mod-proxy (opkg install lighttpd-mod-proxy)"
+            elif [ -z "$_cd" ] || [ ! -f "$_cd/combined.pem" ]; then
+                CAP_HTTPS_WHY="сначала выпустите HTTPS-сертификат"
+            else CAP_HTTPS=true; fi ;;
+        *)
+            CAP_HTTPS_WHY="на этом роутере панель обслуживает uhttpd — он не умеет реверс-прокси; поставьте nginx или используйте режим «проброс порта»" ;;
+    esac
+    if [ "$PLATFORM" = keenetic ]; then
+        CAP_DNAT=true
+        CAP_DNAT_WHY="правила ставятся через ndm/netfilter.d (не проверено на живом Keenetic)"
+    elif command -v uci >/dev/null 2>&1; then
+        CAP_DNAT=true
+    else
+        CAP_DNAT_WHY="нет uci — правила файрвола поставить некуда"
+    fi
+}
+
+# ============================ RENDERERS ======================================
+
+# ---- nginx ------------------------------------------------------------------
+render_nginx() {
+    have_nginx || return 0
+    _cd=$(cert_dir)
+    _any=0
+    _tmp="$NGINX_CONF.tmp.$$"
+    {
+        echo "# Managed by detour-portmap — DO NOT EDIT (regenerated on every apply)."
+        echo "# One server{} per published mapping; the zz- name sorts last in conf.d so"
+        echo "# the router's own default servers keep their precedence."
+    } > "$_tmp"
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        case "$ln" in \#*) continue ;; esac
+        _id=$(fld 1 "$ln");   _en=$(fld 2 "$ln");  _mode=$(fld 3 "$ln")
+        _lp=$(fld 4 "$ln");   _tip=$(fld 6 "$ln"); _tp=$(fld 7 "$ln")
+        _sch=$(fld 8 "$ln");  _src=$(fld 9 "$ln"); _usr=$(fld 10 "$ln")
+        [ "$_mode" = https ] || continue
+        [ "$_en" = 1 ] || continue
+        [ -n "$_cd" ] && [ -f "$_cd/fullchain.pem" ] || continue
+        _any=1
+        {
+            echo ""
+            echo "server {"
+            echo "    listen $_lp ssl;"
+            echo "    listen [::]:$_lp ssl;"
+            echo "    server_name _;"
+            echo "    ssl_certificate     $_cd/fullchain.pem;"
+            echo "    ssl_certificate_key $_cd/privkey.pem;"
+            echo "    ssl_protocols TLSv1.2 TLSv1.3;"
+            echo "    client_max_body_size 0;"
+            # Source restriction is enforced by the FIREWALL (the uci rule for a
+            # src=lan mapping opens the port on the lan zone only, so the wan zone's
+            # default reject still applies). These allow/deny lines are just
+            # defence-in-depth, and only exist when the build has the access module.
+            if [ "$_src" = lan ] && ngx_has_access; then
+                _lc=$(lan_cidr)
+                [ -n "$_lc" ] && echo "    allow $_lc;"
+                echo "    allow 127.0.0.0/8;"
+                echo "    deny all;"
+            fi
+            echo "    location / {"
+            echo "        proxy_pass $_sch://$_tip:$_tp;"
+            [ "$_sch" = https ] && echo "        proxy_ssl_verify off;"
+            echo "        proxy_http_version 1.1;"
+            echo "        proxy_set_header Host \$host;"
+            echo "        proxy_set_header X-Real-IP \$remote_addr;"
+            echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+            echo "        proxy_set_header X-Forwarded-Proto https;"
+            # WebSocket upgrade WITHOUT a `map` block: GL.iNet's nginx is built
+            # without ngx_http_map_module, and a `map` directive there is a fatal
+            # "unknown directive" that takes the whole config down (verified on
+            # GL-BE9300 / nginx 1.26.1). Passing the client's own Connection header
+            # through is the map-free equivalent: a WS handshake sends
+            # "Connection: Upgrade" and gets forwarded as such, an ordinary request
+            # sends keep-alive/close and is forwarded unchanged.
+            echo "        proxy_set_header Upgrade \$http_upgrade;"
+            echo "        proxy_set_header Connection \$http_connection;"
+            echo "        proxy_read_timeout 300s;"
+            echo "        proxy_send_timeout 300s;"
+            echo "        proxy_buffering off;"
+            if [ -n "$_usr" ] && [ -f "$AUTH_DIR/$_id.htpasswd" ]; then
+                case "$(nginx_auth_engine)" in
+                    basic)
+                        echo "        auth_basic \"Detour\";"
+                        echo "        auth_basic_user_file $AUTH_DIR/$_id.htpasswd;" ;;
+                    lua)
+                        echo "        access_by_lua '$(lua_auth_snippet "$AUTH_DIR/$_id.htpasswd")';" ;;
+                esac
+            fi
+            echo "    }"
+            echo "}"
+        } >> "$_tmp"
+    done < "$CONF"
+
+    # Nothing to publish → drop the file entirely rather than leaving an empty stub.
+    if [ "$_any" = 0 ]; then
+        rm -f "$_tmp"
+        if [ -f "$NGINX_CONF" ]; then
+            rm -f "$NGINX_CONF"
+            nginx -t >/dev/null 2>&1 && nginx_reload
+        fi
+        return 0
+    fi
+
+    # Identical to what's already live → don't touch nginx at all. This is what makes
+    # the restart below cheap: `apply` runs on every save/toggle/postinst, but only a
+    # real change costs a restart.
+    if [ -f "$NGINX_CONF" ] && cmp -s "$_tmp" "$NGINX_CONF"; then
+        rm -f "$_tmp"
+        return 0
+    fi
+
+    # Keep the old file so a bad render can be rolled back (a broken conf.d file
+    # takes the ROUTER'S OWN web UI down with it, not just ours).
+    _bak=""
+    [ -f "$NGINX_CONF" ] && { _bak="$NGINX_CONF.bak.$$"; cp "$NGINX_CONF" "$_bak"; }
+    mv "$_tmp" "$NGINX_CONF"
+    if nginx -t >/dev/null 2>&1; then
+        nginx_reload
+        rm -f "$_bak"
+        log "nginx portmap conf applied"
+        return 0
+    fi
+    # Log WHAT nginx objected to — "config rejected" alone makes a stripped-module
+    # build (unknown directive) indistinguishable from a bad value.
+    log "nginx -t failed after portmap render — reverting: $(nginx -t 2>&1 | head -2 | tr '\n' ' ')"
+    if [ -n "$_bak" ]; then mv "$_bak" "$NGINX_CONF"; else rm -f "$NGINX_CONF"; fi
+    nginx -t >/dev/null 2>&1 && nginx_reload
+    return 1
+}
+
+# Apply a changed nginx config.
+#
+# NOT a graceful reload: on the reference GL-BE9300 a reload silently fails to take
+# effect — the router's own admin UI holds long-lived WebSocket connections, the old
+# workers stay in "shutting down" forever and keep serving requests from the PREVIOUS
+# config. Measured: a config change was still not live 60 s after `nginx -s reload`
+# (and after `/etc/init.d/nginx reload`), while a restart applied it in ~2 s. A
+# published service that silently keeps its old password/target is worse than a
+# ~2 s blip of the router UI, and callers only reach this when the config really
+# changed (see the cmp -s short-circuit above).
+nginx_reload() {
+    /etc/init.d/nginx restart >/dev/null 2>&1 || {
+        nginx -s reload >/dev/null 2>&1
+        return 0
+    }
+}
+
+# ---- lighttpd (Keenetic) ----------------------------------------------------
+render_lighttpd() {
+    have_lighttpd || return 0
+    _cd=$(cert_dir)
+    _tmp="$LIGHTTPD_CONF.tmp.$$"
+    _any=0
+    mkdir -p "$LIGHTTPD_CONFD" 2>/dev/null
+    {
+        echo "# Managed by detour-portmap — DO NOT EDIT (regenerated on every apply)."
+        echo "server.modules += ( \"mod_proxy\", \"mod_openssl\" )"
+    } > "$_tmp"
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        case "$ln" in \#*) continue ;; esac
+        _id=$(fld 1 "$ln");  _en=$(fld 2 "$ln");  _mode=$(fld 3 "$ln")
+        _lp=$(fld 4 "$ln");  _tip=$(fld 6 "$ln"); _tp=$(fld 7 "$ln")
+        _usr=$(fld 10 "$ln")
+        [ "$_mode" = https ] || continue
+        [ "$_en" = 1 ] || continue
+        [ -n "$_cd" ] && [ -f "$_cd/combined.pem" ] || continue
+        lighttpd_has_proxy || continue
+        _any=1
+        {
+            echo ""
+            echo "\$SERVER[\"socket\"] == \":$_lp\" {"
+            echo "    ssl.engine  = \"enable\""
+            echo "    ssl.pemfile = \"$_cd/combined.pem\""
+            echo "    proxy.server = ( \"\" => (( \"host\" => \"$_tip\", \"port\" => $_tp )) )"
+            # lighttpd >= 1.4.46: forward the Upgrade handshake so WebSockets work.
+            echo "    proxy.header = ( \"upgrade\" => \"enable\" )"
+            if [ -n "$_usr" ] && [ -f "$AUTH_DIR/$_id.htpasswd" ]; then
+                echo "    server.modules += ( \"mod_auth\", \"mod_authn_file\" )"
+                echo "    auth.backend = \"htpasswd\""
+                echo "    auth.backend.htpasswd.userfile = \"$AUTH_DIR/$_id.htpasswd\""
+                echo "    auth.require = ( \"\" => ( \"method\" => \"basic\", \"realm\" => \"Detour\", \"require\" => \"valid-user\" ) )"
+            fi
+            echo "}"
+        } >> "$_tmp"
+    done < "$CONF"
+
+    if [ "$_any" = 0 ]; then
+        rm -f "$_tmp"
+        [ -f "$LIGHTTPD_CONF" ] && { rm -f "$LIGHTTPD_CONF"; panel_restart; }
+        return 0
+    fi
+    _bak=""
+    [ -f "$LIGHTTPD_CONF" ] && { _bak="$LIGHTTPD_CONF.bak.$$"; cp "$LIGHTTPD_CONF" "$_bak"; }
+    mv "$_tmp" "$LIGHTTPD_CONF"
+    # lighttpd -tt actually loads the modules, so a missing mod_proxy is caught
+    # here instead of taking the panel down on restart.
+    if lighttpd -tt -f /opt/etc/lighttpd/detour.conf >/dev/null 2>&1; then
+        panel_restart; rm -f "$_bak"; log "lighttpd portmap conf applied"; return 0
+    fi
+    log "lighttpd config test failed after portmap render — reverting"
+    if [ -n "$_bak" ]; then mv "$_bak" "$LIGHTTPD_CONF"; else rm -f "$LIGHTTPD_CONF"; fi
+    panel_restart
+    return 1
+}
+
+panel_restart() {
+    [ -x /opt/etc/init.d/S51detour-panel ] && /opt/etc/init.d/S51detour-panel restart >/dev/null 2>&1
+    return 0
+}
+
+# ---- firewall: OpenWrt (uci; works for both fw4/nft and fw3/iptables) --------
+# Every section we own carries name='detour-pm-<id>' so a full purge is a simple
+# name-prefix scan. Deleting shifts the @rule[N] indices, so re-query each round.
+uci_purge() {  # $1 = rule|redirect
+    while :; do
+        _idx=$(uci show firewall 2>/dev/null | \
+            sed -n "s/^firewall\.@$1\[\([0-9]*\)\]\.name='detour-pm-.*'\$/\1/p" | head -1)
+        [ -n "$_idx" ] || break
+        uci -q delete "firewall.@$1[$_idx]" 2>/dev/null || break
+    done
+}
+
+sync_firewall_openwrt() {
+    command -v uci >/dev/null 2>&1 || return 0
+    uci_purge rule
+    uci_purge redirect
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        case "$ln" in \#*) continue ;; esac
+        _id=$(fld 1 "$ln");  _en=$(fld 2 "$ln");   _mode=$(fld 3 "$ln")
+        _lp=$(fld 4 "$ln");  _pr=$(fld 5 "$ln");   _tip=$(fld 6 "$ln")
+        _tp=$(fld 7 "$ln");  _src=$(fld 9 "$ln")
+        [ "$_en" = 1 ] || continue
+        case "$_mode" in
+            https)
+                # Reverse proxy runs ON the router → this is an INPUT accept.
+                # src=lan means "don't open it on the WAN at all".
+                _zone=wan; [ "$_src" = lan ] && _zone=lan
+                _s=$(uci add firewall rule 2>/dev/null) || continue
+                uci -q set "firewall.$_s.name=detour-pm-$_id"
+                uci -q set "firewall.$_s.src=$_zone"
+                uci -q set "firewall.$_s.proto=tcp"
+                uci -q set "firewall.$_s.dest_port=$_lp"
+                uci -q set "firewall.$_s.target=ACCEPT"
+                ;;
+            dnat)
+                [ "$_src" = lan ] && continue   # a WAN forward restricted to LAN is a no-op
+                _s=$(uci add firewall redirect 2>/dev/null) || continue
+                uci -q set "firewall.$_s.name=detour-pm-$_id"
+                uci -q set "firewall.$_s.src=wan"
+                # proto — СПИСОК: «tcp udp» должно стать двумя элементами, а не
+                # одной строкой с пробелом (fw3 такую строку не разберёт). Отсюда
+                # add_list по словам, а не set одним значением.
+                [ -n "$_pr" ] || _pr=tcp
+                for _p in $_pr; do uci -q add_list "firewall.$_s.proto=$_p"; done
+                uci -q set "firewall.$_s.src_dport=$_lp"
+                uci -q set "firewall.$_s.dest=lan"
+                uci -q set "firewall.$_s.dest_ip=$_tip"
+                uci -q set "firewall.$_s.dest_port=$_tp"
+                uci -q set "firewall.$_s.target=DNAT"
+                ;;
+        esac
+    done < "$CONF"
+    uci commit firewall 2>/dev/null
+    /etc/init.d/firewall reload >/dev/null 2>&1
+    log "uci firewall synced"
+}
+
+# ---- firewall: Keenetic (iptables via the ndm hook) -------------------------
+# KeeneticOS rebuilds iptables on every reconfig, so the authoritative place for
+# these rules is /opt/etc/ndm/netfilter.d/50-detour.sh (it reads $CONF and emits
+# the same rules). Here we just poke the hook so a save takes effect immediately.
+sync_firewall_keenetic() {
+    [ -x /opt/etc/ndm/netfilter.d/50-detour.sh ] && \
+        /opt/etc/ndm/netfilter.d/50-detour.sh iptables nat >/dev/null 2>&1
+    return 0
+}
+
+# ---- htpasswd ---------------------------------------------------------------
+# "{SHA}" (base64 of the raw sha1) is understood by BOTH nginx's auth_basic and
+# lighttpd's htpasswd backend, and openssl is already a dependency (detour-cert),
+# so no apache tooling is needed on the router.
+write_htpasswd() {  # $1 id  $2 user  $3 password
+    mkdir -p "$AUTH_DIR" 2>/dev/null
+    _h=$(printf '%s' "$3" | openssl sha1 -binary 2>/dev/null | openssl base64 2>/dev/null)
+    [ -n "$_h" ] || return 1
+    printf '%s:{SHA}%s\n' "$2" "$_h" > "$AUTH_DIR/$1.htpasswd"
+    chmod 0640 "$AUTH_DIR/$1.htpasswd" 2>/dev/null
+    return 0
+}
+
+apply_all() {
+    _rc=0
+    render_nginx    || _rc=1
+    render_lighttpd || _rc=1
+    if [ "$PLATFORM" = keenetic ]; then sync_firewall_keenetic; else sync_firewall_openwrt; fi
+    return $_rc
+}
+
+# ---- runtime probes ---------------------------------------------------------
+port_listening() {  # $1 port
+    netstat -ltn 2>/dev/null | grep -qE "[:.]$1[[:space:]]"
+}
+target_reachable() {  # $1 ip  $2 port
+    command -v nc >/dev/null 2>&1 || return 2
+    nc -w 2 "$1" "$2" </dev/null >/dev/null 2>&1
+}
+
+# ============================ COMMANDS =======================================
+CMD="${1:-status}"
+
+case "$CMD" in
+
+status|list)
+    caps
+    _dom=$(cert_domain)
+    printf '{"ok":true,"platform":%s,"engine":%s,' "$(json_str "$PLATFORM")" "$(json_str "$ENGINE")"
+    printf '"https_supported":%s,"https_reason":%s,' "$CAP_HTTPS" "$(json_str "$CAP_HTTPS_WHY")"
+    printf '"dnat_supported":%s,"dnat_reason":%s,' "$CAP_DNAT" "$(json_str "$CAP_DNAT_WHY")"
+    auth_caps
+    printf '"auth_supported":%s,"auth_reason":%s,' "$CAP_AUTH" "$(json_str "$CAP_AUTH_WHY")"
+    printf '"domain":%s,"lan_cidr":%s,"mappings":[' "$(json_str "$_dom")" "$(json_str "$(lan_cidr)")"
+    _first=1
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        case "$ln" in \#*) continue ;; esac
+        _id=$(fld 1 "$ln");  _en=$(fld 2 "$ln");  _mode=$(fld 3 "$ln")
+        _lp=$(fld 4 "$ln");  _pr=$(fld 5 "$ln");  _tip=$(fld 6 "$ln")
+        _tp=$(fld 7 "$ln");  _sch=$(fld 8 "$ln"); _src=$(fld 9 "$ln")
+        _usr=$(fld 10 "$ln"); _name=$(fld 12 "$ln")
+        # Ports go out as JSON NUMBERS — a hand-edited config with a non-numeric
+        # port would otherwise emit invalid JSON and blank the whole panel section.
+        case "$_lp" in ''|*[!0-9]*) _lp=0 ;; esac
+        case "$_tp" in ''|*[!0-9]*) _tp=0 ;; esac
+        _lst=false
+        [ "$_mode" = https ] && [ "$_en" = 1 ] && port_listening "$_lp" && _lst=true
+        [ "$_first" = 1 ] || printf ','
+        _first=0
+        printf '{"id":%s,"enabled":%s,"mode":%s,"listen_port":%s,"proto":%s,' \
+            "$(json_str "$_id")" "$([ "$_en" = 1 ] && echo true || echo false)" \
+            "$(json_str "$_mode")" "$_lp" "$(json_str "$_pr")"
+        printf '"target_ip":%s,"target_port":%s,"scheme":%s,"src":%s,' \
+            "$(json_str "$_tip")" "$_tp" "$(json_str "$_sch")" "$(json_str "$_src")"
+        printf '"auth_user":%s,"auth":%s,"name":%s,"listening":%s}' \
+            "$(json_str "$_usr")" "$([ -n "$_usr" ] && echo true || echo false)" \
+            "$(json_str "$_name")" "$_lst"
+    done < "$CONF"
+    printf ']}\n'
+    ;;
+
+# set <id> <enabled> <mode> <listen_port> <proto> <target_ip> <target_port> <scheme> <src> <name…>
+set)
+    shift
+    # `shift 9` is a hard error in ash when fewer args are present — check first.
+    [ $# -ge 9 ] || die_json "мало аргументов для set"
+    ID="$1"; EN="$2"; MODE="$3"; LP="$4"; PR="$5"; TIP="$6"; TP="$7"; SCH="$8"; SRC="$9"
+    shift 9
+    NAME=$(sanitize_text "$*")
+
+    valid_id "$ID"      || die_json "некорректный id (a-z, 0-9, -, _)"
+    case "$EN" in 0|1) ;; *) EN=1 ;; esac
+    case "$MODE" in https|dnat) ;; *) die_json "неизвестный режим: $MODE" ;; esac
+    # «TCP + UDP» приходит из панели как одно поле "tcp udp" — храним его так же
+    # (пробел, не запятая): и uci add_list, и iptables-хук раскладывают его по
+    # словам. Прочие написания нормализуем, мусор — молча в tcp.
+    case "$PR" in
+        tcp|udp) ;;
+        'tcp udp'|'udp tcp'|tcp,udp|udp,tcp|tcpudp) PR='tcp udp' ;;
+        *) PR=tcp ;;
+    esac
+    case "$SCH" in http|https) ;; *) SCH=http ;; esac
+    case "$SRC" in any|lan) ;; *) SRC=any ;; esac
+    valid_port "$LP"    || die_json "некорректный внешний порт"
+    valid_port "$TP"    || die_json "некорректный порт устройства"
+    valid_ipv4 "$TIP"   || die_json "некорректный IP устройства"
+    is_reserved_port "$LP" && die_json "порт $LP занят самим роутером/панелью — выберите другой"
+    port_taken_by_other "$LP" "$ID" && die_json "порт $LP уже используется другим пробросом"
+    [ "$MODE" = dnat ] && [ "$PR" = udp ] && [ "$SCH" = https ] && SCH=http
+
+    caps
+    if [ "$MODE" = https ] && [ "$CAP_HTTPS" != true ]; then die_json "HTTPS-проброс недоступен: $CAP_HTTPS_WHY"; fi
+    if [ "$MODE" = dnat ]  && [ "$CAP_DNAT"  != true ]; then die_json "проброс порта недоступен: $CAP_DNAT_WHY"; fi
+
+    # Preserve the existing Basic-auth credentials across an edit (they are set
+    # through `set-auth`, so the panel never has to round-trip the hash).
+    OLD=$(get_line "$ID")
+    USR=""; SHA=""
+    if [ -n "$OLD" ]; then USR=$(fld 10 "$OLD"); SHA=$(fld 11 "$OLD"); fi
+
+    del_line "$ID"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$ID" "$EN" "$MODE" "$LP" "$PR" "$TIP" "$TP" "$SCH" "$SRC" "$USR" "$SHA" "$NAME" >> "$CONF"
+    log "set $ID mode=$MODE $LP -> $TIP:$TP src=$SRC enabled=$EN"
+    if apply_all; then
+        printf '{"ok":true,"id":%s}\n' "$(json_str "$ID")"
+    else
+        die_json "правило сохранено, но веб-сервер отклонил конфиг — проброс не активирован (см. $LOG)"
+    fi
+    ;;
+
+# set-auth <id> <user> <password>   — пустой user снимает Basic-авторизацию
+set-auth)
+    ID="$2"; USR=$(sanitize_text "$3"); PASS="$4"
+    valid_id "$ID" || die_json "некорректный id"
+    OLD=$(get_line "$ID"); [ -n "$OLD" ] || die_json "проброс не найден"
+    if [ -z "$USR" ]; then
+        rm -f "$AUTH_DIR/$ID.htpasswd" 2>/dev/null
+        USR=""; SHAV=""
+    else
+        [ -n "$PASS" ] || die_json "укажите пароль"
+        # Refuse rather than store a password nothing will ever check — otherwise the
+        # panel would show «вход: admin» on a service that is in fact wide open.
+        auth_caps
+        [ "$CAP_AUTH" = true ] || die_json "авторизация недоступна: $CAP_AUTH_WHY"
+        write_htpasswd "$ID" "$USR" "$PASS" || die_json "не удалось посчитать хеш пароля (нет openssl?)"
+        SHAV=1
+    fi
+    del_line "$ID"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$(fld 1 "$OLD")" "$(fld 2 "$OLD")" "$(fld 3 "$OLD")" "$(fld 4 "$OLD")" \
+        "$(fld 5 "$OLD")" "$(fld 6 "$OLD")" "$(fld 7 "$OLD")" "$(fld 8 "$OLD")" \
+        "$(fld 9 "$OLD")" "$USR" "$SHAV" "$(fld 12 "$OLD")" >> "$CONF"
+    apply_all >/dev/null 2>&1
+    log "set-auth $ID user='$USR'"
+    printf '{"ok":true,"auth":%s}\n' "$([ -n "$USR" ] && echo true || echo false)"
+    ;;
+
+toggle)
+    ID="$2"; EN="$3"
+    case "$EN" in 0|1) ;; *) die_json "нужно 0 или 1" ;; esac
+    OLD=$(get_line "$ID"); [ -n "$OLD" ] || die_json "проброс не найден"
+    del_line "$ID"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$(fld 1 "$OLD")" "$EN" "$(fld 3 "$OLD")" "$(fld 4 "$OLD")" \
+        "$(fld 5 "$OLD")" "$(fld 6 "$OLD")" "$(fld 7 "$OLD")" "$(fld 8 "$OLD")" \
+        "$(fld 9 "$OLD")" "$(fld 10 "$OLD")" "$(fld 11 "$OLD")" "$(fld 12 "$OLD")" >> "$CONF"
+    apply_all >/dev/null 2>&1
+    log "toggle $ID -> $EN"
+    printf '{"ok":true,"enabled":%s}\n' "$([ "$EN" = 1 ] && echo true || echo false)"
+    ;;
+
+delete)
+    ID="$2"
+    valid_id "$ID" || die_json "некорректный id"
+    del_line "$ID"
+    rm -f "$AUTH_DIR/$ID.htpasswd" 2>/dev/null
+    apply_all >/dev/null 2>&1
+    log "delete $ID"
+    printf '{"ok":true}\n'
+    ;;
+
+apply)
+    if apply_all; then printf '{"ok":true}\n'; else die_json "веб-сервер отклонил конфиг — см. $LOG"; fi
+    ;;
+
+check)
+    ID="$2"
+    OLD=$(get_line "$ID"); [ -n "$OLD" ] || die_json "проброс не найден"
+    TIP=$(fld 6 "$OLD"); TP=$(fld 7 "$OLD"); LP=$(fld 4 "$OLD")
+    target_reachable "$TIP" "$TP"
+    case "$?" in
+        0) TGT=true;  TWHY="" ;;
+        2) TGT=false; TWHY="нет nc — проверить недоступно" ;;
+        *) TGT=false; TWHY="устройство $TIP:$TP не отвечает" ;;
+    esac
+    _lst=false; port_listening "$LP" && _lst=true
+    printf '{"ok":true,"target_up":%s,"listening":%s,"note":%s}\n' "$TGT" "$_lst" "$(json_str "$TWHY")"
+    ;;
+
+*)
+    echo "usage: detour-portmap {status|list|set <id> <0|1> <https|dnat> <lport> <tcp|udp|'tcp udp'> <ip> <tport> <http|https> <any|lan> <name>|set-auth <id> <user> <pass>|toggle <id> <0|1>|delete <id>|apply|check <id>}" >&2
+    exit 2 ;;
+esac

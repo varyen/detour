@@ -59,6 +59,7 @@ PUSH_MSG="/tmp/detour-push.msg"             # latest push message JSON (read by 
 CERT_BIN="/usr/sbin/detour-cert"            # Let's Encrypt helper (acme.sh) — backs the cert_* actions
 CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written by detour-cert)
 OFFLOAD_BIN="/usr/sbin/detour-offload"      # QCA HW-offload watchdog/recovery — backs the offload_* actions
+PORTMAP_BIN="/usr/sbin/detour-portmap"      # публикация внутренних сервисов наружу — backs the portmap_* actions
 WANLINK_BIN="/usr/sbin/detour-wan-link"     # WAN PHY/link-speed monitor — warns on 100M negotiation (not offload-related)
 # Swap file (Keenetic/Entware only — /opt on a USB flash needs swap or the stack
 # gets OOM-killed). Managed via the S05swap init script; backs the swap_* actions.
@@ -151,6 +152,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     CERT_BIN="$OPT/sbin/detour-cert"
     CERT_STATE="$OPT/var/state/detour-cert.json"
     OFFLOAD_BIN="$OPT/sbin/detour-offload"   # QCA-only; no-op on Keenetic (no NSS accelerator)
+    PORTMAP_BIN="$OPT/sbin/detour-portmap"
     WANLINK_BIN="$OPT/sbin/detour-wan-link"
     SWAPFILE="$OPT/swapfile"
     SWAP_INITD="$OPT/etc/init.d/S05swap"
@@ -3993,6 +3995,142 @@ swap_remove)
     [ -x "$SWAP_INITD" ] || { json_err "S05swap не установлен"; exit 0; }
     "$SWAP_INITD" remove >/dev/null 2>&1
     printf '{"ok":true}'
+    ;;
+
+# ==================== ПРОБРОС СЕРВИСОВ (portmap) ====================
+# Тонкая обёртка над /usr/sbin/detour-portmap: публикация внутреннего устройства
+# наружу либо как HTTPS-реверс-прокси на LE-серте панели (режим https), либо как
+# обычный проброс порта DNAT (режим dnat). Вся валидация — в хелпере (он же
+# единственный, кто пишет конфиг и трогает nginx/lighttpd/файрвол); здесь только
+# разбор JSON. Значения уходят в хелпер как argv, а не через `sh -c`, поэтому
+# метасимволы в имени безопасны — но id всё равно проверяем по charset.
+portmap_status)
+    if [ -x "$PORTMAP_BIN" ]; then "$PORTMAP_BIN" status
+    else printf '{"ok":true,"platform":"%s","engine":"none","https_supported":false,"https_reason":"detour-portmap не установлен","dnat_supported":false,"dnat_reason":"detour-portmap не установлен","domain":"","lan_cidr":"","mappings":[]}' "$PLATFORM"; fi
+    ;;
+
+portmap_save)
+    # Body = {"id","name","mode","listen_port","proto","target_ip","target_port",
+    #         "scheme","src","enabled"}
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$PORTMAP_BIN" ] || { json_err "detour-portmap не установлен"; exit 0; }
+    PM_ID=$(printf '%s' "$POST_DATA"    | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_NAME=$(printf '%s' "$POST_DATA"  | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_MODE=$(printf '%s' "$POST_DATA"  | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_PROTO=$(printf '%s' "$POST_DATA" | sed -n 's/.*"proto"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_TIP=$(printf '%s' "$POST_DATA"   | sed -n 's/.*"target_ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_SCH=$(printf '%s' "$POST_DATA"   | sed -n 's/.*"scheme"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_SRC=$(printf '%s' "$POST_DATA"   | sed -n 's/.*"src"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_LP=$(printf '%s' "$POST_DATA"    | sed -n 's/.*"listen_port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    PM_TP=$(printf '%s' "$POST_DATA"    | sed -n 's/.*"target_port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    PM_EN=1
+    printf '%s' "$POST_DATA" | grep -q '"enabled"[[:space:]]*:[[:space:]]*false' && PM_EN=0
+    case "$PM_ID" in ''|*[!a-z0-9_-]*) json_err "bad id"; exit 0 ;; esac
+    [ -n "$PM_LP" ] || { json_err "не указан внешний порт"; exit 0; }
+    [ -n "$PM_TP" ] || { json_err "не указан порт устройства"; exit 0; }
+    "$PORTMAP_BIN" set "$PM_ID" "$PM_EN" "$PM_MODE" "$PM_LP" "$PM_PROTO" \
+        "$PM_TIP" "$PM_TP" "$PM_SCH" "$PM_SRC" "$PM_NAME"
+    ;;
+
+portmap_auth)
+    # Body = {"id","user","password"}. Пустой user снимает Basic-авторизацию.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$PORTMAP_BIN" ] || { json_err "detour-portmap не установлен"; exit 0; }
+    PM_ID=$(printf '%s' "$POST_DATA"   | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_USER=$(printf '%s' "$POST_DATA" | sed -n 's/.*"user"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_PASS=$(printf '%s' "$POST_DATA" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    case "$PM_ID" in ''|*[!a-z0-9_-]*) json_err "bad id"; exit 0 ;; esac
+    "$PORTMAP_BIN" set-auth "$PM_ID" "$PM_USER" "$PM_PASS"
+    ;;
+
+portmap_toggle)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$PORTMAP_BIN" ] || { json_err "detour-portmap не установлен"; exit 0; }
+    PM_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    case "$PM_ID" in ''|*[!a-z0-9_-]*) json_err "bad id"; exit 0 ;; esac
+    PM_EN=1
+    printf '%s' "$POST_DATA" | grep -q '"enabled"[[:space:]]*:[[:space:]]*false' && PM_EN=0
+    "$PORTMAP_BIN" toggle "$PM_ID" "$PM_EN"
+    ;;
+
+portmap_delete)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$PORTMAP_BIN" ] || { json_err "detour-portmap не установлен"; exit 0; }
+    PM_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    case "$PM_ID" in ''|*[!a-z0-9_-]*) json_err "bad id"; exit 0 ;; esac
+    "$PORTMAP_BIN" delete "$PM_ID"
+    ;;
+
+portmap_apply)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$PORTMAP_BIN" ] || { json_err "detour-portmap не установлен"; exit 0; }
+    "$PORTMAP_BIN" apply
+    ;;
+
+portmap_check)
+    [ -x "$PORTMAP_BIN" ] || { json_err "detour-portmap не установлен"; exit 0; }
+    PM_ID=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]id=\([^&]*\).*/\1/p' | head -1)
+    case "$PM_ID" in ''|*[!a-z0-9_-]*) json_err "bad id"; exit 0 ;; esac
+    "$PORTMAP_BIN" check "$PM_ID"
+    ;;
+
+# Клиенты локальной сети — для выпадающего списка «IP устройства в LAN» в
+# пробросе сервисов (вспоминать адрес руками не надо). Два источника, склеенных
+# по IP:
+#   * аренды dnsmasq — единственный источник ИМЁН хостов (OpenWrt: /tmp/dhcp.leases);
+#   * ARP-таблица ядра — видит устройства со статикой и с чужой арендой, но без имён.
+# На Keenetic DHCP раздаёт сам NDM, его аренды из Entware не читаются, поэтому там
+# список приходит из ARP (адреса есть, имён нет) — панель это переживает: селект
+# просто показывает адреса. Свой же адрес роутера из списка убираем — пробрасывать
+# на него нечего.
+lan_clients)
+    LC_RAW="/tmp/detour-lanclients.$$"
+    LC_OUT="/tmp/detour-lanclients.$$.out"
+    : > "$LC_RAW"
+    for lc_f in /tmp/dhcp.leases /var/dhcp.leases /opt/var/lib/misc/dnsmasq.leases; do
+        [ -f "$lc_f" ] || continue
+        # dnsmasq lease: <expiry> <mac> <ip> <hostname|*> <clientid>
+        # Поля разделяем '|', а НЕ табом: таб — это IFS-пробел, и `read` схлопнул
+        # бы два таба подряд в один, так что у безымянного клиента MAC уехал бы в
+        # поле имени (проверено). '|' из свободного текста режем тут же.
+        awk '$3 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+                h = $4; if (h == "*") h = ""; gsub(/\|/, "", h);
+                print $3 "|" h "|" $2
+             }' "$lc_f" >> "$LC_RAW" 2>/dev/null
+    done
+    if [ -f /proc/net/arp ]; then
+        # IP HWtype Flags HWaddress Mask Device; flags 0x0 = неполная запись.
+        awk -v ifc="$LAN_IF" 'NR > 1 && $3 != "0x0" && $6 ~ ("^" ifc) {
+                print $1 "||" $4
+             }' /proc/net/arp >> "$LC_RAW" 2>/dev/null
+    fi
+    LC_SELF=$(ip -4 -o addr show "$LAN_IF" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    # Сортировка по октетам, склейка дублей (аренда с именем выигрывает у ARP).
+    sort -t. -k1,1n -k2,2n -k3,3n -k4,4n "$LC_RAW" 2>/dev/null | \
+        awk -F'|' -v self="$LC_SELF" '
+            $1 == self { next }
+            {
+                if (!($1 in seen)) { seen[$1] = 1; order[++n] = $1; host[$1] = ""; mac[$1] = "" }
+                if (host[$1] == "" && $2 != "") host[$1] = $2
+                if (mac[$1]  == "" && $3 != "") mac[$1]  = $3
+            }
+            END { for (i = 1; i <= n; i++) printf "%s|%s|%s\n", order[i], host[order[i]], mac[order[i]] }
+        ' > "$LC_OUT" 2>/dev/null
+    printf '{"ok":true,"clients":['
+    LC_FIRST=1
+    while IFS='|' read -r lc_ip lc_host lc_mac; do
+        # Имя хоста и MAC приходят из файлов, которые пишем не мы, — режем до
+        # безопасного набора символов вместо экранирования: в JSON уходит чистое.
+        lc_ip=$(printf '%s' "$lc_ip" | tr -cd '0-9.')
+        [ -n "$lc_ip" ] || continue
+        lc_host=$(printf '%s' "$lc_host" | tr -cd 'A-Za-z0-9._-' | cut -c1-32)
+        lc_mac=$(printf '%s' "$lc_mac" | tr -cd 'A-Fa-f0-9:' | cut -c1-17)
+        [ "$LC_FIRST" = 1 ] || printf ','
+        LC_FIRST=0
+        printf '{"ip":"%s","host":"%s","mac":"%s"}' "$lc_ip" "$lc_host" "$lc_mac"
+    done < "$LC_OUT"
+    printf ']}'
+    rm -f "$LC_RAW" "$LC_OUT"
     ;;
 
 *) json_err "unknown action: $ACTION" ;;

@@ -80,6 +80,39 @@ find_acme() {
     return 1
 }
 
+# The webroot acme.sh recorded for a domain (Le_Webroot in its per-domain conf), or
+# empty. Derived from the acme.sh location so it follows find_acme's search order.
+# EC certs live in "<domain>_ecc"; plain RSA in "<domain>" — check both.
+acme_webroot() {  # $1 domain → echoes the recorded webroot, or nothing
+    _ah=$(find_acme) || return 0
+    _ah=$(dirname "$_ah")
+    for _dd in "$_ah/$1_ecc" "$_ah/$1"; do
+        [ -f "$_dd/$1.conf" ] || continue
+        sed -n "s/^Le_Webroot='\([^']*\)'.*/\1/p" "$_dd/$1.conf" 2>/dev/null | head -1
+        return 0
+    done
+    return 0
+}
+
+# The reload hook acme.sh will replay on renewal. acme stores it either verbatim or
+# wrapped in its __ACME_BASE64__ markers, so handle both. Echoes it, or nothing.
+acme_reloadcmd() {  # $1 domain
+    _ah=$(find_acme) || return 0
+    _ah=$(dirname "$_ah")
+    for _dd in "$_ah/$1_ecc" "$_ah/$1"; do
+        [ -f "$_dd/$1.conf" ] || continue
+        _rc=$(sed -n "s/^Le_ReloadCmd='\([^']*\)'.*/\1/p" "$_dd/$1.conf" 2>/dev/null | head -1)
+        case "$_rc" in
+            __ACME_BASE64__START_*)
+                _rc=${_rc#__ACME_BASE64__START_}; _rc=${_rc%__ACME_BASE64__END_}
+                printf '%s' "$_rc" | base64 -d 2>/dev/null ;;
+            *) printf '%s' "$_rc" ;;
+        esac
+        return 0
+    done
+    return 0
+}
+
 ensure_acme() {
     _a=$(find_acme) && { echo "$_a"; return 0; }
     log "acme.sh not found — installing"
@@ -145,13 +178,44 @@ probe_webroot() {  # $1 domain  $2 webroot  [$3 port=80] → 0 if the token is s
     [ "$_got" = "$_tok" ]
 }
 
+# Apply a changed nginx config. NOT a graceful reload — see the long note on
+# nginx_reload() in detour-portmap: on the reference GL-BE9300 the router's own admin
+# UI holds long-lived WebSockets, the old workers stay in "shutting down" forever and
+# keep answering from the PREVIOUS config. Measured there: a change was still not live
+# 60 s after `nginx -s reload` (and after `/etc/init.d/nginx reload`), while a restart
+# applied it in ~2 s.
+#
+# This silently broke certificate RENEWAL: nginx_add_snippet() wrote a correct :80
+# challenge server, `nginx -t` passed, the reload reported success — and the block
+# never went live, so probe_webroot() kept seeing the router's default :80 server
+# (a 302 to the LAN IP, which Let's Encrypt refuses to follow) and every unattended
+# renewal failed. The same stale command also went into cert.conf's RELOAD_CMD, so a
+# renewal that DID succeed would not have been picked up by the running nginx either.
+nginx_reload() {
+    /etc/init.d/nginx restart >/dev/null 2>&1 || {
+        nginx -s reload >/dev/null 2>&1
+        return 0
+    }
+    # A restart needs a moment to bind :80 again. probe_webroot() runs right after
+    # this and a probe that lands in the gap reports a false "webroot not served",
+    # which aborts issuance/renewal even though the config is fine. Wait for the
+    # listener (any HTTP answer counts — we only care that nginx is back).
+    _w=0
+    while [ "$_w" -lt 10 ]; do
+        curl -s -m 2 -o /dev/null "http://127.0.0.1/" 2>/dev/null && break
+        _w=$((_w + 1)); sleep 1
+    done
+    return 0
+}
+
 # Generic-nginx fallback: add a managed, name-based :80 server block serving the
 # challenge from ACME_WEBROOT. Kept after issue so unattended renewals keep
 # validating. Guarded by `nginx -t`. (No-op win on GL — the probe picks the
 # built-in webroot first, so this is only reached on plain nginx.)
-nginx_add_snippet() {  # $1 domain
+nginx_add_snippet() {  # $1 domain  [$2 webroot=ACME_WEBROOT]
     [ -d "$NGINX_CONFD" ] || return 1
-    mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge" 2>/dev/null
+    _sw="${2:-$ACME_WEBROOT}"
+    mkdir -p "$_sw/.well-known/acme-challenge" 2>/dev/null
     cat > "$NGINX_SNIPPET" <<EOF
 # Managed by detour-cert — serves the Let's Encrypt HTTP-01 challenge for $1.
 server {
@@ -159,18 +223,18 @@ server {
     listen [::]:80;
     server_name $1;
     location ^~ /.well-known/acme-challenge/ {
-        root $ACME_WEBROOT;
+        root $_sw;
         default_type "text/plain";
         try_files \$uri =404;
     }
 }
 EOF
     if nginx -t >/dev/null 2>&1; then
-        /etc/init.d/nginx reload >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1
+        nginx_reload
         return 0
     fi
     log "nginx -t failed after adding challenge snippet — reverting"
-    rm -f "$NGINX_SNIPPET"; nginx -s reload >/dev/null 2>&1
+    rm -f "$NGINX_SNIPPET"; nginx_reload
     return 1
 }
 
@@ -233,12 +297,12 @@ server {
 }
 EOF
     if nginx -t >/dev/null 2>&1; then
-        /etc/init.d/nginx reload >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1
+        nginx_reload
         log "managed panel vhost written for $_pd → $_pb"
         return 0
     fi
     log "nginx -t failed after panel vhost — reverting"
-    rm -f "$NGINX_PANEL_VHOST"; nginx -s reload >/dev/null 2>&1
+    rm -f "$NGINX_PANEL_VHOST"; nginx_reload
     return 1
 }
 
@@ -254,12 +318,28 @@ prepare_webroot() {  # $1 domain  $2 http80-server → echoes webroot, or fails
     fi
     case "$_srv" in
         nginx)
-            # built-in / pre-existing webroots first (GL.iNet /tmp/acme-webroot),
-            # then our own managed snippet for plain nginx.
+            # The webroot acme.sh already has on file for this domain comes FIRST.
+            # On a renewal acme writes the token to that recorded path and ignores any
+            # -w we pass (--renew reloads the saved parameters), so if we validate and
+            # serve a different directory the CA gets a 404 — which is exactly how a
+            # working setup rotted into silent renewal failures here.
+            _rec=$(acme_webroot "$_d")
+            if [ -n "$_rec" ]; then
+                # A recorded webroot means this domain has been issued before, so acme
+                # will write the token THERE and nowhere else. Validating some other
+                # directory that merely happens to be served would "succeed" and then
+                # hand the CA a 404 — settle for nothing but the recorded path: probe
+                # it, and if the live :80 doesn't serve it, repoint our snippet at it.
+                probe_webroot "$_d" "$_rec" && { echo "$_rec"; return 0; }
+                nginx_add_snippet "$_d" "$_rec" && probe_webroot "$_d" "$_rec" && { echo "$_rec"; return 0; }
+                return 1
+            fi
+            # First issuance: any webroot the :80 server provably serves will do, and
+            # the -w we pass becomes the recorded one.
             for _wr in /tmp/acme-webroot "$ACME_WEBROOT"; do
                 probe_webroot "$_d" "$_wr" && { echo "$_wr"; return 0; }
             done
-            nginx_add_snippet "$_d" && probe_webroot "$_d" "$ACME_WEBROOT" && { echo "$ACME_WEBROOT"; return 0; }
+            nginx_add_snippet "$_d" "$ACME_WEBROOT" && probe_webroot "$_d" "$ACME_WEBROOT" && { echo "$ACME_WEBROOT"; return 0; }
             return 1 ;;
         uhttpd)
             _wr=$(uci -q get uhttpd.main.home 2>/dev/null); [ -n "$_wr" ] || _wr=/www
@@ -404,7 +484,10 @@ issue)
 
     # --- target cert dir + reload command ---
     case "$TGT" in
-        nginx)    CERT_DIR_V="$NGINX_SSL/$DOMAIN_IN"; RELOAD_V="/etc/init.d/nginx reload 2>/dev/null || nginx -s reload" ;;
+        # Route the renewal hook back through THIS script so the restart-vs-reload
+        # fix lives in one place — acme.sh stores the string verbatim and replays it
+        # on every unattended renewal for the life of the cert.
+        nginx)    CERT_DIR_V="$NGINX_SSL/$DOMAIN_IN"; RELOAD_V="detour-cert _nginx-reload" ;;
         uhttpd)   CERT_DIR_V="$DETOUR_SSL"; RELOAD_V="/etc/init.d/uhttpd restart" ;;
         lighttpd) CERT_DIR_V="$DETOUR_SSL"; RELOAD_V="detour-cert _lighttpd-pem" ;;
     esac
@@ -438,7 +521,7 @@ EOF
         uhttpd)   configure_uhttpd  "$CERT_DIR_V" ;;
         lighttpd) configure_lighttpd "$CERT_DIR_V" ;;
         nginx)
-            /etc/init.d/nginx reload >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1
+            nginx_reload
             # Ensure SNI=<domain> on :443 actually serves this cert. A default :443
             # server (e.g. GL.iNet's) otherwise answers <domain> with its own cert and
             # the panel is unreachable over HTTPS. Add a managed routing vhost unless
@@ -458,15 +541,62 @@ EOF
 
 renew)
     ACME=$(find_acme) || { log "renew: acme.sh not found"; exit 1; }
-    "$ACME" --cron >>"$LOG" 2>&1
-    write_state ok ""
-    log "renew run"
+    # Re-assert the challenge webroot BEFORE renewing. Issuance left one behind, but
+    # ACME_WEBROOT lives under /var — a symlink to /tmp on OpenWrt — so a reboot
+    # silently deletes it and every later renewal fails the HTTP-01 check with no
+    # trace. prepare_webroot re-creates the dir and, if the :80 server still doesn't
+    # serve it, reinstalls the managed nginx snippet.
+    [ -f "$CERT_CONF" ] && . "$CERT_CONF" 2>/dev/null
+    RENEW_RC=0
+    WEBROOT=""
+    [ -n "$DOMAIN" ] && WEBROOT=$(prepare_webroot "$DOMAIN" "$(http80_server)" 2>/dev/null)
+    if [ -n "$WEBROOT" ]; then
+        # prepare_webroot has guaranteed the live :80 serves the directory acme will
+        # write to; --renew reloads the saved parameters, so -w here is belt-and-braces
+        # (acme ignores it on a renewal) — the real work was making the two agree.
+        "$ACME" --renew --ecc -d "$DOMAIN" -w "$WEBROOT" >>"$LOG" 2>&1 || RENEW_RC=$?
+    else
+        [ -n "$DOMAIN" ] && log "renew: no usable ACME webroot for $DOMAIN — falling back to acme cron"
+        "$ACME" --cron >>"$LOG" 2>&1 || RENEW_RC=$?
+    fi
+    # acme.sh exits 2 for "skipped, not due yet" — a healthy no-op, not a failure.
+    if [ "$RENEW_RC" = 0 ] || [ "$RENEW_RC" = 2 ]; then
+        # Re-register the install hook when it has drifted. --renew replays the
+        # reloadcmd saved at issue time and ignores one passed on the command line, so
+        # a cert issued before the restart-vs-reload fix keeps running the useless
+        # `nginx -s reload` forever; --install-cert is the only call that rewrites it.
+        # Gate on an actual mismatch: --install-cert also RE-RUNS the hook, and doing
+        # that unconditionally would bounce nginx on every scheduled renew check.
+        if [ -n "$RELOAD_CMD" ] && [ -n "$CERT_DIR" ] && \
+           [ "$(acme_reloadcmd "$DOMAIN")" != "$RELOAD_CMD" ]; then
+            log "renew: refreshing stale install hook for $DOMAIN"
+            "$ACME" --install-cert --ecc -d "$DOMAIN" \
+                --fullchain-file "$CERT_DIR/fullchain.pem" \
+                --key-file "$CERT_DIR/privkey.pem" \
+                --reloadcmd "$RELOAD_CMD" >>"$LOG" 2>&1 || \
+                log "renew: could not refresh the install hook for $DOMAIN"
+        fi
+        write_state ok ""
+        log "renew run (rc=$RENEW_RC)"
+    else
+        # Never report success on a failed renewal: the panel's cert chip and the
+        # "last_result" in the status modal are the ONLY place a silent expiry would
+        # have shown up, and blanket-ok is why this went unnoticed for weeks.
+        write_state error "renewal failed — see $LOG"
+        log "renew FAILED"
+        exit 1
+    fi
     ;;
+
+_nginx-reload)
+    nginx_reload ;;
 
 _lighttpd-pem)
     lighttpd_pem ;;
 
 *)
     echo "usage: detour-cert {detect | issue <domain> <email> | renew | status}" >&2
+    # _nginx-reload / _lighttpd-pem are internal hooks replayed by acme.sh — not
+    # advertised here on purpose.
     exit 2 ;;
 esac

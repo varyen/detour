@@ -318,4 +318,68 @@ fi
 add filter OUTPUT -j DETOUR_EGRESS_BLOCK_OUT
 add filter FORWARD -j DETOUR_EGRESS_BLOCK_FWD
 
+# --- «Проброс сервисов» (detour-portmap) -------------------------------------
+# Source: /opt/etc/detour/portmap.conf, one mapping per line, '|'-separated:
+#   id|enabled|mode|listen_port|proto|target_ip|target_port|scheme|src|user|sha|name
+#
+#   mode=https → the reverse proxy runs on THIS router (lighttpd mod_proxy socket
+#                written by detour-portmap), so all we owe it is an INPUT accept.
+#   mode=dnat  → a real WAN→LAN port forward: nat PREROUTING DNAT + a FORWARD accept
+#                (KeeneticOS masquerades the return path itself).
+#
+# Own chains, flushed on every run, so removing a mapping actually removes its rule
+# (the generic `add` helper is idempotent but never deletes).
+# ⚠ NOT verified on a live Keenetic yet — see keenetic/README.md.
+PORTMAP_CONF="${DETOUR_PORTMAP_CONF:-/opt/etc/detour/portmap.conf}"
+LAN_CIDR=$(ip -4 -o addr show "$LAN_IF" 2>/dev/null | awk '{print $4}' | head -1 | \
+    awk -F/ '{split($1,a,"."); print a[1]"."a[2]"."a[3]".0/"$2}')
+
+iptables -t filter -N DETOUR_PORTMAP_IN 2>/dev/null
+iptables -t filter -F DETOUR_PORTMAP_IN 2>/dev/null
+iptables -t filter -N DETOUR_PORTMAP_FWD 2>/dev/null
+iptables -t filter -F DETOUR_PORTMAP_FWD 2>/dev/null
+iptables -t nat -N DETOUR_PORTMAP_DNAT 2>/dev/null
+iptables -t nat -F DETOUR_PORTMAP_DNAT 2>/dev/null
+
+if [ -f "$PORTMAP_CONF" ]; then
+    while IFS= read -r pmline; do
+        [ -n "$pmline" ] || continue
+        case "$pmline" in \#*) continue ;; esac
+        pm_en=$(printf '%s' "$pmline"   | cut -d'|' -f2)
+        [ "$pm_en" = 1 ] || continue
+        pm_mode=$(printf '%s' "$pmline" | cut -d'|' -f3)
+        pm_lp=$(printf '%s' "$pmline"   | cut -d'|' -f4)
+        pm_pr=$(printf '%s' "$pmline"   | cut -d'|' -f5)
+        pm_tip=$(printf '%s' "$pmline"  | cut -d'|' -f6)
+        pm_tp=$(printf '%s' "$pmline"   | cut -d'|' -f7)
+        pm_src=$(printf '%s' "$pmline"  | cut -d'|' -f9)
+        case "$pm_lp" in ''|*[!0-9]*) continue ;; esac
+        case "$pm_tp" in ''|*[!0-9]*) continue ;; esac
+        # «TCP + UDP» хранится в конфиге одним полем "tcp udp" — раскладываем его
+        # по словам ниже (iptables принимает только один -p за правило).
+        case "$pm_pr" in tcp|udp|'tcp udp') ;; *) pm_pr=tcp ;; esac
+        case "$pm_mode" in
+            https)
+                if [ "$pm_src" = lan ] && [ -n "$LAN_CIDR" ]; then
+                    add filter DETOUR_PORTMAP_IN -s "$LAN_CIDR" -p tcp --dport "$pm_lp" -j ACCEPT
+                else
+                    add filter DETOUR_PORTMAP_IN -p tcp --dport "$pm_lp" -j ACCEPT
+                fi
+                ;;
+            dnat)
+                # src=lan on a WAN forward is a no-op — skip it rather than publish.
+                [ "$pm_src" = lan ] && continue
+                for pmproto in $pm_pr; do
+                    add nat DETOUR_PORTMAP_DNAT ! -s "${LAN_CIDR:-0.0.0.0/0}" -p "$pmproto" \
+                        --dport "$pm_lp" -j DNAT --to-destination "$pm_tip:$pm_tp"
+                    add filter DETOUR_PORTMAP_FWD -p "$pmproto" -d "$pm_tip" --dport "$pm_tp" -j ACCEPT
+                done
+                ;;
+        esac
+    done < "$PORTMAP_CONF"
+fi
+add filter INPUT -j DETOUR_PORTMAP_IN
+add filter FORWARD -j DETOUR_PORTMAP_FWD
+add nat PREROUTING -j DETOUR_PORTMAP_DNAT
+
 exit 0

@@ -138,6 +138,8 @@ PANEL_FILES = [
     (("router_files", "detour-push"), "usr/sbin/detour-push", 0o755),
     (("router_files", "detour-cert"), "usr/sbin/detour-cert", 0o755),
     (("router_files", "detour-offload"), "usr/sbin/detour-offload", 0o755),
+    # Публикация LAN-сервисов наружу (HTTPS-реверс-прокси на nginx / DNAT через uci).
+    (("router_files", "detour-portmap"), "usr/sbin/detour-portmap", 0o755),
     (("router_files", "detour-wan-link"), "usr/sbin/detour-wan-link", 0o755),
     (("router_files", "detour-hosts"), "usr/sbin/detour-hosts", 0o755),
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
@@ -356,7 +358,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/detour-bootstrap-install \
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
-    /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-offload /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
+    /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-offload /usr/sbin/detour-portmap /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /usr/sbin/detour-rulist \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
@@ -465,6 +467,15 @@ fi
 # 3f) Seed the HW-offload watchdog config on first install only (keeplist-preserved, so
 # a user's later choice survives upgrades). Default: auto-recover a wedged QCA accelerator.
 [ -f /etc/detour/offload.conf ] || echo 'MODE=auto' > /etc/detour/offload.conf
+
+# 3g) Re-apply the published-services config. portmap.conf lives in the keeplist, but
+# its GENERATED artefacts do not: a firmware sysupgrade wipes /etc/nginx/conf.d and the
+# uci firewall rules, and the post-sysupgrade restore path lands right here (it re-runs
+# `opkg install`). Without this the mappings would still be listed in the panel while
+# nothing actually listened. No-op when nothing is published.
+if [ -s /etc/detour/portmap.conf ] && [ -x /usr/sbin/detour-portmap ]; then
+    /usr/sbin/detour-portmap apply >/dev/null 2>&1
+fi
 
 # 4) Install/refresh cron entries for self-update + subscription-refresh.
 # subscription-refresh ticks hourly; the script itself decides which subscriptions
