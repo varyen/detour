@@ -4074,6 +4074,17 @@ portmap_check)
     "$PORTMAP_BIN" check "$PM_ID"
     ;;
 
+portmap_check_external)
+    # Доходит ли порт до роутера из интернета. Отдельно от portmap_check, потому что
+    # обращается к стороннему сервису проверки и занимает до ~30 с — панель зовёт это
+    # только по явному нажатию, а не при открытии модала.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$PORTMAP_BIN" ] || { json_err "detour-portmap не установлен"; exit 0; }
+    PM_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    case "$PM_ID" in ''|*[!a-z0-9_-]*) json_err "bad id"; exit 0 ;; esac
+    "$PORTMAP_BIN" check-external "$PM_ID"
+    ;;
+
 # Клиенты локальной сети — для выпадающего списка «IP устройства в LAN» в
 # пробросе сервисов (вспоминать адрес руками не надо). Два источника, склеенных
 # по IP:

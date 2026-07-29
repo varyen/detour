@@ -537,9 +537,106 @@ apply_all() {
 port_listening() {  # $1 port
     netstat -ltn 2>/dev/null | grep -qE "[:.]$1[[:space:]]"
 }
-target_reachable() {  # $1 ip  $2 port
+# Is anything actually listening on the LAN target? Only the TCP CONNECT matters —
+# what the service does afterwards is its own business.
+#
+# NOT `nc`: BusyBox nc exits 1 whenever the peer sends nothing back, so every HTTP
+# server that politely waits for a request was reported as "устройство не отвечает"
+# (measured against a live Caddy: nc → 1, curl → 0). curl's %{time_connect} is the
+# honest signal — it is non-zero as soon as the handshake completes, even if the
+# transfer later times out because the service is silent.
+target_reachable() {  # $1 ip  $2 port  → 0 up, 1 down, 2 cannot tell
+    if command -v curl >/dev/null 2>&1; then
+        _tc=$(curl -s -m 4 --connect-timeout 3 -o /dev/null \
+              -w '%{time_connect}' "http://$1:$2/" 2>/dev/null)
+        # "Is it zero?" — strip every 0 and the decimal point and see if anything is
+        # left. A glob like 0.0* would also swallow a perfectly good 0.001147.
+        case "$(printf '%s' "$_tc" | tr -d '0.')" in
+            '') return 1 ;;                 # 0.000000 or empty → never connected
+            *)  return 0 ;;
+        esac
+    fi
     command -v nc >/dev/null 2>&1 || return 2
     nc -w 2 "$1" "$2" </dev/null >/dev/null 2>&1
+}
+
+# ---- external reachability --------------------------------------------------
+# Packets counted so far by OUR firewall rule for this mapping — i.e. how much
+# traffic from the WAN has actually arrived. Echoes a number, or nothing when the
+# counter can't be read (then callers must not draw conclusions from it).
+#
+# This is the ONLY trustworthy way to tell "the port reaches this router" apart
+# from "something on the path answers on that port". A plain port-checker cannot:
+# an ISP box that hijacks the port completes the TCP handshake just fine and every
+# checker in the world reports "open" (observed on the reference router — port 1234
+# probed as open from three continents while the router had neither a listener nor
+# a rule for it). Counter moved = it was us. Counter didn't = it wasn't.
+#
+# Counters reset on a firewall reload, which is fine: callers read a BEFORE/AFTER
+# delta around their own probe rather than an absolute value.
+rule_packets() {  # $1 id  $2 port
+    if [ "$PLATFORM" = keenetic ]; then
+        # Own chains, so match on the port inside them.
+        { iptables -t filter -L DETOUR_PORTMAP_IN   -v -n -x 2>/dev/null
+          iptables -t nat    -L DETOUR_PORTMAP_DNAT -v -n -x 2>/dev/null; } | \
+            awk -v p="dpt:$2" '$0 ~ p {s += $1} END {if (s != "") print s+0}'
+        return 0
+    fi
+    if command -v nft >/dev/null 2>&1 && nft list ruleset >/dev/null 2>&1; then
+        # fw4 names every generated rule with our comment. Skip the "(reflection)"
+        # twins — those count LAN clients looping back through the public IP, which
+        # says nothing about whether the internet can reach us.
+        nft list ruleset 2>/dev/null | \
+            awk -v c="detour-pm-$1\"" '$0 ~ c && $0 !~ /reflection/ {
+                for (i = 1; i < NF; i++) if ($i == "packets") { s += $(i+1); break }
+            } END {if (s != "") print s+0}'
+        return 0
+    fi
+    # fw3 / iptables-only routers (no nft): the uci-generated rules carry the same
+    # name as an iptables comment.
+    { iptables -t filter -L -v -n -x 2>/dev/null
+      iptables -t nat    -L -v -n -x 2>/dev/null; } | \
+        awk -v c="detour-pm-$1" '$0 ~ c && $0 !~ /reflection/ {s += $1} END {if (s != "") print s+0}'
+}
+
+wan_ip() {
+    # The address the outside world would connect to. uci first (it knows which
+    # interface is WAN), then the source address of the default route.
+    _ip=$(uci -q get network.wan.ipaddr 2>/dev/null)
+    case "$_ip" in ''|*[!0-9.]*) _ip="" ;; esac
+    [ -n "$_ip" ] || _ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -1)
+    printf '%s' "$_ip"
+}
+
+# Ask check-host.net to open a TCP connection to <ip>:<port> from a handful of its
+# nodes. Echoes "<connected> <total>", or nothing if the service could not be used.
+#
+# ⚠ This is the one place detour-portmap talks to a third party. Only the WAN IP and
+# the port are sent — never the domain, the LAN target or any credential — and both
+# are already public by definition (the IP is in DNS, the port is open to the world).
+# It is never called on its own: only from the operator-triggered `check-external`.
+extprobe() {  # $1 ip  $2 port
+    command -v curl >/dev/null 2>&1 || return 1
+    _rq=$(curl -s -m 20 -H "Accept: application/json" \
+        "https://check-host.net/check-tcp?host=$1:$2&max_nodes=3" 2>/dev/null)
+    _rid=$(printf '%s' "$_rq" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p' | head -1)
+    [ -n "$_rid" ] || return 1
+    # Nodes report asynchronously; poll until every one has an answer (or give up).
+    _try=0
+    while [ "$_try" -lt 8 ]; do
+        sleep 3
+        _res=$(curl -s -m 20 -H "Accept: application/json" \
+            "https://check-host.net/check-result/$_rid" 2>/dev/null)
+        # A node still working is reported as null — wait for those to settle.
+        printf '%s' "$_res" | grep -q ':null' || break
+        _try=$((_try + 1))
+    done
+    [ -n "$_res" ] || return 1
+    # One entry per node: {"address":...,"time":...} = connected, {"error":...} = not.
+    _tot=$(printf '%s' "$_res" | grep -o 'node\.check-host\.net"' | wc -l)
+    _okn=$(printf '%s' "$_res" | grep -o '"time":' | wc -l)
+    [ "$_tot" -gt 0 ] 2>/dev/null || return 1
+    printf '%s %s' "$_okn" "$_tot"
 }
 
 # ============================ COMMANDS =======================================
@@ -700,10 +797,70 @@ check)
         *) TGT=false; TWHY="устройство $TIP:$TP не отвечает" ;;
     esac
     _lst=false; port_listening "$LP" && _lst=true
-    printf '{"ok":true,"target_up":%s,"listening":%s,"note":%s}\n' "$TGT" "$_lst" "$(json_str "$TWHY")"
+    _pk=$(rule_packets "$ID" "$LP")
+    printf '{"ok":true,"target_up":%s,"listening":%s,"wan_packets":%s,"note":%s}\n' \
+        "$TGT" "$_lst" "${_pk:--1}" "$(json_str "$TWHY")"
+    ;;
+
+# check-external <id> — доходит ли порт до РОУТЕРА из интернета.
+# Отдельная команда, а не часть `check`: она обращается к стороннему сервису
+# (см. extprobe), поэтому запускается только вручную оператором.
+check-external)
+    ID="$2"
+    OLD=$(get_line "$ID"); [ -n "$OLD" ] || die_json "проброс не найден"
+    LP=$(fld 4 "$OLD"); SRC=$(fld 9 "$OLD"); EN=$(fld 2 "$OLD")
+    [ "$EN" = 1 ] || die_json "проброс выключен — снаружи он и не должен отвечать"
+    [ "$SRC" = lan ] && die_json "проброс ограничен локальной сетью — снаружи он закрыт намеренно"
+    WIP=$(wan_ip)
+    [ -n "$WIP" ] || die_json "не удалось определить внешний адрес роутера"
+    case "$WIP" in
+        10.*|127.*|192.168.*|169.254.*) die_json "внешний адрес роутера приватный ($WIP) — роутер за чужим NAT, проверка снаружи ничего не покажет" ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[01].*) die_json "внешний адрес роутера приватный ($WIP) — роутер за чужим NAT, проверка снаружи ничего не покажет" ;;
+    esac
+
+    # BEFORE/AFTER around the probe — the delta is what proves the packets were ours.
+    PK0=$(rule_packets "$ID" "$LP")
+    PROBE=$(extprobe "$WIP" "$LP") || PROBE=""
+    PK1=$(rule_packets "$ID" "$LP")
+    OKN=$(printf '%s' "$PROBE" | cut -d' ' -f1)
+    TOT=$(printf '%s' "$PROBE" | cut -d' ' -f2)
+    case "$OKN" in ''|*[!0-9]*) OKN=-1 ;; esac
+    case "$TOT" in ''|*[!0-9]*) TOT=-1 ;; esac
+
+    DELTA=-1
+    case "$PK0$PK1" in
+        *[!0-9]*|'') ;;                       # counter unreadable on this router
+        *) DELTA=$((PK1 - PK0)); [ "$DELTA" -lt 0 ] && DELTA=-1 ;;  # <0 = fw reload mid-probe
+    esac
+
+    if [ "$TOT" -lt 0 ]; then
+        VERDICT=unknown
+        MSG="не удалось выполнить проверку снаружи (нет доступа к сервису проверки или нет curl)"
+    elif [ "$DELTA" -gt 0 ]; then
+        VERDICT=reachable
+        MSG="порт доходит до роутера: из $TOT внешних точек подключились $OKN, наше правило файрвола увидело $DELTA пакет(ов)"
+    elif [ "$DELTA" -lt 0 ]; then
+        # No counter → fall back to the raw reachability answer, and say it's weaker.
+        if [ "$OKN" -gt 0 ]; then
+            VERDICT=open_unverified
+            MSG="порт отвечает снаружи ($OKN из $TOT точек), но проверить, что отвечает именно этот роутер, не удалось — счётчик правила недоступен"
+        else
+            VERDICT=blocked
+            MSG="порт снаружи не отвечает (0 из $TOT точек)"
+        fi
+    elif [ "$OKN" -gt 0 ]; then
+        VERDICT=hijacked
+        MSG="порт $LP отвечает снаружи ($OKN из $TOT точек), но до роутера не доходит ни одного пакета — его перехватывает оборудование выше роутера (обычно провайдер). Смените внешний порт на нестандартный."
+    else
+        VERDICT=blocked
+        MSG="порт $LP снаружи не отвечает (0 из $TOT точек) и до роутера не доходит — закрыт провайдером либо роутер недоступен по этому порту извне"
+    fi
+
+    printf '{"ok":true,"verdict":"%s","wan_ip":%s,"port":%s,"nodes_ok":%s,"nodes_total":%s,"packets_delta":%s,"message":%s}\n' \
+        "$VERDICT" "$(json_str "$WIP")" "$LP" "$OKN" "$TOT" "$DELTA" "$(json_str "$MSG")"
     ;;
 
 *)
-    echo "usage: detour-portmap {status|list|set <id> <0|1> <https|dnat> <lport> <tcp|udp|'tcp udp'> <ip> <tport> <http|https> <any|lan> <name>|set-auth <id> <user> <pass>|toggle <id> <0|1>|delete <id>|apply|check <id>}" >&2
+    echo "usage: detour-portmap {status|list|set <id> <0|1> <https|dnat> <lport> <tcp|udp|'tcp udp'> <ip> <tport> <http|https> <any|lan> <name>|set-auth <id> <user> <pass>|toggle <id> <0|1>|delete <id>|apply|check <id>|check-external <id>}" >&2
     exit 2 ;;
 esac

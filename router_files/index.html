@@ -11475,8 +11475,18 @@
                       escapeHtml(url) +
                       "</a></div>"
                     : "") +
+                  '<div id="pm-ext-' +
+                  escapeHtml(m.id) +
+                  '" style="font-size:12px;margin-top:4px;color:var(--text-dim)"></div>' +
                   "</div>" +
                   '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+                  (m.enabled && m.src !== "lan"
+                    ? '<button class="btn sm" id="pm-extbtn-' +
+                      escapeHtml(m.id) +
+                      '" onclick="portmapCheckExternal(\'' +
+                      escapeHtml(m.id) +
+                      '\')" title="Подключиться к этому порту из интернета и проверить, что запрос дошёл именно до роутера">Проверить снаружи</button>'
+                    : "") +
                   '<button class="btn sm" onclick="portmapToggle(\'' +
                   escapeHtml(m.id) +
                   "'," +
@@ -11610,6 +11620,42 @@
             "</span>";
         } finally {
           btn.disabled = false;
+        }
+      }
+
+      // Проверка «доходит ли порт до роутера из интернета». Отдельная кнопка, а не
+      // часть обычного обновления списка: запрос уходит на сторонний сервис проверки
+      // и занимает до ~30 секунд.
+      async function portmapCheckExternal(id) {
+        var out = document.getElementById("pm-ext-" + id);
+        var btn = document.getElementById("pm-extbtn-" + id);
+        if (!out) return;
+        if (btn) btn.disabled = true;
+        out.style.color = "var(--text-dim)";
+        out.textContent = "Проверяю снаружи… (до 30 с)";
+        try {
+          var r = await api("portmap_check_external", "POST", { id: id });
+          if (!r.ok) throw new Error(r.error || "не удалось проверить");
+          var color =
+            r.verdict === "reachable"
+              ? "var(--green)"
+              : r.verdict === "hijacked" || r.verdict === "blocked"
+                ? "var(--red)"
+                : "var(--amber)";
+          var icon =
+            r.verdict === "reachable"
+              ? "✓ "
+              : r.verdict === "hijacked" || r.verdict === "blocked"
+                ? "✗ "
+                : "⚠ ";
+          out.style.color = color;
+          out.textContent = icon + (r.message || r.verdict);
+        } catch (e) {
+          if (e.message === "Not authenticated") return;
+          out.style.color = "var(--red)";
+          out.textContent = e.message || String(e);
+        } finally {
+          if (btn) btn.disabled = false;
         }
       }
 
