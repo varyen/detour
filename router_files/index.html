@@ -60,6 +60,9 @@
         --green-border: rgba(63, 179, 104, 0.32);
         --green-pulse: rgba(63, 179, 104, 0.55);
         --yellow: #e0a740;
+        /* Алиас: в разметке/JS исторически встречается var(--amber) — без этой
+           строки цвет не резолвился и текст наследовал обычный --text. */
+        --amber: var(--yellow);
         --red: #ef5454;
         --red-soft: rgba(239, 84, 84, 0.12);
         --red-border: rgba(239, 84, 84, 0.45);
@@ -203,6 +206,110 @@
         font-size: 14px;
         -webkit-font-smoothing: antialiased;
       }
+      /* ===== FORM CONTROLS — базовый вид ВСЕХ полей ввода =====
+         Стоит в начале файла намеренно: даёт одинаковую «подложку» полям и в
+         тёмной, и в светлой теме (только токены, никаких захардкоженных
+         цветов), а компонентные правила ниже (.login-form, .modal,
+         .profile-row, textarea.domains …) переопределяют поверх лишь метрики.
+         Раньше поля без класса рисовались нативно (белые в тёмной теме), а
+         пара инлайновых стилей тянула фолбэк #1b1b1b — тёмный прямоугольник
+         посреди светлой панели. */
+      input[type="text"],
+      input[type="password"],
+      input[type="number"],
+      input[type="email"],
+      input[type="url"],
+      input[type="search"],
+      input[type="tel"],
+      input:not([type]),
+      select,
+      textarea {
+        max-width: 100%;
+        background: var(--bg-elev-solid);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 8px 11px;
+        font-family: var(--sans);
+        font-size: 13px;
+        line-height: 1.45;
+        outline: none;
+        transition:
+          border-color 0.15s,
+          box-shadow 0.15s;
+      }
+      /* appearance:none — только для текстовых полей: у select он срезал бы
+         нативную стрелку, а своей у нас нет. */
+      input[type="text"],
+      input[type="password"],
+      input[type="number"],
+      input[type="email"],
+      input[type="url"],
+      input[type="search"],
+      input[type="tel"],
+      input:not([type]),
+      textarea {
+        -webkit-appearance: none;
+        appearance: none;
+      }
+      select {
+        cursor: pointer;
+      }
+      /* Список опций нативного select: Chrome на десктопе рисует его системной
+         палитрой, а не color-scheme страницы. */
+      select option {
+        background: var(--bg-elev-solid);
+        color: var(--text);
+      }
+      input[type="text"]:focus,
+      input[type="password"]:focus,
+      input[type="number"]:focus,
+      input[type="email"]:focus,
+      input[type="url"]:focus,
+      input[type="search"]:focus,
+      input[type="tel"]:focus,
+      input:not([type]):focus,
+      select:focus,
+      textarea:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+      input::placeholder,
+      textarea::placeholder {
+        color: var(--text-muted);
+        opacity: 1;
+      }
+      input:disabled,
+      select:disabled,
+      textarea:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      input[type="checkbox"],
+      input[type="radio"] {
+        accent-color: var(--accent);
+      }
+      input[type="file"] {
+        max-width: 100%;
+        font-family: var(--sans);
+        font-size: 12px;
+        color: var(--text-dim);
+      }
+      input[type="file"]::file-selector-button {
+        margin-right: 10px;
+        padding: 6px 12px;
+        background: var(--btn);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        font-family: var(--sans);
+        font-size: 12px;
+        cursor: pointer;
+      }
+      input[type="file"]::file-selector-button:hover {
+        background: var(--btn-hover);
+      }
+
       /* ===== Animated "matrix rain" background (varyen.net-style) ===== */
       #bg-rain {
         position: fixed;
@@ -1419,16 +1526,6 @@
       .health-controls #health-speed-size {
         height: 30px;
         padding: 0 8px;
-        font-size: 13px;
-        border-radius: 6px;
-        background: var(--bg-elev-solid);
-        color: var(--text, inherit);
-        border: 1px solid var(--border, #30363d);
-        cursor: pointer;
-      }
-      .health-controls #health-speed-size:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
       }
       .health-switch-note {
         font-size: 12px;
@@ -3539,14 +3636,54 @@
               ставится с бэкапом; без неё — ставится напрямую через opkg, без
               проверки.
             </p>
+            <!-- Нативные file-инпуты скрыты, выбор идёт кнопкой (как у импорта
+                 профилей и hosts-источников). Причина: с accept=".ipk"/".sig"
+                 Safari (macOS/iOS) и часть Android-пикеров гасят незнакомое
+                 расширение — файл невозможно выбрать, поле остаётся «файл не
+                 выбран», и «Установить из файла» выглядит как мёртвая кнопка.
+                 accept тут не ставим намеренно. -->
             <div class="form-grid">
               <div class="full">
                 <label>Пакет .ipk</label>
-                <input type="file" id="upd-ipk-file" accept=".ipk" />
+                <div class="flex-gap" style="align-items: center">
+                  <button
+                    class="btn"
+                    type="button"
+                    onclick="document.getElementById('upd-ipk-file').click()"
+                  >
+                    📦 Выбрать .ipk
+                  </button>
+                  <span id="upd-ipk-name" class="helper-text"
+                    >файл не выбран</span
+                  >
+                </div>
+                <input
+                  type="file"
+                  id="upd-ipk-file"
+                  style="display: none"
+                  onchange="onUpdFilePick(this, 'upd-ipk-name')"
+                />
               </div>
               <div class="full">
                 <label>Подпись .ipk.sig (опционально)</label>
-                <input type="file" id="upd-sig-file" accept=".sig" />
+                <div class="flex-gap" style="align-items: center">
+                  <button
+                    class="btn"
+                    type="button"
+                    onclick="document.getElementById('upd-sig-file').click()"
+                  >
+                    🔏 Выбрать .sig
+                  </button>
+                  <span id="upd-sig-name" class="helper-text"
+                    >файл не выбран</span
+                  >
+                </div>
+                <input
+                  type="file"
+                  id="upd-sig-file"
+                  style="display: none"
+                  onchange="onUpdFilePick(this, 'upd-sig-name')"
+                />
               </div>
             </div>
             <div class="flex-gap" style="margin-top: 8px">
@@ -4699,14 +4836,8 @@
                 spellcheck="false"
                 style="
                   width: 100%;
-                  padding: 8px 10px;
-                  background: var(--bg-elev-solid);
-                  border: 1px solid var(--border);
-                  border-radius: var(--radius-sm);
-                  color: var(--text);
                   font-family: var(--mono);
                   font-size: 11.5px;
-                  outline: none;
                   resize: vertical;
                 "
               ></textarea>
@@ -4774,13 +4905,7 @@
                 <select
                   id="udpvpn-mode"
                   onchange="setUdpVpnMode(this.value)"
-                  style="
-                    padding: 3px 6px;
-                    background: var(--bg-input, #1b1b1b);
-                    color: var(--text);
-                    border: 1px solid var(--border, #333);
-                    border-radius: 6px;
-                  "
+                  style="padding: 4px 8px; font-size: 12.5px"
                 >
                   <option value="off">Выкл</option>
                   <option value="list">По списку</option>
@@ -4798,17 +4923,11 @@
                 style="
                   width: 100%;
                   height: 132px;
-                  box-sizing: border-box;
-                  font-family: monospace;
+                  font-family: var(--mono);
                   font-size: 12px;
-                  padding: 6px;
-                  background: var(--bg-input, #1b1b1b);
-                  color: var(--text);
-                  border: 1px solid var(--border, #333);
-                  border-radius: 6px;
                   resize: vertical;
                 "
-                placeholder="# UDP через VPN — хосты / подсети / домены / порты&#10;37.27.109.49            // весь UDP к этому IP&#10;37.27.109.49:8211       // только порт 8211 у этого IP&#10;10.0.0.0/24             // подсеть&#10;game.example.com        // домен (весь UDP к нему)&#10;:27015                  // порт с любого адреса&#10;19294:19344             // Discord voice (Cloudflare)"
+                placeholder="# UDP через VPN — хосты / подсети / домены / порты&#10;1.2.3.4                 // весь UDP к этому IP&#10;1.2.3.4:8211            // только порт 8211 у этого IP&#10;10.0.0.0/24             // подсеть&#10;game.example.com        // домен (весь UDP к нему)&#10;:27015                  // порт с любого адреса&#10;19294:19344             // Discord voice (Cloudflare)"
               ></textarea>
               <div class="card-actions" style="margin-top: 4px">
                 <button class="btn primary" onclick="saveUdpVpnList()">
@@ -5177,14 +5296,7 @@
                   id="log-select"
                   onchange="onLogSelectChange()"
                   title="Какой лог показать"
-                  style="
-                    padding: 6px 8px;
-                    border-radius: 8px;
-                    border: 1px solid var(--border);
-                    background: var(--bg-elev-solid);
-                    color: var(--text);
-                    font-size: 13px;
-                  "
+                  style="padding: 6px 10px"
                 >
                   <option value="singbox">sing-box</option>
                   <option value="zapret">zapret (tpws)</option>
@@ -5808,19 +5920,7 @@
               type="text"
               id="new-group-name"
               placeholder="Новая группа (имя)"
-              style="
-                flex: 1;
-                min-width: 180px;
-                height: 32px;
-                padding: 0 10px;
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: var(--radius-sm);
-                color: var(--text);
-                font-size: 13px;
-                font-family: var(--sans);
-                outline: none;
-              "
+              style="flex: 1; min-width: 180px; height: 32px; padding: 0 10px"
               onkeydown="if (event.key === 'Enter') createEmptyGroup();"
             />
             <button class="btn primary" onclick="createEmptyGroup()">
@@ -6041,14 +6141,8 @@
               style="
                 height: 30px;
                 padding: 0 10px;
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: var(--radius-sm);
-                color: var(--text);
                 font-size: 12.5px;
                 font-family: var(--mono);
-                outline: none;
-                cursor: pointer;
               "
             ></select>
             <input
@@ -6059,18 +6153,7 @@
                 bulkLastIndex = null;
                 renderBulkProfilesList();
               "
-              style="
-                height: 30px;
-                padding: 0 10px;
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: var(--radius-sm);
-                color: var(--text);
-                font-size: 12.5px;
-                font-family: var(--sans);
-                outline: none;
-                width: 180px;
-              "
+              style="height: 30px; padding: 0 10px; font-size: 12.5px; width: 180px"
             />
           </div>
           <div id="bulk-profiles-list" class="row-list"></div>
@@ -6084,14 +6167,7 @@
               style="
                 height: 32px;
                 padding: 0 10px;
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: var(--radius-sm);
-                color: var(--text);
-                font-size: 13px;
                 font-family: var(--mono);
-                outline: none;
-                cursor: pointer;
               "
             ></select>
             <button class="btn" onclick="bulkReassignGroup()">
@@ -6361,7 +6437,7 @@
             </div>
             <div>
               <label>Endpoint host</label>
-              <input type="text" id="wg-server" placeholder="77.232.148.50" />
+              <input type="text" id="wg-server" placeholder="198.51.100.10" />
             </div>
             <div>
               <label>Endpoint port</label>
@@ -11758,7 +11834,7 @@
               "</b> МБ.";
           } else {
             curText.innerHTML =
-              '<span style="color:var(--amber,#d08700)">SWAP не создан.</span> Свободно на флешке: <b>' +
+              '<span style="color:var(--amber)">SWAP не создан.</span> Свободно на флешке: <b>' +
               escapeHtml(String(d.free_mb)) +
               "</b> МБ.";
           }
@@ -16799,12 +16875,32 @@
           startPanelUpdatePolling(el);
         }
       }
+      // Показать имя/размер выбранного файла рядом с кнопкой выбора: без этого
+      // (скрытый input) пользователь не видит, что файл вообще подхватился.
+      function onUpdFilePick(input, labelId) {
+        var lbl = document.getElementById(labelId);
+        var f = input.files && input.files[0];
+        if (!lbl) return;
+        if (!f) {
+          lbl.textContent = "файл не выбран";
+          return;
+        }
+        var size =
+          f.size >= 1048576
+            ? (f.size / 1048576).toFixed(1) + " МБ"
+            : Math.max(1, Math.round(f.size / 1024)) + " КБ";
+        lbl.textContent = f.name + " (" + size + ")";
+        var st = document.getElementById("upd-local-status");
+        if (st) st.textContent = "";
+      }
       async function applyUpdateLocal() {
         var ipkInput = document.getElementById("upd-ipk-file");
         var sigInput = document.getElementById("upd-sig-file");
         var el = document.getElementById("upd-local-status");
         if (!ipkInput.files.length) {
-          el.textContent = "Выберите .ipk";
+          // Не тупиковое сообщение, а сразу открываем выбор файла.
+          el.textContent = "Сначала выберите файл .ipk";
+          ipkInput.click();
           return;
         }
         var btn = document.getElementById("upd-local-btn");

@@ -433,7 +433,7 @@ teardown_intercept() {
 
 # ---- UDP через VPN (TPROXY) ----
 # Emit per-entry TPROXY rules for PORT (":8211", ":19294-19344") and HOST:PORT
-# ("37.27.109.49:8211", "1.2.3.0/24:27015") lines in $UDP_VPN_LIST. Plain IP/CIDR
+# ("1.2.3.4:8211", "1.2.3.0/24:27015") lines in $UDP_VPN_LIST. Plain IP/CIDR
 # and domain lines are handled via the ipset (setup_domains_file), not here. $1 is
 # the shared TPROXY target args ($TP) — passed unquoted so it word-splits.
 udp_vpn_port_rules() {
