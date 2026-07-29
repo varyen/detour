@@ -65,6 +65,8 @@ FILES = [
     # Фолбэк-декодер QR для браузеров без BarcodeDetector (Safari/iOS, Firefox).
     # Грузится лениво, только при открытии сканера. См. docs/vendor-jsqr.md
     (os.path.join(ROUTER_FILES, "jsQR.min.js"), "opt/share/www/detour/jsQR.min.js", 0o644, False),
+    # Генератор QR для модала «Доступ с другого устройства». См. docs/vendor-qr.md
+    (os.path.join(ROUTER_FILES, "qrcode-generator.min.js"), "opt/share/www/detour/qrcode-generator.min.js", 0o644, False),
     (os.path.join(ROUTER_FILES, "detour-api"), "opt/share/www/cgi-bin/detour-api", 0o755, True),
     # Subscription refresh helper (Lua) + a bundled pure-Lua cjson.safe, since the
     # Entware feed has no lua-cjson. fix_shebang rewrites #!/usr/bin/lua → /opt/bin/lua.
