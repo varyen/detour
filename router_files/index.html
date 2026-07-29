@@ -6774,14 +6774,16 @@
         // same on 60/90/120 Hz screens. Each column picks a log-uniform speed
         // in [SPEED_MIN, SPEED_MAX]: an even spread of *ratios*, so slow drifters
         // and fast streaks are equally common instead of clumping near the top.
-        var SPEED_MIN = 3.8,
-          SPEED_MAX = 14;
+        var SPEED_MIN = 4.6,
+          SPEED_MAX = 16.8;
         // Alpha budget the fading wash spends per second (longer tails = less).
-        var FADE_PER_SEC = 1.5;
+        // Scaled in lockstep with the speeds, so tails keep the same length in
+        // rows — bump the speeds alone and every tail grows proportionally.
+        var FADE_PER_SEC = 1.8;
         // ...but spend it in chunks: an rgba fill with alpha ≈0.02 rounds to a
         // zero-pixel change on 8-bit canvas, which leaves trails that never die.
         var FADE_MIN_STEP = 0.12;
-        var RESPAWN_PER_SEC = 1.2; // how eagerly a finished column restarts
+        var RESPAWN_PER_SEC = 1.44; // how eagerly a finished column restarts
         var cols = 0,
           drops = [], // fractional row of the head
           speeds = [],
