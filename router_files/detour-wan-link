@@ -1,8 +1,19 @@
 #!/bin/sh
 # detour-wan-link — monitor the negotiated WAN Ethernet speed and warn when the
-# physical uplink drops below gigabit. This is not the same failure mode as a
-# wedged offload engine: when the WAN PHY negotiates at 100 Mbps, no software
-# kick can restore >100 Mbps until the cable / peer port / copper path is fixed.
+# physical uplink comes up SLOWER THAN THE PORT ITSELF CAN DO. This is not the
+# same failure mode as a wedged offload engine: when the WAN PHY negotiates
+# below its capability, no software kick can restore the speed until the cable /
+# peer port / copper path is fixed.
+#
+# The reference speed is NOT a hardcoded gigabit: plenty of routers (many
+# Keenetic models, older Fast-Ethernet boxes) top out at 100 Mbps, and there
+# 100 Mbps is perfect health, not a fault. The port ceiling is resolved as:
+#   1) WAN_LINK_MAX_MBPS in detour.conf (manual override),
+#   2) ethtool "Supported link modes" of our own PHY,
+#   3) the highest speed ever observed on this router (learned, persisted),
+# and if none of those is known we stay silent instead of crying wolf. A peer
+# that only advertises 100 Mbps is reported as a peer limit, not as our fault.
+# Set WAN_LINK_MONITOR=off in detour.conf to switch the whole check off.
 
 DETOUR_DIR=/etc/detour
 STATE=/var/state/detour-wan-link.json
@@ -99,7 +110,7 @@ iface_is_phy_candidate() {
     esac
     iface_has_master "$_if" && return 1
     iface_speed "$_if" >/dev/null 2>&1 && return 0
-    _pm=$(partner_max_mbps "$_if")
+    _pm=$(ethtool_caps "$_if" | awk '{print $2}')
     [ -n "$_pm" ] && [ "$_pm" -gt 0 ] 2>/dev/null
 }
 
@@ -156,20 +167,41 @@ resolve_phy_iface() {
     [ -n "$_orig" ] && printf '%s' "$_orig"
 }
 
-partner_max_mbps() {
-    ethtool "$1" 2>/dev/null | awk '
-    /Link partner advertised link modes:/ {cap=1}
-    cap==1 && $0 !~ /Link partner advertised link modes:/ && $0 !~ /^[[:space:]]/ {cap=0}
-    cap==1 {
-        txt=$0
-        while (match(txt, /(10000|5000|2500|1000|100|10)baseT/)) {
-            v=substr(txt, RSTART, RLENGTH)
+# "<our port max> <link partner max>" in Mbps (0 = unknown), from ONE ethtool
+# call — `status` runs on every panel poll, so this is a hot path. Both numbers
+# are the highest baseT mode listed in their section; a section ends at the next
+# "Something:" field, since its continuation lines carry no colon.
+ethtool_caps() {
+    _et=$(ethtool "$1" 2>/dev/null)
+    [ -n "$_et" ] || { printf '0 0'; return 0; }
+    printf '%s\n' "$_et" | awk \
+        -v ws="Supported link modes:" \
+        -v wp="Link partner advertised link modes:" '
+    BEGIN { sup = 0; par = 0; cur = "" }
+    {
+        line = ""
+        if ((p = index($0, ws)) > 0)      { cur = "s"; line = substr($0, p + length(ws)) }
+        else if ((p = index($0, wp)) > 0) { cur = "p"; line = substr($0, p + length(wp)) }
+        else if (cur != "") {
+            if (index($0, ":") > 0) cur = ""
+            else line = $0
+        }
+        while (cur != "" && line != "" && match(line, /(10000|5000|2500|1000|100|10)baseT/)) {
+            v = substr(line, RSTART, RLENGTH)
             sub(/baseT.*/, "", v)
-            if ((v + 0) > max) max = v + 0
-            txt = substr(txt, RSTART + RLENGTH)
+            if (cur == "s") { if ((v + 0) > sup) sup = v + 0 }
+            else            { if ((v + 0) > par) par = v + 0 }
+            line = substr(line, RSTART + RLENGTH)
         }
     }
-    END { if (max > 0) print max }'
+    END { print sup " " par }'
+}
+
+num_or_zero() {
+    case "$1" in
+        ''|*[!0-9]*) printf '0' ;;
+        *) printf '%s' "$1" ;;
+    esac
 }
 
 current_wan_iface() {
@@ -186,6 +218,12 @@ current_wan_iface() {
     [ -n "$_v" ] && printf '%s' "$_v"
 }
 
+read_prev_best() {
+    [ -f "$STATE" ] || { printf '0'; return 0; }
+    _b=$(sed -n 's/.*"best_speed_mbps"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$STATE" 2>/dev/null | head -1)
+    num_or_zero "$_b"
+}
+
 collect_live() {
     WL_SUPPORTED=false
     WL_DEGRADED=false
@@ -193,10 +231,22 @@ collect_live() {
     WL_PHY_IF=$(resolve_phy_iface "$WL_WAN_IF")
     WL_SPEED=0
     WL_PARTNER=0
+    WL_PORT_MAX=0
+    WL_EXPECTED=0
+    WL_BEST=$(read_prev_best)
+    WL_PEER_LIMITED=false
     WL_DUPLEX=""
     WL_OPERSTATE=""
     WL_CARRIER=0
     WL_DIAGNOSIS=""
+
+    # Kill switch for anyone who does not want the check at all.
+    case "$WAN_LINK_MONITOR" in
+        off|0|no|false)
+            WL_DIAGNOSIS="Мониторинг WAN-линка выключен (WAN_LINK_MONITOR)"
+            return 0
+            ;;
+    esac
 
     [ -n "$WL_PHY_IF" ] || {
         WL_DIAGNOSIS="Не удалось определить WAN интерфейс"
@@ -211,37 +261,57 @@ collect_live() {
         WL_SPEED=$_sp
         WL_SUPPORTED=true
     fi
-    _pm=$(partner_max_mbps "$WL_PHY_IF")
-    case "$_pm" in
-        ''|*[!0-9]*) _pm=0 ;;
-    esac
-    WL_PARTNER=${_pm:-0}
+    _caps=$(ethtool_caps "$WL_PHY_IF")
+    WL_PARTNER=$(num_or_zero "$(printf '%s' "$_caps" | awk '{print $2}')")
+
+    # Learn the ceiling from what this port has actually reached. On a 100 Mbps
+    # router this stays 100 forever — exactly the point: no false «просело» alarm.
+    [ "$WL_CARRIER" = "1" ] && [ "$WL_SPEED" -gt "$WL_BEST" ] 2>/dev/null && WL_BEST=$WL_SPEED
+
+    WL_PORT_MAX=$(num_or_zero "$WAN_LINK_MAX_MBPS")
+    if [ "$WL_PORT_MAX" -le 0 ] 2>/dev/null; then
+        WL_PORT_MAX=$(num_or_zero "$(printf '%s' "$_caps" | awk '{print $1}')")
+    fi
+    [ "$WL_PORT_MAX" -le 0 ] 2>/dev/null && WL_PORT_MAX=$WL_BEST
+
+    # What this link can realistically negotiate: our port, capped by what the
+    # peer advertises. A peer that only does 100 Mbps is its own limit, not a
+    # fault of our cable — report it, but do not raise an alarm about it.
+    WL_EXPECTED=$WL_PORT_MAX
+    if [ "$WL_PARTNER" -gt 0 ] 2>/dev/null && [ "$WL_PORT_MAX" -gt 0 ] 2>/dev/null \
+        && [ "$WL_PARTNER" -lt "$WL_PORT_MAX" ]; then
+        WL_EXPECTED=$WL_PARTNER
+        WL_PEER_LIMITED=true
+    fi
 
     if [ "$WL_CARRIER" != "1" ]; then
         WL_DIAGNOSIS="Линк WAN сейчас down"
         return 0
     fi
-    if [ "$WL_SPEED" -gt 0 ] 2>/dev/null; then
-        if [ "$WL_SPEED" -lt 1000 ]; then
-            WL_DEGRADED=true
-            if [ "$WL_PARTNER" -gt 0 ] 2>/dev/null && [ "$WL_PARTNER" -lt 1000 ]; then
-                WL_DIAGNOSIS="Соседний порт advertises только до ${WL_PARTNER} Mbps"
-            else
-                WL_DIAGNOSIS="WAN negotiated only ${WL_SPEED} Mbps"
-            fi
-        else
-            WL_DIAGNOSIS="WAN линк в норме"
-        fi
-    else
+    if [ "$WL_SPEED" -le 0 ] 2>/dev/null; then
         WL_DIAGNOSIS="Скорость линка недоступна для $WL_PHY_IF"
+        return 0
+    fi
+    if [ "$WL_EXPECTED" -le 0 ] 2>/dev/null; then
+        WL_DIAGNOSIS="Не удалось определить максимум WAN-порта — проверка пропущена"
+        return 0
+    fi
+    if [ "$WL_SPEED" -lt "$WL_EXPECTED" ] 2>/dev/null; then
+        WL_DEGRADED=true
+        WL_DIAGNOSIS="WAN поднялся на ${WL_SPEED} Мбит/с вместо ${WL_EXPECTED}"
+    elif [ "$WL_PEER_LIMITED" = true ]; then
+        WL_DIAGNOSIS="Линк на максимуме соседнего порта: ${WL_SPEED} Мбит/с (порт роутера умеет ${WL_PORT_MAX})"
+    else
+        WL_DIAGNOSIS="WAN линк в норме: ${WL_SPEED} Мбит/с — максимум для этого порта"
     fi
 }
 
 write_json() {
-    printf '{"ok":true,"supported":%s,"wan_if":%s,"phy_if":%s,"speed_mbps":%s,"duplex":%s,"operstate":%s,"carrier":%s,"partner_max_mbps":%s,"degraded":%s,"diagnosis":%s,"advice":%s,"last_ts":%s}\n' \
+    printf '{"ok":true,"supported":%s,"wan_if":%s,"phy_if":%s,"speed_mbps":%s,"duplex":%s,"operstate":%s,"carrier":%s,"partner_max_mbps":%s,"port_max_mbps":%s,"expected_mbps":%s,"best_speed_mbps":%s,"peer_limited":%s,"degraded":%s,"diagnosis":%s,"advice":%s,"last_ts":%s}\n' \
         "$WL_SUPPORTED" "$(json_str "$WL_WAN_IF")" "$(json_str "$WL_PHY_IF")" \
         "${WL_SPEED:-0}" "$(json_str "$WL_DUPLEX")" "$(json_str "$WL_OPERSTATE")" \
-        "${WL_CARRIER:-0}" "${WL_PARTNER:-0}" "$WL_DEGRADED" \
+        "${WL_CARRIER:-0}" "${WL_PARTNER:-0}" "${WL_PORT_MAX:-0}" "${WL_EXPECTED:-0}" \
+        "${WL_BEST:-0}" "${WL_PEER_LIMITED:-false}" "$WL_DEGRADED" \
         "$(json_str "$WL_DIAGNOSIS")" "$(json_str "$ADVICE")" "$NOW"
 }
 
@@ -267,13 +337,14 @@ tick() {
     _prev=$(read_prev_degraded)
     [ -n "$_prev" ] || _prev=false
     if [ "$WL_DEGRADED" = true ] && [ "$_prev" != true ]; then
-        log "WAN degraded: speed=${WL_SPEED} partner=${WL_PARTNER} iface=${WL_PHY_IF}"
+        log "WAN degraded: speed=${WL_SPEED} expected=${WL_EXPECTED} port_max=${WL_PORT_MAX} partner=${WL_PARTNER} iface=${WL_PHY_IF}"
         send_alert "Detour: WAN линк просел до ${WL_SPEED} Мбит" \
             "Kick offload не поможет. ${WL_DIAGNOSIS}. ${ADVICE}."
-    elif [ "$WL_DEGRADED" != true ] && [ "$_prev" = true ] && [ "$WL_SPEED" -ge 1000 ] 2>/dev/null; then
-        log "WAN recovered: speed=${WL_SPEED} iface=${WL_PHY_IF}"
+    elif [ "$WL_DEGRADED" != true ] && [ "$_prev" = true ] \
+        && [ "$WL_SPEED" -gt 0 ] 2>/dev/null && [ "$WL_SPEED" -ge "${WL_EXPECTED:-0}" ] 2>/dev/null; then
+        log "WAN recovered: speed=${WL_SPEED} expected=${WL_EXPECTED} iface=${WL_PHY_IF}"
         send_alert "Detour: WAN линк восстановлен" \
-            "WAN снова negotiated на ${WL_SPEED} Мбит (${WL_PHY_IF}). Ограничение 100 Мбит снято."
+            "WAN снова поднялся на ${WL_SPEED} Мбит (${WL_PHY_IF}) — это максимум для этого линка."
     fi
     write_state
 }

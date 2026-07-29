@@ -63,6 +63,7 @@ load_wanwatch_config() {
     WANWATCH_COOLDOWN_SECS=1800
     WANWATCH_WINDOW_SECS=21600
     WANWATCH_MAX_RESTARTS=3
+    WANWATCH_PORT_MAX=0
     WANWATCH_AUTO_SUPPORTED=false
     if [ "$PLATFORM" = "openwrt" ] && command -v ifdown >/dev/null 2>&1 && command -v ifup >/dev/null 2>&1; then
         WANWATCH_AUTO_SUPPORTED=true
@@ -76,7 +77,48 @@ load_wanwatch_config() {
         case "$_ws" in ''|*[!0-9]*) ;; *) WANWATCH_WINDOW_SECS=$_ws ;; esac
         _mr=$(sed -n 's/^MAX_RESTARTS=//p' "$WANWATCH_CONF" 2>/dev/null | tail -1)
         case "$_mr" in ''|*[!0-9]*) ;; *) WANWATCH_MAX_RESTARTS=$_mr ;; esac
+        # Manual port ceiling for boxes where we cannot read it (see read_wan_link).
+        _pmx=$(sed -n 's/^PORT_MAX_MBPS=//p' "$WANWATCH_CONF" 2>/dev/null | tail -1)
+        case "$_pmx" in ''|*[!0-9]*) ;; *) WANWATCH_PORT_MAX=$_pmx ;; esac
     fi
+}
+
+num_or_zero() {
+    case "$1" in
+        ''|*[!0-9]*) printf '0' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# "<our port max> <link partner max>" in Mbps (0 = unknown), from one ethtool
+# call. Both are the highest baseT mode in their section; a section ends at the
+# next "Something:" field, since its continuation lines carry no colon.
+# Mirrors ethtool_caps() in detour-wan-link.
+ethtool_caps() {
+    command -v ethtool >/dev/null 2>&1 || { printf '0 0'; return 0; }
+    _et=$(ethtool "$1" 2>/dev/null)
+    [ -n "$_et" ] || { printf '0 0'; return 0; }
+    printf '%s\n' "$_et" | awk \
+        -v ws="Supported link modes:" \
+        -v wp="Link partner advertised link modes:" '
+    BEGIN { sup = 0; par = 0; cur = "" }
+    {
+        line = ""
+        if ((p = index($0, ws)) > 0)      { cur = "s"; line = substr($0, p + length(ws)) }
+        else if ((p = index($0, wp)) > 0) { cur = "p"; line = substr($0, p + length(wp)) }
+        else if (cur != "") {
+            if (index($0, ":") > 0) cur = ""
+            else line = $0
+        }
+        while (cur != "" && line != "" && match(line, /(10000|5000|2500|1000|100|10)baseT/)) {
+            v = substr(line, RSTART, RLENGTH)
+            sub(/baseT.*/, "", v)
+            if (cur == "s") { if ((v + 0) > sup) sup = v + 0 }
+            else            { if ((v + 0) > par) par = v + 0 }
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    END { print sup " " par }'
 }
 
 wan_speed_label() {
@@ -88,12 +130,24 @@ wan_speed_label() {
     esac
 }
 
+# A WAN port is «degraded» only when it comes up slower than it CAN — never
+# because it is slower than gigabit. Many routers (Keenetic 100M models, older
+# Fast-Ethernet boxes) top out at 100 Mbps, where 100 Mbps is full health. The
+# ceiling comes from PORT_MAX_MBPS in wan-watch.conf → ethtool "Supported link
+# modes" → the highest speed ever seen (learned, carried in the state file).
+# Unknown ceiling ⇒ no alarm. A peer advertising less than our port is its own
+# limit, not our cable.
 read_wan_link() {
     WAN_DEVICE=$(detect_wan_device)
     WAN_CARRIER=false
     WAN_SPEED_MBPS=""
     WAN_DUPLEX=""
     WAN_DEGRADED=false
+    WAN_PARTNER_MAX=0
+    WAN_PORT_MAX=0
+    WAN_EXPECTED=0
+    WAN_PEER_LIMITED=false
+    WAN_BEST=$(num_or_zero "$prev_wan_best")
 
     if [ -n "$WAN_DEVICE" ] && command -v ubus >/dev/null 2>&1; then
         _wdev=$(ubus call network.device status "{\"name\":\"$WAN_DEVICE\"}" 2>/dev/null)
@@ -119,11 +173,29 @@ read_wan_link() {
         fi
     fi
 
-    case "$WAN_SPEED_MBPS" in
-        ''|*[!0-9]*) ;;
-        *) [ "$WAN_CARRIER" = true ] && [ "$WAN_SPEED_MBPS" -lt 1000 ] && WAN_DEGRADED=true ;;
-    esac
+    _spd=$(num_or_zero "$WAN_SPEED_MBPS")
+    if [ -n "$WAN_DEVICE" ]; then
+        _caps=$(ethtool_caps "$WAN_DEVICE")
+        WAN_PORT_MAX=$(num_or_zero "$(printf '%s' "$_caps" | awk '{print $1}')")
+        WAN_PARTNER_MAX=$(num_or_zero "$(printf '%s' "$_caps" | awk '{print $2}')")
+    fi
+    [ "$WAN_CARRIER" = true ] && [ "$_spd" -gt "$WAN_BEST" ] 2>/dev/null && WAN_BEST=$_spd
+    [ "$WANWATCH_PORT_MAX" -gt 0 ] 2>/dev/null && WAN_PORT_MAX=$WANWATCH_PORT_MAX
+    [ "$WAN_PORT_MAX" -le 0 ] 2>/dev/null && WAN_PORT_MAX=$WAN_BEST
+
+    WAN_EXPECTED=$WAN_PORT_MAX
+    if [ "$WAN_PARTNER_MAX" -gt 0 ] 2>/dev/null && [ "$WAN_PORT_MAX" -gt 0 ] 2>/dev/null \
+        && [ "$WAN_PARTNER_MAX" -lt "$WAN_PORT_MAX" ]; then
+        WAN_EXPECTED=$WAN_PARTNER_MAX
+        WAN_PEER_LIMITED=true
+    fi
+
+    if [ "$WAN_CARRIER" = true ] && [ "$_spd" -gt 0 ] 2>/dev/null \
+        && [ "$WAN_EXPECTED" -gt 0 ] 2>/dev/null && [ "$_spd" -lt "$WAN_EXPECTED" ] 2>/dev/null; then
+        WAN_DEGRADED=true
+    fi
     WAN_SPEED_LABEL=$(wan_speed_label "$WAN_SPEED_MBPS")
+    WAN_EXPECTED_LABEL=$(wan_speed_label "$WAN_EXPECTED")
 }
 
 # Carry forward last_ok / last_fail timestamps from the previous run.
@@ -138,6 +210,7 @@ prev_wan_last_suppressed=0
 prev_wan_restart_count=0
 prev_wan_restart_window_start=0
 prev_wan_last_restart_result=""
+prev_wan_best=0
 if [ -f "$STATE" ]; then
     prev_last_ok=$(jnum last_ok "$STATE")
     prev_last_fail=$(jnum last_fail "$STATE")
@@ -150,6 +223,7 @@ if [ -f "$STATE" ]; then
     prev_wan_restart_count=$(jnum restart_count "$STATE")
     prev_wan_restart_window_start=$(jnum restart_window_start "$STATE")
     prev_wan_last_restart_result=$(jstr last_restart_result "$STATE")
+    prev_wan_best=$(jnum best_speed_mbps "$STATE")
 fi
 [ -z "$prev_last_ok" ] && prev_last_ok=0
 [ -z "$prev_last_fail" ] && prev_last_fail=0
@@ -161,6 +235,7 @@ fi
 [ -z "$prev_wan_last_suppressed" ] && prev_wan_last_suppressed=0
 [ -z "$prev_wan_restart_count" ] && prev_wan_restart_count=0
 [ -z "$prev_wan_restart_window_start" ] && prev_wan_restart_window_start=0
+[ -z "$prev_wan_best" ] && prev_wan_best=0
 
 profile=$(jstr active_profile "$SETTINGS")
 [ -z "$profile" ] && profile=$(jstr active_chain "$SETTINGS")
@@ -175,8 +250,8 @@ if [ -f "$pfile" ]; then
     ptype=$(jstr type "$pfile")
 fi
 
+load_wanwatch_config   # PORT_MAX_MBPS must be known before read_wan_link judges the link
 read_wan_link
-load_wanwatch_config
 wan_last_change=$prev_wan_last_change
 wan_last_degraded=$prev_wan_last_degraded
 wan_last_recovered=$prev_wan_last_recovered
@@ -191,7 +266,7 @@ if [ "$WAN_DEGRADED" != "$prev_wan_degraded" ]; then
         wan_last_degraded=$now
         case "$WANWATCH_MODE" in
             off) ;;
-            *) push_alert "Detour: WAN просел" "WAN-порт ${WAN_DEVICE:-?} поднялся только как ${WAN_SPEED_LABEL}. Это режет скорость VPN. Панель → «WAN», либо проверьте кабель/аплинк." ;;
+            *) push_alert "Detour: WAN просел" "WAN-порт ${WAN_DEVICE:-?} поднялся как ${WAN_SPEED_LABEL} вместо ${WAN_EXPECTED_LABEL}. Это режет скорость VPN. Панель → «WAN», либо проверьте кабель/аплинк." ;;
         esac
     elif [ "$prev_wan_degraded" = true ]; then
         wan_last_recovered=$now
@@ -294,6 +369,7 @@ ping_json=false; [ "$ping_ok" = "1" ] && ping_json=true
 wan_carrier_json=false; [ "$WAN_CARRIER" = true ] && wan_carrier_json=true
 wan_degraded_json=false; [ "$WAN_DEGRADED" = true ] && wan_degraded_json=true
 wan_auto_supported_json=false; [ "$WANWATCH_AUTO_SUPPORTED" = true ] && wan_auto_supported_json=true
+wan_peer_limited_json=false; [ "$WAN_PEER_LIMITED" = true ] && wan_peer_limited_json=true
 case "$WAN_SPEED_MBPS" in ''|*[!0-9]*) wan_speed_json=null ;; *) wan_speed_json=$WAN_SPEED_MBPS ;; esac
 case "$WAN_DEVICE" in '') wan_device_json=null ;; *) wan_device_json=$(json_str "$WAN_DEVICE") ;; esac
 case "$WAN_DUPLEX" in '') wan_duplex_json=null ;; *) wan_duplex_json=$(json_str "$WAN_DUPLEX") ;; esac
@@ -317,6 +393,11 @@ cat > "$tmp" <<EOF
         "speed_mbps": $wan_speed_json,
         "speed_label": $(json_str "$WAN_SPEED_LABEL"),
         "duplex": $wan_duplex_json,
+        "port_max_mbps": ${WAN_PORT_MAX:-0},
+        "partner_max_mbps": ${WAN_PARTNER_MAX:-0},
+        "expected_mbps": ${WAN_EXPECTED:-0},
+        "best_speed_mbps": ${WAN_BEST:-0},
+        "peer_limited": $wan_peer_limited_json,
         "degraded": $wan_degraded_json,
         "mode": $(json_str "$WANWATCH_MODE"),
         "auto_supported": $wan_auto_supported_json,

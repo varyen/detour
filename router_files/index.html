@@ -3142,6 +3142,32 @@
                 </svg>
                 Push-уведомления
               </button>
+              <!-- Появляется только когда предупреждение о скорости WAN-порта
+                   скрыто вручную — иначе в меню висел бы пункт-пустышка. -->
+              <button
+                id="hdr-wanlink-restore"
+                class="hdr-menu-item"
+                role="menuitem"
+                style="display: none"
+                onclick="hdrMenuRun(restoreWanLinkAlert)"
+                title="Вернуть скрытое предупреждение о скорости WAN-порта"
+              >
+                <svg
+                  class="i"
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M3 12a9 9 0 1 0 3-6.7" />
+                  <path d="M3 3v5h5" />
+                </svg>
+                Вернуть предупреждение о WAN
+              </button>
               <!-- HTTPS/LE cert — OpenWrt only; hidden on Keenetic (uses KeenDNS). -->
               <div id="hdr-https-group" style="display: contents">
                 <div class="hdr-menu-sep"></div>
@@ -7980,26 +8006,97 @@
         }, 3000);
       }
 
+      // Shown ONLY when the WAN port came up slower than it can do (see
+      // detour-wan-link). A 100 Мбит порт, поднявшийся на 100 Мбит, — это норма,
+      // а не авария, поэтому баннера там нет.
+      //
+      // «Скрыть» прячет баннер до тех пор, пока ситуация та же: под ключом лежит
+      // подпись «интерфейс/скорость/ожидаемое», и стоит любому числу измениться —
+      // предупреждение вернётся само (иначе одно нажатие глушило бы и будущую,
+      // уже настоящую аварию). Вернуть вручную — «Настройки → Вернуть
+      // предупреждение о WAN»; пункт появляется только когда есть что возвращать.
+      var WAN_DISMISS_KEY = "detour.wanLinkDismissed";
+      var lastWanLink = null;
+      function wanLinkSignature(wan) {
+        return (
+          (wan.phy_if || "?") +
+          "/" +
+          (Number(wan.speed_mbps) || 0) +
+          "/" +
+          (Number(wan.expected_mbps) || 0)
+        );
+      }
+      function wanLinkStored() {
+        try {
+          return localStorage.getItem(WAN_DISMISS_KEY);
+        } catch (e) {
+          return null;
+        }
+      }
+      function showWanLinkRestoreItem(on) {
+        var el = document.getElementById("hdr-wanlink-restore");
+        if (el) el.style.display = on ? "" : "none";
+      }
+      function dismissWanLinkAlert() {
+        var box = document.getElementById("wan-link-alert");
+        if (!box || !lastWanLink) return;
+        try {
+          localStorage.setItem(WAN_DISMISS_KEY, wanLinkSignature(lastWanLink));
+        } catch (e) {}
+        box.style.display = "none";
+        showWanLinkRestoreItem(true);
+        toast("Предупреждение скрыто. Вернуть — в настройках.", "success");
+      }
+      function restoreWanLinkAlert() {
+        try {
+          localStorage.removeItem(WAN_DISMISS_KEY);
+        } catch (e) {}
+        showWanLinkRestoreItem(false);
+        renderWanLinkAlert(lastWanLink);
+      }
       function renderWanLinkAlert(wan) {
         var box = document.getElementById("wan-link-alert");
         if (!box) return;
+        lastWanLink = wan;
         if (!wan || !wan.supported || !wan.degraded) {
           box.style.display = "none";
           box.innerHTML = "";
+          showWanLinkRestoreItem(false);
           return;
         }
         var speed = Number(wan.speed_mbps) || 0;
         var partner = Number(wan.partner_max_mbps) || 0;
+        var portMax = Number(wan.port_max_mbps) || 0;
+        var expected = Number(wan.expected_mbps) || 0;
+        var stored = wanLinkStored();
+        if (stored && stored !== wanLinkSignature(wan)) {
+          // Цифры изменились — старое «скрыть» больше не про эту ситуацию.
+          try {
+            localStorage.removeItem(WAN_DISMISS_KEY);
+          } catch (e) {}
+          stored = null;
+        }
+        if (stored) {
+          box.style.display = "none";
+          showWanLinkRestoreItem(true);
+          return;
+        }
+        showWanLinkRestoreItem(false);
         var summary =
-          speed > 0
-            ? "WAN линк negotiated только на " + speed + " Мбит/с."
-            : "WAN линк ниже гигабита.";
+          speed > 0 && expected > 0
+            ? "WAN линк поднялся на " +
+              speed +
+              " Мбит/с вместо " +
+              expected +
+              " Мбит/с."
+            : "WAN линк поднялся ниже своих возможностей.";
         var diagnosis = wan.diagnosis ? escapeHtml(wan.diagnosis) : "";
         var advice = wan.advice
           ? escapeHtml(wan.advice)
           : "Проверьте: 1) WAN-кабель 2) аплинк-порт 3) переходники и розетки";
         var details = [];
         if (wan.phy_if) details.push("PHY: " + escapeHtml(String(wan.phy_if)));
+        if (portMax > 0) details.push("порт умеет: " + portMax + " Мбит/с");
         if (partner > 0) details.push("partner max: " + partner + " Мбит/с");
         if (wan.duplex)
           details.push("duplex: " + escapeHtml(String(wan.duplex)));
@@ -8011,6 +8108,7 @@
           (diagnosis ? " " + diagnosis + "." : "") +
           " " + advice +
           (details.length ? "<br><br>" + escapeHtml(details.join(" · ")) : "") +
+          '<br><br><a href="#" onclick="dismissWanLinkAlert();return false;">Скрыть это предупреждение</a>' +
           "</div>";
         box.style.display = "block";
       }

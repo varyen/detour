@@ -151,6 +151,14 @@ CHECK_CRON_MATCH="detour-update check"
 log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null; echo "[$LOG_TAG] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
+# Version opkg's own package database reports ("" if the package is unknown to
+# opkg). Deliberately separate from current_version(), which prefers the version
+# FILE the postinst writes — the two can disagree, and that disagreement is
+# exactly the failure verify_and_install checks for.
+opkg_db_version() {
+    opkg list-installed "$PACKAGE_NAME" 2>/dev/null | awk '{print $3; exit}'
+}
+
 current_version() {
     if [ -f "$VERSION_FILE" ]; then cat "$VERSION_FILE"
     else opkg list-installed "$PACKAGE_NAME" 2>/dev/null | awk '{print $3}' | head -1
@@ -247,16 +255,46 @@ gh_curl_retry() {
     return 1
 }
 
+# Tag probe that does NOT touch api.github.com. The API allows 60 unauthenticated
+# requests per HOUR PER IP — behind ISP CGNAT that quota is shared with every other
+# subscriber on the same address, so it can answer 403 for hours at a time (seen on
+# Keenetic: all four attempts "curl: (22) The requested URL returned error: 403").
+# The plain web endpoint github.com/<repo>/releases/latest 302-redirects to
+# /releases/tag/<tag> and is not part of that quota, so a HEAD + final-URL read
+# still yields the version. Release asset URLs are deterministic
+# (/releases/download/<tag>/<name>), so this is enough to install from too.
+gh_tag_via_web() {
+    local repo="$1" url
+    url=$(curl --connect-timeout 15 -sSIL --max-time 30 -o /dev/null \
+        -w '%{url_effective}' "https://github.com/$repo/releases/latest" 2>/dev/null) || return 1
+    printf '%s\n' "$url" | sed -n 's|.*/releases/tag/\([^/?#]*\).*|\1|p' | head -1
+}
+
 gh_assets() {
     [ -n "$GH_OWNER" ] && [ -n "$GH_REPO" ] || die "GH_OWNER/GH_REPO missing in $CONFIG"
     local url tmp
     url="https://api.github.com/repos/$GH_OWNER/$GH_REPO/releases/latest"
     tmp=$(mktemp)
-    gh_curl_retry -fsSL \
+    if ! gh_curl_retry -fsSL \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         --max-time 30 \
-        -o "$tmp" "$url" || { rm -f "$tmp"; die "GH API request failed"; }
+        -o "$tmp" "$url"; then
+        rm -f "$tmp"
+        local wtag wver base
+        wtag=$(gh_tag_via_web "$GH_OWNER/$GH_REPO")
+        [ -n "$wtag" ] || die "GH API request failed (403 = лимит запросов GitHub на ваш IP? страница релизов тоже недоступна)"
+        log "GH API unavailable (403/rate limit?) — falling back to the release page: $wtag"
+        wver="${wtag#v}"
+        base="https://github.com/$GH_OWNER/$GH_REPO/releases/download/$wtag"
+        # Same shape as the API path: tag, changelog (empty here), name<TAB>url…
+        printf '%s\n\n' "$wtag"
+        printf '%s\t%s\n' "${PACKAGE_NAME}_${wver}_${ARCH}.ipk" \
+            "$base/${PACKAGE_NAME}_${wver}_${ARCH}.ipk"
+        printf '%s\t%s\n' "${PACKAGE_NAME}_${wver}_${ARCH}.ipk.sig" \
+            "$base/${PACKAGE_NAME}_${wver}_${ARCH}.ipk.sig"
+        return 0
+    fi
     # Tiny Lua JSON parser (lua-cjson is a hard dep).
     # Prints on stdout:
     # line 1: <tag_name>
@@ -312,7 +350,12 @@ gh_latest_tag() {
             -H "X-GitHub-Api-Version: 2022-11-28" \
             --max-time 30 -o "$tmp" \
             "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null; then
-        rm -f "$tmp"; return 1
+        rm -f "$tmp"
+        # Same 403/rate-limit escape hatch as gh_assets — tag only, no changelog.
+        local wtag; wtag=$(gh_tag_via_web "$repo")
+        [ -n "$wtag" ] || return 1
+        printf '%s\n\n' "${wtag#v}"
+        return 0
     fi
     tag=$(lua - "$tmp" 2>/dev/null <<'LUA'
 package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
@@ -543,6 +586,20 @@ verify_and_install() {
     # opkg handles file replacement, dep resolution, postinst, etc.
     # shellcheck disable=SC2086
     opkg install $opkg_flags "$ipk" || die "opkg install failed"
+    # …and then CHECK THE PACKAGE DATABASE. Two independent traps here:
+    #   * opkg (Entware especially) can exit 0 while the package silently stays old;
+    #   * /etc/detour/version is written by the .ipk's own postinst, so the panel's
+    #     version file can read "new" while opkg's DB still records the OLD release
+    #     (reported on Keenetic: the 1.37.2 .ipk sat on the flash drive while the DB
+    #     — and therefore the installed files and the running services — stayed
+    #     1.30.2). current_version() prefers that file, so it cannot catch this.
+    # Ask the DB itself; a mismatch is a failed install, not a success.
+    local _want _got
+    _want=$(ipk_version "$ipk")
+    _got=$(opkg_db_version)
+    if [ -n "$_want" ] && [ -n "$_got" ] && [ "$_want" != "$_got" ]; then
+        die "opkg вернул успех, но в базе opkg остался $PACKAGE_NAME $_got (в пакете $_want) — установка НЕ применилась"
+    fi
     # Stash the just-installed package + its signature so the uci-defaults
     # restore script can re-install it after a router firmware sysupgrade
     # (sysupgrade preserves /etc/detour/ via /etc/sysupgrade.conf).
@@ -1049,6 +1106,19 @@ cmd_selftest() {
         echo "MISSING: no public key for verification"; ok=0
     fi
     [ -f "$CONFIG" ] || { echo "MISSING: $CONFIG"; ok=0; }
+    # The version file (written by postinst) vs what opkg's DB actually records.
+    # A split here means an install did not take: the panel would report the new
+    # version while the old files keep running. See verify_and_install.
+    local _db _file
+    _db=$(opkg_db_version)
+    _file=$(current_version)
+    if [ -n "$_db" ] && [ -n "$_file" ] && [ "$_db" != "$_file" ]; then
+        echo "MISMATCH: $VERSION_FILE says $_file, opkg DB says $PACKAGE_NAME $_db"
+        echo "  → переустановите пакет: detour-update apply-local <ipk>  (или apply)"
+        ok=0
+    elif [ -n "$_db" ]; then
+        echo "OK: opkg DB and $VERSION_FILE agree ($_db)"
+    fi
     [ "$ok" = "1" ] && { echo "selftest: OK"; return 0; }
     echo "selftest: FAILED"
     return 1

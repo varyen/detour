@@ -94,7 +94,10 @@ local fields = {
   tostring(obj.partner_max_mbps or 0),
   tostring(obj.duplex or ""),
   tostring(obj.diagnosis or ""),
-  tostring(obj.advice or "")
+  tostring(obj.advice or ""),
+  tostring(obj.port_max_mbps or 0),
+  tostring(obj.expected_mbps or 0),
+  tostring(obj.peer_limited)
 }
 io.write(table.concat(fields, "\t"))
 LUA
@@ -204,19 +207,29 @@ else
     if [ -z "$wan" ]; then
         bad "detour-wan-link status returned nothing / unreadable JSON"
     else
-        IFS='	' read -r WL_SUPPORTED WL_DEGRADED WL_WAN_IF WL_PHY_IF WL_SPEED WL_PARTNER WL_DUPLEX WL_DIAG WL_ADVICE <<EOF
+        IFS='	' read -r WL_SUPPORTED WL_DEGRADED WL_WAN_IF WL_PHY_IF WL_SPEED WL_PARTNER WL_DUPLEX WL_DIAG WL_ADVICE WL_PORTMAX WL_EXPECTED WL_PEERLIM <<EOF
 $wan
 EOF
-        info "wan_if=$WL_WAN_IF phy_if=$WL_PHY_IF speed=${WL_SPEED}Mbps partner=${WL_PARTNER}Mbps duplex=${WL_DUPLEX:-?}"
+        info "wan_if=$WL_WAN_IF phy_if=$WL_PHY_IF speed=${WL_SPEED}Mbps port_max=${WL_PORTMAX}Mbps expected=${WL_EXPECTED}Mbps partner=${WL_PARTNER}Mbps duplex=${WL_DUPLEX:-?}"
         info "diagnosis: ${WL_DIAG:-'(empty)'}"
         if [ "$WL_SUPPORTED" = true ]; then
             ok "speed detection supported on this Keenetic"
         else
             warn "speed detection not supported here — unresolved: need to inspect /sys/class/net/<if>/speed and ethtool availability"
         fi
+        # The reference is the PORT's own ceiling, not a hardcoded gigabit: on a
+        # 100 Mbps Keenetic, 100 Mbps is full health. port_max=0 means we could
+        # not establish a ceiling at all — then the check stays silent by design.
+        if [ "${WL_PORTMAX:-0}" = "0" ]; then
+            warn "port ceiling unknown (no ethtool, nothing learned yet) — degradation check is intentionally silent here"
+        elif [ "$WL_SPEED" = "$WL_PORTMAX" ]; then
+            ok "link is at the port's own maximum (${WL_SPEED}Mbps) — no false «просело» alarm"
+        fi
         if [ "$WL_DEGRADED" = true ]; then
-            warn "WAN link currently degraded below 1 Gbps"
+            warn "WAN link currently below what the port can do (${WL_SPEED} < ${WL_EXPECTED}Mbps)"
             info "advice: ${WL_ADVICE:-'(empty)'}"
+        elif [ "$WL_PEERLIM" = true ]; then
+            ok "not degraded: link sits at the PEER's maximum (${WL_EXPECTED}Mbps), our port does ${WL_PORTMAX}Mbps"
         else
             ok "WAN link not currently degraded"
         fi
