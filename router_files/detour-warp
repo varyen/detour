@@ -324,7 +324,10 @@ local res = reserved_from(cfg.client_id)
 if res then p.reserved = res end
 
 local prof = {
-  id = id, name = pname, type = "wireguard", uri = "",
+  -- Все WARP-устройства складываем в папку «WARP» (группа профиля) — так они не
+  -- растворяются среди обычных VPN и их удобно фильтровать. Папка появляется сама,
+  -- как только в ней есть хоть один профиль (группы вычисляются из профилей).
+  id = id, name = pname, type = "wireguard", uri = "", group = "WARP",
   -- Метаданные устройства живут прямо в профиле: отдельный файл потребовал бы
   -- своей записи в keeplist, а так они переживают sysupgrade вместе с профилем.
   warp = { device_id = o.id, account_type = (o.account or {}).account_type,

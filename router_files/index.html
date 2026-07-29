@@ -6265,6 +6265,13 @@
             <div class="flex-gap">
               <button
                 class="btn"
+                onclick="showView('groups')"
+                title="Создать, переименовать или удалить папки (группы) и привязать к ним подписки"
+              >
+                🗂 Управление папками
+              </button>
+              <button
+                class="btn"
                 onclick="showView('home')"
                 title="Вернуться на главную"
               >
@@ -6273,11 +6280,14 @@
             </div>
           </div>
           <div class="helper-text-block">
-            Список всех VPN-профилей: массовый выбор, перенос между группами,
-            удаление и отметка «участвует в авто-переключении» (чип
+            Список всех VPN-профилей: массовый выбор, перенос между папками
+            (группами), удаление и отметка «участвует в авто-переключении» (чип
             <span class="row-tag as-on" style="padding: 1px 6px">✓ авто</span> у
             строки). Выделите профили (Shift+клик — диапазон) и примените
-            действие. Фильтруйте по группе или ищите по имени.
+            действие. В «Перенести в группу» можно выбрать
+            <b>＋ новая папка…</b> — создать папку прямо здесь. Переименование и
+            удаление папок, а также подписки — по кнопке
+            <b>🗂 Управление папками</b>.
           </div>
           <div class="bulk-toolbar">
             <label class="check-row">
@@ -10217,6 +10227,7 @@
         var hidden = document.getElementById("sb-profile-select");
         var search = document.getElementById("sb-profile-search");
         if (hidden) hidden.value = id || "";
+        var label = "";
         var p = null;
         for (var i = 0; i < currentProfiles.length; i++) {
           if (currentProfiles[i].id === id) {
@@ -10224,7 +10235,16 @@
             break;
           }
         }
-        if (search) search.value = p ? profileFullLabel(p) : "";
+        if (p) {
+          label = profileFullLabel(p);
+        } else {
+          // Может быть выбрана цепочка — у неё своя подпись.
+          var c = currentChains.filter(function (x) {
+            return x.id === id;
+          })[0];
+          if (c) label = "🔗 " + (c.name || c.id);
+        }
+        if (search) search.value = label;
       }
 
       function chooseProfile(id) {
@@ -10319,11 +10339,80 @@
         dd.innerHTML = "";
         profileComboRendered = [];
         var q = (query || "").trim().toLowerCase();
+        var selId = document.getElementById("sb-profile-select").value;
+        var selIdx = -1;
+
+        // Цепочки идут ПЕРВЫМИ, отдельной группой «🔗 Цепочки»: они не входят в
+        // папки профилей и не фильтруются по группе. Активные — сверху. Клик
+        // выбирает цепочку целиком; «Применить» её и активирует (activateSelectedProfile).
+        var chainMatches = currentChains
+          .filter(function (c) {
+            if (!q) return true;
+            var hay = (
+              (c.name || "") +
+              " " +
+              c.id +
+              " " +
+              (Array.isArray(c.hops) ? c.hops.join(" ") : "")
+            ).toLowerCase();
+            return hay.indexOf(q) >= 0;
+          })
+          .sort(function (a, b) {
+            var aa = chainMatchesActive(a) ? 0 : 1;
+            var bb = chainMatchesActive(b) ? 0 : 1;
+            if (aa !== bb) return aa - bb;
+            return (a.name || a.id).localeCompare(b.name || b.id, undefined, {
+              numeric: true,
+              sensitivity: "base",
+            });
+          });
+        if (chainMatches.length) {
+          var chead = document.createElement("div");
+          chead.className = "profile-dropdown-group";
+          chead.textContent = "🔗 Цепочки";
+          dd.appendChild(chead);
+          chainMatches.forEach(function (c) {
+            var idx = profileComboRendered.length;
+            var active = chainMatchesActive(c);
+            var item = document.createElement("div");
+            item.className =
+              "profile-dropdown-item" + (c.id === selId ? " selected" : "");
+            item.setAttribute("role", "option");
+            item.innerHTML =
+              '<span class="pdi-label">🔗 ' +
+              highlightMatch(c.name || c.id, query) +
+              (active ? ' <span class="tag">активна</span>' : "") +
+              "</span>";
+            item.addEventListener("mousedown", function (e) {
+              e.preventDefault();
+            });
+            item.addEventListener(
+              "click",
+              (function (cid) {
+                return function () {
+                  chooseProfile(cid);
+                };
+              })(c.id),
+            );
+            item.addEventListener(
+              "mouseenter",
+              (function (i) {
+                return function () {
+                  setActiveItem(i);
+                };
+              })(idx),
+            );
+            dd.appendChild(item);
+            if (c.id === selId) selIdx = idx;
+            profileComboRendered.push(c);
+          });
+        }
+
         var ordered = sortProfilesForList(profileComboVisible);
         var matches = ordered.filter(function (p) {
           return !q || profileSearchText(p).indexOf(q) >= 0;
         });
-        if (!matches.length) {
+        if (!matches.length && !chainMatches.length) {
           var empty = document.createElement("div");
           empty.className = "profile-dropdown-empty";
           empty.textContent = profileComboVisible.length
@@ -10333,9 +10422,7 @@
           profileComboActiveIdx = -1;
           return;
         }
-        var selId = document.getElementById("sb-profile-select").value;
         var lastGroup = null;
-        var selIdx = -1;
         matches.forEach(function (p) {
           var g = (p.group || "").trim();
           if (g !== lastGroup) {
@@ -10407,7 +10494,14 @@
         }
         var prev = hidden.value;
         var chosen = "";
-        if (visibleHas(currentActiveProfileId)) chosen = currentActiveProfileId;
+        // Если сейчас активна многохоповая сохранённая цепочка — показываем в пикере
+        // её (а не последний хоп), чтобы выбор отражал реальное подключение.
+        var activeChainMatch = currentChains.filter(function (c) {
+          return chainMatchesActive(c);
+        })[0];
+        if (activeChainMatch) chosen = activeChainMatch.id;
+        else if (visibleHas(currentActiveProfileId))
+          chosen = currentActiveProfileId;
         else if (visibleHas(prev)) chosen = prev;
         else if (profileComboVisible.length) chosen = profileComboVisible[0].id;
         setSelectedProfile(chosen);
@@ -12936,8 +13030,14 @@
         bulkLastIndex = null;
         document.getElementById("bulk-search").value = "";
         document.getElementById("bulk-select-all").checked = false;
-        // group filter
+        populateBulkGroupSelects();
+        renderBulkProfilesList();
+      }
+      // Наполнить оба селекта папок (фильтр + цель переноса). Вынесено, чтобы после
+      // создания новой папки прямо на странице списки обновлялись без ухода со страницы.
+      function populateBulkGroupSelects() {
         var gf = document.getElementById("bulk-group-filter");
+        var prevFilter = gf.value;
         gf.innerHTML = "";
         var oAll = document.createElement("option");
         oAll.value = "";
@@ -12959,20 +13059,31 @@
           o.textContent = g.name + " (" + g.count + ")";
           gf.appendChild(o);
         });
-        // regroup target dropdown
+        // сохранить прежний выбор фильтра, если он ещё существует
+        if (
+          prevFilter &&
+          Array.prototype.some.call(gf.options, function (o) {
+            return o.value === prevFilter;
+          })
+        )
+          gf.value = prevFilter;
+        // regroup target dropdown: «— без группы —», «＋ новая папка…», затем существующие
         var rt = document.getElementById("bulk-regroup-target");
         rt.innerHTML = "";
         var oNone = document.createElement("option");
         oNone.value = "__none__";
         oNone.textContent = "— без группы —";
         rt.appendChild(oNone);
+        var oNew = document.createElement("option");
+        oNew.value = "__new__";
+        oNew.textContent = "＋ новая папка…";
+        rt.appendChild(oNew);
         allGroupsWithCounts().forEach(function (g) {
           var o = document.createElement("option");
           o.value = g.name;
           o.textContent = g.name;
           rt.appendChild(o);
         });
-        renderBulkProfilesList();
       }
       // Back-compat shim: a few call sites may still reference the old name.
       function showBulkProfilesModal() {
@@ -13150,7 +13261,24 @@
           return;
         }
         var target = document.getElementById("bulk-regroup-target").value;
-        var newGroup = target === "__none__" ? "" : target;
+        var newGroup;
+        if (target === "__new__") {
+          // Создать новую папку прямо здесь и перенести в неё выбранные.
+          var nm = prompt("Название новой папки:");
+          if (nm === null) return;
+          nm = nm.trim();
+          if (!nm) {
+            toast("Введите название папки", "error");
+            return;
+          }
+          if (nm === "__none__" || nm === "__new__" || nm === "__ungrouped__") {
+            toast("Недопустимое имя папки", "error");
+            return;
+          }
+          newGroup = nm;
+        } else {
+          newGroup = target === "__none__" ? "" : target;
+        }
         var status = document.getElementById("bulk-status");
         var ids = Array.from(bulkSelected);
         status.textContent = "Обновляю группу...";
@@ -13168,6 +13296,7 @@
           } catch (e) {}
         }
         await loadProfiles();
+        populateBulkGroupSelects();
         renderBulkProfilesList();
         status.textContent = "";
         toast(
@@ -13301,6 +13430,36 @@
         var name = sel.value;
         if (!name) {
           toast("Выберите профиль", "error");
+          return;
+        }
+        // Выбрана цепочка → активируем её целиком (тем же путём, что «Включить»).
+        var chain = currentChains.filter(function (c) {
+          return c.id === name;
+        })[0];
+        if (chain) {
+          if (
+            !confirm(
+              'Активировать цепочку "' +
+                (chain.name || name) +
+                '"?\n\nКонфиг sing-box будет перегенерирован и сервис перезапущен.',
+            )
+          )
+            return;
+          try {
+            var dc = await api(
+              "chain_activate",
+              "POST",
+              (chain.hops || []).join(","),
+            );
+            if (dc && dc.ok === false)
+              throw new Error(dc.error || "не удалось применить");
+            toast('Цепочка "' + (chain.name || name) + '" активирована', "success");
+            await loadStatus();
+            await loadProfiles();
+          } catch (e) {
+            if (e.message !== "Not authenticated")
+              toast("Ошибка: " + e.message, "error");
+          }
           return;
         }
         if (
