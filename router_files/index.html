@@ -6834,7 +6834,7 @@
       onclick="backdropClose(event, closeChainModal)"
     >
       <div class="modal">
-        <h3>🔗 Цепочка VPN / Proxy</h3>
+        <h3 id="chain-modal-title">🔗 Цепочка VPN / Proxy</h3>
         <div class="chain-toolbar">
           <div style="flex: 1">
             <label>Добавить профиль в цепочку</label>
@@ -6932,6 +6932,10 @@
       var currentActiveChain = [];
       var currentChains = [];
       var editingChain = [];
+      // id сохранённой цепочки, которую сейчас редактируем в конструкторе ("" =
+      // новая цепочка). При сохранении в edit-режиме перезаписываем этот же id.
+      var editingChainId = "";
+      var editingChainName = "";
       var lastParsedProfileType = "";
       var currentEditingProfileId = "";
       var lastParsedProfiles = [];
@@ -13363,7 +13367,10 @@
         );
       }
 
-      // Сохранённые цепочки в основном экране: включаются одним кликом, как профиль.
+      // Сохранённые цепочки на главном экране как первоклассные записи «VPN»:
+      // активные сверху, ниже остальные по алфавиту (как в маршрутизации). У цепочки
+      // свой набор действий — включить / редактировать (в конструкторе) / удалить —
+      // отличный от профилей и прокси.
       function renderChainsList() {
         var el = document.getElementById("sb-chains-list");
         if (!el) return;
@@ -13374,6 +13381,9 @@
         var rows = currentChains
           .slice()
           .sort(function (a, b) {
+            var aa = chainMatchesActive(a) ? 0 : 1;
+            var bb = chainMatchesActive(b) ? 0 : 1;
+            if (aa !== bb) return aa - bb; // активные сверху
             return (a.name || a.id).localeCompare(b.name || b.id, undefined, {
               numeric: true,
               sensitivity: "base",
@@ -13406,16 +13416,18 @@
                 ? ""
                 : '<button class="btn" onclick="activateSavedChain(\'' +
                   c.id +
-                  "')\">Включить</button>") +
+                  "')\" title=\"Сделать активной\">Включить</button>") +
+              '<button class="btn" onclick="editSavedChain(\'' +
+              c.id +
+              "')\" title=\"Изменить порядок и состав хопов\">✎</button>" +
               '<button class="btn danger" onclick="deleteSavedChain(\'' +
               c.id +
-              "')\">✕</button>" +
+              "')\" title=\"Удалить цепочку\">✕</button>" +
               "</div></div>"
             );
           });
         el.innerHTML =
-          '<div class="saved-chains-title">Сохранённые цепочки</div>' +
-          rows.join("");
+          '<div class="saved-chains-title">Цепочки VPN</div>' + rows.join("");
       }
 
       async function activateSavedChain(id) {
@@ -13455,15 +13467,45 @@
       }
 
       function showChainModal() {
+        editingChainId = "";
+        editingChainName = "";
         editingChain = currentActiveChain.length
           ? currentActiveChain.slice()
           : [];
+        setChainModalTitle("🔗 Цепочка VPN / Proxy");
         syncChainProfilePicker();
         renderChainEditor();
         document.getElementById("chain-modal").style.display = "flex";
       }
 
+      // Открыть конструктор для РЕДАКТИРОВАНИЯ сохранённой цепочки: подставляем её
+      // хопы и запоминаем id, чтобы «💾 Сохранить» перезаписал её же, а не создал
+      // новую.
+      function editSavedChain(id) {
+        var chain = currentChains.filter(function (c) {
+          return c.id === id;
+        })[0];
+        if (!chain) {
+          toast("Цепочка не найдена", "error");
+          return;
+        }
+        editingChainId = chain.id;
+        editingChainName = chain.name || chain.id;
+        editingChain = (Array.isArray(chain.hops) ? chain.hops : []).slice();
+        setChainModalTitle("🔗 Редактирование: " + editingChainName);
+        syncChainProfilePicker();
+        renderChainEditor();
+        document.getElementById("chain-modal").style.display = "flex";
+      }
+
+      function setChainModalTitle(text) {
+        var h = document.getElementById("chain-modal-title");
+        if (h) h.textContent = text;
+      }
+
       function closeChainModal() {
+        editingChainId = "";
+        editingChainName = "";
         document.getElementById("chain-modal").style.display = "none";
       }
 
@@ -13572,21 +13614,27 @@
         }
       }
 
-      // Сохранить собранную цепочку под именем (не применяя). Дальше её можно
-      // включить одним кликом из основного экрана или назначить целью маршрута.
+      // Сохранить собранную цепочку под именем (не применяя). В edit-режиме
+      // (editingChainId задан) перезаписываем ту же цепочку — id остаётся стабильным,
+      // меняется только имя/состав. Дальше цепочку можно включить одним кликом с
+      // главного экрана или назначить целью маршрута.
       async function saveCurrentChain() {
         if (editingChain.length < 2) {
           toast("В цепочке должно быть минимум два хопа", "error");
           return;
         }
+        var editing = !!editingChainId;
+        var defaultName = editing
+          ? editingChainName
+          : editingChain
+              .map(function (id) {
+                var m = getProfileMeta(id);
+                return m ? m.name : id;
+              })
+              .join(" → ");
         var name = prompt(
-          "Название цепочки:",
-          editingChain
-            .map(function (id) {
-              var m = getProfileMeta(id);
-              return m ? m.name : id;
-            })
-            .join(" → "),
+          editing ? "Новое название цепочки:" : "Название цепочки:",
+          defaultName,
         );
         if (name === null) return;
         name = name.trim();
@@ -13594,7 +13642,13 @@
           toast("Введите название", "error");
           return;
         }
-        var id = makeProfileId(name);
+        // Новая цепочка получает id из имени; при редактировании id не трогаем.
+        var id = editing ? editingChainId : makeProfileId(name);
+        var wasActive =
+          editing &&
+          currentChains.some(function (c) {
+            return c.id === id && chainMatchesActive(c);
+          });
         try {
           var d = await api(
             "chain_save",
@@ -13602,10 +13656,23 @@
             JSON.stringify({ id: id, name: name, hops: editingChain.slice() }),
           );
           if (!d.ok) throw new Error(d.error || "не удалось сохранить");
-          toast("Цепочка «" + name + "» сохранена", "success");
+          toast(
+            editing
+              ? "Цепочка «" + name + "» обновлена"
+              : "Цепочка «" + name + "» сохранена",
+            "success",
+          );
+          editingChainId = "";
+          editingChainName = "";
           await loadChains();
           renderChainsList();
           renderRouteProfileSelect();
+          if (wasActive) {
+            toast(
+              "Это активная цепочка — нажмите «Включить», чтобы применить изменения",
+              "info",
+            );
+          }
         } catch (e) {
           toast(e.message, "error");
         }
@@ -15124,6 +15191,18 @@
       // роутер сохраняет готовую цепочку «выбранный VPN → WARP».
       var warpPollTimer = null;
       var warpViaCombo = null;
+      // Отметка времени последнего терминального состояния ДО старта операции —
+      // чтобы опрос не принял «done» от прошлой регистрации (см. pollWarpStatus).
+      var warpBaselineTs = 0;
+
+      async function warpCaptureBaseline() {
+        try {
+          var s = await api("warp_status");
+          warpBaselineTs = (s.last && s.last.ts) || 0;
+        } catch (e) {
+          warpBaselineTs = 0;
+        }
+      }
 
       async function openWarpModal() {
         document.getElementById("warp-modal").style.display = "flex";
@@ -15218,6 +15297,7 @@
         status.innerHTML =
           '<span style="color:var(--text-dim)">Регистрация через выбранный VPN… это 15–40 секунд.</span>';
         try {
+          await warpCaptureBaseline();
           var resp = await api(
             "warp_register",
             "POST",
@@ -15241,6 +15321,7 @@
         status.innerHTML =
           '<span style="color:var(--text-dim)">Проверка цепочки через временный экземпляр…</span>';
         try {
+          await warpCaptureBaseline();
           var resp = await api(
             "warp_verify",
             "POST",
@@ -15373,9 +15454,11 @@
       async function refreshWarpDevices() {
         try {
           var s = await api("warp_status");
-          warpDevices = Array.isArray(s.profiles) ? s.profiles : [];
+          // Клобберим список только валидным массивом — транзиентный пустой/битый
+          // ответ (temp sing-box догорал) не должен обнулять уже показанные строки.
+          if (Array.isArray(s.profiles)) warpDevices = s.profiles;
         } catch (e) {
-          warpDevices = [];
+          /* оставляем прежний список */
         }
       }
 
@@ -15394,37 +15477,41 @@
         try {
           var s = await api("warp_status");
           var last = s.last || {};
-          if (last.state === "done") {
+          // Стоп-состояние принимаем ТОЛЬКО если оно новее, чем было на старте
+          // операции (warpBaselineTs). Иначе первый же опрос словил бы «done» от
+          // прошлой регистрации (detach_bg спит 1 с до старта фонового job) и модалка
+          // показала бы устаревший результат с пустым списком устройств.
+          var terminal = last.state === "done" || last.state === "error";
+          var fresh = !last.ts || last.ts > warpBaselineTs;
+          if (terminal && fresh) {
             btn.disabled = false;
-            var extra = last.chain
-              ? " Цепочка сохранена — её можно включить кнопкой «Активировать» ниже или назначить на домены в «Карте маршрутов»."
-              : " Профиль добавлен.";
-            status.innerHTML =
-              '<span style="color:var(--green)">Готово. ' +
-              escapeHtml(last.message || "") +
-              "</span><br /><span class=\"helper-text\">" +
-              escapeHtml(extra) +
-              "</span>";
+            // Список устройств берём из ЭТОГО же ответа (s.profiles), а не вторым
+            // запросом warp_status — второй вызов иногда ловил транзиентный пустой
+            // ответ (temp sing-box от verify ещё догорал), и список моргал в ноль.
+            if (Array.isArray(s.profiles)) warpDevices = s.profiles;
+            if (last.state === "done") {
+              var extra = last.chain
+                ? " Цепочка сохранена — она уже в списке VPN на главном экране (можно включить одним кликом) и доступна целью в «Карте маршрутов»."
+                : " Профиль добавлен.";
+              status.innerHTML =
+                '<span style="color:var(--green)">Готово. ' +
+                escapeHtml(last.message || "") +
+                "</span><br /><span class=\"helper-text\">" +
+                escapeHtml(extra) +
+                "</span>";
+            } else {
+              status.innerHTML =
+                '<span style="color:var(--red)">' +
+                escapeHtml(last.message || "не удалось") +
+                "</span>";
+            }
             await loadChains();
             await loadProfiles();
-            await refreshWarpDevices();
             renderWarpList();
             syncWarpViaPicker(true);
             return;
           }
-          if (last.state === "error") {
-            btn.disabled = false;
-            status.innerHTML =
-              '<span style="color:var(--red)">' +
-              escapeHtml(last.message || "не удалось") +
-              "</span>";
-            await loadChains();
-            await loadProfiles();
-            await refreshWarpDevices();
-            renderWarpList();
-            return;
-          }
-          if (last.message) {
+          if (last.message && !terminal) {
             status.innerHTML =
               '<span style="color:var(--text-dim)">' +
               escapeHtml(last.message) +
