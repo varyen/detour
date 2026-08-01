@@ -2623,30 +2623,86 @@
       }
 
       /* ===== TOAST ===== */
-      /* Сверху справа и ВЫШЕ модалки (.modal-overlay — 5000). Пока тосты лежали
-         на 1000 и снизу, любое сообщение из открытого окна уходило под оверлей:
-         операция падала молча. pointer-events снимаем с контейнера, иначе его
-         колонка перехватывала бы клики по правому краю страницы. */
+      /* ===== ЗАНЯТОСТЬ + УВЕДОМЛЕНИЯ =====
+         Одно место действия по центру экрана: пока запрос летит — крутилка,
+         потом на её месте появляется результат. Оба слоя ВЫШЕ модалки
+         (.modal-overlay — 5000): раньше тосты лежали на 1000 и сообщения из
+         открытого окна уходили под затемнение, то есть операция «молчала». */
+      .busy-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding-bottom: 8vh;
+        background: var(--overlay);
+        backdrop-filter: blur(2px);
+        -webkit-backdrop-filter: blur(2px);
+        opacity: 0;
+        visibility: hidden;
+        /* visibility гасим ПОСЛЕ затухания, иначе оверлей исчезал рывком */
+        transition:
+          opacity 0.18s ease,
+          visibility 0s linear 0.18s;
+      }
+      /* Показываем только вместе с классом .on — заодно перехватываем клики,
+         чтобы по кнопке «Сохранить» не успели нажать дважды. */
+      .busy-overlay.on {
+        opacity: 1;
+        visibility: visible;
+        transition:
+          opacity 0.18s ease,
+          visibility 0s;
+      }
+      .busy-card {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 16px 22px;
+        border-radius: var(--radius);
+        background: var(--surface);
+        border: 1px solid var(--border);
+        box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.55);
+        font-size: 14px;
+        color: var(--text);
+      }
+      .busy-spinner {
+        width: 20px;
+        height: 20px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        border: 2px solid var(--border);
+        border-top-color: var(--accent);
+        animation: busySpin 0.7s linear infinite;
+      }
+      @keyframes busySpin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
       .toast-container {
         position: fixed;
-        top: 16px;
-        right: 16px;
+        inset: 0;
         z-index: 10000;
         display: flex;
         flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding-bottom: 8vh;
         gap: 10px;
         pointer-events: none;
-        max-width: min(420px, calc(100vw - 32px));
       }
       .toast {
         pointer-events: auto;
         position: relative;
         display: flex;
         align-items: flex-start;
-        gap: 10px;
-        padding: 13px 16px 13px 14px;
+        gap: 11px;
+        padding: 15px 22px;
+        max-width: min(520px, calc(100vw - 48px));
         border-radius: var(--radius);
-        font-size: 13.5px;
+        font-size: 14.5px;
         line-height: 1.45;
         color: var(--text);
         box-shadow:
@@ -2724,9 +2780,11 @@
           opacity: 1;
         }
       }
+      /* Появление по центру: короткий подъём со сжатия. Ощущается как «пришло
+         сюда», а не «приехало откуда-то сбоку». */
       @keyframes toastIn {
         from {
-          transform: translate3d(24px, -8px, 0) scale(0.96);
+          transform: translate3d(0, 10px, 0) scale(0.94);
           opacity: 0;
         }
         to {
@@ -2736,14 +2794,29 @@
       }
       @keyframes toastOut {
         to {
-          transform: translate3d(24px, 0, 0) scale(0.98);
+          transform: translate3d(0, -6px, 0) scale(0.97);
           opacity: 0;
         }
       }
+      /* Кому анимации мешают — оставляем только проявление: вращение крутилки
+         подменяем мягким пульсом, чтобы «идёт работа» всё-таки читалось. */
       @media (prefers-reduced-motion: reduce) {
         .toast,
         .toast.leaving {
           animation: none;
+        }
+        .busy-spinner {
+          animation: busyPulse 1.4s ease-in-out infinite;
+          border-top-color: var(--accent);
+        }
+      }
+      @keyframes busyPulse {
+        0%,
+        100% {
+          opacity: 0.35;
+        }
+        50% {
+          opacity: 1;
         }
       }
 
@@ -7024,6 +7097,12 @@
       </div>
     </div>
 
+    <div class="busy-overlay" id="busy" aria-hidden="true">
+      <div class="busy-card" role="status" aria-live="polite">
+        <span class="busy-spinner"></span>
+        <span id="busy-text">Сохраняем…</span>
+      </div>
+    </div>
     <div class="toast-container" id="toasts"></div>
 
     <script>
@@ -7373,6 +7452,53 @@
         );
       }
 
+      // ===== ИНДИКАТОР ЗАНЯТОСТИ =====
+      // Любая мутация (POST) идёт через api(), поэтому крутилка живёт здесь —
+      // одно место на все 99 мест сохранения. Показываем НЕ сразу: быстрый
+      // запрос успевает закончиться за 250 мс, и мигать оверлеем на нём глупо;
+      // а вот пересборка конфига с перезапуском sing-box занимает 3–6 с, и вот
+      // там пустой экран и выглядит как «кнопка не работает».
+      // Счётчик, потому что сохранение пачки профилей — это цикл из POST'ов:
+      // оверлей должен держаться на весь цикл, а не мигать между итерациями.
+      var busyDepth = 0;
+      var busyTimer = null;
+      var busyGuard = null;
+      function busyShow() {
+        var el = document.getElementById("busy");
+        if (el) el.classList.add("on");
+        // Страховка: `detour-update apply` перезапускает веб-сервер, и ответ на
+        // тот запрос может не прийти никогда. Оверлей, залипший навсегда, хуже
+        // отсутствующего — он блокирует клики.
+        clearTimeout(busyGuard);
+        busyGuard = setTimeout(busyHide, 45000);
+      }
+      function busyHide() {
+        clearTimeout(busyGuard);
+        busyGuard = null;
+        var el = document.getElementById("busy");
+        if (el) el.classList.remove("on");
+      }
+      function busyStart(text) {
+        busyDepth += 1;
+        var label = document.getElementById("busy-text");
+        if (label && text) label.textContent = text;
+        if (busyDepth === 1 && busyTimer === null) {
+          busyTimer = setTimeout(function () {
+            busyTimer = null;
+            if (busyDepth > 0) busyShow();
+          }, 250);
+        }
+      }
+      function busyEnd() {
+        busyDepth = Math.max(0, busyDepth - 1);
+        if (busyDepth > 0) return;
+        clearTimeout(busyTimer);
+        busyTimer = null;
+        busyHide();
+        var label = document.getElementById("busy-text");
+        if (label) label.textContent = "Сохраняем…";
+      }
+
       async function api(action, method, body) {
         method = method || "GET";
         body = body || null;
@@ -7385,12 +7511,18 @@
           opts.body = typeof body === "string" ? body : JSON.stringify(body);
           opts.headers = { "Content-Type": "text/plain" };
         }
-        const r = await fetch(API + "?action=" + action, opts);
-        if (r.status === 401) {
-          showLogin();
-          throw new Error("Not authenticated");
+        var mutating = opts.method === "POST";
+        if (mutating) busyStart();
+        try {
+          const r = await fetch(API + "?action=" + action, opts);
+          if (r.status === 401) {
+            showLogin();
+            throw new Error("Not authenticated");
+          }
+          return r.json();
+        } finally {
+          if (mutating) busyEnd();
         }
-        return r.json();
       }
 
       // Read the response to a panel-update "apply" request tolerantly. Installing
