@@ -3,6 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Панель — ОДИН файл, который целиком меняется при каждом обновлении, а
+         uhttpd отдаёт его лишь с ETag/Last-Modified. По ним браузер вправе
+         считать копию свежей и не переспрашивать — после установки новой версии
+         человек продолжал видеть старую панель и справедливо считал, что правка
+         не приехала. Просим перепроверять всегда: файл маленький, а расхождение
+         версии UI и CGI стоит дорого. -->
+    <meta http-equiv="Cache-Control" content="no-cache" />
     <title>Detour</title>
     <!-- Inline SVG favicon (source: router_files/favicon.svg) — embedded so it
          ships with the single-file panel, no extra asset to package or serve. -->
@@ -7465,7 +7472,10 @@
       var busyGuard = null;
       function busyShow() {
         var el = document.getElementById("busy");
-        if (el) el.classList.add("on");
+        if (el) {
+          el.classList.add("on");
+          el.setAttribute("aria-hidden", "false");
+        }
         // Страховка: `detour-update apply` перезапускает веб-сервер, и ответ на
         // тот запрос может не прийти никогда. Оверлей, залипший навсегда, хуже
         // отсутствующего — он блокирует клики.
@@ -7476,7 +7486,10 @@
         clearTimeout(busyGuard);
         busyGuard = null;
         var el = document.getElementById("busy");
-        if (el) el.classList.remove("on");
+        if (el) {
+          el.classList.remove("on");
+          el.setAttribute("aria-hidden", "true");
+        }
       }
       function busyStart(text) {
         busyDepth += 1;
@@ -7486,7 +7499,7 @@
           busyTimer = setTimeout(function () {
             busyTimer = null;
             if (busyDepth > 0) busyShow();
-          }, 250);
+          }, 150);
         }
       }
       function busyEnd() {
@@ -19364,14 +19377,29 @@
           return;
         }
         hideLogin();
-        await fetchCurrentPanelUser();
-        loadEmptyGroupsFromSession();
-        await loadStatus();
-        await loadProfiles();
-        // Profiles are loaded — honor any deep link (?view=…) now.
-        routeFromUrl();
-        await loadDomains();
-        await loadWhitelist();
+        // Первый экран — это последовательность запросов, и до неё пользователь
+        // смотрит в пустую страницу. Показываем ту же крутилку, что и на
+        // действиях: она сама не появится, если всё успело за 150 мс.
+        busyStart("Загружаем панель…");
+        try {
+          await fetchCurrentPanelUser();
+          loadEmptyGroupsFromSession();
+          // Статус и профили друг от друга не зависят — раньше они ждали друг
+          // друга по очереди. Оба трогают currentActiveChain, поэтому превью
+          // цепочки перерисовываем после обоих: кто бы ни ответил последним,
+          // имена хопов возьмутся уже из загруженных профилей.
+          await Promise.all([loadStatus(), loadProfiles()]);
+          renderChainPreview(currentActiveChain);
+          // Profiles are loaded — honor any deep link (?view=…) now.
+          routeFromUrl();
+        } finally {
+          busyEnd();
+        }
+        // Домены/белый список/RU-лист не нужны первому экрану: вкладка «Домены»
+        // грузит их заново при открытии. Не держим ими старт — пусть догружаются
+        // в фоне.
+        loadDomains();
+        loadWhitelist();
         loadRuList();
         setupLogAutoRefresh();
         startPingScheduler();

@@ -3191,6 +3191,82 @@ allvpn_off)
 
 # ==================== PROFILES ====================
 profiles_list)
+    # Этот ответ рисует первый экран, поэтому его скорость = скорость запуска
+    # панели. Шелл-цикл ниже тратил на КАЖДЫЙ профиль ~15 процессов (basename,
+    # 4×json_val = sed+head, 2×grep, 2×json_escape): на 106 профилях это ~1500
+    # форков и 3.5 с на busybox. Тот же ответ собирается одним запуском lua —
+    # чтение файлов, разбор JSON и экранирование делаются внутри процесса.
+    # Шелл-ветка осталась запасной: profiles_list — единственный эндпоинт, без
+    # которого панель вообще пустая, и терять её из-за сломанного cjson нельзя.
+    PL_TMP="/tmp/detour-profiles.$$"
+    lua - "$PLATFORM" "$AUTOSWITCH_EXCLUDE" "$SPEEDCHECK_EXCLUDE" \
+          "$(get_active_profile)" "$(get_active_chain)" \
+          "$SINGBOX_PROFILES_DIR"/*.json > "$PL_TMP" 2>/dev/null <<'LUA'
+local platform, ex_as, ex_sc, active, chain_csv = arg[1], arg[2], arg[3], arg[4], arg[5]
+if platform == "keenetic" then
+    package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
+end
+local ok, cjson = pcall(require, "cjson.safe")
+if not ok or not cjson then os.exit(1) end
+
+-- Списки исключений читаем ОДИН раз в множества: в шелл-версии на каждый
+-- профиль запускался свой grep по тем же двум файлам.
+local function read_set(path)
+    local set = {}
+    if not path or path == "" then return set end
+    local f = io.open(path, "r")
+    if not f then return set end
+    for line in f:lines() do
+        line = line:gsub("%s+$", "")
+        if line ~= "" then set[line] = true end
+    end
+    f:close()
+    return set
+end
+local no_autoswitch = read_set(ex_as)
+local no_speedcheck = read_set(ex_sc)
+
+-- Массивы собираем конкатенацией, а не одним cjson.encode всего ответа: пустую
+-- таблицу cjson отдал бы как {}, и панель упала бы на `profiles.map` там, где
+-- профилей ещё нет (свежий роутер).
+local parts = {}
+local i = 6
+while arg[i] do
+    local path = arg[i]
+    local id = path:match("([^/]+)%.json$")
+    local f = id and io.open(path, "rb")
+    if f then
+        local obj = cjson.decode(f:read("*a") or "") or {}
+        f:close()
+        local function str(v) return type(v) == "string" and v or "" end
+        parts[#parts + 1] = cjson.encode({
+            id = id,
+            type = str(obj.type),
+            name = str(obj.name),
+            group = str(obj.group),
+            routing_mode = str(obj.routing_mode),
+            autoswitch = not no_autoswitch[id],
+            speedcheck = not no_speedcheck[id],
+        })
+    end
+    i = i + 1
+end
+
+local chain = {}
+for item in tostring(chain_csv or ""):gmatch("[^,]+") do
+    chain[#chain + 1] = cjson.encode(item)
+end
+
+io.write('{"profiles":[', table.concat(parts, ","),
+         '],"active":', cjson.encode(active or ""),
+         ',"active_chain":[', table.concat(chain, ","), ']}')
+LUA
+    if [ -s "$PL_TMP" ]; then
+        cat "$PL_TMP"
+        rm -f "$PL_TMP"
+        exit 0
+    fi
+    rm -f "$PL_TMP"
     printf '{"profiles":['
     FIRST=1
     for f in "$SINGBOX_PROFILES_DIR"/*.json; do
