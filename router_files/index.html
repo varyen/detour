@@ -2623,26 +2623,72 @@
       }
 
       /* ===== TOAST ===== */
+      /* Сверху справа и ВЫШЕ модалки (.modal-overlay — 5000). Пока тосты лежали
+         на 1000 и снизу, любое сообщение из открытого окна уходило под оверлей:
+         операция падала молча. pointer-events снимаем с контейнера, иначе его
+         колонка перехватывала бы клики по правому краю страницы. */
       .toast-container {
         position: fixed;
-        bottom: 20px;
-        right: 20px;
-        z-index: 1000;
+        top: 16px;
+        right: 16px;
+        z-index: 10000;
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 10px;
+        pointer-events: none;
+        max-width: min(420px, calc(100vw - 32px));
       }
       .toast {
-        padding: 12px 18px;
+        pointer-events: auto;
+        position: relative;
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 13px 16px 13px 14px;
         border-radius: var(--radius);
-        font-size: 13px;
+        font-size: 13.5px;
+        line-height: 1.45;
         color: var(--text);
-        box-shadow: var(--shadow-md);
-        animation: slideIn 0.25s ease;
-        max-width: 380px;
+        box-shadow:
+          0 10px 30px -8px rgba(0, 0, 0, 0.45),
+          0 2px 8px -2px rgba(0, 0, 0, 0.3);
+        animation: toastIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+        overflow-wrap: anywhere;
+        border: 1px solid var(--border);
         border-left: 3px solid;
         background: var(--surface);
-        border: 1px solid var(--border);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+      }
+      .toast-icon {
+        flex: 0 0 auto;
+        width: 18px;
+        height: 18px;
+        margin-top: 1px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1;
+        color: var(--on-accent);
+      }
+      .toast-body {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      .toast.success .toast-icon {
+        background: var(--green);
+      }
+      .toast.error .toast-icon {
+        background: var(--red);
+      }
+      .toast.info .toast-icon {
+        background: var(--accent);
+      }
+      .toast.leaving {
+        animation: toastOut 0.22s ease forwards;
       }
       .toast.success {
         background: linear-gradient(
@@ -2676,6 +2722,28 @@
         to {
           transform: translateX(0);
           opacity: 1;
+        }
+      }
+      @keyframes toastIn {
+        from {
+          transform: translate3d(24px, -8px, 0) scale(0.96);
+          opacity: 0;
+        }
+        to {
+          transform: translate3d(0, 0, 0) scale(1);
+          opacity: 1;
+        }
+      }
+      @keyframes toastOut {
+        to {
+          transform: translate3d(24px, 0, 0) scale(0.98);
+          opacity: 0;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .toast,
+        .toast.leaving {
+          animation: none;
         }
       }
 
@@ -8210,20 +8278,38 @@
       }
 
       // ===== TOAST =====
+      // Единственное место, где рождаются тосты. Ошибке даём больше времени, чем
+      // подтверждению: её надо успеть прочитать, а «сохранено» считывается мельком.
+      // Клик закрывает досрочно.
+      var TOAST_ICON = { success: "✓", error: "!", info: "i" };
       function toast(msg, type) {
-        type = type || "info";
+        type = TOAST_ICON[type] ? type : "info";
         var c = document.getElementById("toasts");
+        if (!c) return;
         var t = document.createElement("div");
         t.className = "toast " + type;
-        t.textContent = msg;
-        c.appendChild(t);
-        setTimeout(function () {
-          t.style.opacity = "0";
-          t.style.transition = "opacity 0.3s";
+        var icon = document.createElement("span");
+        icon.className = "toast-icon";
+        icon.textContent = TOAST_ICON[type];
+        icon.setAttribute("aria-hidden", "true");
+        var body = document.createElement("div");
+        body.className = "toast-body";
+        body.textContent = msg;
+        t.appendChild(icon);
+        t.appendChild(body);
+        t.setAttribute("role", type === "error" ? "alert" : "status");
+        var closed = false;
+        function dismiss() {
+          if (closed) return;
+          closed = true;
+          t.classList.add("leaving");
           setTimeout(function () {
             t.remove();
-          }, 300);
-        }, 3000);
+          }, 220);
+        }
+        t.onclick = dismiss;
+        c.appendChild(t);
+        setTimeout(dismiss, type === "error" ? 7000 : 3500);
       }
 
       // Shown ONLY when the WAN port came up slower than it can do (see
@@ -13984,8 +14070,15 @@
       // меняется только имя/состав. Дальше цепочку можно включить одним кликом с
       // главного экрана или назначить целью маршрута.
       async function saveCurrentChain() {
-        if (editingChain.length < 2) {
-          toast("В цепочке должно быть минимум два хопа", "error");
+        // Хватает одного хопа. Требование «минимум два» выглядело логично для
+        // слова «цепочка», но запирало нужный сценарий: убрать последний хоп
+        // (скажем, WARP), оставив ту же сохранённую запись. Иначе пришлось бы
+        // удалять цепочку и переписывать маршруты, которые ссылаются на её id.
+        // Одиночный хоп для рендера — обычное дело: активация профиля идёт тем
+        // же путём (build_config с CSV из одного элемента). «Применить» его и
+        // так принимал — теперь и «Сохранить».
+        if (!editingChain.length) {
+          toast("Добавьте хотя бы один профиль", "error");
           return;
         }
         var editing = !!editingChainId;
