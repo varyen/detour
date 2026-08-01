@@ -27,6 +27,10 @@ DNS_PORT="${DETOUR_DNS_PORT:-5354}"
 ALLVPN_MARK="/opt/etc/detour/allvpn.enabled"   # «Все через VPN» (set by the panel)
 DNS_MARK="/opt/etc/detour/dns.enabled"         # detour dnsmasq up (set by S50detour-dns)
 ROUTE_MAP="${SINGBOX_ROUTEMAP_LIST:-/opt/etc/sing-box/route-map.list}"
+# Per-route-target inbound ports (target N → BASE+N). MUST match detour-api's
+# ROUTE_PORT_BASE: the CGI writes the listen port into the config, we point the
+# target's ipset at it. Literal (not SINGBOX_PORT+N) for exactly that reason.
+ROUTE_PORT_BASE=12400
 BLOCKED_EGRESS_LIST="${DETOUR_BLOCKED_EGRESS_LIST:-/opt/etc/detour/blocked-egress-ips.list}"
 
 # Extra inbound ifaces (besides LAN_IF) that get the same redirect — VPN
@@ -137,14 +141,31 @@ route_map_bool_option() {
     esac
 }
 
+# A route target is either a PROFILE or a saved CHAIN (chains.json) — the CGI
+# gives both a slot in route-map file order. Skipping chains here would leave
+# their sites without an ipset/REDIRECT (→ SNI-sniff only → leak into the active
+# VPN) and shift the numbering of every later profile target, pointing its ipset
+# at another target's inbound. Parity with sing-box.initd.
+chain_ids() {
+    _cf="${SINGBOX_CHAINS:-${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/chains.json}"
+    [ -f "$_cf" ] || return 0
+    tr ',' '\n' < "$_cf" 2>/dev/null | \
+        sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+route_target_exists() {
+    [ -f "${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/profiles/$1.json" ] && return 0
+    chain_ids | grep -qxF "$1"
+}
+
 route_map_slots() {
     [ -f "$ROUTE_MAP" ] || return 0
     n=0
     for id in $(route_map_targets); do
         route_map_section "$id" | grep -q . || continue
-        [ -f "${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/profiles/$id.json" ] || continue
+        route_target_exists "$id" || continue
         n=$((n + 1))
-        echo "$n $id $((SINGBOX_PORT + n)) singbox_t$n"
+        echo "$n $id $((ROUTE_PORT_BASE + n)) singbox_t$n"
     done
 }
 

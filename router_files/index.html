@@ -5077,6 +5077,7 @@
             >
               <textarea
                 id="udpvpn-list"
+                data-hostlist="port"
                 spellcheck="false"
                 style="
                   width: 100%;
@@ -5167,6 +5168,7 @@
               <textarea
                 class="domains"
                 id="domains-editor"
+                data-hostlist="1"
                 spellcheck="false"
                 placeholder="// Разблокировка&#10;sonic-world.ru&#10;199.232.188.158 // CDN&#10;&#10;// Telegram&#10;149.154.160.0/20&#10;91.108.4.0/22"
               ></textarea>
@@ -5181,6 +5183,7 @@
               <textarea
                 class="domains"
                 id="whitelist-editor"
+                data-hostlist="1"
                 spellcheck="false"
                 placeholder="// Исключения (не проксируются)&#10;// Банки&#10;sberbank.ru&#10;tinkoff.ru&#10;&#10;// Локальные ресурсы&#10;mail.ru"
               ></textarea>
@@ -5293,6 +5296,7 @@
               <textarea
                 class="domains"
                 id="rulist-exclude-editor"
+                data-hostlist="1"
                 spellcheck="false"
                 style="min-height: 120px"
                 placeholder="// Зарегистрированы на РФ, а стоят за рубежом&#10;5.101.82.0/24&#10;// 203.0.113.7"
@@ -5383,7 +5387,11 @@
               <code>sing-box</code>. Галка
               <strong>«Через активную цепочку»</strong> строит путь вида
               <code>текущий VPN → route-прокси/VPN</code> вместо прямого выхода
-              к указанной цели.
+              к указанной цели. В списке можно оставлять заметки: строка,
+              начинающаяся с <code>//</code> или <code>#</code>, игнорируется, и
+              так же обрезается «хвост» после них в конце строки
+              (<code>claude.ai // основной домен</code>). Повторы убираются при
+              сохранении — в списке остаются только уникальные записи.
             </p>
             <div class="flex-gap" style="margin-bottom: 8px">
               <div
@@ -5573,6 +5581,7 @@
             <textarea
               class="domains"
               id="zapret-domains-editor"
+              data-hostlist="1"
               spellcheck="false"
               placeholder="# YouTube&#10;www.youtube.com&#10;youtube.com&#10;m.youtube.com&#10;&#10;# LinkedIn&#10;www.linkedin.com&#10;linkedin.com&#10;&#10;# Discord&#10;discord.com&#10;discordapp.com"
             ></textarea>
@@ -5750,6 +5759,7 @@
             <textarea
               class="domains"
               id="hosts-dns-custom"
+              data-hostlist="1"
               spellcheck="false"
               placeholder="# свои записи&#10;1.2.3.4 example.com&#10;5.6.7.8 sub.example.org"
             ></textarea>
@@ -5972,6 +5982,7 @@
             </p>
             <textarea
               id="egress-block-editor"
+              data-hostlist="1"
               spellcheck="false"
               placeholder="203.0.113.7"
             ></textarea>
@@ -6941,6 +6952,8 @@
       var pendingSpeedcheckFlags = Object.create(null);
       var currentActiveChain = [];
       var currentChains = [];
+      // id цели маршрута → сколько хостов на неё ведёт (см. loadRouteTargetUsage).
+      var routeTargetUse = {};
       var editingChain = [];
       // id сохранённой цепочки, которую сейчас редактируем в конструкторе ("" =
       // новая цепочка). При сохранении в edit-режиме перезаписываем этот же id.
@@ -8536,7 +8549,32 @@
         } catch (e) {
           currentChains = [];
         }
+        await loadRouteTargetUsage();
         return currentChains;
+      }
+
+      // Сколько хостов ведёт на каждую цель маршрута (id профиля/цепочки → N).
+      // Нужно, чтобы список цепочек честно показывал «эта цепочка уже работает —
+      // как цель маршрута», иначе кнопка «Сделать основной» читается как «маршрут
+      // выключен». Разбираем в ОТДЕЛЬНУЮ структуру, а не в routeRules: там могут
+      // лежать несохранённые правки вкладки «Маршруты».
+      async function loadRouteTargetUsage() {
+        try {
+          var d = await api("route_map");
+          var use = {};
+          parseRouteMapSections(d.routemap || "").forEach(function (rule) {
+            var hosts = String(rule.text || "")
+              .split("\n")
+              .map(function (l) {
+                return l.replace(/\/\/.*$/, "").replace(/#.*$/, "").trim();
+              })
+              .filter(Boolean);
+            if (hosts.length) use[rule.id] = hosts.length;
+          });
+          routeTargetUse = use;
+        } catch (e) {
+          /* бейдж — украшение, молча оставляем прошлое значение */
+        }
       }
 
       async function loadProfiles() {
@@ -10781,6 +10819,115 @@
           return String(profile.uri).trim();
         return null;
       }
+
+      // ===== ВСТАВКА ССЫЛКИ В СПИСОК ХОСТОВ =====
+      // Списки маршрутов/доменов ждут ХОСТ, а из адресной строки копируется целый
+      // URL («https://example.com/page?x=1»). Приводим к хосту ТОЛЬКО в момент
+      // вставки: набранный руками текст не трогаем, чтобы не мешать вводу. Поля
+      // помечаются data-hostlist ("port" — формат host:port, порт сохраняем).
+      var HOSTLIST_DOMAIN_RE = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/;
+      var HOSTLIST_IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+      function hostFromPastedLine(line, keepPort) {
+        var raw = String(line);
+        var s = raw.trim();
+        if (!s || /^(\/\/|#)/.test(s)) return raw;
+        // IP/CIDR — «/» тут значит префикс, а не путь: не трогаем.
+        if (/^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(s)) return raw;
+        // Есть смысл вмешиваться, только если это похоже на ссылку.
+        if (!/:\/\//.test(s) && s.indexOf("/") === -1) return raw;
+        var v = s.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "");
+        v = v.split(/[/?#]/)[0]; // путь, query, якорь
+        var at = v.lastIndexOf("@"); // user:pass@host
+        if (at !== -1) v = v.slice(at + 1);
+        if (v.charAt(0) === "[") return raw; // IPv6-литерал — оставляем как есть
+        var port = "";
+        var colon = v.indexOf(":");
+        if (colon !== -1) {
+          port = v.slice(colon);
+          v = v.slice(0, colon);
+        }
+        v = v.replace(/\.+$/, "").toLowerCase();
+        if (!HOSTLIST_DOMAIN_RE.test(v) && !HOSTLIST_IPV4_RE.test(v)) return raw;
+        if (keepPort && /^:\d+$/.test(port)) return v + port;
+        return v;
+      }
+
+      function normalizePastedHostList(text, keepPort) {
+        return String(text)
+          .replace(/\r/g, "")
+          .split("\n")
+          .map(function (line) {
+            return hostFromPastedLine(line, keepPort);
+          })
+          .join("\n");
+      }
+
+      // Убрать повторы в списке хостов. Комментарии (`//`, `#`) и пустые строки —
+      // часть заметок пользователя, их не трогаем и не считаем; сравниваем только
+      // сами записи, без инлайн-комментария и без учёта регистра (домены
+      // регистронезависимы). `*.a.ru` и `a.ru` НЕ схлопываем — это разные правила
+      // (суффикс против точного хоста). Возвращает текст и число выброшенных строк.
+      function dedupeHostListText(text) {
+        var seen = new Set();
+        var removed = 0;
+        var lines = String(text)
+          .replace(/\r/g, "")
+          .split("\n")
+          .filter(function (line) {
+            var s = line.trim();
+            if (!s || /^(\/\/|#)/.test(s)) return true;
+            var key = s
+              .replace(/\/\/.*$/, "")
+              .replace(/#.*$/, "")
+              .trim()
+              .toLowerCase()
+              .replace(/\.+$/, "");
+            if (!key) return true;
+            if (seen.has(key)) {
+              removed++;
+              return false;
+            }
+            seen.add(key);
+            return true;
+          });
+        return { text: lines.join("\n"), keys: seen, removed: removed };
+      }
+
+      // Вставляем через execCommand, чтобы сохранить историю undo (Ctrl+Z вернёт
+      // поле к прежнему виду, как при обычной вставке).
+      function insertTextAtCursor(el, text) {
+        el.focus();
+        // execCommand сам шлёт input; ручная ветка — нет, поэтому шлём событие
+        // сами (на нём висит сохранение правила маршрута в модель).
+        if (document.execCommand && document.execCommand("insertText", false, text))
+          return;
+        var start = el.selectionStart || 0;
+        var end = el.selectionEnd || 0;
+        var v = el.value;
+        el.value = v.slice(0, start) + text + v.slice(end);
+        var pos = start + text.length;
+        el.setSelectionRange(pos, pos);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
+      document.addEventListener("paste", function (e) {
+        var el = e.target;
+        if (!el || !el.closest) return;
+        var field = el.closest("[data-hostlist]");
+        if (!field || field !== el) return;
+        var cb = e.clipboardData || window.clipboardData;
+        if (!cb) return;
+        var raw = cb.getData("text");
+        if (!raw) return;
+        var out = normalizePastedHostList(
+          raw,
+          field.getAttribute("data-hostlist") === "port",
+        );
+        if (out === raw.replace(/\r/g, "")) return; // нечего чинить — обычная вставка
+        e.preventDefault();
+        insertTextAtCursor(field, out);
+      });
 
       // ===== CLIPBOARD (LAN panel runs over plain HTTP → navigator.clipboard is often absent) =====
       function fallbackCopy(text) {
@@ -13557,6 +13704,10 @@
               })
               .join(" → ");
             var active = chainMatchesActive(c);
+            // Цепочка может РАБОТАТЬ, не будучи основной: если она назначена целью
+            // маршрута, по ней уже ходят перечисленные там сайты. Без этого бейджа
+            // кнопка рядом читается как «маршрут выключен».
+            var used = routeTargetUse[c.id] || 0;
             return (
               '<div class="saved-chain-row' +
               (active ? " active" : "") +
@@ -13564,7 +13715,14 @@
               '<div class="saved-chain-info">' +
               '<span class="saved-chain-name">🔗 ' +
               escapeHtml(c.name || c.id) +
-              (active ? ' <span class="tag">активна</span>' : "") +
+              (active ? ' <span class="tag">основная</span>' : "") +
+              (used
+                ? ' <span class="tag" title="Цепочка уже работает как цель маршрута: ' +
+                  used +
+                  " сайт(ов) из «Маршрутов» идут через неё. Основной цепочкой её делать не нужно.\">в маршрутах: " +
+                  used +
+                  "</span>"
+                : "") +
               "</span>" +
               '<span class="saved-chain-hops">' +
               preview +
@@ -13575,7 +13733,7 @@
                 ? ""
                 : '<button class="btn" onclick="activateSavedChain(\'' +
                   c.id +
-                  "')\" title=\"Сделать активной\">Включить</button>") +
+                  "')\" title=\"Пустить через эту цепочку ВЕСЬ трафик (кроме отдельных маршрутов и белого списка). Для отдельных сайтов цепочку не включают — её назначают целью во вкладке «Маршруты».\">Сделать основной</button>") +
               '<button class="btn" onclick="editSavedChain(\'' +
               c.id +
               "')\" title=\"Изменить порядок и состав хопов\">✎</button>" +
@@ -13586,7 +13744,12 @@
             );
           });
         el.innerHTML =
-          '<div class="saved-chains-title">Цепочки VPN</div>' + rows.join("");
+          '<div class="saved-chains-title">Цепочки VPN</div>' +
+          '<div class="helper-text" style="margin:-4px 0 8px">' +
+          "«Основная» — через неё идёт весь трафик. Чтобы пустить по цепочке только " +
+          "отдельные сайты, назначь её целью во вкладке «Маршруты» — основной делать не нужно." +
+          "</div>" +
+          rows.join("");
       }
 
       async function activateSavedChain(id) {
@@ -13827,10 +13990,10 @@
           renderChainsList();
           renderRouteProfileSelect();
           if (wasActive) {
-            toast(
-              "Это активная цепочка — нажмите «Включить», чтобы применить изменения",
-              "info",
-            );
+            // Сервер сам пересобирает конфиг, если цепочка была основной или целью
+            // маршрута (chain_save) — просто подтягиваем свежий статус.
+            toast("Цепочка была в работе — изменения применены", "info");
+            loadStatus();
           }
         } catch (e) {
           toast(e.message, "error");
@@ -16944,7 +17107,11 @@
               return;
             }
             if (!current) return;
-            var meta = line.match(/^\s*\/\/\s*meta:\s*(.*?)\s*$/);
+            // Только НАШУ служебную строку, а не любую заметку человека: без
+            // этой оговорки «// meta: напомнить про X» съедалось при перезагрузке.
+            var meta = line.match(
+              /^\s*\/\/\s*meta:\s*((?:strict|via_chain)\s*=.*?)\s*$/,
+            );
             if (meta) {
               parseRouteMeta(meta[1], current);
               return;
@@ -17101,8 +17268,9 @@
           var textarea = document.createElement("textarea");
           textarea.className = "domains";
           textarea.spellcheck = false;
+          textarea.setAttribute("data-hostlist", "1");
           textarea.placeholder =
-            "claude.ai\napi.anthropic.com\n160.79.104.0/21";
+            "// заметка к блоку\nclaude.ai\napi.anthropic.com // и тут можно\n*.claudeusercontent.com\n160.79.104.0/21";
           textarea.value = rule.text || "";
           textarea.oninput = function () {
             rule.text = textarea.value;
@@ -17262,6 +17430,42 @@
             "error",
           );
           return;
+        }
+        // Чистим повторы ДО отправки и сразу перерисовываем поля, чтобы человек
+        // видел ровно то, что сохранилось, а не догадывался.
+        var removedTotal = 0;
+        var keysBySection = [];
+        routeRules.forEach(function (rule) {
+          var r = dedupeHostListText(rule.text || "");
+          if (r.removed) {
+            rule.text = r.text;
+            removedTotal += r.removed;
+          }
+          keysBySection.push({ id: rule.id, keys: r.keys });
+        });
+        if (removedTotal) {
+          renderRouteRules();
+          toast("Убраны повторы: строк — " + removedTotal, "info");
+        }
+        // Один и тот же хост в ДВУХ маршрутах — не ошибка ввода, а тихо мёртвая
+        // запись: сработает первое правило, второе никогда. Молчать про это нельзя.
+        var clashes = [];
+        keysBySection.forEach(function (sec, i) {
+          sec.keys.forEach(function (k) {
+            for (var j = 0; j < i; j++) {
+              if (keysBySection[j].keys.has(k) && clashes.indexOf(k) === -1)
+                clashes.push(k);
+            }
+          });
+        });
+        if (clashes.length) {
+          toast(
+            "В нескольких маршрутах сразу: " +
+              clashes.slice(0, 3).join(", ") +
+              (clashes.length > 3 ? " и ещё " + (clashes.length - 3) : "") +
+              " — сработает первый маршрут сверху",
+            "info",
+          );
         }
         var text = serializeRouteMapSections();
         var btn = document.getElementById("btn-save-routemap");

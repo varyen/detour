@@ -17,6 +17,15 @@ SINGBOX_CHAINS="/etc/sing-box/chains.json"
 # so a client hard-pinned to the SAME upstream proxy gets the panel's routing
 # instead of a broken double-proxy wrap. Empty/absent = feature off.
 SINGBOX_INTERCEPT_MAP="/etc/sing-box/intercept.map"
+# Base for the per-route-target inbound ports (target N listens on BASE+N). Must
+# match sing-box.initd/50-detour.sh — the CGI names the port, the firewall points
+# the target's ipset at it. Kept away from 12345 (default inbound) and 12350
+# (tproxy-udp): the old 12345+N range hit 12350 on the fifth route target and
+# sing-box rejected the whole config for a duplicate listen port.
+ROUTE_PORT_BASE=12400
+# То же для UDP-инбаундов целей маршрута (цель N → BASE+N, tproxy). Отдельная
+# база, потому что у цели два инбаунда: redirect для TCP и tproxy для UDP.
+ROUTE_UDP_PORT_BASE=12500
 SINGBOX_LOG="/var/log/sing-box.log"
 SINGBOX_INITD="/etc/init.d/sing-box"
 SINGBOX_SETTINGS="/etc/sing-box/settings.json"
@@ -1021,10 +1030,11 @@ route_tag_for() {
 compute_route_extras() {
     local chain="$1"
     local target tag payload ptype dom_arr dom_exact_objs ip_arr robj rule_objs host_override
-    local idx inport in_tag fallback_objs via_chain strict detour thops
+    local idx inport in_tag fallback_objs via_chain strict detour thops udp_mode
     RX_OB=""; RX_EP=""; RX_RULES=""; RX_INBOUNDS=""
     rule_objs=""
     fallback_objs=""
+    udp_mode=$(udp_vpn_mode_val)
     idx=0
     for target in $(route_map_targets); do
         route_map_section "$target" | grep -q . || continue
@@ -1037,7 +1047,7 @@ compute_route_extras() {
             [ -n "$thops" ] || continue
         fi
         idx=$((idx + 1))
-        inport=$((12345 + idx))
+        inport=$((ROUTE_PORT_BASE + idx))
         in_tag="in_rt_$idx"
         strict=$(route_map_bool_option "$target" strict 1)
         if [ -n "$thops" ]; then
@@ -1105,6 +1115,23 @@ compute_route_extras() {
             # still go to the route target even when SNI/Host sniffing failed and
             # the exact-host override rules above did not match.
             robj="{\"action\":\"route\",\"inbound\":[\"$in_tag\"],\"outbound\":\"$tag\"}"
+            if [ -n "$fallback_objs" ]; then fallback_objs="$fallback_objs,$robj"; else fallback_objs="$robj"; fi
+        fi
+        # UDP/QUIC этой же цели. TCP приходит на свой инбаунд по ipset и потому
+        # детерминирован, а UDP до сих пор держался на сниффинге QUIC ClientHello:
+        # не распозналось (фрагментированный hello, ECH, не-QUIC протокол) — пакет
+        # уходил в route.final, то есть в основной VPN. Свой tproxy-инбаунд снимает
+        # догадки: firewall шлёт сюда ТОЛЬКО ipset этой цели, поэтому правило по
+        # inbound прибивает трафик к ней жёстко. Правило ставим всегда, когда есть
+        # инбаунд (не только для strict): у UDP нет «мягкого» пути — фолбэк в
+        # route.final это и есть та самая утечка.
+        # strict-цель получает инбаунд даже при выключенном «UDP через VPN» —
+        # обещание «не течёт» иначе не выполняется (initd ставит для неё правила).
+        # Keenetic: TPROXY нет (udp_vpn_mode_val там всегда off) — не эмитим.
+        if [ "$PLATFORM" != keenetic ] && { [ "$udp_mode" != off ] || [ "$strict" = "1" ]; }; then
+            RX_INBOUNDS="$RX_INBOUNDS,
+    {\"type\":\"tproxy\",\"tag\":\"in_rt_udp_$idx\",\"listen\":\"::\",\"listen_port\":$((ROUTE_UDP_PORT_BASE + idx)),\"network\":\"udp\"}"
+            robj="{\"action\":\"route\",\"inbound\":[\"in_rt_udp_$idx\"],\"outbound\":\"$tag\"}"
             if [ -n "$fallback_objs" ]; then fallback_objs="$fallback_objs,$robj"; else fallback_objs="$robj"; fi
         fi
     done
@@ -1432,7 +1459,7 @@ build_config() {
             fi
             route_map_section "$target" | grep -q . || continue
             idx=$((idx + 1))
-            port=$((12345 + idx))
+            port=$((ROUTE_PORT_BASE + idx))
             tmp_t="${SINGBOX_CONFIG_DIR}/config-$target.json.tmp.$$"
             if [ -n "$thops" ]; then
                 # именованная цепочка задаёт порядок сама (см. compute_route_extras)
@@ -3361,8 +3388,34 @@ chain_save)
     CH_ID=$(printf '%s' "$CINFO" | cut -f1)
     CH_NAME=$(printf '%s' "$CINFO" | cut -f2)
     CH_HOPS=$(printf '%s' "$CINFO" | cut -f3)
+    # Порядок хопов ДО правки: active_chain хранит CSV хопов, а не id цепочки,
+    # поэтому «была ли она основной» можно спросить только по старому значению.
+    CH_OLD_HOPS=$(chain_hops_csv "$CH_ID")
     if ! CH_ERR=$(chain_store_save "$CH_ID" "$CH_NAME" "$CH_HOPS"); then
         json_err "$(printf '%s' "$CH_ERR" | json_escape)"; exit 0
+    fi
+    # Цепочка могла быть уже В РАБОТЕ — основной или целью маршрута. Раньше
+    # сохранение только меняло chains.json: конфиг оставался со старыми хопами,
+    # панель показывала новые, а трафик молча шёл прежним путём. Пересобираем.
+    CH_NEW_HOPS=$(chain_hops_csv "$CH_ID")
+    CH_APPLY_CHAIN=""
+    if [ -n "$CH_OLD_HOPS" ] && [ "$(get_active_chain)" = "$CH_OLD_HOPS" ]; then
+        CH_APPLY_CHAIN="$CH_NEW_HOPS"
+    elif route_map_targets | grep -qx "$CH_ID"; then
+        CH_APPLY_CHAIN=$(get_active_chain)
+    fi
+    if [ -n "$CH_APPLY_CHAIN" ]; then
+        SBMODE=$(get_singbox_mode)
+        BUILD_ERR=$(build_config "$SBMODE" "$CH_APPLY_CHAIN")
+        if [ $? -ne 0 ]; then
+            json_err "цепочка сохранена, но конфиг не собрался: $(printf '%s' "$BUILD_ERR" | json_escape)"
+            exit 0
+        fi
+        write_settings "$CH_APPLY_CHAIN" "$(resolve_routing_mode_for_chain "$CH_APPLY_CHAIN")" \
+            "$(collect_upstream_ips)" "$SBMODE"
+        # Домены/ipset не менялись — хватает быстрого reconfigure (fail-closed).
+        $SINGBOX_INITD reconfigure >/dev/null 2>&1
+        sleep 3
     fi
     json_ok
     ;;

@@ -120,12 +120,28 @@ route_map_bool_option() {
     esac
 }
 
+# A route target is either a PROFILE or a saved CHAIN (chains.json) — the CGI
+# gives both a slot in route-map file order. Skipping chains here would leave
+# their sites without an ipset (→ SNI-sniff only → leak into the active VPN) and
+# shift the numbering of every later profile target. Parity with sing-box.initd.
+chain_ids() {
+    _cf="${SINGBOX_CHAINS:-${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/chains.json}"
+    [ -f "$_cf" ] || return 0
+    tr ',' '\n' < "$_cf" 2>/dev/null | \
+        sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+route_target_exists() {
+    [ -f "${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/profiles/$1.json" ] && return 0
+    chain_ids | grep -qxF "$1"
+}
+
 route_map_slots() {
     [ -f "$SINGBOX_ROUTEMAP_LIST" ] || return 0
     n=0
     for id in $(route_map_targets); do
         route_map_section "$id" | grep -q . || continue
-        [ -f "${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/profiles/$id.json" ] || continue
+        route_target_exists "$id" || continue
         n=$((n + 1))
         echo "$n $id singbox_t$n"
     done

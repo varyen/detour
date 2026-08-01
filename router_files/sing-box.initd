@@ -10,6 +10,7 @@ CONFIG_DIR=/etc/sing-box
 DOMAINS_FILE=/etc/sing-box/proxy-domains.list
 WHITELIST_FILE=/etc/sing-box/whitelist-domains.list
 ROUTE_MAP=/etc/sing-box/route-map.list
+CHAINS_FILE=/etc/sing-box/chains.json
 SETTINGS_FILE=/etc/sing-box/settings.json
 # Self-proxy "smart intercept" map (written by the CGI's compute_intercept_inbounds):
 # one "<server_ip>\t<server_port>\t<local_socks_inbound_port>" line per intercepted
@@ -51,6 +52,14 @@ FASTSWITCH_FLAG=/tmp/.singbox-fastswitch
 # exact-match `ip rule` их бы промахнул.
 UDP_VPN_LIST=/etc/sing-box/udp-vpn.list   # хосты/подсети/домены/порты → VPN (list)
 UDP_VPN_TPROXY_PORT=12350                 # sing-box tproxy-udp inbound (config.json)
+# Base for per-route-target inbound ports (target N → BASE+N). MUST match
+# detour-api's ROUTE_PORT_BASE — the CGI writes the listen port into the config,
+# this script points the target's ipset at it. Away from 12345/12350: the old
+# 12345+N range collided with tproxy-udp on the fifth target.
+ROUTE_PORT_BASE=12400
+# То же для UDP-инбаундов целей маршрута (tproxy, цель N → BASE+N). Должен
+# совпадать с ROUTE_UDP_PORT_BASE в detour-api.
+ROUTE_UDP_PORT_BASE=12500
 UDP_VPN_MARK=0x1e                         # masked fwmark → local-delivery table
 UDP_VPN_TABLE=106                         # policy-routing table (local default dev lo)
 UDP_VPN_CHAIN=UDP_VPN                     # mangle-цепочка с TPROXY-правилами
@@ -353,6 +362,25 @@ route_map_bool_option() {
     esac
 }
 
+# Ids of the saved named chains (chains.json), one per line.
+chain_ids() {
+    [ -f "$CHAINS_FILE" ] || return 0
+    tr ',' '\n' < "$CHAINS_FILE" 2>/dev/null | \
+        sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+# A route target is either a PROFILE or a saved CHAIN — the CGI resolves both
+# (compute_route_extras / the multi-instance loop) and assigns them a slot in
+# route-map file order. Accepting only profiles here used to (a) drop the chain's
+# ipset+REDIRECT entirely, so its sites fell back to SNI-sniffing alone and
+# leaked into the active VPN whenever the sniff came up empty, and (b) shift the
+# numbering of every later profile target, pointing its ipset at another
+# target's inbound.
+route_target_exists() {
+    [ -f "$CONFIG_DIR/profiles/$1.json" ] && return 0
+    chain_ids | grep -qxF "$1"
+}
+
 # Emit "N id port ipset" for every non-empty route target. Port/ipset numbering is
 # shared by the CGI and firewall, so a route block keeps a stable redirect port
 # within the current file order in both single- and multi-instance modes.
@@ -361,9 +389,9 @@ route_map_slots() {
     local n=0 id
     for id in $(route_map_targets); do
         route_map_section "$id" | grep -q . || continue
-        [ -f "$CONFIG_DIR/profiles/$id.json" ] || continue
+        route_target_exists "$id" || continue
         n=$((n + 1))
-        echo "$n $id $((12345 + n)) singbox_t$n"
+        echo "$n $id $((ROUTE_PORT_BASE + n)) singbox_t$n"
     done
 }
 
@@ -477,6 +505,27 @@ udp_vpn_port_rules() {
 # != off), so the daemon is the gate; here we only (un)install firewall + routing.
 # The $UDP_VPN_IPSET set is created+populated in start_service (before the dnsmasq
 # restart) so domain entries resolve; here we just reference it.
+# TPROXY UDP цели маршрута в ЕЁ tproxy-инбаунд (ROUTE_UDP_PORT_BASE+N), чтобы QUIC
+# размеченного сайта шёл по маршруту, а не зависел от удачного сниффа ClientHello
+# (не распозналось → route.final = активный VPN, то есть утечка). Порядок вызова
+# важен: правила ставятся выше whitelist-RETURN и catch-all.
+# mode=off — только strict-цели: их обещание «не течёт» действует и при выключенном
+# «UDP через VPN» (CGI ровно по этому же условию рисует им инбаунд).
+# Только single-режим: в multi у каждой цели свой процесс и своя нумерация портов,
+# UDP-инбаундов там нет — правило било бы в никуда.
+udp_vpn_target_rules() {
+    local mode="$1" n id port ipset
+    [ "$(get_singbox_mode)" = single ] || return 0
+    { if [ "$mode" = off ]; then route_map_strict_slots; else route_map_slots; fi; } | \
+    while read -r n id port ipset; do
+        [ -n "$ipset" ] || continue
+        ipset create "$ipset" hash:net -exist
+        iptables -t mangle -A "$UDP_VPN_CHAIN" -p udp -m set --match-set "$ipset" dst \
+            -j TPROXY --on-ip 127.0.0.1 --on-port "$((ROUTE_UDP_PORT_BASE + n))" \
+            --tproxy-mark "$UDP_VPN_MARK/$UDP_VPN_MARK"
+    done
+}
+
 udp_vpn_up() {
     local mode="$1"
     modprobe nft_tproxy 2>/dev/null; modprobe xt_TPROXY 2>/dev/null
@@ -514,6 +563,11 @@ udp_vpn_up() {
             [ -n "$ip" ] && iptables -t mangle -A "$UDP_VPN_CHAIN" -d "$ip" -j RETURN
         done
     fi
+
+    # Цели маршрута — СРАЗУ после исключений: явный маршрут обязан выиграть и у
+    # whitelist-RETURN, и у catch-all ниже. Без этого QUIC размеченного сайта
+    # уходил в общий tproxy-инбаунд и дальше в route.final = основной VPN.
+    udp_vpn_target_rules "$mode"
 
     if [ "$mode" = all ]; then
         # Keep DNS direct/local so the panel's domain routing + ipset population
@@ -569,7 +623,13 @@ udp_vpn_down() {
 # the mode off then restarting (incl. KEEPFW) cleanly removes stale rules.
 udp_vpn_apply() {
     local m=$(udp_vpn_mode)
-    if [ "$m" = off ]; then udp_vpn_down; else udp_vpn_up "$m"; fi
+    # «UDP через VPN» выключен, но строгий маршрут есть → цепочку всё равно ставим,
+    # только с правилами его целей: иначе строгий маршрут течёт по QUIC.
+    if [ "$m" = off ] && [ -z "$(route_map_strict_slots)" ]; then
+        udp_vpn_down
+    else
+        udp_vpn_up "$m"
+    fi
 }
 
 start_service() {
@@ -872,6 +932,13 @@ stop_service() {
             iptables -t nat -I PREROUTING 1 -i "$VIF" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
         done
     done
+
+    # То же для UDP строгих целей: udp_vpn_down выше снял всю цепочку, поднимаем её
+    # заново в режиме "off" — там остаются ТОЛЬКО правила strict-целей. QUIC
+    # размеченного сайта упрётся в мёртвый порт (fail-closed), а не уйдёт напрямую.
+    if [ -n "$(route_map_strict_slots)" ]; then
+        udp_vpn_up off
+    fi
 
     close_port_lan
 
