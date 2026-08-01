@@ -6870,6 +6870,20 @@
           интернетом.
         </div>
         <div id="chain-builder-list" class="chain-builder-list"></div>
+        <div style="margin-top: 12px">
+          <label for="chain-name-input">Название цепочки</label>
+          <input
+            id="chain-name-input"
+            type="text"
+            spellcheck="false"
+            placeholder="например: Германия → WARP"
+            style="width: 100%"
+          />
+          <div class="helper-text">
+            Под этим именем цепочка появится в списке и в выборе цели маршрута.
+            Менять можно в любой момент — id не меняется, маршруты не слетают.
+          </div>
+        </div>
         <div class="modal-footer">
           <button class="btn" onclick="closeChainModal()">Отмена</button>
           <button
@@ -13745,7 +13759,7 @@
                   "')\" title=\"Пустить через эту цепочку ВЕСЬ трафик (кроме отдельных маршрутов и белого списка). Для отдельных сайтов цепочку не включают — её назначают целью во вкладке «Маршруты».\">Сделать основной</button>") +
               '<button class="btn" onclick="editSavedChain(\'' +
               c.id +
-              "')\" title=\"Изменить порядок и состав хопов\">✎</button>" +
+              "')\" title=\"Переименовать цепочку, изменить порядок и состав хопов\">✎</button>" +
               '<button class="btn danger" onclick="deleteSavedChain(\'' +
               c.id +
               "')\" title=\"Удалить цепочку\">✕</button>" +
@@ -13797,6 +13811,21 @@
         }
       }
 
+      // Имя по умолчанию для новой цепочки — перечисление хопов по порядку.
+      function defaultChainName() {
+        return editingChain
+          .map(function (id) {
+            var m = getProfileMeta(id);
+            return m ? m.name : id;
+          })
+          .join(" → ");
+      }
+
+      function setChainNameInput(value) {
+        var el = document.getElementById("chain-name-input");
+        if (el) el.value = value || "";
+      }
+
       function showChainModal() {
         editingChainId = "";
         editingChainName = "";
@@ -13804,6 +13833,7 @@
           ? currentActiveChain.slice()
           : [];
         setChainModalTitle("🔗 Цепочка VPN / Proxy");
+        setChainNameInput(defaultChainName());
         syncChainProfilePicker();
         renderChainEditor();
         document.getElementById("chain-modal").style.display = "flex";
@@ -13824,9 +13854,12 @@
         editingChainName = chain.name || chain.id;
         editingChain = (Array.isArray(chain.hops) ? chain.hops : []).slice();
         setChainModalTitle("🔗 Редактирование: " + editingChainName);
+        setChainNameInput(editingChainName);
         syncChainProfilePicker();
         renderChainEditor();
         document.getElementById("chain-modal").style.display = "flex";
+        var el = document.getElementById("chain-name-input");
+        if (el) el.focus();
       }
 
       function setChainModalTitle(text) {
@@ -13837,6 +13870,7 @@
       function closeChainModal() {
         editingChainId = "";
         editingChainName = "";
+        setChainNameInput("");
         document.getElementById("chain-modal").style.display = "none";
       }
 
@@ -13955,22 +13989,16 @@
           return;
         }
         var editing = !!editingChainId;
-        var defaultName = editing
-          ? editingChainName
-          : editingChain
-              .map(function (id) {
-                var m = getProfileMeta(id);
-                return m ? m.name : id;
-              })
-              .join(" → ");
-        var name = prompt(
-          editing ? "Новое название цепочки:" : "Название цепочки:",
-          defaultName,
-        );
-        if (name === null) return;
-        name = name.trim();
+        // Имя берём из поля в самой модалке, а не из window.prompt: браузер после
+        // нескольких диалогов предлагает «блокировать окна этой страницы», и тогда
+        // prompt молча возвращает null — сохранение отваливалось без единого
+        // сообщения, будто запрос и не уходил.
+        var nameInput = document.getElementById("chain-name-input");
+        var name = String((nameInput && nameInput.value) || "").trim();
+        if (!name) name = defaultChainName();
         if (!name) {
-          toast("Введите название", "error");
+          toast("Введите название цепочки", "error");
+          if (nameInput) nameInput.focus();
           return;
         }
         // Новая цепочка получает id из имени; при редактировании id не трогаем.
