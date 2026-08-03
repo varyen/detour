@@ -1423,6 +1423,32 @@ EOF
     return 0
 }
 
+# Hops of a chain CSV whose profile file is absent (space-separated). Used to turn
+# the opaque "bad chain?" into an actionable reason when the active profile was
+# deleted out from under settings.json (e.g. a subscription refresh dropped the
+# active upstream node), which otherwise fails EVERY config rebuild.
+chain_missing_profiles() {
+    local csv pname old_ifs miss=""
+    csv=$(normalize_profile_list "$1")
+    old_ifs="$IFS"; IFS=','; set -- $csv; IFS="$old_ifs"
+    for pname in "$@"; do
+        [ -n "$pname" ] || continue
+        [ -f "$SINGBOX_PROFILES_DIR/$pname.json" ] || miss="${miss:+$miss }$pname"
+    done
+    printf '%s' "$miss"
+}
+
+# $1 = chain CSV that failed to render, $2 = generic fallback reason. Names the
+# missing profile(s) when that is why the render failed.
+render_fail_reason() {
+    local miss; miss=$(chain_missing_profiles "$1")
+    if [ -n "$miss" ]; then
+        printf 'профиль недоступен: %s (активный профиль удалён — выберите другой)' "$miss"
+    else
+        printf '%s' "$2"
+    fi
+}
+
 # Build all sing-box config(s) for the given mode + chain. Writes to temp files,
 # validates EVERY config with `sing-box check`, then commits atomically. On any
 # failure prints a reason to stdout, returns 1, and leaves live configs intact.
@@ -1442,7 +1468,7 @@ build_config() {
         rm -f "$SINGBOX_INTERCEPT_MAP"
         # Default instance: active chain only, route rules suppressed.
         if ! render_chain_config "$chain" "" "" "" 12345 > "$tmp_default"; then
-            rm -f "$tmp_default"; echo "failed to render default config (bad chain?)"; return 1
+            rm -f "$tmp_default"; render_fail_reason "$chain" "failed to render default config (bad chain?)"; echo; return 1
         fi
         err=$($SINGBOX_BIN check -c "$tmp_default" 2>&1)
         if [ $? -ne 0 ]; then
@@ -1472,7 +1498,7 @@ build_config() {
             if ! render_chain_config "$target_chain" "" "" "" "$port" > "$tmp_t"; then
                 for pair in $commit_list; do rm -f "${pair%%:*}"; done
                 rm -f "$tmp_t"
-                echo "failed to render config for target $target"; return 1
+                render_fail_reason "$target_chain" "failed to render config for target $target"; echo; return 1
             fi
             err=$($SINGBOX_BIN check -c "$tmp_t" 2>&1)
             if [ $? -ne 0 ]; then
@@ -1500,7 +1526,7 @@ build_config() {
             fi
         fi
         if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$route_rules" 12345 redirect "$RX_INBOUNDS$IX_INBOUNDS" > "$tmp_default"; then
-            rm -f "$tmp_default"; echo "failed to render config (bad chain?)"; return 1
+            rm -f "$tmp_default"; render_fail_reason "$chain" "failed to render config (bad chain?)"; echo; return 1
         fi
         err=$($SINGBOX_BIN check -c "$tmp_default" 2>&1)
         if [ $? -ne 0 ]; then

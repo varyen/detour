@@ -38,6 +38,8 @@ local SUBS_DIR   = OPT .. "/etc/detour/subscriptions"
 local LEGACY_CFG = OPT .. "/etc/detour/subscription.json"
 local PROFILES   = OPT .. "/etc/sing-box/profiles"
 local WHITELIST  = OPT .. "/etc/sing-box/whitelist-domains.list"
+local SETTINGS   = OPT .. "/etc/sing-box/settings.json"
+local CHAINS     = OPT .. "/etc/sing-box/chains.json"
 local STATE_DIR  = OPT .. "/var/state"
 local STATE_FILE = STATE_DIR .. "/subscription-refresh.json"
 
@@ -70,6 +72,41 @@ end
 local function write_state(tbl)
     os.execute("mkdir -p " .. STATE_DIR)
     write_atomic(STATE_FILE, cjson.encode(tbl) or "{}", "0644")
+end
+
+-- Profile ids that must NEVER be pruned even when they vanish upstream: the
+-- active chain / active profile and every hop of a saved chain. Deleting one of
+-- these leaves settings.json pointing at a missing profile file, and then EVERY
+-- build_config (profile switch, route-map save, health auto-switch) fails with
+-- the opaque "failed to render config (bad chain?)". Mirrors the guard in
+-- detour-api's profile_delete. Better to keep a stale-but-present profile than
+-- to orphan the active pointer.
+local function protected_profile_ids()
+    local set = {}
+    local raw = read_all(SETTINGS)
+    local s = raw and cjson.decode(raw)
+    if type(s) == "table" then
+        -- active_chain is a CSV of hop ids; active_profile is a single id.
+        for _, key in ipairs({ "active_chain", "active_profile" }) do
+            local v = s[key]
+            if type(v) == "string" then
+                for id in v:gmatch("[^,]+") do
+                    id = id:gsub("^%s+", ""):gsub("%s+$", "")
+                    if id ~= "" then set[id] = true end
+                end
+            end
+        end
+    end
+    raw = read_all(CHAINS)
+    local c = raw and cjson.decode(raw)
+    if type(c) == "table" and type(c.chains) == "table" then
+        for _, ch in ipairs(c.chains) do
+            if type(ch.hops) == "table" then
+                for _, h in ipairs(ch.hops) do set[tostring(h)] = true end
+            end
+        end
+    end
+    return set
 end
 
 local function shell_quote(s) return "'" .. string.gsub(s or "", "'", [['\'']]) .. "'" end
@@ -670,10 +707,13 @@ local function refresh_subscription(sub)
     local seen_ids = {}
     for _, p in ipairs(profiles) do seen_ids[p.id] = true end
 
-    -- Delete profiles in the same group that no longer appear
+    -- Delete profiles in the same group that no longer appear — except the ones
+    -- the active chain / saved chains still reference (see protected_profile_ids).
     local removed = 0
+    local kept_stale = 0
     local group = sub.group or ""
     if group ~= "" then
+        local protected = protected_profile_ids()
         local p = io.popen("ls " .. PROFILES .. "/*.json 2>/dev/null")
         if p then
             for path in p:lines() do
@@ -682,7 +722,11 @@ local function refresh_subscription(sub)
                 if prev and prev.group == group then
                     local pid = prev.id
                     if pid and not seen_ids[pid] then
-                        os.remove(path); removed = removed + 1
+                        if protected[pid] then
+                            kept_stale = kept_stale + 1
+                        else
+                            os.remove(path); removed = removed + 1
+                        end
                     end
                 end
             end
@@ -700,6 +744,7 @@ local function refresh_subscription(sub)
 
     return true, {
         saved = saved, removed = removed, skipped = skipped,
+        kept_stale = kept_stale,
         bypass_written = bypass_written, source_kind = source_kind,
         fetched_bytes = #body,
     }
@@ -713,6 +758,7 @@ local function persist_outcome(sub, ok, payload)
         sub.last_error = nil
         sub.last_saved = payload.saved or 0
         sub.last_removed = payload.removed or 0
+        sub.last_kept_stale = payload.kept_stale or 0
         sub.last_skipped = payload.skipped or 0
         sub.last_bypass_written = payload.bypass_written or 0
         sub.last_source_kind = payload.source_kind or ""
