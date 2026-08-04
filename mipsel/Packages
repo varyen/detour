@@ -1,0 +1,30 @@
+Package: sing-box
+Version: 1.13.16-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 77943612
+Description: sing-box universal proxy platform. Detour feed build for Keenetic/Entware (mipsel soft-float, musl-static). (1.13.16-1)
+Filename: sing-box_1.13.16-1_all.ipk
+Size: 22804112
+MD5Sum: 02f71056eda894dd94019987e64e4c54
+SHA256sum: 6d91b0a53dd1f8461db8d6924f202faf972631e99b4e487e42da24af3a98b4be
+
+Package: tpws-zapret
+Version: 72.13-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 127024
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build for Keenetic/Entware (mipsel). (72.13-1)
+Filename: tpws-zapret_72.13-1_all.ipk
+Size: 126773
+MD5Sum: 669316a6ecb811f87a3eeb17ef8aae85
+SHA256sum: 8672e6659c1eda3517c4df260112bb7da3f278dcf30fb974a74fd82abee6457c
+
