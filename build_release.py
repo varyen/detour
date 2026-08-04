@@ -159,11 +159,6 @@ PANEL_FILES = [
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
     (("router_files", "index.html"), "www/detour/index.html", 0o644),
     (("router_files", "sw.js"), "www/detour/sw.js", 0o644),
-    # Фолбэк-декодер QR для браузеров без BarcodeDetector (Safari/iOS, Firefox).
-    # Грузится лениво, только при открытии сканера. См. docs/vendor-jsqr.md
-    (("router_files", "jsQR.min.js"), "www/detour/jsQR.min.js", 0o644),
-    # Генератор QR для модала «Доступ с другого устройства». См. docs/vendor-qr.md
-    (("router_files", "qrcode-generator.min.js"), "www/detour/qrcode-generator.min.js", 0o644),
     # NOTE: tpws-zapret is NOT bundled here anymore — first install bootstraps it
     # from the opkg feed in the background, same as sing-box.
     # Pin our public key in two places: opkg's standard keyring (so future opkg

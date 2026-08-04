@@ -86,13 +86,6 @@ SWAP_STATE="/var/state/detour-swap.json"
 AUTH_FILE="/etc/detour.auth"
 SESSION_DIR="/tmp/detour-sessions"
 LOGIN_THROTTLE_DIR="/tmp/detour-login"   # per-IP login brute-force state (tmpfs; cleared on reboot). Not remapped on Keenetic (like SESSION_DIR).
-# Одноразовые pairing-токены для входа на втором устройстве по QR. tmpfs, как
-# SESSION_DIR и LOGIN_THROTTLE_DIR — на Keenetic не ремапится. Короткий TTL и
-# сжигание при первом же использовании: токен едет в QR на экране, то есть его
-# может увидеть любой, кто оказался рядом.
-PAIR_DIR="/tmp/detour-pair"
-PAIR_TTL=300                             # 5 минут
-PAIR_MAX=8                               # больше стольких живых токенов не держим
 SINGBOX_BIN="/usr/bin/sing-box"
 TPWS_BIN="/usr/bin/tpws-zapret"
 NFQWS_BIN="/usr/bin/nfqws2"
@@ -1631,32 +1624,6 @@ gen_token() {
     printf '%s%s' "$a" "$b"
 }
 
-# ---- Pairing-токены (вход по QR на втором устройстве) ---------------------
-# Файл $PAIR_DIR/<token>: 1-я строка — epoch выпуска, 2-я — имя пользователя.
-# Токен одноразовый: pair_claim удаляет файл до того, как выдаст сессию.
-pair_purge() {
-    [ -d "$PAIR_DIR" ] || return 0
-    local now f born
-    now=$(date +%s)
-    for f in "$PAIR_DIR"/*; do
-        [ -f "$f" ] || continue
-        born=$(head -1 "$f" 2>/dev/null)
-        # мусор без валидного epoch выбрасываем сразу
-        case "$born" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
-        [ $((now - born)) -ge "$PAIR_TTL" ] && rm -f "$f"
-    done
-    # Страховка от разрастания: если живых токенов всё равно много, оставляем
-    # самые свежие. Обычно тут 0–1 файл.
-    local n
-    n=$(ls -1 "$PAIR_DIR" 2>/dev/null | wc -l)
-    if [ "$n" -gt "$PAIR_MAX" ]; then
-        ls -1t "$PAIR_DIR" 2>/dev/null | tail -n +$((PAIR_MAX + 1)) | while read -r f; do
-            rm -f "$PAIR_DIR/$f"
-        done
-    fi
-    return 0   # последний тест в цикле не должен утекать в код возврата функции
-}
-
 # ---- Login brute-force throttle (per source IP) ---------------------------
 # State: $LOGIN_THROTTLE_DIR/<ip> holds "failcount lastfail_epoch" (tmpfs — a
 # reboot clearing a lockout is acceptable). Keyed on the source IP; when the
@@ -1968,49 +1935,6 @@ if [ "$ACTION" = "push_message" ] && [ "$REQUEST_METHOD" = "POST" ] && ! check_a
     exit 0
 fi
 
-# ============ PAIRING CLAIM (token-authed, no session) ============
-# Второе устройство предъявляет одноразовый токен из QR и получает обычную
-# сессионную куку. Токен сжигается ДО выдачи сессии, поэтому повторный скан
-# того же кода (или его перехват с чужого экрана постфактум) уже бесполезен.
-# Троттлинг — общий с логином: токен 256-битный и перебору не поддаётся, но
-# заводить бесплатный неограниченный эндпоинт всё равно незачем.
-if [ "$ACTION" = "pair_claim" ] && [ "$REQUEST_METHOD" = "POST" ]; then
-    if ! login_check_lock; then
-        echo "Status: 429 Too Many Requests"
-        reply_json
-        echo "Retry-After: $LOGIN_LOCK_LEFT"
-        echo ""
-        printf '{"ok":false,"error":"Слишком много попыток. Повторите через %s с.","locked":true,"retry_after":%s}' "$LOGIN_LOCK_LEFT" "$LOGIN_LOCK_LEFT"
-        exit 0
-    fi
-    reply_json
-    PAIR_TOKEN=$(printf '%s' "$POST_DATA" | tr -d '\r\n' | head -c 64)
-    if ! printf '%s' "$PAIR_TOKEN" | grep -qE '^[a-f0-9]{64}$'; then
-        login_record_fail
-        echo ""
-        json_err "Неверный код"
-        exit 0
-    fi
-    pair_purge
-    if [ -f "$PAIR_DIR/$PAIR_TOKEN" ]; then
-        PAIR_USER=$(sed -n '2p' "$PAIR_DIR/$PAIR_TOKEN" 2>/dev/null)
-        rm -f "$PAIR_DIR/$PAIR_TOKEN"
-        [ -z "$PAIR_USER" ] && PAIR_USER="root"
-        login_record_success
-        TOKEN=$(gen_token)
-        echo "$PAIR_USER" > "$SESSION_DIR/$TOKEN"
-        echo "Set-Cookie: detour_session=$TOKEN; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
-        echo ""
-        json_ok
-    else
-        login_record_fail
-        sleep 1
-        echo ""
-        json_err "Код недействителен или истёк"
-    fi
-    exit 0
-fi
-
 # ==================== AUTH CHECK ====================
 if ! check_auth; then
     echo "Status: 401 Unauthorized"
@@ -2065,31 +1989,6 @@ check_auth)
     TOKEN=$(get_session_token); SESSION_USER=""
     [ -n "$TOKEN" ] && [ -f "$SESSION_DIR/$TOKEN" ] && SESSION_USER=$(cat "$SESSION_DIR/$TOKEN")
     printf '{"ok":true,"user":"%s"}' "$SESSION_USER"
-    ;;
-
-# Выпустить одноразовый код для входа на втором устройстве (панель рисует его
-# как QR). Живёт $PAIR_TTL секунд, сгорает при первом использовании.
-pair_create)
-    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    mkdir -p "$PAIR_DIR" 2>/dev/null
-    chmod 700 "$PAIR_DIR" 2>/dev/null
-    pair_purge
-    TOKEN=$(get_session_token); SESSION_USER=""
-    [ -n "$TOKEN" ] && [ -f "$SESSION_DIR/$TOKEN" ] && SESSION_USER=$(cat "$SESSION_DIR/$TOKEN")
-    [ -z "$SESSION_USER" ] && SESSION_USER="root"
-    PAIR_TOKEN=$(gen_token)
-    PAIR_TMP=$(mktemp)
-    printf '%s\n%s\n' "$(date +%s)" "$SESSION_USER" > "$PAIR_TMP"
-    chmod 600 "$PAIR_TMP"
-    mv "$PAIR_TMP" "$PAIR_DIR/$PAIR_TOKEN"
-    printf '{"ok":true,"token":"%s","ttl":%s}' "$PAIR_TOKEN" "$PAIR_TTL"
-    ;;
-
-# Отозвать все невыданные коды (кнопка «отменить» в модале).
-pair_revoke)
-    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    rm -f "$PAIR_DIR"/* 2>/dev/null
-    json_ok
     ;;
 
 status)

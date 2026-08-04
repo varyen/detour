@@ -2311,88 +2311,6 @@
         align-items: center;
         gap: 10px;
       }
-      /* ===== QR-сканер (импорт профиля с камеры телефона) ===== */
-      .qr-scan-row {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-top: 8px;
-        flex-wrap: wrap;
-      }
-      .qr-scan-hint {
-        font-size: 12px;
-        color: var(--text-dim);
-      }
-      .qr-stage {
-        position: relative;
-        width: 100%;
-        aspect-ratio: 4 / 3;
-        background: #000;
-        border-radius: var(--radius);
-        overflow: hidden;
-        border: 1px solid var(--border);
-      }
-      .qr-stage video {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
-      }
-      /* Рамка прицела: квадрат по центру, чтобы было понятно, куда наводить. */
-      .qr-frame {
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .qr-frame::before {
-        content: "";
-        width: min(62%, 260px);
-        aspect-ratio: 1;
-        border: 2px solid rgba(255, 255, 255, 0.85);
-        border-radius: 14px;
-        box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.35);
-      }
-      .qr-status {
-        font-size: 13px;
-        margin-top: 10px;
-        min-height: 20px;
-        line-height: 1.45;
-      }
-      .qr-status.err {
-        color: var(--red);
-      }
-      .qr-status.ok {
-        color: var(--green);
-      }
-      .qr-cam-select {
-        flex: 1;
-        min-width: 0;
-      }
-      .pair-hint {
-        font-size: 13px;
-        color: var(--text-dim);
-        line-height: 1.5;
-        margin-bottom: 14px;
-      }
-      /* Белая подложка обязательна: в тёмной теме QR на тёмном фоне не читается,
-         а инверсию тянет не всякий сканер. */
-      .pair-qr-wrap {
-        display: flex;
-        justify-content: center;
-        background: #fff;
-        border-radius: var(--radius);
-        padding: 14px;
-      }
-      .pair-qr-wrap canvas {
-        display: block;
-        width: 100%;
-        max-width: 300px;
-        height: auto;
-        image-rendering: pixelated;
-      }
       .modal-tabs {
         display: flex;
         gap: 2px;
@@ -2638,7 +2556,10 @@
       .busy-overlay {
         position: fixed;
         inset: 0;
-        z-index: 9000;
+        /* Выше и модалок (5000), и экрана входа (9999) — вход тоже операция,
+           которую человек ждёт. Ниже тостов (10001): результат перекрывает
+           крутилку, а не наоборот. */
+        z-index: 10000;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -2691,7 +2612,7 @@
       .toast-container {
         position: fixed;
         inset: 0;
-        z-index: 10000;
+        z-index: 10001;
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -2935,14 +2856,6 @@
           />
           <button class="btn primary" onclick="doLogin()" id="btn-login">
             Войти
-          </button>
-          <button
-            class="btn"
-            id="btn-login-qr"
-            onclick="openPairScanner()"
-            title="Отсканировать QR, показанный в панели на уже настроенном устройстве"
-          >
-            📷 Войти по QR
           </button>
           <div id="login-error" class="login-error"></div>
         </div>
@@ -3232,33 +3145,6 @@
                 Импорт профилей
               </button>
               <div class="hdr-menu-sep"></div>
-              <div class="hdr-menu-title">Доступ</div>
-              <button
-                class="hdr-menu-item"
-                role="menuitem"
-                onclick="hdrMenuRun(openPairModal)"
-                title="Показать QR для входа на другом телефоне без ввода логина и пароля"
-              >
-                <svg
-                  class="i"
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <rect x="3" y="3" width="7" height="7" />
-                  <rect x="14" y="3" width="7" height="7" />
-                  <rect x="3" y="14" width="7" height="7" />
-                  <line x1="14" y1="14" x2="14" y2="21" />
-                  <line x1="18" y1="14" x2="21" y2="14" />
-                  <line x1="21" y1="18" x2="21" y2="21" />
-                </svg>
-                Вход на другом устройстве
-              </button>
               <div class="hdr-menu-title">Конфиг панели</div>
               <button
                 class="hdr-menu-item"
@@ -6633,49 +6519,13 @@
             вида <code>http login password host port</code> либо
             <code>host:port:login:password</code>:</label
           >
-          <!-- Картинку с QR можно вставить (Ctrl+V) или перетащить прямо сюда —
-               дальше тот же декодер, что и у кнопки «QR из файла». -->
           <textarea
             id="profile-uri-input"
             rows="3"
             spellcheck="false"
             oninput="parseProfileUri()"
-            onpaste="handleQrPaste(event)"
-            ondragover="event.preventDefault()"
-            ondrop="handleQrDrop(event)"
             placeholder="vless://uuid@host:port?security=reality&amp;...#Name"
           ></textarea>
-          <div class="qr-scan-row">
-            <button
-              type="button"
-              class="btn sm"
-              id="qr-scan-btn"
-              onclick="openQrScanner()"
-              title="Навести камеру телефона на QR-код с ссылкой профиля или подписки"
-            >
-              📷 Сканировать QR
-            </button>
-            <button
-              type="button"
-              class="btn sm"
-              id="qr-file-btn"
-              onclick="pickQrFile()"
-              title="Выбрать фото или скриншот с QR-кодом — работает и без камеры/HTTPS. Картинку можно и вставить (Ctrl+V) или перетащить в поле ссылки"
-            >
-              🖼 QR из файла
-            </button>
-            <!-- Один общий скрытый input: его дёргают обе кнопки «QR из файла»
-                 (здесь и в модале сканера). -->
-            <input
-              type="file"
-              id="qr-file-input"
-              accept="image/*"
-              style="display: none"
-              onchange="handleQrFile(this)"
-            />
-            <span class="qr-scan-hint" id="qr-scan-hint"></span>
-            <span class="qr-scan-hint" id="qr-file-status"></span>
-          </div>
           <div
             id="uri-parse-status"
             style="font-size: 12px; margin-top: 4px; min-height: 18px"
@@ -7048,62 +6898,6 @@
       </div>
     </div>
 
-    <div
-      class="modal-overlay"
-      id="pair-modal"
-      style="display: none"
-      onclick="backdropClose(event, closePairModal)"
-    >
-      <div class="modal" style="max-width: 460px">
-        <h3>📱 Вход на другом устройстве</h3>
-        <div class="pair-hint">
-          Отсканируйте код вторым телефоном — штатной камерой или кнопкой
-          «Войти по QR» на экране входа панели. Устройство войдёт под тем же
-          пользователем, вводить логин и пароль не придётся.
-        </div>
-        <div class="pair-qr-wrap">
-          <canvas id="pair-qr" width="300" height="300"></canvas>
-        </div>
-        <div class="qr-status" id="pair-status">Готовлю код…</div>
-        <div class="modal-footer">
-          <button class="btn" onclick="createPairCode()">↻ Новый код</button>
-          <button class="btn" onclick="closePairModal()">Закрыть</button>
-        </div>
-      </div>
-    </div>
-
-    <div
-      class="modal-overlay"
-      id="qr-scan-modal"
-      style="display: none"
-      onclick="backdropClose(event, closeQrScanner)"
-    >
-      <div class="modal" style="max-width: 520px">
-        <h3>📷 Сканирование QR</h3>
-        <div class="qr-stage">
-          <video id="qr-video" playsinline muted autoplay></video>
-          <div class="qr-frame"></div>
-        </div>
-        <div class="qr-status" id="qr-status">Запрашиваю доступ к камере…</div>
-        <div class="modal-footer">
-          <select
-            id="qr-cam-select"
-            class="qr-cam-select"
-            style="display: none"
-            onchange="switchQrCamera(this.value)"
-          ></select>
-          <button
-            class="btn"
-            onclick="pickQrFile()"
-            title="Распознать QR с фото или скриншота вместо камеры"
-          >
-            🖼 Из файла
-          </button>
-          <button class="btn" onclick="closeQrScanner()">Закрыть</button>
-        </div>
-      </div>
-    </div>
-
     <div class="busy-overlay" id="busy" aria-hidden="true">
       <div class="busy-card" role="status" aria-live="polite">
         <span class="busy-spinner"></span>
@@ -7460,13 +7254,21 @@
       }
 
       // ===== ИНДИКАТОР ЗАНЯТОСТИ =====
-      // Любая мутация (POST) идёт через api(), поэтому крутилка живёт здесь —
-      // одно место на все 99 мест сохранения. Показываем НЕ сразу: быстрый
-      // запрос успевает закончиться за 250 мс, и мигать оверлеем на нём глупо;
-      // а вот пересборка конфига с перезапуском sing-box занимает 3–6 с, и вот
-      // там пустой экран и выглядит как «кнопка не работает».
+      // Крутилка живёт в api() — одно место на все ~150 запросов панели.
+      // Показывается на ЛЮБОЙ операции, которую человек ждёт: и на сохранении
+      // (POST), и на чтении, которое он сам вызвал — открыл вкладку, нажал
+      // «Проверить», раскрыл модал с данными. Молча читают только фоновые
+      // опросы (статус раз в 10 с, кэш пингов/здоровья, автообновление лога) —
+      // они помечаются {quiet:true} и оверлей не трогают, иначе панель мигала бы
+      // сама по себе, пока человек в неё даже не тыкал.
+      // Показываем НЕ сразу: быстрый запрос успевает закончиться за 150 мс, и
+      // мигать оверлеем на нём глупо; а вот пересборка конфига с перезапуском
+      // sing-box занимает 3–6 с, и вот там пустой экран выглядит как «кнопка не
+      // работает».
       // Счётчик, потому что сохранение пачки профилей — это цикл из POST'ов:
       // оверлей должен держаться на весь цикл, а не мигать между итерациями.
+      var BUSY_DEFAULT_TEXT = "Загружаем…";
+      var QUIET = { quiet: true }; // фоновый запрос: без оверлея
       var busyDepth = 0;
       var busyTimer = null;
       var busyGuard = null;
@@ -7493,14 +7295,22 @@
       }
       function busyStart(text) {
         busyDepth += 1;
+        // Подпись ставит только САМАЯ ВНЕШНЯЯ операция: вложенное чтение внутри
+        // сохранения не должно переписывать «Сохраняем…» на «Загружаем…».
         var label = document.getElementById("busy-text");
-        if (label && text) label.textContent = text;
+        if (label && text && busyDepth === 1) label.textContent = text;
         if (busyDepth === 1 && busyTimer === null) {
           busyTimer = setTimeout(function () {
             busyTimer = null;
             if (busyDepth > 0) busyShow();
           }, 150);
         }
+      }
+      // Перебить подпись уже показанной крутилки — для пачек, где полезно видеть
+      // «7 / 114», а не просто «Сохраняем…».
+      function busyText(text) {
+        var label = document.getElementById("busy-text");
+        if (label && busyDepth > 0) label.textContent = text;
       }
       function busyEnd() {
         busyDepth = Math.max(0, busyDepth - 1);
@@ -7509,10 +7319,12 @@
         busyTimer = null;
         busyHide();
         var label = document.getElementById("busy-text");
-        if (label) label.textContent = "Сохраняем…";
+        if (label) label.textContent = BUSY_DEFAULT_TEXT;
       }
 
-      async function api(action, method, body) {
+      // `ui` — необязательный четвёртый аргумент: {quiet:true} для фоновых
+      // опросов (без оверлея), {text:"…"} чтобы подписать крутилку по-своему.
+      async function api(action, method, body, ui) {
         method = method || "GET";
         body = body || null;
         const opts = { method: method };
@@ -7525,7 +7337,9 @@
           opts.headers = { "Content-Type": "text/plain" };
         }
         var mutating = opts.method === "POST";
-        if (mutating) busyStart();
+        var busy = !(ui && ui.quiet);
+        if (busy)
+          busyStart((ui && ui.text) || (mutating ? "Сохраняем…" : undefined));
         try {
           const r = await fetch(API + "?action=" + action, opts);
           if (r.status === 401) {
@@ -7534,7 +7348,7 @@
           }
           return r.json();
         } finally {
-          if (mutating) busyEnd();
+          if (busy) busyEnd();
         }
       }
 
@@ -8291,7 +8105,6 @@
         document.getElementById("login-form-default").style.display = "";
         document.getElementById("login-form-setup").style.display = "none";
         document.getElementById("login-user").focus();
-        refreshLoginQrBtn();
         // Ask the CGI whether this is a clean first install. The probe is
         // unauthenticated and idempotent — safe to call on every login render.
         probeSetupStatus();
@@ -8347,6 +8160,7 @@
         var btn = document.getElementById("btn-setup");
         btn.disabled = true;
         btn.textContent = "Создание...";
+        busyStart("Создаём аккаунт…");
         try {
           var r = await fetch(API + "?action=panel_first_setup", {
             method: "POST",
@@ -8365,6 +8179,7 @@
         } catch (e) {
           err.textContent = "Сеть: " + e.message;
         } finally {
+          busyEnd();
           btn.disabled = false;
           btn.textContent = "Создать аккаунт и войти";
         }
@@ -8382,6 +8197,7 @@
         btn.disabled = true;
         btn.textContent = "Вход...";
         document.getElementById("login-error").textContent = "";
+        busyStart("Входим…");
         try {
           var encoded = utf8ToBase64(user + "\n" + pass);
           var r = await fetch(API + "?action=login", {
@@ -8400,6 +8216,8 @@
         } catch (e) {
           document.getElementById("login-error").textContent =
             "Ошибка сети: " + e.message;
+        } finally {
+          busyEnd();
         }
         btn.disabled = false;
         btn.textContent = "Войти";
@@ -8565,12 +8383,15 @@
       }
 
       // ===== STATUS =====
+      // Фоновая функция: крутится по таймеру раз в 10 с и подтягивается после
+      // действий — оверлея не показывает НИКОГДА (иначе панель мигала бы сама
+      // по себе). Первый экран крутилку показывает, но заводит её init().
       async function loadStatus() {
         try {
-          var d = await api("status");
+          var d = await api("status", null, null, QUIET);
           currentPlatform = d.platform || "openwrt";
           currentPanelPort = d.panel_port || 8080;
-          loadUdpVpn();
+          loadUdpVpn(true);
 
           // Keenetic gets HTTPS via its built-in KeenDNS web-app publishing (valid
           // auto-renewed cert) — our Let's Encrypt flow doesn't apply there, so hide
@@ -8592,7 +8413,7 @@
           // MT6000 тоже openwrt, но без QCA-ускорителя).
           if (!offloadChecked) {
             offloadChecked = true;
-            api("offload_status")
+            api("offload_status", null, null, QUIET)
               .then(function (o) {
                 var g = document.getElementById("hdr-offload-group");
                 if (g) g.style.display = o && o.supported ? "contents" : "none";
@@ -8661,7 +8482,7 @@
           renderBinariesChip(d.binaries);
           currentSingboxMode = d.singbox.singbox_mode || "single";
           updateSingboxModeUI(currentSingboxMode);
-          loadKeepalive();
+          loadKeepalive(true);
 
           // Все через VPN
           updateAllvpnUI(d.singbox.allvpn);
@@ -9048,7 +8869,7 @@
 
       // Seed the cache from the server (instant; survives reloads / shared across devices).
       function seedPingStatus() {
-        return api("ping_status")
+        return api("ping_status", null, null, QUIET)
           .then(function (d) {
             if (d && d.now)
               pingClockSkew = d.now - Math.floor(Date.now() / 1000);
@@ -9303,7 +9124,7 @@
       // Seed/refresh from the router's health cache (pure reader, like ping).
       function seedHealthStatus() {
         var mutationSeq = healthConfigMutationSeq;
-        return api("health_status")
+        return api("health_status", null, null, QUIET)
           .then(function (d) {
             if (mutationSeq !== healthConfigMutationSeq) return;
             applyHealthMeta(d);
@@ -10014,7 +9835,15 @@
           if (btn)
             btn.textContent = "Обновление… " + (i + 1) + "/" + ids.length;
           var id = ids[i++];
-          return api("ping_check&id=" + encodeURIComponent(id))
+          // Пачка на все профили идёт минутами и не блокирует панель: прогресс
+          // человек видит прямо на кнопке («Обновление… 7/114»), поэтому
+          // оверлей тут не нужен — он бы ещё и мигал на каждой итерации.
+          return api(
+            "ping_check&id=" + encodeURIComponent(id),
+            null,
+            null,
+            QUIET,
+          )
             .then(function (r) {
               if (r && r.id) {
                 pingResults[r.id] = {
@@ -11333,6 +11162,7 @@
       // Toolbar "Экспорт профилей": fetch all profiles, then let the user choose the
       // export format (separate links / JSON) inside the share modal.
       async function openExportProfilesModal() {
+        busyStart();
         try {
           // profiles_export returns a {version, exported_at, profiles:[...]} envelope,
           // each profile carrying its full outbound — exactly what link-building needs.
@@ -11375,6 +11205,8 @@
           });
         } catch (e) {
           toast("Ошибка экспорта: " + e.message, "error");
+        } finally {
+          busyEnd();
         }
       }
 
@@ -11513,6 +11345,7 @@
 
       // ===== PANEL CONFIG EXPORT / IMPORT (settings + domain lists + subscription) =====
       async function exportPanelConfig() {
+        busyStart();
         try {
           var resp = await fetch(
             "/cgi-bin/detour-api?action=panel_export_config",
@@ -11547,6 +11380,8 @@
           toast("Конфиг панели экспортирован", "success");
         } catch (e) {
           toast("Ошибка экспорта: " + e.message, "error");
+        } finally {
+          busyEnd();
         }
       }
 
@@ -12047,7 +11882,9 @@
           return;
         }
         try {
-          var s = await api("cert_status");
+          // Опрос прогресса: у модала своя строка состояния, оверлей тут только
+          // мешал бы (выпуск серта идёт минуту с лишним).
+          var s = await api("cert_status", null, null, QUIET);
           if (s.last_result === "ok") {
             btn.disabled = false;
             status.innerHTML =
@@ -12783,7 +12620,7 @@
           return;
         }
         try {
-          var d = await api("swap_status");
+          var d = await api("swap_status", null, null, QUIET); // опрос прогресса
           if (d.supported && !d.busy) {
             btn.disabled = !d.tools;
             if (d.last_result === "ok" || d.active) {
@@ -13041,13 +12878,21 @@
         var status = document.getElementById("groups-status");
         status.textContent = "Обновляю " + affected.length + " профилей...";
         var ok = 0;
-        for (var i = 0; i < affected.length; i++) {
-          var copy = cloneJson(affected[i]);
-          copy.group = newName;
-          try {
-            var r = await api("profile_save", "POST", JSON.stringify(copy));
-            if (r.ok) ok++;
-          } catch (e) {}
+        // Внешний busyStart держит оверлей на ВЕСЬ цикл: без него счётчик падал
+        // бы до нуля между итерациями и крутилка мигала бы на каждом профиле.
+        busyStart("Сохраняем…");
+        try {
+          for (var i = 0; i < affected.length; i++) {
+            busyText("Сохраняем " + (i + 1) + " / " + affected.length);
+            var copy = cloneJson(affected[i]);
+            copy.group = newName;
+            try {
+              var r = await api("profile_save", "POST", JSON.stringify(copy));
+              if (r.ok) ok++;
+            } catch (e) {}
+          }
+        } finally {
+          busyEnd();
         }
         // also rename in the empty-groups list
         var idx = emptyGroups.indexOf(oldName);
@@ -13079,13 +12924,19 @@
         status.textContent =
           "Снимаю группу с " + affected.length + " профилей...";
         var ok = 0;
-        for (var i = 0; i < affected.length; i++) {
-          var copy = cloneJson(affected[i]);
-          copy.group = "";
-          try {
-            var r = await api("profile_save", "POST", JSON.stringify(copy));
-            if (r.ok) ok++;
-          } catch (e) {}
+        busyStart("Сохраняем…");
+        try {
+          for (var i = 0; i < affected.length; i++) {
+            busyText("Сохраняем " + (i + 1) + " / " + affected.length);
+            var copy = cloneJson(affected[i]);
+            copy.group = "";
+            try {
+              var r = await api("profile_save", "POST", JSON.stringify(copy));
+              if (r.ok) ok++;
+            } catch (e) {}
+          }
+        } finally {
+          busyEnd();
         }
         var idx = emptyGroups.indexOf(name);
         if (idx >= 0) {
@@ -13638,14 +13489,20 @@
         var ids = Array.from(bulkSelected);
         status.textContent = "Удаляю...";
         var ok = 0;
-        for (var i = 0; i < ids.length; i++) {
-          try {
-            var r = await api(
-              "profile_delete&name=" + encodeURIComponent(ids[i]),
-              "POST",
-            );
-            if (r.ok) ok++;
-          } catch (e) {}
+        busyStart("Удаляем…");
+        try {
+          for (var i = 0; i < ids.length; i++) {
+            busyText("Удаляем " + (i + 1) + " / " + ids.length);
+            try {
+              var r = await api(
+                "profile_delete&name=" + encodeURIComponent(ids[i]),
+                "POST",
+              );
+              if (r.ok) ok++;
+            } catch (e) {}
+          }
+        } finally {
+          busyEnd();
         }
         bulkSelected = new Set();
         await loadProfiles();
@@ -13807,13 +13664,19 @@
           // Bypass the "skip if id already used" logic: caller provided an explicit id,
           // and we want exact restore semantics.
           var saved = 0;
-          for (var i = 0; i < profiles.length; i++) {
-            var resp = await api(
-              "profile_save",
-              "POST",
-              JSON.stringify(profiles[i]),
-            );
-            if (resp.ok) saved++;
+          busyStart("Импортируем…");
+          try {
+            for (var i = 0; i < profiles.length; i++) {
+              busyText("Импортируем " + (i + 1) + " / " + profiles.length);
+              var resp = await api(
+                "profile_save",
+                "POST",
+                JSON.stringify(profiles[i]),
+              );
+              if (resp.ok) saved++;
+            }
+          } finally {
+            busyEnd();
           }
           toast(
             "Импортировано: " + saved + " / " + profiles.length,
@@ -14395,7 +14258,6 @@
       function showProfileModal(profile, profileId) {
         resetProfileModalState();
         document.getElementById("profile-modal").style.display = "flex";
-        refreshQrHint();
         document.getElementById("profile-modal-group").value = "";
         document
           .querySelectorAll("input[name='profile-routing-mode']")
@@ -14494,7 +14356,6 @@
 
       function closeProfileModal() {
         document.getElementById("profile-modal").style.display = "none";
-        closeQrScanner(); // не оставляем камеру включённой, если её закрыли «через голову»
       }
 
       function switchModalTab(btn, panelId) {
@@ -14965,715 +14826,6 @@
         }
       }
 
-      // ===== QR-СКАНЕР (импорт профиля с камеры телефона) =====
-      // Декодер выбирается по возможностям браузера: нативный BarcodeDetector
-      // (Android Chrome/Edge) — бесплатно; иначе лениво подгружается вендоренный
-      // jsQR.min.js (Safari/iOS, Firefox). См. docs/vendor-jsqr.md
-      var qrState = {
-        stream: null,
-        timer: null,
-        detector: null,
-        jsqrLoading: null,
-        canvas: null,
-        active: false,
-        // Куда отдать распознанный текст. null — обычный импорт профиля;
-        // openPairScanner() подменяет на обработчик входа по QR.
-        onResult: null,
-      };
-
-      function qrStatus(msg, cls) {
-        var el = document.getElementById("qr-status");
-        if (!el) return;
-        el.textContent = msg;
-        el.className = "qr-status" + (cls ? " " + cls : "");
-      }
-
-      // getUserMedia живёт только в secure context. Панель по http://192.168.x.x
-      // таковым НЕ считается — камера доступна лишь через HTTPS (Let's Encrypt /
-      // KeenDNS) или с localhost. Проверяем заранее, чтобы не ловить туманный
-      // NotAllowedError и объяснить причину по-человечески.
-      function qrUnavailableReason() {
-        if (!window.isSecureContext)
-          return (
-            "Камера доступна только по HTTPS. Сейчас панель открыта по " +
-            location.protocol +
-            "// — откройте её по HTTPS-адресу (сертификат выпускается в «Настройках»), " +
-            "либо вставьте ссылку вручную."
-          );
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
-          return "Браузер не умеет работать с камерой (нет mediaDevices.getUserMedia).";
-        return null;
-      }
-
-      function loadJsQr() {
-        if (window.jsQR) return Promise.resolve(window.jsQR);
-        if (qrState.jsqrLoading) return qrState.jsqrLoading;
-        qrState.jsqrLoading = new Promise(function (resolve, reject) {
-          var s = document.createElement("script");
-          // Путь относительно index.html: оба манифеста кладут файл рядом с ней
-          // (/www/detour/ на OpenWrt, /opt/share/www/detour/ на Keenetic).
-          s.src = "jsQR.min.js";
-          s.onload = function () {
-            window.jsQR
-              ? resolve(window.jsQR)
-              : reject(new Error("jsQR.min.js загрузился, но не отдал функцию"));
-          };
-          s.onerror = function () {
-            reject(new Error("не удалось загрузить jsQR.min.js"));
-          };
-          document.head.appendChild(s);
-        });
-        return qrState.jsqrLoading;
-      }
-
-      // Нативный детектор бывает объявлен, но без поддержки qr_code — проверяем список.
-      async function pickQrDecoder() {
-        if (window.BarcodeDetector) {
-          try {
-            var fmts = await window.BarcodeDetector.getSupportedFormats();
-            if (fmts && fmts.indexOf("qr_code") >= 0) {
-              qrState.detector = new window.BarcodeDetector({
-                formats: ["qr_code"],
-              });
-              return "native";
-            }
-          } catch (e) {
-            /* падаем в jsQR */
-          }
-        }
-        await loadJsQr();
-        return "jsqr";
-      }
-
-      async function listQrCameras() {
-        var sel = document.getElementById("qr-cam-select");
-        if (!sel || !navigator.mediaDevices.enumerateDevices) return;
-        try {
-          var devs = await navigator.mediaDevices.enumerateDevices();
-          var cams = devs.filter(function (d) {
-            return d.kind === "videoinput";
-          });
-          if (cams.length < 2) {
-            sel.style.display = "none";
-            return;
-          }
-          sel.innerHTML = "";
-          cams.forEach(function (c, i) {
-            var o = document.createElement("option");
-            o.value = c.deviceId;
-            o.textContent = c.label || "Камера " + (i + 1);
-            sel.appendChild(o);
-          });
-          var cur =
-            qrState.stream &&
-            qrState.stream.getVideoTracks()[0] &&
-            qrState.stream.getVideoTracks()[0].getSettings().deviceId;
-          if (cur) sel.value = cur;
-          sel.style.display = "";
-        } catch (e) {
-          sel.style.display = "none";
-        }
-      }
-
-      async function startQrStream(constraints) {
-        stopQrStream();
-        qrState.stream =
-          await navigator.mediaDevices.getUserMedia(constraints);
-        var v = document.getElementById("qr-video");
-        v.srcObject = qrState.stream;
-        await v.play().catch(function () {});
-      }
-
-      function stopQrStream() {
-        if (qrState.stream) {
-          qrState.stream.getTracks().forEach(function (t) {
-            t.stop();
-          });
-          qrState.stream = null;
-        }
-        var v = document.getElementById("qr-video");
-        if (v) v.srcObject = null;
-      }
-
-      async function openQrScanner() {
-        var modal = document.getElementById("qr-scan-modal");
-        modal.style.display = "flex";
-        qrState.active = true;
-        qrStatus("Запрашиваю доступ к камере…");
-
-        var why = qrUnavailableReason();
-        if (why) {
-          qrStatus(why, "err");
-          return;
-        }
-
-        try {
-          // Камеру запрашиваем ПЕРВОЙ, до ленивой загрузки декодера: Safari на iOS
-          // привязывает разрешение к пользовательскому жесту, а await на загрузке
-          // скрипта эту цепочку рвёт.
-          // facingMode как ideal, а не exact: на ноутбуке задней камеры нет,
-          // exact там уронил бы getUserMedia с OverconstrainedError.
-          await startQrStream({
-            video: { facingMode: { ideal: "environment" } },
-          });
-        } catch (e) {
-          var msg = "Не удалось включить камеру: " + (e.message || e);
-          if (e.name === "NotAllowedError")
-            msg =
-              "Доступ к камере запрещён. Разрешите его в настройках сайта и откройте сканер заново.";
-          else if (e.name === "NotFoundError")
-            msg = "Камера не найдена.";
-          else if (e.name === "NotReadableError")
-            msg = "Камера занята другим приложением.";
-          qrStatus(msg, "err");
-          stopQrStream();
-          return;
-        }
-
-        qrStatus("Камера включена, готовлю декодер…");
-        var mode;
-        try {
-          mode = await pickQrDecoder();
-        } catch (e) {
-          qrStatus(
-            "Камера работает, но декодер QR недоступен: " +
-              (e.message || e) +
-              ". Вставьте ссылку вручную.",
-            "err",
-          );
-          stopQrStream();
-          return;
-        }
-
-        qrStatus(
-          "Наведите камеру на QR-код" +
-            (mode === "jsqr" ? " (программный декодер)" : ""),
-        );
-        await listQrCameras();
-        qrLoop(mode);
-      }
-
-      async function switchQrCamera(deviceId) {
-        if (!deviceId || !qrState.active) return;
-        try {
-          var wasNative = !!qrState.detector;
-          await startQrStream({ video: { deviceId: { exact: deviceId } } });
-          qrStatus("Наведите камеру на QR-код");
-          qrLoop(wasNative ? "native" : "jsqr");
-        } catch (e) {
-          qrStatus("Не удалось переключить камеру: " + (e.message || e), "err");
-        }
-      }
-
-      function qrLoop(mode) {
-        if (qrState.timer) clearInterval(qrState.timer);
-        var v = document.getElementById("qr-video");
-        var busy = false;
-        // 200 мс — компромисс: быстрее человек всё равно не наводит, а jsQR на
-        // слабом телефоне при каждом кадре греет батарею.
-        qrState.timer = setInterval(async function () {
-          if (!qrState.active || busy) return;
-          if (!v.videoWidth) return;
-          busy = true;
-          try {
-            var text = null;
-            if (mode === "native" && qrState.detector) {
-              var codes = await qrState.detector.detect(v);
-              if (codes && codes.length) text = codes[0].rawValue;
-            } else {
-              if (!qrState.canvas) qrState.canvas = document.createElement("canvas");
-              var c = qrState.canvas;
-              // Ограничиваем сторону 640 px: jsQR по полному 1080p кадру заметно тормозит.
-              var scale = Math.min(1, 640 / Math.max(v.videoWidth, v.videoHeight));
-              c.width = Math.round(v.videoWidth * scale);
-              c.height = Math.round(v.videoHeight * scale);
-              var ctx = c.getContext("2d", { willReadFrequently: true });
-              ctx.drawImage(v, 0, 0, c.width, c.height);
-              var img = ctx.getImageData(0, 0, c.width, c.height);
-              // attemptBoth, а не dontInvert: QR нередко показывают в тёмной теме —
-              // белый код на чёрном фоне без инверсии не читается.
-              var r = window.jsQR(img.data, img.width, img.height, {
-                inversionAttempts: "attemptBoth",
-              });
-              if (r && r.data) text = r.data;
-            }
-            if (text) onQrDecoded(text);
-          } catch (e) {
-            /* один сбойный кадр — не повод останавливать цикл */
-          } finally {
-            busy = false;
-          }
-        }, 200);
-      }
-
-      function onQrDecoded(text) {
-        text = (text || "").trim();
-        if (!text) return;
-        // Забираем обработчик ДО закрытия: closeQrScanner() его сбрасывает.
-        var handler = qrState.onResult;
-        qrState.active = false;
-        qrStatus("Код распознан", "ok");
-        closeQrScanner();
-        if (handler) {
-          handler(text);
-          return;
-        }
-
-        var input = document.getElementById("profile-uri-input");
-        // Несколько сканов подряд — накапливаем список, парсер и так умеет пакет.
-        var prev = input.value.trim();
-        input.value = prev && prev !== text ? prev + "\n" + text : text;
-        parseProfileUri();
-        input.focus();
-
-        var known = /^(vless|trojan|vmess|ss|socks5?|https?):\/\//i.test(text);
-        toast(
-          known ? "QR распознан: " + text.slice(0, 40) + "…" : "QR распознан",
-          known ? "success" : "info",
-        );
-      }
-
-      function closeQrScanner() {
-        qrState.active = false;
-        // Сбрасываем назначение сканера: брошенный «вход по QR» не должен
-        // перехватить следующий скан профиля.
-        qrState.onResult = null;
-        if (qrState.timer) {
-          clearInterval(qrState.timer);
-          qrState.timer = null;
-        }
-        stopQrStream();
-        var m = document.getElementById("qr-scan-modal");
-        if (m) m.style.display = "none";
-      }
-
-      // Подпись под кнопкой: заранее объясняем, почему сканер не заработает,
-      // чтобы пользователь не тыкал кнопку впустую.
-      // Кнопка «Войти по QR» на экране входа: без secure context камеры не будет.
-      // Прятать нельзя — вместо неё остаётся рабочий путь «снять ссылку штатной
-      // камерой», о нём и пишем в подсказке.
-      function refreshLoginQrBtn() {
-        var b = document.getElementById("btn-login-qr");
-        if (!b) return;
-        var why = qrUnavailableReason();
-        b.disabled = !!why;
-        b.title = why
-          ? why + " Можно открыть ссылку из QR штатной камерой телефона."
-          : "Отсканировать QR, показанный в панели на уже настроенном устройстве";
-      }
-
-      // Кнопку «QR из файла» здесь НЕ трогаем: она работает и без камеры,
-      // и без HTTPS — декодеру secure context не нужен.
-      function refreshQrHint() {
-        var hint = document.getElementById("qr-scan-hint");
-        var btn = document.getElementById("qr-scan-btn");
-        var st = document.getElementById("qr-file-status");
-        if (st) {
-          st.textContent = "";
-          st.style.color = "";
-          st.title = "";
-        }
-        if (!hint || !btn) return;
-        var why = qrUnavailableReason();
-        if (why) {
-          btn.disabled = true;
-          hint.textContent =
-            (window.isSecureContext
-              ? "камера недоступна в этом браузере"
-              : "нужен HTTPS-доступ к панели") + " — загрузите фото QR";
-          hint.title = why;
-        } else {
-          btn.disabled = false;
-          hint.textContent = "";
-          hint.title = "";
-        }
-      }
-
-      // ===== QR ИЗ ФАЙЛА (фото/скриншот) =====
-      // Камере нужен secure context, декодеру — нет: по http://192.168.x.x и с
-      // десктопа без вебкамеры фото с кодом остаётся единственным способом
-      // импорта. Тот же путь выручает, когда QR прислали картинкой в мессенджере.
-      function qrFileStatus(msg, cls) {
-        var modal = document.getElementById("qr-scan-modal");
-        if (modal && modal.style.display === "flex") {
-          qrStatus(msg, cls);
-          return;
-        }
-        var st = document.getElementById("qr-file-status");
-        if (!st) return;
-        st.textContent = msg || "";
-        st.style.color = cls === "err" ? "var(--red)" : "";
-        st.title = msg || "";
-      }
-
-      function pickQrFile() {
-        var inp = document.getElementById("qr-file-input");
-        if (inp) inp.click();
-      }
-
-      // Скриншот QR в буфере обмена или перетащенный файл — на десктопе это
-      // самый частый сценарий, гоняем через тот же handleQrFile.
-      function firstImageFile(list) {
-        for (var i = 0; i < (list ? list.length : 0); i++) {
-          var f = list[i].getAsFile ? list[i].getAsFile() : list[i];
-          if (f && /^image\//.test(f.type || "")) return f;
-        }
-        return null;
-      }
-
-      function handleQrPaste(e) {
-        var f = e.clipboardData && firstImageFile(e.clipboardData.items);
-        if (!f) return; // обычный текст — пусть вставляется штатно
-        e.preventDefault();
-        handleQrFile({ files: [f] });
-      }
-
-      function handleQrDrop(e) {
-        var f = e.dataTransfer && firstImageFile(e.dataTransfer.files);
-        if (!f) return; // не картинка — не мешаем браузеру
-        e.preventDefault();
-        handleQrFile({ files: [f] });
-      }
-
-      function loadQrImageEl(file) {
-        return new Promise(function (resolve, reject) {
-          var url = URL.createObjectURL(file);
-          var img = new Image();
-          img.onload = function () {
-            URL.revokeObjectURL(url);
-            resolve(img);
-          };
-          img.onerror = function () {
-            URL.revokeObjectURL(url);
-            reject(new Error("формат картинки не поддерживается браузером"));
-          };
-          img.src = url;
-        });
-      }
-
-      // createImageBitmap разбирает большие JPEG быстрее и не трогает DOM, но
-      // есть не везде и падает на части форматов — тогда обычный <img>.
-      function loadQrImage(file) {
-        if (window.createImageBitmap) {
-          try {
-            return createImageBitmap(file).catch(function () {
-              return loadQrImageEl(file);
-            });
-          } catch (e) {
-            /* синхронный бросок в старых движках — идём в фолбэк */
-          }
-        }
-        return loadQrImageEl(file);
-      }
-
-      // Фото — это не кадр видоискателя: код бывает мелким в углу, снят под углом,
-      // в тёмной теме или с шумом. jsQR чувствителен к размеру входа, поэтому
-      // идём лесенкой масштабов и добиваем центральным кропом.
-      async function decodeQrFromFile(file) {
-        var src = await loadQrImage(file);
-        var w = src.width || src.naturalWidth;
-        var h = src.height || src.naturalHeight;
-        function done(val) {
-          if (src.close) src.close();
-          return val;
-        }
-        if (!w || !h) return done(null);
-
-        // Нативный детектор точнее и быстрее — пробуем его первым, целым кадром.
-        if (window.BarcodeDetector) {
-          try {
-            var fmts = await window.BarcodeDetector.getSupportedFormats();
-            if (fmts && fmts.indexOf("qr_code") >= 0) {
-              var det =
-                qrState.detector ||
-                new window.BarcodeDetector({ formats: ["qr_code"] });
-              var codes = await det.detect(src);
-              if (codes && codes.length && codes[0].rawValue)
-                return done(codes[0].rawValue);
-            }
-          } catch (e) {
-            /* падаем в jsQR */
-          }
-        }
-
-        await loadJsQr();
-        var canvas = document.createElement("canvas");
-        var ctx = canvas.getContext("2d", { willReadFrequently: true });
-        var attempts = [
-          { max: 1000, crop: 1 },
-          { max: 640, crop: 1 },
-          { max: 1600, crop: 1 },
-          { max: 800, crop: 0.6 }, // код мелкий в центре кадра
-        ];
-        var seen = {};
-        for (var i = 0; i < attempts.length; i++) {
-          var a = attempts[i];
-          var cw = Math.round(w * a.crop);
-          var ch = Math.round(h * a.crop);
-          var sx = Math.round((w - cw) / 2);
-          var sy = Math.round((h - ch) / 2);
-          var scale = Math.min(1, a.max / Math.max(cw, ch)); // апскейл не помогает
-          var tw = Math.max(1, Math.round(cw * scale));
-          var th = Math.max(1, Math.round(ch * scale));
-          var key = sx + "," + sy + "," + tw + "x" + th;
-          if (seen[key]) continue; // мелкая картинка: масштабы схлопнулись в один
-          seen[key] = 1;
-          canvas.width = tw;
-          canvas.height = th;
-          ctx.drawImage(src, sx, sy, cw, ch, 0, 0, tw, th);
-          var img = ctx.getImageData(0, 0, tw, th);
-          // attemptBoth: QR часто показывают в тёмной теме (белый на чёрном).
-          var r = window.jsQR(img.data, img.width, img.height, {
-            inversionAttempts: "attemptBoth",
-          });
-          if (r && r.data) return done(r.data);
-        }
-        return done(null);
-      }
-
-      async function handleQrFile(input) {
-        var file = input && input.files && input.files[0];
-        if (input) input.value = ""; // чтобы тот же файл можно было выбрать повторно
-        if (!file) return;
-        if (
-          !/^image\//.test(file.type || "") &&
-          !/\.(png|jpe?g|webp|gif|bmp|heic|heif)$/i.test(file.name || "")
-        ) {
-          qrFileStatus("Это не картинка", "err");
-          return;
-        }
-        var btns = [
-          document.getElementById("qr-file-btn"),
-          document.getElementById("qr-scan-btn"),
-        ];
-        btns.forEach(function (b) {
-          if (b) b.disabled = true;
-        });
-        qrFileStatus("Распознаю…");
-        try {
-          var text = await decodeQrFromFile(file);
-          if (!text) {
-            qrFileStatus(
-              "QR на картинке не найден — обрежьте кадр по коду и попробуйте ещё раз",
-              "err",
-            );
-            toast("QR не распознан", "error");
-            return;
-          }
-          qrFileStatus("");
-          // Дальше — общий путь скана: подстановка в поле ссылки либо обработчик
-          // «входа по QR», если файл выбрали из открытого модала сканера.
-          onQrDecoded(text);
-        } catch (e) {
-          qrFileStatus("Не удалось прочитать файл: " + (e.message || e), "err");
-          toast("Не удалось прочитать файл", "error");
-        } finally {
-          // Не через refreshQrHint(): он чистит строку статуса, а там уже может
-          // лежать сообщение об ошибке распознавания.
-          var fb = document.getElementById("qr-file-btn");
-          if (fb) fb.disabled = false;
-          var sb = document.getElementById("qr-scan-btn");
-          if (sb) sb.disabled = !!qrUnavailableReason();
-        }
-      }
-
-      // ===== ВХОД НА ДРУГОМ УСТРОЙСТВЕ ПО QR =====
-      // Панель на настроенном устройстве выпускает одноразовый код (pair_create) и
-      // рисует ссылку вида <адрес панели>#pair=<код>. Второе устройство либо
-      // открывает её штатной камерой, либо сканирует кнопкой на экране входа —
-      // и меняет код на обычную сессионную куку (pair_claim).
-      //
-      // Код живёт в ХЕШЕ, а не в query: фрагмент не уходит на сервер, поэтому
-      // не оседает в access-логах uhttpd/lighttpd и не утекает в Referer.
-      var pairTimer = null;
-
-      function pairStatus(msg, cls) {
-        var el = document.getElementById("pair-status");
-        if (!el) return;
-        el.textContent = msg;
-        el.className = "qr-status" + (cls ? " " + cls : "");
-      }
-
-      function loadQrEncoder() {
-        if (window.qrcode) return Promise.resolve(window.qrcode);
-        if (window.__qrEncLoading) return window.__qrEncLoading;
-        window.__qrEncLoading = new Promise(function (resolve, reject) {
-          var s = document.createElement("script");
-          s.src = "qrcode-generator.min.js";
-          s.onload = function () {
-            window.qrcode
-              ? resolve(window.qrcode)
-              : reject(new Error("генератор QR не загрузился"));
-          };
-          s.onerror = function () {
-            reject(new Error("не удалось загрузить qrcode-generator.min.js"));
-          };
-          document.head.appendChild(s);
-        });
-        return window.__qrEncLoading;
-      }
-
-      function pairUrlFor(token) {
-        return location.origin + location.pathname + "#pair=" + token;
-      }
-
-      function renderPairQr(text) {
-        var qr = window.qrcode(0, "M"); // 0 — автоподбор версии
-        qr.addData(text);
-        qr.make();
-        var n = qr.getModuleCount();
-        var quiet = 4; // обязательная «тихая зона», без неё сканеры не берут код
-        var cv = document.getElementById("pair-qr");
-        var scale = Math.max(1, Math.floor(300 / (n + quiet * 2)));
-        var size = (n + quiet * 2) * scale;
-        cv.width = size;
-        cv.height = size;
-        var ctx = cv.getContext("2d");
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, size, size);
-        ctx.fillStyle = "#000000";
-        for (var r = 0; r < n; r++) {
-          for (var c = 0; c < n; c++) {
-            if (qr.isDark(r, c))
-              ctx.fillRect(
-                (c + quiet) * scale,
-                (r + quiet) * scale,
-                scale,
-                scale,
-              );
-          }
-        }
-      }
-
-      function stopPairCountdown() {
-        if (pairTimer) {
-          clearInterval(pairTimer);
-          pairTimer = null;
-        }
-      }
-
-      function startPairCountdown(ttl) {
-        stopPairCountdown();
-        var left = ttl;
-        var tick = function () {
-          if (left <= 0) {
-            stopPairCountdown();
-            var cv = document.getElementById("pair-qr");
-            var ctx = cv.getContext("2d");
-            ctx.clearRect(0, 0, cv.width, cv.height);
-            pairStatus("Код истёк. Нажмите «Новый код».", "err");
-            return;
-          }
-          var m = Math.floor(left / 60),
-            s = left % 60;
-          pairStatus(
-            "Код действует ещё " +
-              (m ? m + " мин " : "") +
-              s +
-              " с · одноразовый",
-          );
-          left--;
-        };
-        tick();
-        pairTimer = setInterval(tick, 1000);
-      }
-
-      async function createPairCode() {
-        stopPairCountdown();
-        pairStatus("Готовлю код…");
-        try {
-          await loadQrEncoder();
-          // тело "1", а не "": api() считает пустую строку отсутствием тела и ушёл бы GET-ом
-          var d = await api("pair_create", "POST", "1");
-          if (!d || !d.ok)
-            throw new Error((d && d.error) || "не удалось выпустить код");
-          renderPairQr(pairUrlFor(d.token));
-          startPairCountdown(d.ttl || 300);
-        } catch (e) {
-          pairStatus("Ошибка: " + (e.message || e), "err");
-        }
-      }
-
-      function openPairModal() {
-        document.getElementById("pair-modal").style.display = "flex";
-        createPairCode();
-      }
-
-      function closePairModal() {
-        stopPairCountdown();
-        document.getElementById("pair-modal").style.display = "none";
-        // Гасим невыданные коды: показанный на экране QR не должен пережить модал.
-        api("pair_revoke", "POST", "1").catch(function () {});
-      }
-
-      // Обмен кода на сессию. Не через api(): тот на 401 показывает экран входа,
-      // а здесь «не принят» — это штатный ответ, который надо показать текстом.
-      async function claimPairToken(token) {
-        try {
-          var r = await fetch(API + "?action=pair_claim", {
-            method: "POST",
-            body: token,
-            headers: { "Content-Type": "text/plain" },
-          });
-          var d = await r.json().catch(function () {
-            return null;
-          });
-          if (d && d.ok) return null;
-          return (d && d.error) || "код не принят";
-        } catch (e) {
-          return "ошибка сети: " + (e.message || e);
-        }
-      }
-
-      // Кнопка «Войти по QR» на экране входа: тот же сканер, другой обработчик.
-      function openPairScanner() {
-        qrState.onResult = async function (text) {
-          var token = extractPairToken(text);
-          var errEl = document.getElementById("login-error");
-          if (!token) {
-            if (errEl)
-              errEl.textContent =
-                "Это не код входа. Нужен QR из пункта «Вход на другом устройстве».";
-            return;
-          }
-          if (errEl) errEl.textContent = "Проверяю код…";
-          var err = await claimPairToken(token);
-          if (err) {
-            if (errEl) errEl.textContent = err;
-            return;
-          }
-          hideLogin();
-          init();
-        };
-        openQrScanner();
-      }
-
-      // Принимаем и полную ссылку с #pair=..., и голый 64-символьный код.
-      function extractPairToken(text) {
-        text = (text || "").trim();
-        var m = /[#?&]pair=([a-f0-9]{64})\b/i.exec(text);
-        if (m) return m[1].toLowerCase();
-        if (/^[a-f0-9]{64}$/i.test(text)) return text.toLowerCase();
-        return null;
-      }
-
-      // Ссылку могли открыть штатной камерой телефона — тогда код приезжает в хеше
-      // ещё до всякого сканера. Вызывается из init-пути ДО показа экрана входа.
-      async function tryPairFromHash() {
-        var token = extractPairToken(location.hash);
-        if (!token) return false;
-        // Хеш подчищаем сразу, чтобы код не остался в истории браузера и не был
-        // повторно применён при перезагрузке страницы.
-        history.replaceState(null, "", location.pathname + location.search);
-        var err = await claimPairToken(token);
-        if (err) {
-          toast("Вход по ссылке не удался: " + err, "error");
-          return false;
-        }
-        toast("Вход выполнен по QR-коду", "success");
-        return true;
-      }
-
       // ===== URI PARSING =====
       function parseProfileUri() {
         var uri = document.getElementById("profile-uri-input").value.trim();
@@ -16079,7 +15231,7 @@
           return;
         }
         try {
-          var s = await api("warp_status");
+          var s = await api("warp_status", null, null, QUIET); // опрос прогресса
           var last = s.last || {};
           // Стоп-состояние принимаем ТОЛЬКО если оно новее, чем было на старте
           // операции (warpBaselineTs). Иначе первый же опрос словил бы «done» от
@@ -16631,9 +15783,10 @@
       }
 
       // ===== DOMAINS (proxy-list) =====
-      async function loadDomains() {
+      // quiet=true — предзагрузка на старте (вкладка ещё не открыта).
+      async function loadDomains(quiet) {
         try {
-          var d = await api("domains");
+          var d = await api("domains", null, null, quiet ? QUIET : null);
           document.getElementById("domains-editor").value = d.domains || "";
         } catch (e) {
           if (e.message !== "Not authenticated")
@@ -16661,9 +15814,9 @@
       }
 
       // ===== WHITELIST (all-except) =====
-      async function loadWhitelist() {
+      async function loadWhitelist(quiet) {
         try {
-          var d = await api("whitelist");
+          var d = await api("whitelist", null, null, quiet ? QUIET : null);
           document.getElementById("whitelist-editor").value = d.whitelist || "";
         } catch (e) {
           if (e.message !== "Not authenticated")
@@ -16738,10 +15891,11 @@
         if (er) er.textContent = d.error || "";
       }
 
-      async function loadRuList() {
+      async function loadRuList(quiet) {
+        var ui = quiet ? QUIET : null;
         try {
-          renderRuList(await api("rulist_status"));
-          var e = await api("rulist_exclude");
+          renderRuList(await api("rulist_status", null, null, ui));
+          var e = await api("rulist_exclude", null, null, ui);
           var ta = document.getElementById("rulist-exclude-editor");
           if (ta) ta.value = e.exclude || "";
         } catch (e) {
@@ -16848,11 +16002,16 @@
       }
       // Name kept as loadSingboxLog() so the tab-switch + auto-refresh callers are
       // unchanged; it now loads whichever log is selected.
-      async function loadSingboxLog() {
+      // quiet=true — тик автообновления раз в 5 с; без него оверлей мигал бы на
+      // открытой вкладке «Логи» сам по себе.
+      async function loadSingboxLog(quiet) {
         var el = document.getElementById("singbox-log-view");
         try {
           var d = await api(
             "logs_view&name=" + encodeURIComponent(currentLogName),
+            null,
+            null,
+            quiet ? QUIET : null,
           );
           el.textContent = d.missing
             ? "(файл лога ещё не создан)"
@@ -17821,9 +16980,12 @@
         }
       }
 
-      async function loadKeepalive() {
+      // quiet=true — когда дёргает loadStatus (фон), иначе это открытие вкладки.
+      async function loadKeepalive(quiet) {
         try {
-          renderKeepalive(await api("keepalive_status"));
+          renderKeepalive(
+            await api("keepalive_status", null, null, quiet ? QUIET : null),
+          );
         } catch (e) {}
       }
 
@@ -17933,11 +17095,6 @@
         if (e.key === "Escape") {
           closeHdrMenu();
           closeSysStats();
-          // Сканер держит камеру — гасим его первым и не пробрасываем Esc дальше.
-          var qr = document.getElementById("qr-scan-modal");
-          if (qr && qr.style.display === "flex") closeQrScanner();
-          var pm = document.getElementById("pair-modal");
-          if (pm && pm.style.display === "flex") closePairModal();
         }
       });
 
@@ -17957,7 +17114,8 @@
       async function refreshUpdateIndicator() {
         var btn = document.getElementById("hdr-update-btn");
         try {
-          var d = await api("updates_overview");
+          // Фон: читает кэш, крутится по таймеру раз в 5 мин.
+          var d = await api("updates_overview", null, null, QUIET);
           window.lastUpdatesOverview = d; // reused by showBinsModal for upstream info
           var panel = (d && d.panel) || {};
           var avail = !!panel.update_available;
@@ -18383,6 +17541,7 @@
           return;
         var el = document.getElementById("upd-github-status");
         el.textContent = "Установка… (может занять до минуты)";
+        busyStart("Запускаем установку…");
         try {
           var r = await fetch(API + "?action=panel_update_apply", {
             method: "POST",
@@ -18407,6 +17566,9 @@
           // running detached. Poll the state file instead of showing a raw error.
           toast("Обновление, вероятно, запущено", "success");
           startPanelUpdatePolling(el);
+        } finally {
+          // Дальше — живой лог установки в модале; держать оверлей нельзя.
+          busyEnd();
         }
       }
       // Показать имя/размер выбранного файла рядом с кнопкой выбора: без этого
@@ -18457,11 +17619,18 @@
             "Загрузка .ipk (" +
             Math.round(ipkInput.files[0].size / 1048576) +
             " МБ)…";
-          var r = await fetch(API + "?action=panel_update_local", {
-            method: "POST",
-            headers: { "Content-Type": "application/octet-stream" },
-            body: ipkInput.files[0],
-          });
+          busyStart("Загружаем .ipk…");
+          var r;
+          try {
+            r = await fetch(API + "?action=panel_update_local", {
+              method: "POST",
+              headers: { "Content-Type": "application/octet-stream" },
+              body: ipkInput.files[0],
+            });
+          } finally {
+            // Дальше — живой лог установки в модале; оверлей снимаем.
+            busyEnd();
+          }
           if (r.status === 401) {
             showLogin();
             return;
@@ -19220,7 +18389,8 @@
       }
 
       // ---- UDP через VPN (TPROXY, OpenWrt only) ----
-      async function loadUdpVpn() {
+      // quiet=true — когда дёргает loadStatus (фон), иначе это действие человека.
+      async function loadUdpVpn(quiet) {
         var card = document.getElementById("udp-vpn-card");
         if (!card) return;
         if (currentPlatform === "keenetic") {
@@ -19228,7 +18398,7 @@
           return;
         }
         try {
-          var d = await api("udp_vpn");
+          var d = await api("udp_vpn", null, null, quiet ? QUIET : null);
           if (d && d.supported === false) {
             card.style.display = "none";
             return;
@@ -19354,7 +18524,7 @@
                 .getElementById("tab-singbox-log")
                 .classList.contains("active")
             )
-              loadSingboxLog();
+              loadSingboxLog(true);
           }, 5000);
         };
         cb.addEventListener("change", function () {
@@ -19366,12 +18536,6 @@
       // Init
       async function init() {
         var authed = await checkAuth();
-        if (!authed) {
-          // Ссылку с #pair=... могли открыть штатной камерой телефона — тогда
-          // сессии ещё нет, но код входа уже приехал в хеше. Пробуем его до
-          // того, как показать форму логина.
-          if (await tryPairFromHash()) authed = await checkAuth();
-        }
         if (!authed) {
           showLogin();
           return;
@@ -19397,10 +18561,10 @@
         }
         // Домены/белый список/RU-лист не нужны первому экрану: вкладка «Домены»
         // грузит их заново при открытии. Не держим ими старт — пусть догружаются
-        // в фоне.
-        loadDomains();
-        loadWhitelist();
-        loadRuList();
+        // в фоне (и молча: оверлей уже снят, панель отдана человеку).
+        loadDomains(true);
+        loadWhitelist(true);
+        loadRuList(true);
         setupLogAutoRefresh();
         startPingScheduler();
         startHealthScheduler();
