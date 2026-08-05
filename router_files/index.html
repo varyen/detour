@@ -7269,9 +7269,18 @@
       // оверлей должен держаться на весь цикл, а не мигать между итерациями.
       var BUSY_DEFAULT_TEXT = "Загружаем…";
       var QUIET = { quiet: true }; // фоновый запрос: без оверлея
+      // Сколько держать оверлей после последнего ответа. Одна операция человека
+      // почти никогда не один запрос: «переключить VPN» — это POST на 3–6 с, а
+      // следом перечитывание статуса и профилей. Без этой паузы оверлей гас
+      // ровно в тот момент, когда человек смотрит на результат: панель выглядит
+      // незанятой, но показывает ещё СТАРЫЕ данные — то есть «переключение не
+      // сработало». Запрос, стартовавший внутри окна, просто продолжает уже
+      // висящий оверлей, а не зажигает новый.
+      var BUSY_LINGER_MS = 350;
       var busyDepth = 0;
       var busyTimer = null;
       var busyGuard = null;
+      var busyLinger = null;
       function busyShow() {
         var el = document.getElementById("busy");
         if (el) {
@@ -7295,6 +7304,10 @@
       }
       function busyStart(text) {
         busyDepth += 1;
+        // Отменяем догорание от предыдущего запроса этой же операции — иначе
+        // оверлей мигнёт между «сохранили» и «перечитали экран».
+        clearTimeout(busyLinger);
+        busyLinger = null;
         // Подпись ставит только САМАЯ ВНЕШНЯЯ операция: вложенное чтение внутри
         // сохранения не должно переписывать «Сохраняем…» на «Загружаем…».
         var label = document.getElementById("busy-text");
@@ -7317,9 +7330,28 @@
         if (busyDepth > 0) return;
         clearTimeout(busyTimer);
         busyTimer = null;
-        busyHide();
-        var label = document.getElementById("busy-text");
-        if (label) label.textContent = BUSY_DEFAULT_TEXT;
+        clearTimeout(busyLinger);
+        busyLinger = setTimeout(function () {
+          busyLinger = null;
+          if (busyDepth > 0) return; // операция продолжилась — оверлей ещё нужен
+          busyHide();
+          var label = document.getElementById("busy-text");
+          if (label) label.textContent = BUSY_DEFAULT_TEXT;
+        }, BUSY_LINGER_MS);
+      }
+
+      // Обернуть ЦЕЛУЮ операцию человека в одно окно занятости: и сам запрос, и
+      // перечитывание экрана после него. Оверлей снимается, когда панель уже
+      // показывает НОВОЕ состояние, а не когда пришёл ответ на первый запрос.
+      // Используется там, где действие заведомо длинное и меняет весь экран:
+      // переключение VPN/цепочки, старт-стоп сервисов, смена режимов.
+      async function withBusy(text, fn) {
+        busyStart(text);
+        try {
+          return await fn();
+        } finally {
+          busyEnd();
+        }
       }
 
       // `ui` — необязательный четвёртый аргумент: {quiet:true} для фоновых
@@ -8531,12 +8563,14 @@
           b.disabled = true;
         });
         try {
-          var d = await api(action, "POST");
-          toast(
-            d.ok ? action + ": OK" : "Ошибка: " + d.error,
-            d.ok ? "success" : "error",
-          );
-          await loadStatus();
+          await withBusy("Применяем…", async function () {
+            var d = await api(action, "POST");
+            toast(
+              d.ok ? action + ": OK" : "Ошибка: " + d.error,
+              d.ok ? "success" : "error",
+            );
+            await loadStatus();
+          });
         } catch (e) {
           if (e.message !== "Not authenticated")
             toast("Ошибка: " + e.message, "error");
@@ -8589,8 +8623,13 @@
         var cb = document.getElementById("sb-allvpn");
         cb.disabled = true;
         try {
-          var d = await api(on ? "allvpn_on" : "allvpn_off", "POST");
-          if (d.ok) {
+          await withBusy("Применяем…", async function () {
+            var d = await api(on ? "allvpn_on" : "allvpn_off", "POST");
+            if (!d.ok) {
+              toast("Ошибка: " + d.error, "error");
+              cb.checked = !on;
+              return;
+            }
             toast(
               on
                 ? "«Все через VPN» включено — весь TCP через VPN"
@@ -8598,17 +8637,15 @@
               on ? "info" : "success",
             );
             updateAllvpnUI(on);
-          } else {
-            toast("Ошибка: " + d.error, "error");
-            cb.checked = !on;
-          }
+            await loadStatus();
+          });
         } catch (e) {
           if (e.message !== "Not authenticated")
             toast("Ошибка: " + e.message, "error");
           cb.checked = !on;
+          await loadStatus();
         }
         cb.disabled = false;
-        await loadStatus();
       }
 
       // ===== PROFILES =====
@@ -9879,18 +9916,23 @@
         )
           return;
         try {
-          var d = await api(
-            "profile_activate&name=" + encodeURIComponent(id),
-            "POST",
-          );
-          if (d.ok) {
+          // Всё окно занятости — на ЦЕЛУЮ операцию: переключение это POST на
+          // 3–6 с плюс перечитывание статуса и списка. Пока экран не показал
+          // новый VPN, операция для человека не закончилась.
+          await withBusy("Переключаем VPN…", async function () {
+            var d = await api(
+              "profile_activate&name=" + encodeURIComponent(id),
+              "POST",
+            );
+            if (!d.ok) {
+              toast("Ошибка: " + d.error, "error");
+              return;
+            }
             toast('Профиль "' + label + '" активирован', "success");
             await loadStatus();
             await loadProfiles();
             renderVpnStatusTable();
-          } else {
-            toast("Ошибка: " + d.error, "error");
-          }
+          });
         } catch (e) {
           if (e.message !== "Not authenticated")
             toast("Ошибка: " + e.message, "error");
@@ -13710,16 +13752,21 @@
           )
             return;
           try {
-            var dc = await api(
-              "chain_activate",
-              "POST",
-              (chain.hops || []).join(","),
-            );
-            if (dc && dc.ok === false)
-              throw new Error(dc.error || "не удалось применить");
-            toast('Цепочка "' + (chain.name || name) + '" активирована', "success");
-            await loadStatus();
-            await loadProfiles();
+            await withBusy("Переключаем цепочку…", async function () {
+              var dc = await api(
+                "chain_activate",
+                "POST",
+                (chain.hops || []).join(","),
+              );
+              if (dc && dc.ok === false)
+                throw new Error(dc.error || "не удалось применить");
+              toast(
+                'Цепочка "' + (chain.name || name) + '" активирована',
+                "success",
+              );
+              await loadStatus();
+              await loadProfiles();
+            });
           } catch (e) {
             if (e.message !== "Not authenticated")
               toast("Ошибка: " + e.message, "error");
@@ -13735,17 +13782,19 @@
         )
           return;
         try {
-          var d = await api(
-            "profile_activate&name=" + encodeURIComponent(name),
-            "POST",
-          );
-          if (d.ok) {
+          await withBusy("Переключаем VPN…", async function () {
+            var d = await api(
+              "profile_activate&name=" + encodeURIComponent(name),
+              "POST",
+            );
+            if (!d.ok) {
+              toast("Ошибка: " + d.error, "error");
+              return;
+            }
             toast('Профиль "' + name + '" активирован', "success");
             await loadStatus();
             await loadProfiles();
-          } else {
-            toast("Ошибка: " + d.error, "error");
-          }
+          });
         } catch (e) {
           if (e.message !== "Not authenticated")
             toast("Ошибка: " + e.message, "error");
@@ -13878,12 +13927,14 @@
           return;
         }
         try {
-          var d = await api("chain_activate", "POST", chain.hops.join(","));
-          if (d && d.ok === false)
-            throw new Error(d.error || "не удалось применить");
-          toast("Цепочка «" + (chain.name || id) + "» активна", "success");
-          await loadProfiles();
-          await loadStatus();
+          await withBusy("Переключаем цепочку…", async function () {
+            var d = await api("chain_activate", "POST", chain.hops.join(","));
+            if (d && d.ok === false)
+              throw new Error(d.error || "не удалось применить");
+            toast("Цепочка «" + (chain.name || id) + "» активна", "success");
+            await loadProfiles();
+            await loadStatus();
+          });
         } catch (e) {
           toast(e.message, "error");
         }
@@ -14056,17 +14107,19 @@
           return;
         }
         try {
-          var d = await api("chain_activate", "POST", editingChain.join(","));
-          if (d.ok) {
+          await withBusy("Применяем цепочку…", async function () {
+            var d = await api("chain_activate", "POST", editingChain.join(","));
+            if (!d.ok) {
+              toast("Ошибка: " + d.error, "error");
+              return;
+            }
             currentActiveChain = editingChain.slice();
             renderChainPreview(currentActiveChain);
             closeChainModal();
             toast("Цепочка применена, sing-box перезапущен", "success");
             await loadStatus();
             await loadProfiles();
-          } else {
-            toast("Ошибка: " + d.error, "error");
-          }
+          });
         } catch (e) {
           if (e.message !== "Not authenticated")
             toast("Ошибка: " + e.message, "error");
@@ -14398,6 +14451,9 @@
         }
 
         if (activateNow && savedIds.length === 1) {
+          // Сохранение уже держит оверлей; здесь только уточняем подпись —
+          // активация это ещё 3–6 с поверх сохранения.
+          busyText("Переключаем VPN…");
           await api(
             "profile_activate&name=" + encodeURIComponent(savedIds[0]),
             "POST",
@@ -15130,16 +15186,17 @@
           return;
         }
         try {
-          var d = await api(
-            "chain_activate",
-            "POST",
-            chain.hops.join(","),
-          );
-          if (d && d.ok === false)
-            throw new Error(d.error || "не удалось применить");
-          toast("Цепочка «" + (chain.name || chainId) + "» активна", "success");
-          await loadProfiles();
-          renderWarpList();
+          await withBusy("Переключаем цепочку…", async function () {
+            var d = await api("chain_activate", "POST", chain.hops.join(","));
+            if (d && d.ok === false)
+              throw new Error(d.error || "не удалось применить");
+            toast(
+              "Цепочка «" + (chain.name || chainId) + "» активна",
+              "success",
+            );
+            await loadProfiles();
+            renderWarpList();
+          });
         } catch (e) {
           toast(e.message, "error");
         }
