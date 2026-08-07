@@ -48,3 +48,6 @@ landing/raw/
 # данные» в CLAUDE.md). На сайт их заливает landing/deploy.sh из локальной
 # landing/img/, пересобирает — landing/webp.sh.
 landing/img/
+
+# Рабочие выгрузки логов инцидентов: содержат SSH-пароли и реальные хосты.
+logs.txt

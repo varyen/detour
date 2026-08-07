@@ -30,7 +30,16 @@ STATE=/var/state/detour-cert.json          # panel-facing status
 LOG=/var/log/detour-cert.log
 ACME_WEBROOT=/var/detour-acme              # HTTP-01 challenge docroot (nginx mode)
 NGINX_CONFD=/etc/nginx/conf.d
-NGINX_SNIPPET=/etc/nginx/conf.d/detour-acme.conf
+# HTTP-01 challenge vhost. The `zz-` prefix is load-bearing for the SAME reason as the
+# panel vhost below, but on :80 the consequence is worse: nginx picks the FIRST server
+# block declared for a listen address as that address's default_server unless one is
+# marked explicitly, and GL.iNet's stock gl.conf marks neither :80 nor :443. Under the
+# old name (detour-acme.conf) this file sorted BEFORE gl.conf, so it became the :80
+# default and every request to the router by IP — the whole native GL admin UI, /rpc
+# and /ws included — landed here, matched no location, fell through to the http-level
+# `root /www` and 404'd (`open() "/www/rpc" failed`). See NGINX_SNIPPET_LEGACY below.
+NGINX_SNIPPET=/etc/nginx/conf.d/zz-detour-acme.conf
+NGINX_SNIPPET_LEGACY=/etc/nginx/conf.d/detour-acme.conf
 # Managed panel-routing vhost. The `zz-` prefix makes it sort LAST in conf.d so the
 # router's own default :443 server (e.g. GL.iNet gl.conf) stays the default_server —
 # IP / unknown-SNI is unaffected; this named block wins for <domain> by SNI. A
@@ -414,6 +423,20 @@ ensure_renewal() {
 
 valid_domain() { printf '%s' "$1" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'; }
 valid_email()  { printf '%s' "$1" | grep -qE '^[^@ ]+@[^@ ]+\.[^@ ]+$'; }
+
+# One-shot migration for installs that already have the badly-named challenge vhost:
+# under the old name it sorted before gl.conf and took over the :80 default_server,
+# 404-ing the router's own admin UI (see NGINX_SNIPPET). Runs on every invocation so a
+# cron `renew` or the panel's `detect` heals it without waiting for a reissue.
+if [ "$PLATFORM" = openwrt ] && [ -f "$NGINX_SNIPPET_LEGACY" ]; then
+    if [ -f "$NGINX_SNIPPET" ]; then
+        rm -f "$NGINX_SNIPPET_LEGACY"
+    else
+        mv "$NGINX_SNIPPET_LEGACY" "$NGINX_SNIPPET" 2>/dev/null
+    fi
+    log "migrated legacy challenge vhost → $NGINX_SNIPPET (it hijacked the :80 default_server)"
+    nginx -t >/dev/null 2>&1 && nginx_reload
+fi
 
 # ================================ COMMANDS =======================================
 CMD="${1:-detect}"
