@@ -141,6 +141,7 @@ PANEL_FILES = [
     # Cloudflare WARP: регистрирует бесплатное устройство и кладёт его обычным
     # wireguard-профилем (последний хоп цепочки → выход из дата-центра в CF).
     (("router_files", "detour-warp"), "usr/sbin/detour-warp", 0o755),
+    (("router_files", "detour-meter"), "usr/sbin/detour-meter", 0o755),
     (("router_files", "detour-offload"), "usr/sbin/detour-offload", 0o755),
     # Публикация LAN-сервисов наружу (HTTPS-реверс-прокси на nginx / DNAT через uci).
     (("router_files", "detour-portmap"), "usr/sbin/detour-portmap", 0o755),
@@ -167,6 +168,52 @@ PANEL_FILES = [
 ]
 
 # The protected-path sanity check scans the package's full file set.
+# --- новая панель (Vue + PWA) -------------------------------------------------
+# Собранная панель лежит в panel/dist и ставится РЯДОМ со старой, в
+# /www/detour-next/. Пока обе живут одновременно: если новая где-то не
+# дотягивает, управление роутером не теряется — старая на /detour/ работает.
+# Имена файлов с хешом, поэтому кеш-бастинг решается сам собой, а opkg при
+# обновлении сам подчистит ассеты прошлой версии (их нет в новом списке).
+PANEL_NEXT_DIR = os.path.join("panel", "dist")
+PANEL_NEXT_DEST = "www/detour-next"
+
+
+def check_panel_build(version):
+    """Отказать, если panel/dist собран из другой версии.
+
+    В сборку зашита версия из VERSION (define в vite.config.ts): панель сверяет
+    её с версией пакета на роутере, чтобы поймать залипший в кеше старый
+    index.html. Уехавший в релиз dist с чужой версией сломал бы ровно эту
+    проверку — ловим расхождение здесь, а не на роутере.
+    """
+    stamp = os.path.join(HERE, PANEL_NEXT_DIR, "build.json")
+    if not os.path.isfile(stamp):
+        die("panel/dist собран без build.json — пересобери: cd panel && npm run build")
+    with open(stamp, "r", encoding="utf-8") as f:
+        built = (json.load(f) or {}).get("version")
+    if built != version:
+        die("panel/dist собран из версии %s, а пакуется %s\n"
+            "  Обнови VERSION и пересобери: cd panel && npm run build" % (built, version))
+
+
+def panel_next_files(dest_prefix=PANEL_NEXT_DEST):
+    """Файлы собранной Vue-панели одним списком (source_parts, dest, mode)."""
+    root = os.path.join(HERE, PANEL_NEXT_DIR)
+    if not os.path.isdir(root):
+        die("нет собранной панели: " + root + "\n"
+            "  Собери её: cd panel && npm ci && npm run build")
+    entries = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            parts = tuple([PANEL_NEXT_DIR] + rel.split("/"))
+            entries.append((parts, dest_prefix + "/" + rel, 0o644))
+    if not entries:
+        die("panel/dist пуст — сборка панели не выполнялась")
+    return sorted(entries, key=lambda e: e[1])
+
+
 FILES_IN_PACKAGE = PANEL_FILES
 
 # The opkg-keyring path uses the key fingerprint as the filename. Read it
@@ -358,7 +405,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/detour-bootstrap-install \
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
-    /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-warp /usr/sbin/detour-offload /usr/sbin/detour-portmap /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
+    /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-warp /usr/sbin/detour-meter /usr/sbin/detour-offload /usr/sbin/detour-portmap /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /usr/sbin/detour-rulist \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
@@ -908,7 +955,11 @@ def main():
 
     # --- panel (slim; sing-box + tpws-zapret both come from the opkg feed) ---
     print("\n[panel] Assembling .ipk ...")
-    panel_ipk, panel_size = build_ipk(PACKAGE_NAME, version, PANEL_FILES, out_dir,
+    # Vue-панель добавляется здесь, а не в константе: без собранного panel/dist
+    # модуль должен спокойно импортироваться (его тянут другие скрипты).
+    check_panel_build(version)
+    panel_files = PANEL_FILES + panel_next_files()
+    panel_ipk, panel_size = build_ipk(PACKAGE_NAME, version, panel_files, out_dir,
                                       inject_keyring=True)
     print(f"  {panel_ipk}  ({os.path.getsize(panel_ipk):,} B on disk, "
           f"installed {panel_size:,} B, sha256 {sha256_file(panel_ipk)[:16]}...)")

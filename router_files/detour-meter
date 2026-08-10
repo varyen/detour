@@ -1,0 +1,276 @@
+#!/bin/sh
+# detour-meter — счётчики трафика по лентам для схемы потока в панели.
+#
+# ЗАЧЕМ ОТДЕЛЬНЫЕ ПРАВИЛА. Существующие REDIRECT-правила живут в таблице nat, а
+# nat смотрит только ПЕРВЫЙ пакет соединения — её счётчики годятся для подсчёта
+# соединений и совершенно не годятся для байтов. Поэтому здесь заводится своя
+# цепочка в таблице mangle, которая НИЧЕГО не решает: только считает и делает
+# RETURN. Даже если она сломается, маршрутизация не изменится.
+#
+# КАК СЧИТАЕТСЯ:
+#   через VPN     — байты, у которых адрес назначения (исходящие) или источника
+#                   (входящие) лежит в ipset'ах sing-box;
+#   обход DPI     — то же для ipset'а zapret;
+#   всего         — счётчики WAN-интерфейса из /proc/net/dev (точные и дешёвые);
+#   напрямую      — «всего» минус две ленты выше, но не меньше нуля.
+#
+# Панель показывает ДЕЛЬТЫ между двумя чтениями, поэтому здесь же хранится
+# предыдущий снимок. Абсолютные значения бесполезны: правила пересоздаются на
+# каждом перезапуске sing-box.
+#
+# Платформы: одинаковый iptables на OpenWrt и Keenetic. На Keenetic правила
+# сбрасываются при перезагрузке ndm-файрвола, поэтому install вызывается ещё и
+# из ndm-хука (см. keenetic/ndm/netfilter.d).
+
+set -u
+
+PLATFORM=openwrt
+[ -d /opt/etc/ndm ] && PLATFORM=keenetic
+[ -f /opt/etc/detour/platform ] && PLATFORM=keenetic
+
+if [ "$PLATFORM" = keenetic ]; then
+    ETC=/opt/etc
+    PATH=/opt/bin:/opt/sbin:$PATH
+    export PATH
+else
+    ETC=/etc
+fi
+
+STATE=/tmp/detour-meter.state
+CHAIN_UP=DETOUR_METER_UP
+CHAIN_DOWN=DETOUR_METER_DOWN
+
+# ipset'ы, которые заводят init-скрипты. Цели маршрутов (singbox_tN) считаются
+# вместе с основным набором: для схемы это всё одна лента «через VPN».
+SB_SETS_STATIC="singbox_domains singbox_all singbox_udp_vpn"
+ZP_SET=zapret_domains
+WL_SET=singbox_whitelist
+
+lan_iface() {
+    if [ "$PLATFORM" = keenetic ]; then
+        echo br0
+    else
+        uci -q get network.lan.device 2>/dev/null || echo br-lan
+    fi
+}
+
+wan_iface() {
+    if [ "$PLATFORM" = keenetic ]; then
+        # У Keenetic имя WAN-интерфейса не фиксировано — берём тот, через
+        # который лежит маршрут по умолчанию.
+        ip route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1
+    else
+        uci -q get network.wan.device 2>/dev/null ||
+            ip route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1
+    fi
+}
+
+# Все существующие наборы sing-box, включая динамические цели маршрутов.
+# `ipset list -n` без имени печатает все наборы — по нему и сверяемся, потому
+# что `ipset list -n ИМЯ` на отсутствующем наборе ругается в stderr.
+sb_sets() {
+    _all=$(ipset list -n 2>/dev/null)
+    for s in $SB_SETS_STATIC; do
+        echo "$_all" | grep -qx "$s" && echo "$s"
+    done
+    echo "$_all" | grep '^singbox_t[0-9]'
+}
+
+have_set() {
+    ipset list -n 2>/dev/null | grep -qx "$1"
+}
+
+# Режим маршрутизации: от него зависит, какая лента измеряется напрямую, а
+# какая остаётся остатком.
+routing_mode() {
+    sed -n 's/.*"routing_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*//p'         "$ETC/sing-box/settings.json" 2>/dev/null | head -1
+}
+
+# --- установка правил ------------------------------------------------------
+
+install_chain() {
+    lan=$(lan_iface)
+    [ -n "$lan" ] || lan=br-lan
+
+    for c in $CHAIN_UP $CHAIN_DOWN; do
+        iptables -t mangle -N "$c" 2>/dev/null
+        iptables -t mangle -F "$c"
+    done
+
+    # Порядок правил повторяет порядок вердиктов в nat: цепочка zapret стоит в
+    # PREROUTING выше sing-box, а белый список уводит соединение мимо туннеля.
+    # Считаем по ПЕРВОМУ совпадению, иначе один и тот же трафик попадёт в две
+    # ленты сразу и сумма перевалит за сто процентов.
+    for dir in dst src; do
+        [ "$dir" = dst ] && chain=$CHAIN_UP || chain=$CHAIN_DOWN
+        have_set "$ZP_SET" &&
+            iptables -t mangle -A "$chain" -m set --match-set "$ZP_SET" $dir -j RETURN 2>/dev/null
+        have_set "$WL_SET" &&
+            iptables -t mangle -A "$chain" -m set --match-set "$WL_SET" $dir -j RETURN 2>/dev/null
+        for s in $(sb_sets); do
+            iptables -t mangle -A "$chain" -m set --match-set "$s" $dir -j RETURN 2>/dev/null
+        done
+    done
+
+    # Подключаем к PREROUTING: трафик из локальной сети (вверх) и всё, что
+    # пришло снаружи (вниз). Правила без -j, только счёт, поэтому цепочки
+    # безопасно висят даже при выключенном sing-box.
+    iptables -t mangle -D PREROUTING -i "$lan" -j $CHAIN_UP 2>/dev/null
+    iptables -t mangle -I PREROUTING 1 -i "$lan" -j $CHAIN_UP
+    iptables -t mangle -D PREROUTING ! -i "$lan" -j $CHAIN_DOWN 2>/dev/null
+    iptables -t mangle -I PREROUTING 2 ! -i "$lan" -j $CHAIN_DOWN
+}
+
+remove_chain() {
+    lan=$(lan_iface)
+    iptables -t mangle -D PREROUTING -i "$lan" -j $CHAIN_UP 2>/dev/null
+    iptables -t mangle -D PREROUTING ! -i "$lan" -j $CHAIN_DOWN 2>/dev/null
+    for c in $CHAIN_UP $CHAIN_DOWN; do
+        iptables -t mangle -F "$c" 2>/dev/null
+        iptables -t mangle -X "$c" 2>/dev/null
+    done
+    rm -f "$STATE"
+}
+
+installed() {
+    iptables -t mangle -S PREROUTING 2>/dev/null | grep -q -- "-j $CHAIN_UP"
+}
+
+# --- чтение счётчиков ------------------------------------------------------
+
+# Сумма байтов по правилам цепочки, где встречается имя набора.
+# $1 — цепочка, $2 — «sb» или «zp».
+chain_bytes() {
+    _chain=$1
+    _kind=$2
+    iptables -t mangle -L "$_chain" -vxn 2>/dev/null | awk -v kind="$_kind" '
+        /match-set/ {
+            set = ""
+            for (i = 1; i <= NF; i++) if ($i == "match-set") set = $(i + 1)
+            if (set == "") next
+            if (set ~ /^zapret_/) k = "zp"
+            else if (set == "singbox_whitelist") k = "wl"
+            else k = "sb"
+            if (k == kind) total += $2
+        }
+        END { print total + 0 }
+    '
+}
+
+iface_bytes() {
+    _if=$1
+    [ -n "$_if" ] || { echo "0 0"; return; }
+    awk -v ifc="$_if:" '$1 == ifc { print $2, $10 }' /proc/net/dev 2>/dev/null |
+        head -1 | while read -r rx tx; do echo "${rx:-0} ${tx:-0}"; done
+}
+
+read_counters() {
+    now=$(date +%s)
+    wan=$(wan_iface)
+    set -- $(iface_bytes "$wan")
+    wan_rx=${1:-0}
+    wan_tx=${2:-0}
+    wan_total=$((wan_rx + wan_tx))
+
+    vpn=$(($(chain_bytes $CHAIN_UP sb) + $(chain_bytes $CHAIN_DOWN sb)))
+    zap=$(($(chain_bytes $CHAIN_UP zp) + $(chain_bytes $CHAIN_DOWN zp)))
+    wl=$(($(chain_bytes $CHAIN_UP wl) + $(chain_bytes $CHAIN_DOWN wl)))
+
+    p_ts=0 p_wan=0 p_vpn=0 p_zap=0 p_wl=0
+    if [ -f "$STATE" ]; then
+        # shellcheck disable=SC2034  # значения приходят из файла состояния
+        . "$STATE" 2>/dev/null || true
+        p_ts=${M_TS:-0}
+        p_wan=${M_WAN:-0}
+        p_vpn=${M_VPN:-0}
+        p_zap=${M_ZAP:-0}
+        p_wl=${M_WL:-0}
+    fi
+
+    cat > "$STATE" <<EOF
+M_TS=$now
+M_WAN=$wan_total
+M_VPN=$vpn
+M_ZAP=$zap
+M_WL=$wl
+EOF
+
+    span=$((now - p_ts))
+    # Счётчики обнулились (перезапуск sing-box пересоздал цепочки) или первое
+    # чтение — дельту показывать нечестно, отдаём нули и ждём следующего раза.
+    if [ "$p_ts" -eq 0 ] || [ "$span" -le 0 ] ||
+        [ "$vpn" -lt "$p_vpn" ] || [ "$zap" -lt "$p_zap" ] ||
+        [ "$wl" -lt "$p_wl" ] || [ "$wan_total" -lt "$p_wan" ]; then
+        echo '{"ok":true,"supported":true,"warming":true,"exact":true,"direct":0,"vpn":0,"bypass":0,"total":0,"bytes":{"direct":0,"vpn":0,"bypass":0,"total":0},"span":0}'
+        return
+    fi
+
+    d_wan=$((wan_total - p_wan))
+    d_zap=$((zap - p_zap))
+
+    # В режиме «всё кроме» списка проксируемых доменов нет вовсе: в туннель
+    # идёт всё, что не попало в белый список. Тогда измеримая лента — прямая,
+    # а VPN считается остатком. В обычном режиме наоборот.
+    if [ "$(routing_mode)" = all-except ]; then
+        d_dir=$((wl - p_wl))
+        d_vpn=$((d_wan - d_dir - d_zap))
+        [ "$d_vpn" -lt 0 ] && d_vpn=0
+    else
+        d_vpn=$((vpn - p_vpn))
+        d_dir=$((d_wan - d_vpn - d_zap))
+        [ "$d_dir" -lt 0 ] && d_dir=0
+    fi
+
+    sum=$((d_dir + d_vpn + d_zap))
+    if [ "$sum" -le 0 ]; then
+        s_dir=0 s_vpn=0 s_zap=0
+    else
+        s_dir=$((d_dir * 100 / sum))
+        s_vpn=$((d_vpn * 100 / sum))
+        s_zap=$((d_zap * 100 / sum))
+        # Остаток от целочисленного деления отдаём САМОЙ БОЛЬШОЙ ленте. Если
+        # сваливать его в последнюю, пустая лента получает единицу процента при
+        # нулевых байтах — и человек видит трафик там, где его нет.
+        rem=$((100 - s_dir - s_vpn - s_zap))
+        if [ "$d_dir" -ge "$d_vpn" ] && [ "$d_dir" -ge "$d_zap" ]; then
+            s_dir=$((s_dir + rem))
+        elif [ "$d_vpn" -ge "$d_zap" ]; then
+            s_vpn=$((s_vpn + rem))
+        else
+            s_zap=$((s_zap + rem))
+        fi
+    fi
+
+    printf '{"ok":true,"supported":true,"warming":false,"exact":true,'
+    printf '"direct":%d,"vpn":%d,"bypass":%d,"total":100,' "$s_dir" "$s_vpn" "$s_zap"
+    printf '"bytes":{"direct":%d,"vpn":%d,"bypass":%d,"total":%d},' "$d_dir" "$d_vpn" "$d_zap" "$d_wan"
+    printf '"span":%d,"wan":"%s"}\n' "$span" "$wan"
+}
+
+case "${1:-read}" in
+    install) install_chain ;;
+    remove) remove_chain ;;
+    status)
+        if installed; then
+            printf '{"ok":true,"supported":true,"installed":true,"lan":"%s","wan":"%s"}\n' \
+                "$(lan_iface)" "$(wan_iface)"
+        else
+            printf '{"ok":true,"supported":true,"installed":false}\n'
+        fi
+        ;;
+    read)
+        if ! installed; then
+            # Ставим цепочки при первом обращении: панель включает счётчики
+            # самим фактом того, что их кто-то смотрит.
+            install_chain 2>/dev/null || {
+                echo '{"ok":false,"supported":false,"error":"нет iptables mangle"}'
+                exit 0
+            }
+        fi
+        read_counters
+        ;;
+    *)
+        echo "usage: detour-meter install|remove|status|read" >&2
+        exit 1
+        ;;
+esac

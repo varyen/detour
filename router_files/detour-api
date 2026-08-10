@@ -76,6 +76,7 @@ OFFLOAD_BIN="/usr/sbin/detour-offload"      # QCA HW-offload watchdog/recovery �
 PORTMAP_BIN="/usr/sbin/detour-portmap"      # публикация внутренних сервисов наружу — backs the portmap_* actions
 WANLINK_BIN="/usr/sbin/detour-wan-link"     # WAN PHY/link-speed monitor — warns on 100M negotiation (not offload-related)
 WARP_BIN="/usr/sbin/detour-warp"            # Cloudflare WARP (последний хоп цепочки) — backs the warp_* actions
+METER_BIN="/usr/sbin/detour-meter"          # счётчики трафика по лентам — backs the traffic_counters action
 WARP_STATE="/var/state/detour-warp.json"    # ход регистрации WARP (пишет detour-warp; CGI её детачит)
 # Swap file (Keenetic/Entware only — /opt on a USB flash needs swap or the stack
 # gets OOM-killed). Managed via the S05swap init script; backs the swap_* actions.
@@ -166,6 +167,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     WANLINK_BIN="$OPT/sbin/detour-wan-link"
     WARP_BIN="$OPT/sbin/detour-warp"
     WARP_STATE="$OPT/var/state/detour-warp.json"
+    METER_BIN="$OPT/sbin/detour-meter"
     SWAPFILE="$OPT/swapfile"
     SWAP_INITD="$OPT/etc/init.d/S05swap"
     SWAP_STATE="$OPT/var/state/detour-swap.json"
@@ -3065,6 +3067,23 @@ iptables)
 conntrack)
     CT=$(cat /proc/net/nf_conntrack 2>/dev/null | grep '45.88.174' | head -10 | json_escape)
     printf '{"conntrack":"%s"}' "$CT"
+    ;;
+
+# Доли лент для схемы потока. Хелпер сам ставит свои счётчики при первом
+# обращении и отдаёт ДЕЛЬТУ с прошлого чтения, поэтому действие дешёвое и
+# вызывается панелью по таймеру. Нет хелпера (старый пакет) — честно говорим,
+# что счётчиков нет, и схема рисует прочерки вместо выдуманных процентов.
+traffic_counters)
+    if [ -x "$METER_BIN" ]; then
+        OUT=$("$METER_BIN" read 2>/dev/null)
+        if [ -n "$OUT" ]; then
+            echo "$OUT"
+        else
+            printf '{"ok":false,"supported":false,"error":"счётчики недоступны"}'
+        fi
+    else
+        printf '{"ok":false,"supported":false,"error":"нет detour-meter"}'
+    fi
     ;;
 
 allvpn_on)

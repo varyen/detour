@@ -748,6 +748,21 @@
         margin-left: 6px;
         cursor: pointer;
       }
+      .next-link {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--accent);
+        border: 1px solid var(--accent);
+        padding: 1px 8px;
+        border-radius: 10px;
+        margin-left: 8px;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      .next-link:hover {
+        color: var(--on-accent);
+        background: var(--accent);
+      }
       /* A chip blinks green while an update is available for its component. */
       .ver-chip.has-update {
         color: var(--on-accent) !important;
@@ -2953,6 +2968,15 @@
             style="cursor: pointer"
             title="На главную"
             >Detour</span
+          >
+          <!-- Ссылка на новую панель (Vue, /detour-next/). Своя раскладка, а не
+               .ver-chip: чипы версий на узком экране скрываются, а эта ссылка
+               нужна прежде всего на телефоне. -->
+          <a
+            class="next-link"
+            href="/detour-next/"
+            title="Открыть новую панель (эта остаётся на месте)"
+            >Новая панель →</a
           >
           <span
             id="panel-version"

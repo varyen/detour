@@ -1,0 +1,2392 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Detour — три направления редизайна панели</title>
+<style>*{margin:0}img,video{max-width:100%}</style>
+</head>
+<body>
+<canvas id="rain" aria-hidden="true"></canvas>
+
+<style>
+  /* ============ TOKENS ============
+     Каждая концепция — свой набор токенов, scoped по [data-concept].
+     A и C живут в обеих темах, B — сознательно только тёмная (это терминал). */
+  :root {
+    --mono: ui-monospace, "Cascadia Mono", SFMono-Regular, Consolas,
+      "Liberation Mono", monospace;
+    --sans: system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --r: 10px;
+  }
+
+  /* ---- A: пульт (light default) ---- */
+  :root[data-concept="a"] {
+    color-scheme: light;
+    --ground: #eef2f5;
+    --panel: rgba(255, 255, 255, 0.74);
+    --panel-2: rgba(255, 255, 255, 0.5);
+    --line: rgba(20, 50, 70, 0.14);
+    --line-2: rgba(20, 50, 70, 0.28);
+    --ink: #10202b;
+    --dim: #55707f;
+    --faint: #86a0ad;
+    --accent: #0d7c8c;
+    --accent-on: #ffffff;
+    --accent-wash: rgba(13, 124, 140, 0.1);
+    --ok: #1f8a5b;
+    --warn: #a9711a;
+    --bad: #c1453e;
+    --rain-lead: rgba(13, 124, 140, 0.2);
+    --rain-trail: rgba(13, 124, 140, 0.09);
+    --font: var(--sans);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-concept="a"] {
+      color-scheme: dark;
+      --ground: #070c12;
+      --panel: rgba(14, 21, 31, 0.74);
+      --panel-2: rgba(255, 255, 255, 0.035);
+      --line: rgba(120, 160, 190, 0.16);
+      --line-2: rgba(120, 160, 190, 0.32);
+      --ink: #dfe9f2;
+      --dim: #8ba0b4;
+      --faint: #61788a;
+      --accent: #58d3e8;
+      --accent-on: #04202a;
+      --accent-wash: rgba(88, 211, 232, 0.12);
+      --ok: #4ec98a;
+      --warn: #e8b24a;
+      --bad: #f0645e;
+      --rain-lead: rgba(120, 200, 220, 0.6);
+      --rain-trail: rgba(60, 110, 135, 0.4);
+    }
+  }
+  :root[data-theme="dark"][data-concept="a"] {
+    color-scheme: dark;
+    --ground: #070c12;
+    --panel: rgba(14, 21, 31, 0.74);
+    --panel-2: rgba(255, 255, 255, 0.035);
+    --line: rgba(120, 160, 190, 0.16);
+    --line-2: rgba(120, 160, 190, 0.32);
+    --ink: #dfe9f2;
+    --dim: #8ba0b4;
+    --faint: #61788a;
+    --accent: #58d3e8;
+    --accent-on: #04202a;
+    --accent-wash: rgba(88, 211, 232, 0.12);
+    --ok: #4ec98a;
+    --warn: #e8b24a;
+    --bad: #f0645e;
+    --rain-lead: rgba(120, 200, 220, 0.6);
+    --rain-trail: rgba(60, 110, 135, 0.4);
+  }
+  :root[data-theme="light"][data-concept="a"] {
+    color-scheme: light;
+    --ground: #eef2f5;
+    --panel: rgba(255, 255, 255, 0.74);
+    --panel-2: rgba(255, 255, 255, 0.5);
+    --line: rgba(20, 50, 70, 0.14);
+    --line-2: rgba(20, 50, 70, 0.28);
+    --ink: #10202b;
+    --dim: #55707f;
+    --faint: #86a0ad;
+    --accent: #0d7c8c;
+    --accent-on: #ffffff;
+    --accent-wash: rgba(13, 124, 140, 0.1);
+    --ok: #1f8a5b;
+    --warn: #a9711a;
+    --bad: #c1453e;
+    --rain-lead: rgba(13, 124, 140, 0.2);
+    --rain-trail: rgba(13, 124, 140, 0.09);
+  }
+
+  /* ---- B: консоль (одна тема — сознательно) ---- */
+  :root[data-concept="b"] {
+    color-scheme: dark;
+    --ground: #0b0a08;
+    --panel: rgba(23, 20, 15, 0.72);
+    --panel-2: rgba(255, 182, 77, 0.05);
+    --line: rgba(255, 182, 77, 0.18);
+    --line-2: rgba(255, 182, 77, 0.34);
+    --ink: #e9e2d4;
+    --dim: #9a8f7c;
+    --faint: #6d6558;
+    --accent: #ffb64d;
+    --accent-on: #1a1206;
+    --accent-wash: rgba(255, 182, 77, 0.12);
+    --ok: #9ecb7c;
+    --warn: #ffb64d;
+    --bad: #fb6a4a;
+    --rain-lead: rgba(255, 182, 77, 0.34);
+    --rain-trail: rgba(150, 105, 40, 0.22);
+    --font: var(--mono);
+  }
+
+  /* ---- C: спокойный (light default) ---- */
+  :root[data-concept="c"] {
+    color-scheme: light;
+    --ground: #ecefed;
+    --panel: rgba(255, 255, 255, 0.78);
+    --panel-2: rgba(32, 87, 63, 0.05);
+    --line: rgba(24, 40, 34, 0.13);
+    --line-2: rgba(24, 40, 34, 0.26);
+    --ink: #14201b;
+    --dim: #5d6f67;
+    --faint: #8b9a92;
+    --accent: #20573f;
+    --accent-on: #ffffff;
+    --accent-wash: rgba(32, 87, 63, 0.08);
+    --ok: #20573f;
+    --warn: #8e6415;
+    --bad: #a63a2f;
+    --rain-lead: rgba(32, 87, 63, 0.17);
+    --rain-trail: rgba(32, 87, 63, 0.07);
+    --font: var(--sans);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-concept="c"] {
+      color-scheme: dark;
+      --ground: #0c1210;
+      --panel: rgba(19, 27, 23, 0.72);
+      --panel-2: rgba(255, 255, 255, 0.04);
+      --line: rgba(160, 200, 180, 0.14);
+      --line-2: rgba(160, 200, 180, 0.28);
+      --ink: #e4ebe6;
+      --dim: #93a89c;
+      --faint: #6b7d73;
+      --accent: #6fc79a;
+      --accent-on: #08160f;
+      --accent-wash: rgba(111, 199, 154, 0.12);
+      --ok: #6fc79a;
+      --warn: #d9a441;
+      --bad: #e2685c;
+      --rain-lead: rgba(111, 199, 154, 0.48);
+      --rain-trail: rgba(60, 110, 85, 0.38);
+    }
+  }
+  :root[data-theme="dark"][data-concept="c"] {
+    color-scheme: dark;
+    --ground: #0c1210;
+    --panel: rgba(19, 27, 23, 0.72);
+    --panel-2: rgba(255, 255, 255, 0.04);
+    --line: rgba(160, 200, 180, 0.14);
+    --line-2: rgba(160, 200, 180, 0.28);
+    --ink: #e4ebe6;
+    --dim: #93a89c;
+    --faint: #6b7d73;
+    --accent: #6fc79a;
+    --accent-on: #08160f;
+    --accent-wash: rgba(111, 199, 154, 0.12);
+    --ok: #6fc79a;
+    --warn: #d9a441;
+    --bad: #e2685c;
+    --rain-lead: rgba(111, 199, 154, 0.48);
+    --rain-trail: rgba(60, 110, 85, 0.38);
+  }
+  :root[data-theme="light"][data-concept="c"] {
+    color-scheme: light;
+    --ground: #ecefed;
+    --panel: rgba(255, 255, 255, 0.78);
+    --panel-2: rgba(32, 87, 63, 0.05);
+    --line: rgba(24, 40, 34, 0.13);
+    --line-2: rgba(24, 40, 34, 0.26);
+    --ink: #14201b;
+    --dim: #5d6f67;
+    --faint: #8b9a92;
+    --accent: #20573f;
+    --accent-on: #ffffff;
+    --accent-wash: rgba(32, 87, 63, 0.08);
+    --ok: #20573f;
+    --warn: #8e6415;
+    --bad: #a63a2f;
+    --rain-lead: rgba(32, 87, 63, 0.17);
+    --rain-trail: rgba(32, 87, 63, 0.07);
+  }
+
+  /* ============ БАЗА ============ */
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    transition: background-color 0.35s ease, color 0.35s ease;
+  }
+  #rain {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    z-index: -2;
+    pointer-events: none;
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(
+      ellipse 78% 62% at 50% 40%,
+      transparent 0%,
+      color-mix(in srgb, var(--ground) 62%, transparent) 100%
+    );
+  }
+  * {
+    box-sizing: border-box;
+  }
+  button {
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+  input {
+    font: inherit;
+    color: inherit;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============ ОБОЛОЧКА ПИТЧА ============ */
+  .shell {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    flex-wrap: wrap;
+    padding: 12px clamp(14px, 3vw, 30px);
+    background: color-mix(in srgb, var(--ground) 86%, transparent);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  .shell-brand {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  .picker {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--panel-2);
+  }
+  .picker button {
+    border: 0;
+    background: transparent;
+    border-radius: 999px;
+    padding: 6px 15px;
+    font-size: 13px;
+    color: var(--dim);
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    transition: background 0.18s, color 0.18s;
+  }
+  .picker button:hover {
+    color: var(--ink);
+  }
+  .picker button[aria-selected="true"] {
+    background: var(--accent);
+    color: var(--accent-on);
+  }
+  .picker b {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    opacity: 0.7;
+  }
+  .shell-why {
+    margin-left: auto;
+    border: 1px solid var(--line-2);
+    background: transparent;
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-size: 13px;
+    color: var(--dim);
+  }
+  .shell-why:hover {
+    color: var(--ink);
+    border-color: var(--accent);
+  }
+
+  .why {
+    display: none;
+    padding: 18px clamp(14px, 3vw, 30px) 22px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    backdrop-filter: blur(8px);
+  }
+  .why.open {
+    display: block;
+  }
+  .why-grid {
+    display: grid;
+    gap: 22px 34px;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    max-width: 1180px;
+  }
+  .why h4 {
+    margin: 0 0 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+  }
+  .why p {
+    margin: 0;
+    font-size: 14px;
+    color: var(--dim);
+    max-width: 62ch;
+  }
+  .why p strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  .stage {
+    display: none;
+  }
+  .stage.on {
+    display: block;
+  }
+</style>
+
+<header class="shell">
+  <span class="shell-brand">Detour · редизайн панели</span>
+  <div class="picker" role="tablist" aria-label="Концепции">
+    <button role="tab" aria-selected="true" data-go="a"><b>A</b> Пульт</button>
+    <button role="tab" aria-selected="false" data-go="b"><b>B</b> Консоль</button>
+    <button role="tab" aria-selected="false" data-go="c"><b>C</b> Спокойно</button>
+  </div>
+  <button class="shell-why" id="why-btn" aria-expanded="false">Идея концепции</button>
+</header>
+
+<section class="why" id="why">
+  <div class="why-grid" id="why-body"></div>
+</section>
+
+<main>
+  <!-- ============================================================
+       A — ПУЛЬТ: один экран, никаких вкладок, всё редкое — в ⌘K
+       ============================================================ -->
+  <section class="stage on" id="stage-a">
+    <nav class="a-rail" aria-label="Разделы">
+      <button aria-current="true" data-sec="Обзор">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 20a8 8 0 1 1 8-8"/><path d="M12 12l5-3"/></svg>
+        <span class="a-tip">Обзор</span>
+      </button>
+      <button data-sec="Профили">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <span class="a-tip">Профили и подписки</span>
+      </button>
+      <button data-sec="Правила">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="18" r="2.4"/><path d="M8.4 6H14a4 4 0 0 1 0 8h-4a4 4 0 0 0 0 4h5.6"/></svg>
+        <span class="a-tip">Правила маршрутизации</span>
+      </button>
+      <button data-sec="Сервисы">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
+        <span class="a-tip">Сервисы и доступ</span>
+      </button>
+      <button data-sec="Журнал">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M5 8l4 4-4 4M12 16h7"/></svg>
+        <span class="a-tip">Журнал</span>
+      </button>
+    </nav>
+
+    <div class="a-main">
+      <div class="a-top">
+        <div>
+          <h2 class="a-title">Обзор</h2>
+          <div class="a-sub">GL-BE9300 · panel.example.com · sing-box 1.13.13</div>
+        </div>
+        <button class="a-k" id="a-kbtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          Найти домен, профиль, действие<kbd style="margin-left:auto">⌘K</kbd>
+        </button>
+      </div>
+
+      <div class="a-board">
+        <div class="a-board-head">
+          <span class="eyebrow">Поток трафика · последние 60 секунд</span>
+          <span class="a-live"><i class="dot pulse"></i> 118 Мбит/с · 1 412 соединений</span>
+        </div>
+
+        <svg class="a-flow" viewBox="0 0 900 200" role="img" aria-label="Схема: трафик клиентов расходится на три ленты — напрямую, через VPN и через обход DPI">
+          <rect class="node" x="6" y="76" width="118" height="48" rx="10"/>
+          <text x="65" y="95" text-anchor="middle" class="big">14 устройств</text>
+          <text x="65" y="111" text-anchor="middle">LAN 192.168.8.0/24</text>
+
+          <path class="lane" d="M126 100 L 150 100"/>
+          <rect class="node" x="150" y="70" width="110" height="60" rx="12" style="stroke:var(--accent)"/>
+          <text x="205" y="94" text-anchor="middle" class="big">Detour</text>
+          <text x="205" y="112" text-anchor="middle">dnsmasq · ipset · nat</text>
+
+          <path id="lane-d" class="lane" d="M262 100 C 340 100, 360 44, 470 44 L 700 44"/>
+          <path id="lane-v" class="lane hot" d="M262 100 L 700 100"/>
+          <path id="lane-z" class="lane" d="M262 100 C 340 100, 360 156, 470 156 L 700 156"/>
+
+          <circle class="pkt d" r="2.6"><animateMotion dur="3.1s" repeatCount="indefinite"><mpath href="#lane-d"/></animateMotion></circle>
+          <circle class="pkt d" r="2.6"><animateMotion dur="3.1s" begin="1.05s" repeatCount="indefinite"><mpath href="#lane-d"/></animateMotion></circle>
+          <circle class="pkt d" r="2.6"><animateMotion dur="3.1s" begin="2.1s" repeatCount="indefinite"><mpath href="#lane-d"/></animateMotion></circle>
+          <circle class="pkt" r="3.1"><animateMotion dur="2.2s" repeatCount="indefinite"><mpath href="#lane-v"/></animateMotion></circle>
+          <circle class="pkt" r="3.1"><animateMotion dur="2.2s" begin="0.73s" repeatCount="indefinite"><mpath href="#lane-v"/></animateMotion></circle>
+          <circle class="pkt" r="3.1"><animateMotion dur="2.2s" begin="1.46s" repeatCount="indefinite"><mpath href="#lane-v"/></animateMotion></circle>
+          <circle class="pkt z" r="2.4"><animateMotion dur="4.4s" repeatCount="indefinite"><mpath href="#lane-z"/></animateMotion></circle>
+
+          <text x="712" y="40" class="big">Напрямую</text>
+          <text x="712" y="56">1 041 соед. · RU-whitelist</text>
+          <text x="712" y="96" class="big" style="fill:var(--accent)">Через VPN → Нидерланды-01</text>
+          <text x="712" y="112">338 соед. · 214 доменов · 42 мс</text>
+          <text x="712" y="152" class="big">Обход DPI → zapret2</text>
+          <text x="712" y="168">33 соед. · 61 домен</text>
+        </svg>
+
+        <div class="a-legend">
+          <div><i class="swatch" style="background:var(--faint)"></i> Напрямую <b class="num">71%</b></div>
+          <div><i class="swatch" style="background:var(--accent)"></i> Через VPN <b class="num">24%</b></div>
+          <div><i class="swatch" style="background:var(--warn)"></i> Обход DPI <b class="num">5%</b></div>
+          <div style="margin-left:auto"><span class="eyebrow">Внешний IP</span> <b class="num" id="a-ip">185.xx.xx.140</b></div>
+        </div>
+      </div>
+
+      <div class="a-tiles">
+        <div class="a-tile span2">
+          <h3>Активное подключение</h3>
+          <div class="a-big" id="a-prof">Нидерланды-01 <small id="a-proto">trojan · 42 мс</small></div>
+          <div class="a-meta">
+            <span>Работает 4 сут 06:11</span><span>PID 3241 · порт 12345</span>
+            <span style="color:var(--ok)">Проверка проходит</span>
+          </div>
+          <div class="a-row">
+            <button class="a-btn primary" id="a-switch">Сменить VPN</button>
+            <button class="a-btn" data-toast="sing-box перезапущен, правила сохранены">Перезапустить</button>
+            <button class="a-btn" data-toast="Проверка запущена для 14 профилей">Проверить все</button>
+          </div>
+        </div>
+
+        <div class="a-tile">
+          <h3>Область действия</h3>
+          <div class="a-toggle">
+            <button class="sw" aria-pressed="false" data-sw="allvpn"></button>
+            <span>Все через VPN<small>сейчас: только 214 доменов из списка</small></span>
+          </div>
+          <div class="a-toggle" style="margin-top:2px">
+            <button class="sw" aria-pressed="true" data-sw="udp"></button>
+            <span>UDP через VPN<small>по списку: голос, игры</small></span>
+          </div>
+        </div>
+
+        <div class="a-tile">
+          <h3>Обход DPI</h3>
+          <div class="a-seg" role="group" aria-label="Стратегия обхода DPI">
+            <button data-seg="dpi" aria-pressed="false">Выкл</button>
+            <button data-seg="dpi" aria-pressed="false">zapret</button>
+            <button data-seg="dpi" aria-pressed="true">zapret2</button>
+          </div>
+          <div class="a-meta">61 домен · 1 084 IP в ipset · порт 1081</div>
+        </div>
+
+        <div class="a-tile">
+          <h3>Здоровье профилей</h3>
+          <div class="a-big num">9<small> из 14 проходят проверку</small></div>
+          <div class="bar" aria-hidden="true"><i style="width:64%"></i></div>
+          <div class="a-meta">3 медленных · 2 не отвечают · опрос каждые 45 мин</div>
+        </div>
+
+        <div class="a-tile">
+          <h3>Обновления</h3>
+          <div class="a-big" style="font-size:20px">Панель 1.43.2 <small style="color:var(--warn)">→ 1.44.0</small></div>
+          <div class="a-meta">sing-box 1.13.13 · tpws 72.12 — свежие</div>
+          <div class="a-row"><button class="a-btn primary" data-toast="Загружаю detour_1.44.0_all.ipk…">Обновить панель</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="a-scrim" id="a-scrim"></div>
+    <aside class="a-drawer" id="a-drawer" aria-label="Выбор профиля">
+      <header>
+        <h3>Сменить VPN</h3>
+        <button class="a-x" id="a-close" aria-label="Закрыть">×</button>
+      </header>
+      <div class="a-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="a-q" placeholder="Страна, протокол, группа…" autocomplete="off"/>
+      </div>
+      <div class="a-list" id="a-list"></div>
+    </aside>
+
+    <div class="a-pal" id="a-pal">
+      <div class="a-pal-box">
+        <input id="a-palq" placeholder="Что сделать?" autocomplete="off"/>
+        <div class="a-pal-list" id="a-pallist"></div>
+        <div class="a-pal-foot"><span>↑↓ выбрать</span><span>⏎ выполнить</span><span>esc закрыть</span></div>
+      </div>
+    </div>
+    <div class="toast" id="a-toast"></div>
+  </section>
+  <section class="stage" id="stage-b">
+    <div class="b-ribbon">
+      <span class="b-host">detour@home</span>
+      <span><i class="dot"></i> sing-box :12345</span>
+      <span><i class="dot"></i> tpws :1081</span>
+      <span class="b-sep">│</span>
+      <span id="b-active">NL-01 42ms</span>
+      <span class="b-sep">│</span>
+      <span>↓118.4 ↑12.7 Мбит</span>
+      <span class="b-sep">│</span>
+      <span>1412 conn</span>
+      <span class="b-right">v1.43.2 <b>→1.44.0</b></span>
+    </div>
+
+    <div class="b-body">
+      <nav class="b-tree" aria-label="Разделы">
+        <div class="b-grp">подключение</div>
+        <button class="b-node" aria-current="true" data-n="профили" data-c="14">профили</button>
+        <button class="b-node" data-n="цепочки" data-c="2">цепочки</button>
+        <button class="b-node" data-n="подписки" data-c="3">подписки</button>
+        <button class="b-node" data-n="warp" data-c="1">warp</button>
+        <div class="b-grp">правила</div>
+        <button class="b-node" data-n="домены/vpn" data-c="214">домены/vpn</button>
+        <button class="b-node" data-n="домены/dpi" data-c="61">домены/dpi</button>
+        <button class="b-node" data-n="маршруты" data-c="9">маршруты</button>
+        <button class="b-node" data-n="udp" data-c="6">udp</button>
+        <button class="b-node" data-n="hosts" data-c="12">hosts</button>
+        <button class="b-node" data-n="dns" data-c="">dns</button>
+        <div class="b-grp">система</div>
+        <button class="b-node" data-n="файрвол" data-c="">файрвол</button>
+        <button class="b-node" data-n="конфиг" data-c="">конфиг</button>
+        <button class="b-node" data-n="журнал" data-c="">журнал</button>
+        <button class="b-node" data-n="проброс" data-c="2">проброс</button>
+        <button class="b-node" data-n="сертификат" data-c="">сертификат</button>
+        <button class="b-node" data-n="обновления" data-c="1">обновления</button>
+      </nav>
+
+      <div class="b-pane">
+        <div class="b-pane-head">
+          <span class="b-path">/ подключение / <b>профили</b></span>
+          <span class="b-filter" id="b-filterwrap">
+            <span>/</span><input id="b-q" placeholder="фильтр" autocomplete="off" spellcheck="false"/>
+          </span>
+          <span class="b-count" id="b-count"></span>
+        </div>
+        <div class="b-scroll">
+          <table class="b-table">
+            <thead>
+              <tr>
+                <th style="width:34px"></th><th style="width:26px"></th>
+                <th>имя</th><th style="width:96px">прот</th>
+                <th style="width:78px" class="r">пинг</th>
+                <th style="width:120px">проверка</th>
+                <th style="width:150px">группа</th>
+              </tr>
+            </thead>
+            <tbody id="b-rows"></tbody>
+          </table>
+        </div>
+        <div class="b-cmd" id="b-cmdline">
+          <span class="b-prompt">:</span>
+          <input id="b-cmd" placeholder="команда — help, connect, restart, add-domain, check-all" autocomplete="off" spellcheck="false"/>
+        </div>
+        <div class="b-keys">
+          <span><b>j</b>/<b>k</b> строка</span><span><b>/</b> фильтр</span>
+          <span><b>x</b> отметить</span><span><b>⏎</b> подключить</span>
+          <span><b>:</b> команда</span><span><b>?</b> помощь</span>
+          <span class="b-right" id="b-echo">готов</span>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section class="stage" id="stage-c">
+    <div class="c-col">
+      <p class="c-eyebrow">Сейчас</p>
+      <h1 class="c-hero">Защищено</h1>
+      <p class="c-lede">
+        214 сайтов идут через <button class="c-inline" id="c-pick">Нидерланды-01</button>.
+        Отклик <span class="num">42 мс</span>, соединение держится четвёртые сутки.
+      </p>
+      <div class="c-actions">
+        <button class="c-btn primary" id="c-pick2">Сменить страну</button>
+        <button class="c-btn" data-ctoast="Туннель выключен. Весь трафик идёт напрямую.">Выключить</button>
+        <span class="c-quiet">Проверка проходила 6 минут назад</span>
+      </div>
+
+      <div class="c-strip">
+        <div><span class="c-quiet">Скорость</span><b class="num">118 Мбит/с</b></div>
+        <div><span class="c-quiet">Соединений</span><b class="num">1 412</b></div>
+        <div><span class="c-quiet">Внешний IP</span><b class="num">185.xx.xx.140</b></div>
+      </div>
+
+      <div class="c-rows">
+        <section class="c-row">
+          <button class="c-head" aria-expanded="false">
+            <span class="c-name">Что идёт через VPN</span>
+            <span class="c-sum">214 сайтов · 9 отдельных маршрутов</span>
+            <span class="c-chev" aria-hidden="true"></span>
+          </button>
+          <div class="c-panel">
+            <p class="c-note">Через туннель ходят только эти сайты. Остальное — напрямую, так быстрее.</p>
+            <ul class="c-chips">
+              <li>chatgpt.com</li><li>claude.ai</li><li>x.com</li><li>instagram.com</li>
+              <li>medium.com</li><li>notion.so</li><li>discord.com</li>
+              <li class="more">и ещё 207</li>
+            </ul>
+            <div class="c-inline-actions">
+              <button class="c-btn small" data-ctoast="Открыт полный список — 214 записей">Открыть список</button>
+              <button class="c-btn small" data-ctoast="Добавьте домен — он попадёт в ipset после сохранения">Добавить сайт</button>
+            </div>
+            <div class="c-sw">
+              <button class="sw" aria-pressed="false" data-csw="Все через VPN"></button>
+              <span>Пустить в туннель вообще всё<small>кроме российских адресов из белого списка</small></span>
+            </div>
+          </div>
+        </section>
+
+        <section class="c-row">
+          <button class="c-head" aria-expanded="false">
+            <span class="c-name">Обход блокировок без VPN</span>
+            <span class="c-sum">zapret2 · 61 сайт</span>
+            <span class="c-chev" aria-hidden="true"></span>
+          </button>
+          <div class="c-panel">
+            <p class="c-note">Ломает распознавание трафика провайдером — сайт открывается напрямую, без туннеля и без потери скорости.</p>
+            <div class="a-seg" role="group" aria-label="Стратегия">
+              <button data-cseg aria-pressed="false">Выключено</button>
+              <button data-cseg aria-pressed="false">zapret</button>
+              <button data-cseg aria-pressed="true">zapret2</button>
+            </div>
+            <p class="c-note">Стратегия: <code>tcpseg:pos=0,midsld</code> · 1 084 адреса в списке.</p>
+          </div>
+        </section>
+
+        <section class="c-row">
+          <button class="c-head" aria-expanded="false">
+            <span class="c-name">Доступ к роутеру снаружи</span>
+            <span class="c-sum">HTTPS · 2 сервиса опубликованы</span>
+            <span class="c-chev" aria-hidden="true"></span>
+          </button>
+          <div class="c-panel">
+            <dl class="c-defs">
+              <div><dt>Адрес панели</dt><dd>panel.example.com</dd></div>
+              <div><dt>Сертификат</dt><dd>действует до 12 октября · продлится сам</dd></div>
+              <div><dt>Опубликовано</dt><dd>Камера (443 → 192.168.8.24:80), NAS (8443 → 192.168.8.10:5001)</dd></div>
+              <div><dt>Уведомления</dt><dd>приходят в этот браузер</dd></div>
+            </dl>
+            <div class="c-inline-actions">
+              <button class="c-btn small" data-ctoast="Открыт список проброшенных сервисов">Управлять доступом</button>
+              <button class="c-btn small" data-ctoast="Тестовое уведомление отправлено">Проверить уведомления</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="c-row">
+          <button class="c-head" aria-expanded="false">
+            <span class="c-name">Обновления</span>
+            <span class="c-sum accent">Панель 1.44.0 готова к установке</span>
+            <span class="c-chev" aria-hidden="true"></span>
+          </button>
+          <div class="c-panel">
+            <p class="c-note">Установка занимает около минуты, соединения не рвутся.</p>
+            <dl class="c-defs">
+              <div><dt>Панель</dt><dd>1.43.2 → <b class="accent">1.44.0</b></dd></div>
+              <div><dt>sing-box</dt><dd>1.13.13 — свежая</dd></div>
+              <div><dt>tpws</dt><dd>72.12 — свежая</dd></div>
+            </dl>
+            <div class="c-inline-actions">
+              <button class="c-btn primary small" data-ctoast="Устанавливаю 1.44.0…">Установить 1.44.0</button>
+              <button class="c-btn small" data-ctoast="Открыт список изменений">Что изменилось</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <details class="c-expert">
+        <summary>Экспертные настройки</summary>
+        <div class="c-expert-grid">
+          <a href="#" data-ctoast="Конфиг sing-box">Конфиг sing-box</a>
+          <a href="#" data-ctoast="Журнал">Журнал sing-box</a>
+          <a href="#" data-ctoast="Файрвол">Правила файрвола</a>
+          <a href="#" data-ctoast="Маршруты">Маршруты по профилям</a>
+          <a href="#" data-ctoast="DNS">Шифрованный DNS</a>
+          <a href="#" data-ctoast="hosts">Приоритетный hosts</a>
+          <a href="#" data-ctoast="Подписки">Подписки и группы</a>
+          <a href="#" data-ctoast="Цепочки">Цепочки VPN</a>
+          <a href="#" data-ctoast="WARP">Cloudflare WARP</a>
+          <a href="#" data-ctoast="UDP">UDP через VPN</a>
+          <a href="#" data-ctoast="Пароль">Пароль панели</a>
+          <a href="#" data-ctoast="Резервная копия">Резервная копия</a>
+        </div>
+      </details>
+
+      <p class="c-foot">GL-BE9300 · OpenWrt 23.05 · панель 1.43.2</p>
+    </div>
+
+    <div class="c-sheet-scrim" id="c-scrim"></div>
+    <div class="c-sheet" id="c-sheet" role="dialog" aria-label="Выбор страны">
+      <div class="c-sheet-head">
+        <h2>Куда подключиться</h2>
+        <button class="a-x" id="c-close" aria-label="Закрыть">×</button>
+      </div>
+      <input class="c-sheet-q" id="c-q" placeholder="Найти страну или группу" autocomplete="off"/>
+      <div class="c-sheet-list" id="c-list"></div>
+    </div>
+    <div class="toast" id="c-toast"></div>
+  </section>
+</main>
+
+<script>
+  /* ---------- общие фиктивные данные (реальных сервисов/хостов нет) ---------- */
+  var PROFILES = [
+    { n: "Нидерланды-01", p: "trojan", ms: 42, h: "ok", g: "Основные" },
+    { n: "Нидерланды-02", p: "vless", ms: 47, h: "ok", g: "Основные" },
+    { n: "Германия-03", p: "trojan", ms: 58, h: "ok", g: "Основные" },
+    { n: "Финляндия-01", p: "vless", ms: 31, h: "slow", g: "Основные" },
+    { n: "Швейцария-02", p: "hysteria2", ms: 64, h: "ok", g: "Подписка A" },
+    { n: "Швеция-01", p: "vless", ms: 39, h: "dead", g: "Подписка A" },
+    { n: "Франция-04", p: "trojan", ms: 72, h: "ok", g: "Подписка A" },
+    { n: "Польша-01", p: "ss", ms: 28, h: "slow", g: "Подписка A" },
+    { n: "Латвия-02", p: "vless", ms: 24, h: "dead", g: "Подписка B" },
+    { n: "Турция-01", p: "trojan", ms: 88, h: "ok", g: "Подписка B" },
+    { n: "Япония-02", p: "vless", ms: 186, h: "slow", g: "Подписка B" },
+    { n: "США-восток-01", p: "trojan", ms: 141, h: "ok", g: "Подписка B" },
+    { n: "Цепочка: DE → WARP", p: "chain", ms: 96, h: "ok", g: "Цепочки" },
+    { n: "Цепочка: NL → CH", p: "chain", ms: 110, h: "slow", g: "Цепочки" }
+  ];
+  var HEALTH_LABEL = { ok: "проходит", slow: "медленно", dead: "не отвечает" };
+
+  var WHY = {
+    a: [
+      ["Тезис", "Панель — это <strong>прибор</strong>, а не документ. Наверху живая схема потока: видно, куда именно уходит трафик прямо сейчас. Всё остальное — по требованию."],
+      ["Что убрано", "Семь вкладок, тулбар и модалки. Осталась <strong>рейка из пяти разделов</strong>; редкие действия (сертификат, проброс, файрвол, конфиг) переехали в командную палитру <strong>⌘K</strong>."],
+      ["Что нового", "Схема лент «напрямую / через VPN / обход DPI» с долями трафика. Смена профиля — боковая шторка поверх, без ухода со страницы."],
+      ["Риск", "Схему надо кормить настоящими счётчиками (nft counters + ipset). Без честных цифр она превратится в украшение."]
+    ],
+    b: [
+      ["Тезис", "У панели один пользователь — тот, кто и так живёт в SSH. Дать ему <strong>операторскую консоль</strong>: моноширинный список, клавиатура, ноль декора."],
+      ["Что убрано", "Карточки, эмодзи, кнопки-плитки, все всплывающие окна. Состояние — цветом точки и текстом; 114 профилей — это <strong>таблица</strong>, а не сетка карточек."],
+      ["Что нового", "Строка состояния как в tmux, дерево разделов слева, <strong>j/k</strong> для навигации, <strong>/</strong> — фильтр, <strong>x</strong> — выбор, <strong>Enter</strong> — подключить, <strong>:</strong> — команда."],
+      ["Риск", "С телефона так не поработаешь: нужен отдельный компактный режим. И тема одна — тёмная, это осознанно."]
+    ],
+    c: [
+      ["Тезис", "В 95% визитов ответ нужен один: <strong>работает или нет и через какую страну</strong>. Сначала ответ крупно, детали — по клику."],
+      ["Что убрано", "Всё, что не отвечает на главный вопрос, свёрнуто. Экспертные разделы — под общей ссылкой внизу, а не в постоянной навигации."],
+      ["Что нового", "Живой заголовок-предложение вместо таблицы полей. Четыре области раскрываются <strong>на месте</strong>. Полностью светлая и тёмная темы."],
+      ["Риск", "Опытному пользователю нужно на клик больше. Спасает только память раскрытых секций и поиск."]
+    ]
+  };
+
+  /* ---------- матричный фон (сохранён; палитра берётся из темы) ---------- */
+  (function rainBg() {
+    var canvas = document.getElementById("rain");
+    var ctx = canvas.getContext("2d", { alpha: false });
+    var reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var GLYPHS =
+      "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲabcdefghijklmnopqrstuvwxyz0123456789<>[]{}/*+-=$#@%&";
+    var SIZE = 16,
+      SMIN = 4.6,
+      SMAX = 16.8,
+      FADE = 1.8,
+      STEP = 0.12,
+      RESPAWN = 1.44;
+    var cols = 0, drops = [], sp = [], hr = [], hc = [], acc = 0, last = 0, dpr = 1, pal;
+
+    function rgbOf(s) {
+      var m = String(s).trim().match(/^#([0-9a-f]{6})$/i);
+      if (m) return [parseInt(m[1].slice(0, 2), 16), parseInt(m[1].slice(2, 4), 16), parseInt(m[1].slice(4, 6), 16)];
+      m = String(s).match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+      return m ? [+m[1], +m[2], +m[3]] : [8, 12, 18];
+    }
+    function readPal() {
+      var cs = getComputedStyle(document.documentElement);
+      var rgb = rgbOf(cs.getPropertyValue("--ground"));
+      var lum = (rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114) / 255;
+      return {
+        rgb: rgb,
+        base: "rgb(" + rgb.join(",") + ")",
+        fade: lum > 0.5 ? 1.35 : 1,
+        lead: cs.getPropertyValue("--rain-lead").trim(),
+        trail: cs.getPropertyValue("--rain-trail").trim()
+      };
+    }
+    function glyph() { return GLYPHS[(Math.random() * GLYPHS.length) | 0]; }
+    function speed() { return SMIN * Math.pow(SMAX / SMIN, Math.random()); }
+
+    function resize() {
+      pal = readPal();
+      dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.floor(innerWidth * dpr);
+      canvas.height = Math.floor(innerHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = pal.base;
+      ctx.fillRect(0, 0, innerWidth, innerHeight);
+      cols = Math.ceil(innerWidth / SIZE);
+      drops = []; sp = []; hr = []; hc = []; acc = 0; last = 0;
+      var rows = innerHeight / SIZE;
+      for (var i = 0; i < cols; i++) {
+        drops[i] = (Math.random() * 1.4 - 0.7) * rows;
+        sp[i] = speed(); hr[i] = -1; hc[i] = glyph();
+      }
+      if (reduced) staticFrame(rows);
+    }
+    function staticFrame(rows) {
+      ctx.font = SIZE + "px " + getComputedStyle(document.body).getPropertyValue("font-family");
+      for (var i = 0; i < cols; i++)
+        for (var k = 0; k < 3; k++) {
+          var y = Math.random() * rows;
+          ctx.fillStyle = k === 0 ? pal.lead : pal.trail;
+          ctx.fillText(glyph(), i * SIZE, y * SIZE);
+        }
+    }
+    function frame(ts) {
+      requestAnimationFrame(frame);
+      if (!last) { last = ts; return; }
+      var dt = Math.min((ts - last) / 1000, 0.1);
+      last = ts;
+      acc += FADE * pal.fade * dt;
+      if (acc >= STEP) {
+        ctx.fillStyle = "rgba(" + pal.rgb.join(",") + "," + Math.min(acc, 0.5) + ")";
+        ctx.fillRect(0, 0, innerWidth, innerHeight);
+        acc = 0;
+      }
+      ctx.font = SIZE + "px " + getComputedStyle(document.body).getPropertyValue("font-family");
+      var rows = innerHeight / SIZE;
+      for (var i = 0; i < cols; i++) {
+        drops[i] += sp[i] * dt;
+        var r = Math.floor(drops[i]);
+        if (r !== hr[i]) { hr[i] = r; hc[i] = glyph(); }
+        if (r >= 0 && r <= rows) {
+          ctx.fillStyle = pal.trail;
+          ctx.fillText(hc[i], i * SIZE, (r - 1) * SIZE);
+          ctx.fillStyle = pal.lead;
+          ctx.fillText(hc[i], i * SIZE, r * SIZE);
+        }
+        if (drops[i] > rows && Math.random() < RESPAWN * dt) {
+          drops[i] = -Math.random() * rows * 0.6;
+          sp[i] = speed();
+        }
+      }
+    }
+    addEventListener("resize", resize);
+    resize();
+    if (!reduced) requestAnimationFrame(frame);
+    window.__rainRepal = function () { pal = readPal(); };
+  })();
+
+  /* ---------- переключение концепций ---------- */
+  var root = document.documentElement;
+  function setConcept(id) {
+    root.setAttribute("data-concept", id);
+    document.querySelectorAll(".picker button").forEach(function (b) {
+      b.setAttribute("aria-selected", String(b.dataset.go === id));
+    });
+    document.querySelectorAll(".stage").forEach(function (s) {
+      s.classList.toggle("on", s.id === "stage-" + id);
+    });
+    document.getElementById("why-body").innerHTML = WHY[id]
+      .map(function (r) { return "<div><h4>" + r[0] + "</h4><p>" + r[1] + "</p></div>"; })
+      .join("");
+    setTimeout(function () { window.__rainRepal && window.__rainRepal(); }, 30);
+    scrollTo({ top: 0, behavior: "smooth" });
+  }
+  document.querySelectorAll(".picker button").forEach(function (b) {
+    b.onclick = function () { setConcept(b.dataset.go); };
+  });
+  var whyBtn = document.getElementById("why-btn");
+  whyBtn.onclick = function () {
+    var open = document.getElementById("why").classList.toggle("open");
+    whyBtn.setAttribute("aria-expanded", String(open));
+  };
+  new MutationObserver(function () {
+    window.__rainRepal && window.__rainRepal();
+  }).observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+  setConcept("a");
+</script>
+
+<!-- ==================================================================
+     A — ПУЛЬТ
+     ================================================================== -->
+<style>
+  #stage-a {
+    display: none;
+    grid-template-columns: 68px minmax(0, 1fr);
+    min-height: calc(100vh - 58px);
+  }
+  #stage-a.on {
+    display: grid;
+  }
+  .a-rail {
+    border-right: 1px solid var(--line);
+    padding: 14px 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    background: var(--panel-2);
+  }
+  .a-rail button {
+    width: 44px;
+    height: 44px;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: var(--faint);
+    display: grid;
+    place-items: center;
+    position: relative;
+    transition: color 0.16s, background 0.16s;
+  }
+  .a-rail button:hover {
+    color: var(--ink);
+    background: var(--panel-2);
+  }
+  .a-rail button[aria-current="true"] {
+    color: var(--accent);
+    background: var(--accent-wash);
+  }
+  .a-rail button[aria-current="true"]::before {
+    content: "";
+    position: absolute;
+    left: -14px;
+    top: 12px;
+    bottom: 12px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .a-rail .a-tip {
+    position: absolute;
+    left: 54px;
+    white-space: nowrap;
+    font-size: 12px;
+    padding: 5px 9px;
+    border-radius: 7px;
+    background: var(--ink);
+    color: var(--ground);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-4px);
+    transition: opacity 0.14s, transform 0.14s;
+    z-index: 5;
+  }
+  .a-rail button:hover .a-tip {
+    opacity: 1;
+    transform: none;
+  }
+
+  .a-main {
+    padding: 20px clamp(16px, 2.6vw, 34px) 60px;
+    min-width: 0;
+  }
+  .a-top {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-bottom: 22px;
+  }
+  .a-title {
+    font-size: 21px;
+    font-weight: 620;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+  .a-sub {
+    font-size: 13px;
+    color: var(--dim);
+  }
+  .a-k {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 999px;
+    padding: 7px 8px 7px 14px;
+    font-size: 13px;
+    color: var(--dim);
+    min-width: 250px;
+  }
+  .a-k:hover {
+    border-color: var(--line-2);
+    color: var(--ink);
+  }
+  kbd {
+    font-family: var(--mono);
+    font-size: 11px;
+    border: 1px solid var(--line-2);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 1px 5px;
+    color: var(--dim);
+    background: var(--panel-2);
+  }
+
+  /* --- схема потока --- */
+  .a-board {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--panel);
+    backdrop-filter: blur(10px);
+    padding: 18px 20px 8px;
+    margin-bottom: 16px;
+  }
+  .a-board-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .a-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--dim);
+    margin-left: auto;
+  }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ok);
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  .dot.pulse {
+    animation: pulse 2.4s ease-out infinite;
+    color: var(--ok);
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); }
+    70% { box-shadow: 0 0 0 7px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  .a-flow {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+  .a-flow .lane {
+    fill: none;
+    stroke: var(--line-2);
+    stroke-width: 1.4;
+  }
+  .a-flow .lane.hot {
+    stroke: var(--accent);
+    stroke-width: 2;
+  }
+  .a-flow text {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    fill: var(--dim);
+  }
+  .a-flow text.big {
+    font-family: var(--font);
+    font-size: 13px;
+    letter-spacing: 0;
+    fill: var(--ink);
+    font-weight: 600;
+  }
+  .a-flow .node {
+    fill: var(--panel-2);
+    stroke: var(--line-2);
+  }
+  .a-flow .pkt {
+    fill: var(--accent);
+  }
+  .a-flow .pkt.d {
+    fill: var(--faint);
+  }
+  .a-flow .pkt.z {
+    fill: var(--warn);
+  }
+  .a-legend {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    border-top: 1px solid var(--line);
+    margin-top: 6px;
+    padding: 10px 2px 8px;
+  }
+  .a-legend div {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+  .a-legend b {
+    font-size: 15px;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .swatch {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    align-self: center;
+  }
+
+  /* --- плитки --- */
+  .a-tiles {
+    display: grid;
+    gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  }
+  .a-tile {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--panel);
+    backdrop-filter: blur(10px);
+    padding: 15px 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+  .a-tile.span2 {
+    grid-column: span 2;
+  }
+  @media (min-width: 1100px) {
+    .a-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 700px) {
+    .a-tile.span2 { grid-column: span 1; }
+  }
+  .a-tile h3 {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .a-big {
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    font-variant-numeric: tabular-nums;
+  }
+  .a-big small {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--dim);
+    letter-spacing: 0;
+  }
+  .a-meta {
+    font-size: 13px;
+    color: var(--dim);
+    display: flex;
+    gap: 6px 14px;
+    flex-wrap: wrap;
+  }
+  .a-btn {
+    border: 1px solid var(--line-2);
+    background: transparent;
+    border-radius: 9px;
+    padding: 7px 13px;
+    font-size: 13px;
+    color: var(--ink);
+    transition: background 0.16s, border-color 0.16s;
+  }
+  .a-btn:hover {
+    background: var(--accent-wash);
+    border-color: var(--accent);
+  }
+  .a-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-on);
+    font-weight: 600;
+  }
+  .a-btn.primary:hover {
+    filter: brightness(1.08);
+  }
+  .a-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: auto;
+  }
+  /* переключатель */
+  .sw {
+    position: relative;
+    width: 38px;
+    height: 22px;
+    border-radius: 999px;
+    border: 1px solid var(--line-2);
+    background: var(--panel-2);
+    padding: 0;
+    flex: none;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .sw::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--dim);
+    transition: transform 0.2s, background 0.2s;
+  }
+  .sw[aria-pressed="true"] {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .sw[aria-pressed="true"]::after {
+    transform: translateX(16px);
+    background: var(--accent-on);
+  }
+  .a-toggle {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    font-size: 14px;
+  }
+  .a-toggle span small {
+    display: block;
+    font-size: 12px;
+    color: var(--faint);
+  }
+  .a-seg {
+    display: flex;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    overflow: hidden;
+  }
+  .a-seg button {
+    border: 0;
+    background: transparent;
+    padding: 6px 12px;
+    font-size: 12.5px;
+    color: var(--dim);
+    border-right: 1px solid var(--line);
+  }
+  .a-seg button:last-child { border-right: 0; }
+  .a-seg button[aria-pressed="true"] {
+    background: var(--accent-wash);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .bar {
+    height: 5px;
+    border-radius: 3px;
+    background: var(--panel-2);
+    overflow: hidden;
+    border: 1px solid var(--line);
+  }
+  .bar i {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+  }
+
+  /* --- шторка --- */
+  .a-scrim {
+    position: fixed;
+    inset: 0;
+    background: color-mix(in srgb, var(--ground) 62%, transparent);
+    backdrop-filter: blur(3px);
+    z-index: 50;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  .a-scrim.on {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .a-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(430px, 100%);
+    background: color-mix(in srgb, var(--ground) 92%, transparent);
+    border-left: 1px solid var(--line);
+    z-index: 51;
+    transform: translateX(100%);
+    transition: transform 0.26s cubic-bezier(0.3, 0.8, 0.3, 1);
+    display: flex;
+    flex-direction: column;
+  }
+  .a-drawer.on {
+    transform: none;
+  }
+  .a-drawer header {
+    padding: 16px 18px 12px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .a-drawer header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .a-x {
+    margin-left: auto;
+    border: 0;
+    background: transparent;
+    color: var(--dim);
+    font-size: 20px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 8px;
+  }
+  .a-x:hover { background: var(--panel-2); color: var(--ink); }
+  .a-search {
+    margin: 12px 18px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    border: 1px solid var(--line-2);
+    border-radius: 10px;
+    padding: 8px 12px;
+    background: var(--panel-2);
+  }
+  .a-search input {
+    border: 0;
+    background: transparent;
+    outline: none;
+    width: 100%;
+    font-size: 14px;
+  }
+  .a-list {
+    overflow-y: auto;
+    padding: 0 10px 18px;
+    flex: 1;
+  }
+  .a-grp {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: 14px 8px 6px;
+  }
+  .a-item {
+    width: 100%;
+    text-align: left;
+    border: 1px solid transparent;
+    background: transparent;
+    border-radius: 10px;
+    padding: 9px 11px;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+  }
+  .a-item:hover {
+    background: var(--panel-2);
+    border-color: var(--line);
+  }
+  .a-item[aria-current="true"] {
+    background: var(--accent-wash);
+    border-color: var(--accent);
+  }
+  .a-item .nm {
+    font-size: 14px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .a-item .pr {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--faint);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 0 5px;
+  }
+  .a-item .ms {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--dim);
+  }
+  .hdot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .h-ok { background: var(--ok); }
+  .h-slow { background: var(--warn); }
+  .h-dead { background: var(--bad); }
+
+  /* --- палитра команд --- */
+  .a-pal {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: none;
+    padding: 12vh 16px 0;
+    justify-content: center;
+    background: color-mix(in srgb, var(--ground) 58%, transparent);
+    backdrop-filter: blur(4px);
+  }
+  .a-pal.on { display: flex; }
+  .a-pal-box {
+    width: min(620px, 100%);
+    height: max-content;
+    max-height: 66vh;
+    border: 1px solid var(--line-2);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--ground) 94%, transparent);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .a-pal-box input {
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    background: transparent;
+    outline: none;
+    padding: 15px 18px;
+    font-size: 16px;
+  }
+  .a-pal-list {
+    overflow-y: auto;
+    padding: 6px;
+  }
+  .a-cmd {
+    width: 100%;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    border-radius: 9px;
+    padding: 9px 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+  }
+  .a-cmd small {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--faint);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .a-cmd[data-sel="1"] {
+    background: var(--accent-wash);
+    color: var(--accent);
+  }
+  .a-pal-foot {
+    border-top: 1px solid var(--line);
+    padding: 8px 14px;
+    font-size: 12px;
+    color: var(--faint);
+    display: flex;
+    gap: 14px;
+  }
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 26px;
+    transform: translate(-50%, 14px);
+    z-index: 70;
+    border: 1px solid var(--line-2);
+    background: color-mix(in srgb, var(--ground) 94%, transparent);
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 13.5px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s;
+  }
+  .toast.on {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+</style>
+
+<script>
+  /* ---------- A: логика ---------- */
+  (function () {
+    var $ = function (id) { return document.getElementById(id); };
+    var toastEl = $("a-toast"), tt;
+    function toast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add("on");
+      clearTimeout(tt);
+      tt = setTimeout(function () { toastEl.classList.remove("on"); }, 2400);
+    }
+    document.querySelectorAll("#stage-a [data-toast]").forEach(function (b) {
+      b.onclick = function () { toast(b.dataset.toast); };
+    });
+    document.querySelectorAll("#stage-a .sw").forEach(function (b) {
+      b.onclick = function () {
+        var on = b.getAttribute("aria-pressed") !== "true";
+        b.setAttribute("aria-pressed", String(on));
+        var name = b.dataset.sw === "allvpn" ? "«Все через VPN»" : "«UDP через VPN»";
+        toast(name + (on ? " включено" : " выключено"));
+      };
+    });
+    document.querySelectorAll('#stage-a [data-seg="dpi"]').forEach(function (b) {
+      b.onclick = function () {
+        document.querySelectorAll('#stage-a [data-seg="dpi"]').forEach(function (x) {
+          x.setAttribute("aria-pressed", String(x === b));
+        });
+        toast("Обход DPI: " + b.textContent.trim());
+      };
+    });
+    document.querySelectorAll("#stage-a .a-rail button").forEach(function (b) {
+      b.onclick = function () {
+        document.querySelectorAll("#stage-a .a-rail button").forEach(function (x) {
+          x.setAttribute("aria-current", String(x === b));
+        });
+        document.querySelector("#stage-a .a-title").textContent = b.dataset.sec;
+      };
+    });
+
+    /* шторка выбора профиля */
+    var active = 0;
+    function renderList(q) {
+      q = (q || "").toLowerCase();
+      var out = "", grp = null;
+      PROFILES.forEach(function (p, i) {
+        if (q && (p.n + " " + p.p + " " + p.g).toLowerCase().indexOf(q) < 0) return;
+        if (p.g !== grp) { grp = p.g; out += '<div class="a-grp">' + grp + "</div>"; }
+        out +=
+          '<button class="a-item" data-i="' + i + '" aria-current="' + (i === active) + '">' +
+          '<i class="hdot h-' + p.h + '" title="' + HEALTH_LABEL[p.h] + '"></i>' +
+          '<span class="nm">' + p.n + "</span>" +
+          '<span class="pr">' + p.p + "</span>" +
+          '<span class="ms">' + p.ms + " мс</span></button>";
+      });
+      $("a-list").innerHTML = out || '<div class="a-grp">Ничего не найдено</div>';
+      $("a-list").querySelectorAll(".a-item").forEach(function (b) {
+        b.onclick = function () {
+          active = +b.dataset.i;
+          var p = PROFILES[active];
+          $("a-prof").innerHTML = p.n + ' <small>' + p.p + " · " + p.ms + " мс</small>";
+          $("a-ip").textContent = "185.xx.xx." + (100 + active * 7);
+          closeDrawer();
+          toast("Подключено: " + p.n);
+        };
+      });
+    }
+    function openDrawer() {
+      $("a-scrim").classList.add("on");
+      $("a-drawer").classList.add("on");
+      renderList($("a-q").value);
+      setTimeout(function () { $("a-q").focus(); }, 60);
+    }
+    function closeDrawer() {
+      $("a-scrim").classList.remove("on");
+      $("a-drawer").classList.remove("on");
+    }
+    $("a-switch").onclick = openDrawer;
+    $("a-close").onclick = closeDrawer;
+    $("a-scrim").onclick = closeDrawer;
+    $("a-q").oninput = function () { renderList(this.value); };
+    renderList("");
+
+    /* командная палитра */
+    var CMDS = [
+      ["Сменить VPN-профиль", "подключение", openDrawer],
+      ["Включить «Все через VPN»", "область", null],
+      ["Добавить домен в проксирование", "правила", null],
+      ["Маршрут: домен → другой профиль", "правила", null],
+      ["Обход DPI: переключить стратегию", "dpi", null],
+      ["Список доменов zapret", "правила", null],
+      ["Приоритетный hosts-файл", "dns", null],
+      ["Шифрованный DNS (DoH)", "dns", null],
+      ["Показать конфиг sing-box", "диагностика", null],
+      ["Открыть журнал sing-box", "диагностика", null],
+      ["Правила файрвола", "диагностика", null],
+      ["Проброс сервисов наружу", "доступ", null],
+      ["Выпустить сертификат Let's Encrypt", "доступ", null],
+      ["Уведомления в браузер (Web Push)", "доступ", null],
+      ["Проверить обновления", "система", null],
+      ["Обновить sing-box из фида", "система", null],
+      ["Сменить пароль панели", "система", null],
+      ["Зарегистрировать Cloudflare WARP", "подключение", null]
+    ];
+    var sel = 0, shown = CMDS;
+    function paint() {
+      $("a-pallist").innerHTML = shown
+        .map(function (c, i) {
+          return '<button class="a-cmd" data-i="' + i + '" data-sel="' + (i === sel ? 1 : 0) + '">' +
+            c[0] + "<small>" + c[1] + "</small></button>";
+        })
+        .join("") || '<div class="a-grp">Нет совпадений</div>';
+      $("a-pallist").querySelectorAll(".a-cmd").forEach(function (b) {
+        b.onclick = function () { run(+b.dataset.i); };
+      });
+    }
+    function run(i) {
+      var c = shown[i];
+      if (!c) return;
+      closePal();
+      if (c[2]) c[2]();
+      else toast(c[0]);
+    }
+    function openPal() {
+      $("a-pal").classList.add("on");
+      $("a-palq").value = "";
+      shown = CMDS; sel = 0; paint();
+      setTimeout(function () { $("a-palq").focus(); }, 40);
+    }
+    function closePal() { $("a-pal").classList.remove("on"); }
+    $("a-kbtn").onclick = openPal;
+    $("a-pal").onclick = function (e) { if (e.target === $("a-pal")) closePal(); };
+    $("a-palq").oninput = function () {
+      var q = this.value.toLowerCase();
+      shown = CMDS.filter(function (c) {
+        return (c[0] + " " + c[1]).toLowerCase().indexOf(q) >= 0;
+      });
+      sel = 0; paint();
+    };
+    addEventListener("keydown", function (e) {
+      if (document.documentElement.getAttribute("data-concept") !== "a") return;
+      var open = $("a-pal").classList.contains("on");
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault(); open ? closePal() : openPal(); return;
+      }
+      if (e.key === "Escape") { closePal(); closeDrawer(); return; }
+      if (!open) return;
+      if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(sel + 1, shown.length - 1); paint(); }
+      if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(sel - 1, 0); paint(); }
+      if (e.key === "Enter") { e.preventDefault(); run(sel); }
+    });
+
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      var svg = document.querySelector("#stage-a .a-flow");
+      if (svg.pauseAnimations) svg.pauseAnimations();
+    }
+  })();
+</script>
+
+<!-- ==================================================================
+     B — КОНСОЛЬ
+     ================================================================== -->
+<style>
+  #stage-b {
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 0.01em;
+  }
+  #stage-b .dot { width: 6px; height: 6px; display: inline-block; }
+  .b-ribbon {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 7px clamp(10px, 2vw, 18px);
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+    color: var(--dim);
+    font-size: 12px;
+  }
+  .b-ribbon .b-host { color: var(--accent); font-weight: 700; }
+  .b-ribbon .b-sep { color: var(--faint); }
+  .b-ribbon #b-active { color: var(--ink); }
+  .b-right { margin-left: auto; }
+  .b-ribbon .b-right b { color: var(--warn); }
+
+  .b-body {
+    display: grid;
+    grid-template-columns: 210px minmax(0, 1fr);
+    min-height: calc(100vh - 92px);
+  }
+  .b-tree {
+    border-right: 1px solid var(--line);
+    padding: 10px 0 30px;
+    background: color-mix(in srgb, var(--ground) 84%, transparent);
+  }
+  .b-grp {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: var(--faint);
+    padding: 14px 14px 5px;
+  }
+  .b-node {
+    width: 100%;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    padding: 4px 14px 4px 22px;
+    color: var(--dim);
+    position: relative;
+    display: flex;
+    gap: 10px;
+  }
+  .b-node::before {
+    content: "\00b7";
+    position: absolute;
+    left: 12px;
+    color: var(--faint);
+  }
+  .b-node:hover { color: var(--ink); background: var(--accent-wash); }
+  .b-node[aria-current="true"] {
+    color: var(--accent);
+    background: var(--accent-wash);
+  }
+  .b-node[aria-current="true"]::before { content: "\203a"; color: var(--accent); }
+  .b-node[data-c]:not([data-c=""])::after {
+    content: attr(data-c);
+    margin-left: auto;
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .b-pane {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .b-pane-head {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 9px clamp(10px, 2vw, 18px);
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--dim);
+  }
+  .b-path b { color: var(--ink); }
+  .b-filter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--line);
+    padding: 2px 8px;
+    min-width: 190px;
+    color: var(--faint);
+  }
+  .b-filter:focus-within { border-color: var(--accent); }
+  .b-filter input {
+    border: 0;
+    background: transparent;
+    outline: none;
+    width: 100%;
+    font-size: 12px;
+  }
+  .b-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+  .b-scroll { flex: 1; overflow: auto; }
+  .b-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .b-table th {
+    text-align: left;
+    font-weight: 400;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    background: color-mix(in srgb, var(--ground) 94%, transparent);
+  }
+  .b-table th.r, .b-table td.r { text-align: right; }
+  .b-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .b-table tbody td {
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+  }
+  .b-table tr { cursor: pointer; }
+  .b-table tbody tr:hover td {
+    background: color-mix(in srgb, var(--accent-wash), var(--ground) 70%);
+  }
+  .b-table tr[data-cur="1"] td {
+    background: color-mix(in srgb, var(--accent-wash), var(--ground) 55%);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .b-table tr[data-cur="1"] td:first-child { color: var(--accent); }
+  .b-table .idx { color: var(--faint); }
+  .b-table .nm { color: var(--ink); }
+  .b-table tr[data-live="1"] .nm { color: var(--accent); font-weight: 700; }
+  .b-table .sub { color: var(--dim); }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad { color: var(--bad); }
+
+  .b-cmd {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    border-top: 1px solid var(--accent);
+    padding: 7px clamp(10px, 2vw, 18px);
+    background: var(--accent-wash);
+  }
+  .b-cmd.on { display: flex; }
+  .b-prompt { color: var(--accent); font-weight: 700; }
+  .b-cmd input {
+    border: 0;
+    background: transparent;
+    outline: none;
+    width: 100%;
+    font-size: 13px;
+  }
+  .b-keys {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    border-top: 1px solid var(--line);
+    padding: 7px clamp(10px, 2vw, 18px);
+    font-size: 11.5px;
+    color: var(--faint);
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+  }
+  .b-keys b { color: var(--accent); font-weight: 700; }
+  .b-keys #b-echo { color: var(--dim); }
+  @media (max-width: 720px) {
+    .b-body { grid-template-columns: 1fr; }
+    .b-tree { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+    .b-tree .b-grp { display: none; }
+    .b-node { width: auto; white-space: nowrap; }
+  }
+</style>
+
+<script>
+  /* ---------- B: логика ---------- */
+  (function () {
+    var $ = function (id) { return document.getElementById(id); };
+    var cur = 0, live = 0, marked = {}, filtered = PROFILES.map(function (_, i) { return i; });
+    function echo(s) { $("b-echo").textContent = s; }
+    function pad2(n) { return (n < 10 ? "0" : "") + n; }
+    function paint() {
+      $("b-rows").innerHTML = filtered
+        .map(function (i) {
+          var p = PROFILES[i];
+          var cls = p.h === "ok" ? "ok" : p.h === "slow" ? "warn" : "bad";
+          return (
+            '<tr data-i="' + i + '" data-cur="' + (i === cur ? 1 : 0) + '" data-live="' + (i === live ? 1 : 0) + '">' +
+            '<td class="idx">' + (marked[i] ? "[x]" : pad2(i + 1)) + "</td>" +
+            '<td class="' + cls + '">' + (i === live ? "●" : "○") + "</td>" +
+            '<td class="nm">' + p.n + "</td>" +
+            '<td class="sub">' + p.p + "</td>" +
+            '<td class="r sub">' + p.ms + "</td>" +
+            '<td class="' + cls + '">' + HEALTH_LABEL[p.h] + "</td>" +
+            '<td class="sub">' + p.g + "</td></tr>"
+          );
+        })
+        .join("");
+      $("b-count").textContent =
+        filtered.length + "/" + PROFILES.length + " · отмечено " + Object.keys(marked).length;
+      $("b-rows").querySelectorAll("tr").forEach(function (tr) {
+        tr.onclick = function () { cur = +tr.dataset.i; paint(); };
+        tr.ondblclick = function () { connect(+tr.dataset.i); };
+      });
+      var el = $("b-rows").querySelector('tr[data-cur="1"]');
+      if (el) el.scrollIntoView({ block: "nearest" });
+    }
+    function connect(i) {
+      live = i;
+      var p = PROFILES[i];
+      $("b-active").textContent = p.n + " " + p.ms + "ms";
+      echo("connect → " + p.n + " · применено за 6.2 с");
+      paint();
+    }
+    function applyFilter(q) {
+      q = q.toLowerCase();
+      filtered = PROFILES.map(function (_, i) { return i; }).filter(function (i) {
+        var p = PROFILES[i];
+        return !q || (p.n + " " + p.p + " " + p.g + " " + HEALTH_LABEL[p.h]).toLowerCase().indexOf(q) >= 0;
+      });
+      if (filtered.indexOf(cur) < 0) cur = filtered.length ? filtered[0] : -1;
+      paint();
+    }
+    $("b-q").oninput = function () { applyFilter(this.value); };
+    document.querySelectorAll("#stage-b .b-node").forEach(function (b) {
+      b.onclick = function () {
+        document.querySelectorAll("#stage-b .b-node").forEach(function (x) {
+          x.setAttribute("aria-current", String(x === b));
+        });
+        document.querySelector("#stage-b .b-path").innerHTML =
+          "/ раздел / <b>" + b.dataset.n + "</b>";
+        echo("раздел «" + b.dataset.n + "» — в макете показан список профилей");
+      };
+    });
+    $("b-cmd").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        var v = this.value.trim();
+        echo(v ? "> " + v + " — выполнено" : "пустая команда");
+        this.value = "";
+        $("b-cmdline").classList.remove("on");
+        e.stopPropagation();
+      }
+      if (e.key === "Escape") {
+        this.value = "";
+        $("b-cmdline").classList.remove("on");
+      }
+    });
+    addEventListener("keydown", function (e) {
+      if (document.documentElement.getAttribute("data-concept") !== "b") return;
+      var t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) {
+        if (e.key === "Escape") t.blur();
+        return;
+      }
+      var pos = filtered.indexOf(cur);
+      if (e.key === "j" || e.key === "ArrowDown") {
+        e.preventDefault(); cur = filtered[Math.min(pos + 1, filtered.length - 1)]; paint();
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        e.preventDefault(); cur = filtered[Math.max(pos - 1, 0)]; paint();
+      } else if (e.key === "/") {
+        e.preventDefault(); $("b-q").focus(); $("b-q").select();
+      } else if (e.key === ":") {
+        e.preventDefault(); $("b-cmdline").classList.add("on"); $("b-cmd").focus();
+      } else if (e.key === "x") {
+        e.preventDefault();
+        if (marked[cur]) delete marked[cur]; else marked[cur] = 1;
+        paint();
+      } else if (e.key === "Enter") {
+        e.preventDefault(); connect(cur);
+      } else if (e.key === "?") {
+        e.preventDefault();
+        echo("j/k — строка · / — фильтр · x — отметить · ⏎ — подключить · : — команда");
+      }
+    });
+    paint();
+  })();
+</script>
+
+<!-- ==================================================================
+     C — СПОКОЙНО
+     ================================================================== -->
+<style>
+  /* Читаемость поверх дождя: мягкое пятно «листа» под колонкой текста,
+     по краям экрана дождь остаётся в полную силу. */
+  #stage-c::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(
+      ellipse 40% 62% at 50% 42%,
+      color-mix(in srgb, var(--ground) 98%, transparent) 0%,
+      color-mix(in srgb, var(--ground) 90%, transparent) 58%,
+      transparent 100%
+    );
+  }
+  .c-col {
+    position: relative;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: clamp(38px, 8vh, 84px) clamp(18px, 5vw, 24px) 90px;
+  }
+  .c-eyebrow {
+    margin: 0 0 14px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .c-hero {
+    margin: 0;
+    font-size: clamp(46px, 9vw, 78px);
+    font-weight: 300;
+    letter-spacing: -0.035em;
+    line-height: 1;
+    text-wrap: balance;
+  }
+  .c-lede {
+    margin: 20px 0 0;
+    font-size: clamp(18px, 2.4vw, 21px);
+    font-weight: 300;
+    line-height: 1.5;
+    color: var(--dim);
+    max-width: 34ch;
+  }
+  .c-lede .num { color: var(--ink); }
+  .c-inline {
+    border: 0;
+    background: transparent;
+    padding: 0 0 2px;
+    font: inherit;
+    color: var(--ink);
+    font-weight: 500;
+    border-bottom: 2px solid var(--accent);
+  }
+  .c-inline:hover { color: var(--accent); }
+  .c-actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-top: 30px;
+  }
+  .c-btn {
+    border: 1px solid var(--line-2);
+    background: transparent;
+    border-radius: 999px;
+    padding: 11px 22px;
+    font-size: 15px;
+    transition: background 0.18s, border-color 0.18s, color 0.18s;
+  }
+  .c-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .c-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-on);
+  }
+  .c-btn.primary:hover { filter: brightness(1.1); color: var(--accent-on); }
+  .c-btn.small { padding: 7px 15px; font-size: 13.5px; }
+  .c-quiet { font-size: 13px; color: var(--faint); }
+
+  .c-strip {
+    display: flex;
+    gap: 40px;
+    flex-wrap: wrap;
+    margin: 46px 0 8px;
+    padding: 18px 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+  .c-strip div { display: flex; flex-direction: column; gap: 3px; }
+  .c-strip b { font-size: 17px; font-weight: 500; }
+
+  .c-rows { margin-top: 8px; }
+  .c-row { border-bottom: 1px solid var(--line); }
+  .c-head {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    padding: 20px 4px;
+  }
+  .c-head:hover .c-name { color: var(--accent); }
+  .c-name { font-size: 17px; font-weight: 500; transition: color 0.16s; }
+  .c-sum {
+    margin-left: auto;
+    font-size: 13.5px;
+    color: var(--dim);
+    text-align: right;
+  }
+  .c-sum.accent, .accent { color: var(--accent); }
+  .c-chev {
+    width: 9px;
+    height: 9px;
+    border-right: 1.6px solid var(--faint);
+    border-bottom: 1.6px solid var(--faint);
+    transform: rotate(45deg) translateY(-2px);
+    transition: transform 0.22s;
+    flex: none;
+  }
+  .c-head[aria-expanded="true"] .c-chev {
+    transform: rotate(225deg) translateY(-2px);
+  }
+  .c-panel {
+    display: none;
+    padding: 2px 4px 28px;
+    flex-direction: column;
+    gap: 18px;
+    max-width: 62ch;
+  }
+  .c-panel.on { display: flex; }
+  .c-note {
+    margin: 0;
+    font-size: 14.5px;
+    color: var(--dim);
+    line-height: 1.55;
+  }
+  .c-note code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  .c-chips {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+  .c-chips li {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 4px 11px;
+    color: var(--dim);
+  }
+  .c-chips li.more { border-style: dashed; color: var(--faint); }
+  .c-inline-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  .c-defs { margin: 0; display: flex; flex-direction: column; gap: 10px; }
+  .c-defs > div {
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr);
+    gap: 14px;
+    font-size: 14.5px;
+  }
+  .c-defs dt { color: var(--faint); }
+  .c-defs dd { margin: 0; color: var(--ink); }
+  @media (max-width: 560px) {
+    .c-defs > div { grid-template-columns: 1fr; gap: 2px; }
+    .c-sum { margin-left: 0; }
+    .c-head { flex-wrap: wrap; }
+  }
+  .c-sw {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    font-size: 14.5px;
+    padding-top: 4px;
+  }
+  .c-sw small { display: block; font-size: 13px; color: var(--faint); }
+
+  .c-expert { margin-top: 40px; }
+  .c-expert summary {
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--dim);
+    padding: 6px 0;
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .c-expert summary::-webkit-details-marker { display: none; }
+  .c-expert summary::before {
+    content: "+";
+    font-family: var(--mono);
+    color: var(--accent);
+  }
+  .c-expert[open] summary::before { content: "\2212"; }
+  .c-expert summary:hover { color: var(--ink); }
+  .c-expert-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 2px 26px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+  }
+  .c-expert-grid a {
+    color: var(--dim);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 7px 0;
+    border-bottom: 1px solid transparent;
+  }
+  .c-expert-grid a:hover { color: var(--accent); border-color: var(--line); }
+  .c-foot {
+    margin-top: 54px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--faint);
+  }
+
+  .c-sheet-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: color-mix(in srgb, var(--ground) 66%, transparent);
+    backdrop-filter: blur(4px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  .c-sheet-scrim.on { opacity: 1; pointer-events: auto; }
+  .c-sheet {
+    position: fixed;
+    z-index: 51;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -46%) scale(0.98);
+    width: min(460px, calc(100% - 28px));
+    max-height: 78vh;
+    display: flex;
+    flex-direction: column;
+    background: color-mix(in srgb, var(--ground) 95%, transparent);
+    border: 1px solid var(--line-2);
+    border-radius: 18px;
+    box-shadow: 0 30px 70px rgba(0, 0, 0, 0.28);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s;
+  }
+  .c-sheet.on {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  .c-sheet-head {
+    display: flex;
+    align-items: center;
+    padding: 18px 18px 10px;
+  }
+  .c-sheet-head h2 { margin: 0; font-size: 17px; font-weight: 500; }
+  .c-sheet-q {
+    margin: 0 18px 10px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    background: transparent;
+    outline: none;
+    padding: 8px 2px;
+    font-size: 15px;
+  }
+  .c-sheet-q:focus { border-color: var(--accent); }
+  .c-sheet-list { overflow-y: auto; padding: 6px 10px 16px; }
+  .c-opt {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    border-radius: 12px;
+    padding: 11px 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 15px;
+  }
+  .c-opt:hover { background: var(--panel-2); }
+  .c-opt[aria-current="true"] { background: var(--accent-wash); color: var(--accent); }
+  .c-opt .ms {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .c-opt .st { font-size: 12.5px; color: var(--faint); }
+</style>
+
+<script>
+  /* ---------- C: логика ---------- */
+  (function () {
+    var $ = function (id) { return document.getElementById(id); };
+    var toastEl = $("c-toast"), tt;
+    function toast(m) {
+      toastEl.textContent = m;
+      toastEl.classList.add("on");
+      clearTimeout(tt);
+      tt = setTimeout(function () { toastEl.classList.remove("on"); }, 2400);
+    }
+    document.querySelectorAll("#stage-c [data-ctoast]").forEach(function (b) {
+      b.addEventListener("click", function (e) {
+        e.preventDefault();
+        toast(b.dataset.ctoast);
+      });
+    });
+    document.querySelectorAll("#stage-c .c-head").forEach(function (h) {
+      h.onclick = function () {
+        var open = h.getAttribute("aria-expanded") === "true";
+        h.setAttribute("aria-expanded", String(!open));
+        h.parentNode.querySelector(".c-panel").classList.toggle("on", !open);
+      };
+    });
+    document.querySelectorAll("#stage-c .sw").forEach(function (b) {
+      b.onclick = function () {
+        var on = b.getAttribute("aria-pressed") !== "true";
+        b.setAttribute("aria-pressed", String(on));
+        toast("«" + b.dataset.csw + "» " + (on ? "включено" : "выключено"));
+      };
+    });
+    document.querySelectorAll("#stage-c [data-cseg]").forEach(function (b) {
+      b.onclick = function () {
+        document.querySelectorAll("#stage-c [data-cseg]").forEach(function (x) {
+          x.setAttribute("aria-pressed", String(x === b));
+        });
+        toast("Обход блокировок: " + b.textContent.trim());
+      };
+    });
+
+    var act = 0;
+    function render(q) {
+      q = (q || "").toLowerCase();
+      $("c-list").innerHTML = PROFILES.map(function (p, i) {
+        if (q && (p.n + " " + p.g).toLowerCase().indexOf(q) < 0) return "";
+        var st = p.h === "ok" ? "работает" : p.h === "slow" ? "медленно" : "не отвечает";
+        return (
+          '<button class="c-opt" data-i="' + i + '" aria-current="' + (i === act) + '">' +
+          '<i class="hdot h-' + p.h + '"></i><span>' + p.n +
+          '<br><span class="st">' + p.g + " · " + st + "</span></span>" +
+          '<span class="ms">' + p.ms + " мс</span></button>"
+        );
+      }).join("") || '<p class="c-note" style="padding:12px">Ничего не нашлось</p>';
+      $("c-list").querySelectorAll(".c-opt").forEach(function (b) {
+        b.onclick = function () {
+          act = +b.dataset.i;
+          var p = PROFILES[act];
+          $("c-pick").textContent = p.n;
+          document.querySelector("#stage-c .c-lede .num").textContent = p.ms + " мс";
+          close();
+          toast("Подключено: " + p.n);
+        };
+      });
+    }
+    function open() {
+      $("c-scrim").classList.add("on");
+      $("c-sheet").classList.add("on");
+      render($("c-q").value);
+      setTimeout(function () { $("c-q").focus(); }, 60);
+    }
+    function close() {
+      $("c-scrim").classList.remove("on");
+      $("c-sheet").classList.remove("on");
+    }
+    $("c-pick").onclick = open;
+    $("c-pick2").onclick = open;
+    $("c-close").onclick = close;
+    $("c-scrim").onclick = close;
+    $("c-q").oninput = function () { render(this.value); };
+    addEventListener("keydown", function (e) {
+      if (e.key === "Escape") close();
+    });
+    render("");
+  })();
+</script>
+</body>
+</html>

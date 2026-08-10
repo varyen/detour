@@ -29,6 +29,7 @@ runtime binaries via detour-update. No `keenetic/fetch-bins.py` step is needed
 anymore (nothing is bundled).
 """
 import io
+import json
 import os
 import sys
 import tarfile
@@ -108,6 +109,7 @@ FILES = [
     # with_wireguard, а регистрация ходит curl'ом через активную цепочку.
     # fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-warp"), "opt/sbin/detour-warp", 0o755, True),
+    (os.path.join(ROUTER_FILES, "detour-meter"), "opt/sbin/detour-meter", 0o755, True),
     # Публикация LAN-сервисов наружу (shared source, /opt shim): HTTPS-реверс-прокси
     # через lighttpd mod_proxy + DNAT через ndm/netfilter.d. fix_shebang → /opt/bin/sh.
     # ⚠ НЕ проверено на живом Keenetic — см. keenetic/README.md.
@@ -151,6 +153,46 @@ FILES = [
     (os.path.join(HERE, "etc", "detour.conf"), "opt/etc/detour/detour.conf", 0o644, False),
 ]
 
+# Собранная Vue-панель (panel/dist) → /opt/share/www/detour-next/. Docroot lighttpd
+# это /opt/share/www, поэтому она открывается по /detour-next/ — тем же адресом, что
+# и на OpenWrt. Список строится обходом каталога: имена чанков содержат хэш и
+# меняются от сборки к сборке, перечислять их вручную нельзя.
+PANEL_NEXT_DIR = os.path.join(ROOT, "panel", "dist")
+PANEL_NEXT_DEST = "opt/share/www/detour-next"
+
+
+def panel_next_files():
+    if not os.path.isdir(PANEL_NEXT_DIR):
+        sys.exit("нет собранной панели: " + PANEL_NEXT_DIR +
+                 "\n  Собери её: cd panel && npm ci && npm run build")
+    out = []
+    for dirpath, dirnames, filenames in os.walk(PANEL_NEXT_DIR):
+        dirnames.sort()
+        for name in sorted(filenames):
+            src = os.path.join(dirpath, name)
+            rel = os.path.relpath(src, PANEL_NEXT_DIR).replace(os.sep, "/")
+            out.append((src, PANEL_NEXT_DEST + "/" + rel, 0o644, False))
+    if not out:
+        sys.exit("panel/dist пуст: " + PANEL_NEXT_DIR)
+    return out
+
+
+def all_files():
+    """FILES + собранная панель. Лениво: импорт модуля без panel/dist не падает."""
+    return FILES + panel_next_files()
+
+
+def check_panel_build(version):
+    """Отказать, если panel/dist собран из другой версии (см. build_release.py)."""
+    stamp = os.path.join(PANEL_NEXT_DIR, "build.json")
+    if not os.path.isfile(stamp):
+        sys.exit("panel/dist собран без build.json — пересобери: cd panel && npm run build")
+    with open(stamp, "r", encoding="utf-8") as f:
+        built = (json.load(f) or {}).get("version")
+    if built != version:
+        sys.exit("panel/dist собран из версии %s, а пакуется %s\n"
+                 "  Обнови VERSION и пересобери: cd panel && npm run build" % (built, version))
+
 
 def fix_shebang(data):
     txt = data.decode("utf-8")
@@ -170,8 +212,9 @@ def add_bytes(tar, name, content, mode):
 
 
 def build_data():
+    files = all_files()
     dirs = set()
-    for _, dest, _, _ in FILES:
+    for _, dest, _, _ in files:
         parts = dest.split("/")
         for i in range(1, len(parts)):
             dirs.add("/".join(parts[:i]))
@@ -183,7 +226,7 @@ def build_data():
             di.mtime = int(datetime.now(timezone.utc).timestamp())
             tar.addfile(di)
         total = 0
-        for src, dest, mode, fix in FILES:
+        for src, dest, mode, fix in files:
             if not os.path.isfile(src):
                 sys.exit(f"missing source: {src}" + (
                     "  (run keenetic/fetch-bins.py)" if "/bins/" in src.replace("\\", "/") else ""))
@@ -378,6 +421,7 @@ def build(version=None, out_dir=None):
         version = open(os.path.join(ROOT, "VERSION")).read().strip()
     if out_dir is None:
         out_dir = OUT_DIR
+    check_panel_build(version)
     os.makedirs(out_dir, exist_ok=True)
     data_tgz, installed = build_data()
     control_tgz = build_control(version, installed)

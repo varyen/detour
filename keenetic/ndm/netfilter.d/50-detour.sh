@@ -403,4 +403,12 @@ add filter INPUT -j DETOUR_PORTMAP_IN
 add filter FORWARD -j DETOUR_PORTMAP_FWD
 add nat PREROUTING -j DETOUR_PORTMAP_DNAT
 
+# Счётчики трафика для схемы потока в панели. NDM пересобирает iptables на
+# каждый реконфиг и сносит наши цепочки — возвращаем их, но только если панель
+# ими пользуется (есть файл состояния). Правила ничего не решают, лишь считают,
+# поэтому их потеря не ломает маршрутизацию, а лишь обнуляет график.
+if [ -x /opt/sbin/detour-meter ] && [ -f /tmp/detour-meter.state ]; then
+    /opt/sbin/detour-meter install >/dev/null 2>&1
+fi
+
 exit 0

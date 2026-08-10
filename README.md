@@ -4,7 +4,7 @@
 > Два движка под одним SPA-интерфейсом — **sing-box** (Trojan/VLESS-прокси) и
 > **zapret-tpws** (DPI-bypass) — с самообновлением по подписанным `.ipk`-релизам.
 
-**Версия:** [`1.43.2`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
+**Версия:** [`1.44.0`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -136,6 +136,7 @@ busybox-апплетов и т.п.) и подстраивает деплой.
 | Путь                   | Назначение                                                                                |
 | ---------------------- | ----------------------------------------------------------------------------------------- |
 | `router_files/`        | Скрипты, деплоящиеся на роутер: init.d, CGI, updater, shim'ы.                             |
+| `panel/`               | Новая панель на Vue 3 + PWA (ставится в `/detour-next/`). Сборка `npm run build` → `panel/dist`. |
 | `router-backup/`       | Зеркало живого состояния роутера (gitignored). Источник конфигов и бинарников при сборке. |
 | `build_release.py`     | Сборка подписанных `.ipk` панели (`detour` + `detour-keenetic`).                          |
 | `build_feed.py`        | Сборка/публикация opkg-фида с `sing-box` (ветка `feed`).                                  |
@@ -189,6 +190,9 @@ python3 deploy_router.py --router home --full
 ### Сборка
 
 ```bash
+# Новая панель обязана быть собрана из ТОЙ ЖЕ версии (упаковщик проверяет):
+cd panel && npm ci && npm run build && cd ..
+
 # Панель (+ Keenetic) и публикация ассетов в GitHub Release:
 python3 build_release.py --version 1.0.0 --publish
 
