@@ -136,6 +136,17 @@ code {
   background: var(--faint);
 }
 
+/* Подсветка области, на которую привела ссылка `?focus=` (см. lib/deeplink.ts).
+   Кольцо статичное, а не анимированное: класс всё равно снимается по таймеру, и
+   при prefers-reduced-motion (ниже глобально гасятся анимации) подсветку всё
+   равно должно быть видно. */
+.focus-flash {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 16%, transparent);
+  transition: outline-color 0.4s ease, box-shadow 0.4s ease;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

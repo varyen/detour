@@ -12930,6 +12930,22 @@
         populateGroupsUI();
         toast('Группа "' + name + '" создана', "success");
       }
+      // Смена папки ОБЯЗАНА идти через чтение файла профиля с роутера.
+      // В списке (profiles_list) приходит только сводка — без outbound и uri, —
+      // а profile_save перезаписывает файл целиком. Пока эти операции брали
+      // профиль из currentProfiles, перенос/переименование папки оставлял
+      // профиль с именем и типом, но без сервера, порта и пароля.
+      async function saveProfileGroupById(id, newGroup) {
+        var full = await api("profile_get&name=" + encodeURIComponent(id));
+        if (!full || full.ok === false || (!full.outbound && !full.uri)) {
+          throw new Error(
+            (full && full.error) || "профиль прочитать не удалось: " + id,
+          );
+        }
+        full.group = newGroup;
+        var r = await api("profile_save", "POST", JSON.stringify(full));
+        if (!r || !r.ok) throw new Error((r && r.error) || "сохранить не удалось");
+      }
       async function renameGroupPrompt(oldName) {
         var newName = prompt(
           'Переименовать группу "' + oldName + '" в:',
@@ -12944,22 +12960,24 @@
         var status = document.getElementById("groups-status");
         status.textContent = "Обновляю " + affected.length + " профилей...";
         var ok = 0;
+        var firstErr = "";
         // Внешний busyStart держит оверлей на ВЕСЬ цикл: без него счётчик падал
         // бы до нуля между итерациями и крутилка мигала бы на каждом профиле.
         busyStart("Сохраняем…");
         try {
           for (var i = 0; i < affected.length; i++) {
             busyText("Сохраняем " + (i + 1) + " / " + affected.length);
-            var copy = cloneJson(affected[i]);
-            copy.group = newName;
             try {
-              var r = await api("profile_save", "POST", JSON.stringify(copy));
-              if (r.ok) ok++;
-            } catch (e) {}
+              await saveProfileGroupById(affected[i].id, newName);
+              ok++;
+            } catch (e) {
+              if (!firstErr) firstErr = (e && e.message) || String(e);
+            }
           }
         } finally {
           busyEnd();
         }
+        if (firstErr) toast(firstErr, "error");
         // also rename in the empty-groups list
         var idx = emptyGroups.indexOf(oldName);
         if (idx >= 0) {
@@ -12990,20 +13008,22 @@
         status.textContent =
           "Снимаю группу с " + affected.length + " профилей...";
         var ok = 0;
+        var firstErr = "";
         busyStart("Сохраняем…");
         try {
           for (var i = 0; i < affected.length; i++) {
             busyText("Сохраняем " + (i + 1) + " / " + affected.length);
-            var copy = cloneJson(affected[i]);
-            copy.group = "";
             try {
-              var r = await api("profile_save", "POST", JSON.stringify(copy));
-              if (r.ok) ok++;
-            } catch (e) {}
+              await saveProfileGroupById(affected[i].id, "");
+              ok++;
+            } catch (e) {
+              if (!firstErr) firstErr = (e && e.message) || String(e);
+            }
           }
         } finally {
           busyEnd();
         }
+        if (firstErr) toast(firstErr, "error");
         var idx = emptyGroups.indexOf(name);
         if (idx >= 0) {
           emptyGroups.splice(idx, 1);
@@ -13607,18 +13627,22 @@
         var ids = Array.from(bulkSelected);
         status.textContent = "Обновляю группу...";
         var ok = 0;
-        for (var i = 0; i < ids.length; i++) {
-          var p = currentProfiles.find(function (x) {
-            return x.id === ids[i];
-          });
-          if (!p) continue;
-          var copy = cloneJson(p);
-          copy.group = newGroup;
-          try {
-            var r = await api("profile_save", "POST", JSON.stringify(copy));
-            if (r.ok) ok++;
-          } catch (e) {}
+        var firstErr = "";
+        busyStart("Сохраняем…");
+        try {
+          for (var i = 0; i < ids.length; i++) {
+            busyText("Сохраняем " + (i + 1) + " / " + ids.length);
+            try {
+              await saveProfileGroupById(ids[i], newGroup);
+              ok++;
+            } catch (e) {
+              if (!firstErr) firstErr = (e && e.message) || String(e);
+            }
+          }
+        } finally {
+          busyEnd();
         }
+        if (firstErr) toast(firstErr, "error");
         await loadProfiles();
         populateBulkGroupSelects();
         renderBulkProfilesList();

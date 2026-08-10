@@ -11,6 +11,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import ServicePanel from "@/components/services/ServicePanel.vue";
 import PortmapSheet from "@/components/services/PortmapSheet.vue";
 import CertSheet from "@/components/services/CertSheet.vue";
+import KeenHttpsSheet from "@/components/services/KeenHttpsSheet.vue";
 import PasswordSheet from "@/components/services/PasswordSheet.vue";
 import FormField from "@/components/services/FormField.vue";
 import UiButton from "@/components/UiButton.vue";
@@ -151,10 +152,17 @@ const confirmSwap = ref(false);
 const swapSize = ref("512");
 const swapProgress = ref("");
 const importFile = ref<File | null>(null);
+/* Файл разбираем сразу при выборе, а не при нажатии «Восстановить»: человек
+   должен увидеть, что именно будет перезаписано, ДО перезаписи. */
+const importDoc = ref<Record<string, unknown> | null>(null);
+const importSections = ref<string[]>([]);
+const importError = ref("");
+const confirmImport = ref(false);
 
 const sheetPortmap = ref(false);
 const sheetCert = ref(false);
 const sheetPassword = ref(false);
+const sheetKeenHttps = ref(false);
 const editing = ref<PortmapRow | null>(null);
 
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -232,6 +240,16 @@ function rowPath(r: PortmapRow): string {
       ? `защищённо${pm.value?.domain ? ` на ${pm.value.domain}` : ""}`
       : `${r.proto.toUpperCase().replace(" ", " и ")}`;
   return `порт ${r.listen_port} (${via}) → ${r.target_ip}:${r.target_port}`;
+}
+
+/* Ссылка на опубликованный сервис — только для защищённого режима: у проброса
+   порта на другом конце может быть что угодно, не обязательно веб. Домена может
+   не быть — тогда ведём на хост, по которому открыта сама панель: этот же
+   роутер и отвечает на опубликованном порту. */
+function rowUrl(r: PortmapRow): string {
+  if (r.mode !== "https") return "";
+  const host = pm.value?.domain || location.hostname;
+  return `https://${host}:${r.listen_port}/`;
 }
 
 function rowNote(r: PortmapRow): string {
@@ -620,22 +638,71 @@ async function exportConfig() {
   }
 }
 
-function pickFile(e: Event) {
+/* Разделы, которые роутер действительно умеет восстанавливать. Всё прочее в
+   файле он молча пропустит, поэтому и обещать этого не нужно: показываем ровно
+   то, что будет перезаписано. */
+const SECTION_LABELS: Record<string, string> = {
+  settings: "настройки панели",
+  subscription: "подписка на профили",
+  proxy_domains: "список доменов для VPN",
+  whitelist_domains: "список исключений",
+  zapret_conf: "параметры обхода DPI",
+  zapret_domains: "домены для обхода DPI",
+};
+
+function sectionsOf(doc: Record<string, unknown>): string[] {
+  return Object.keys(SECTION_LABELS).filter((k) => {
+    const v = doc[k];
+    if (typeof v === "string") return v.length > 0;
+    /* Пустой объект подписки роутер тоже не пишет — не обещаем его. */
+    if (v && typeof v === "object") return Object.keys(v).length > 0;
+    return false;
+  });
+}
+
+function resetImport() {
+  importFile.value = null;
+  importDoc.value = null;
+  importSections.value = [];
+  importError.value = "";
+  confirmImport.value = false;
+  if (fileInput.value) fileInput.value.value = "";
+}
+
+async function pickFile(e: Event) {
   const input = e.target as HTMLInputElement;
-  importFile.value = input.files?.[0] ?? null;
+  const file = input.files?.[0] ?? null;
+  importFile.value = file;
+  importDoc.value = null;
+  importSections.value = [];
+  importError.value = "";
+  confirmImport.value = false;
+  if (!file) return;
+  try {
+    const doc: unknown = JSON.parse(await file.text());
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+      importError.value = "Это не файл настроек панели";
+      return;
+    }
+    const found = sectionsOf(doc as Record<string, unknown>);
+    if (!found.length) {
+      importError.value = "В файле нет разделов, которые панель умеет восстанавливать";
+      return;
+    }
+    importDoc.value = doc as Record<string, unknown>;
+    importSections.value = found;
+  } catch {
+    importError.value = "Файл повреждён или это не JSON";
+  }
 }
 
 async function importConfig() {
-  const file = importFile.value;
-  if (!file) return;
+  const doc = importDoc.value;
+  if (!doc) return;
   busy.value = "import";
   try {
-    const text = await file.text();
-    const doc: unknown = JSON.parse(text);
-    if (!doc || typeof doc !== "object") throw new Error("Это не файл настроек панели");
     await services.importConfig(doc);
-    importFile.value = null;
-    if (fileInput.value) fileInput.value.value = "";
+    resetImport();
     toast.ok("Настройки восстановлены");
     void status.refresh(true);
   } catch (e) {
@@ -741,6 +808,11 @@ onBeforeUnmount(() => unregister?.());
         Пока ничего не опубликовано.
       </p>
 
+      <p v-if="httpsSupported && pm?.engine" class="note faint">
+        Защищённый доступ роутер выдаёт через {{ pm.engine }}<template v-if="pm?.domain">
+          на домене {{ pm.domain }}</template>.
+      </p>
+
       <div v-for="r in rows" :key="r.id" class="row">
         <SwitchToggle
           :model-value="r.enabled"
@@ -750,6 +822,13 @@ onBeforeUnmount(() => unregister?.());
           @update:model-value="togglePortmap(r, $event)"
         />
         <p v-if="rowNote(r)" class="row-note">{{ rowNote(r) }}</p>
+        <a
+          v-if="rowUrl(r)"
+          class="row-link"
+          :href="rowUrl(r)"
+          target="_blank"
+          rel="noopener"
+        >{{ rowUrl(r) }}</a>
         <p v-if="checks[r.id]" class="row-check">{{ checks[r.id] }}</p>
         <div class="row-actions">
           <UiButton @click="editPortmap(r)">Изменить</UiButton>
@@ -828,6 +907,9 @@ onBeforeUnmount(() => unregister?.());
         <UiButton variant="primary" @click="sheetCert = true">
           {{ certOk ? "Выпустить заново" : "Выпустить сертификат" }}
         </UiButton>
+        <UiButton v-if="status.isKeenetic" @click="sheetKeenHttps = true">
+          Как обойтись без сертификата
+        </UiButton>
         <UiButton :busy="busy === 'cert'" @click="refreshCert">Обновить сведения</UiButton>
       </div>
     </ServicePanel>
@@ -863,6 +945,12 @@ onBeforeUnmount(() => unregister?.());
         Канал доставки уведомлений пущен мимо VPN — иначе сообщение о неработающем
         VPN не дошло бы именно тогда, когда оно нужно.
       </p>
+      <p v-else-if="pushCfg?.bypass === 'inactive'" class="note warn">
+        Канал доставки уведомлений пока идёт через VPN. Если активный VPN упадёт,
+        уведомление об этом может не дойти — тишину нельзя считать признаком того,
+        что всё в порядке. Роутер уводит канал мимо VPN сам, когда уведомления
+        включают; если предупреждение осталось, выключите и включите их здесь заново.
+      </p>
 
       <div class="actions">
         <UiButton
@@ -883,6 +971,12 @@ onBeforeUnmount(() => unregister?.());
           @click="pushTest"
         >
           Отправить пробное
+        </UiButton>
+        <!-- Инструкция нужна ровно в том случае, когда уведомления недоступны:
+             панель открыта по обычному адресу. Поэтому кнопка не прячется, когда
+             всё остальное задизейблено. -->
+        <UiButton v-if="status.isKeenetic" @click="sheetKeenHttps = true">
+          Как открыть панель по HTTPS
         </UiButton>
       </div>
     </ServicePanel>
@@ -916,6 +1010,13 @@ onBeforeUnmount(() => unregister?.());
       <p v-if="offload?.last_action && offload.last_action !== 'none'" class="note faint">
         Последнее действие: {{ offload.last_action }}<template v-if="offload.last_result">
           — {{ offload.last_result }}</template>
+      </p>
+
+      <!-- Доля времени процессора на обработку пакетов — единственный признак, по
+           которому залипание видно снаружи: при работающем ускорителе трафик идёт
+           мимо процессора, и цифра остаётся низкой. -->
+      <p v-if="typeof offload?.last_sirq === 'number'" class="note faint">
+        Процессор на обработке трафика при последней проверке: {{ offload.last_sirq }} %
       </p>
 
       <div class="actions">
@@ -1006,16 +1107,37 @@ onBeforeUnmount(() => unregister?.());
         @change="pickFile"
       />
 
-      <p v-if="importFile" class="note warn">
-        Выбран файл «{{ importFile.name }}». Восстановление заменит текущие списки и
-        настройки — вернуть их обратно можно будет только из другой копии.
+      <p v-if="importError" class="note bad">
+        {{ importFile ? `Файл «${importFile.name}»: ` : "" }}{{ importError }}
       </p>
+
+      <template v-else-if="importDoc">
+        <p class="note warn">
+          Из файла «{{ importFile?.name }}» будет перезаписано:
+        </p>
+        <ul class="sections">
+          <li v-for="s in importSections" :key="s">
+            {{ SECTION_LABELS[s] }} <span class="raw">{{ s }}</span>
+          </li>
+        </ul>
+        <p class="note faint">
+          Остальное останется как есть. После восстановления роутер перезапустит
+          VPN — соединения на несколько секунд прервутся. Вернуть текущие списки
+          обратно можно будет только из другой копии.
+        </p>
+      </template>
 
       <div class="actions">
         <UiButton variant="primary" :busy="busy === 'export'" @click="exportConfig">
           Скачать копию
         </UiButton>
-        <UiButton :disabled="!importFile" :busy="busy === 'import'" @click="importConfig">
+        <template v-if="confirmImport">
+          <UiButton variant="danger" :busy="busy === 'import'" @click="importConfig">
+            Точно перезаписать
+          </UiButton>
+          <UiButton @click="confirmImport = false">Отмена</UiButton>
+        </template>
+        <UiButton v-else :disabled="!importDoc" @click="confirmImport = true">
           Восстановить из файла
         </UiButton>
       </div>
@@ -1063,8 +1185,16 @@ onBeforeUnmount(() => unregister?.());
     :http80="certInfo?.http80 ?? ''"
     :wan-ip="certInfo?.wan_ip ?? ''"
     :acme-present="certInfo?.acme_present !== false"
+    :keenetic="status.isKeenetic"
+    :panel-port="status.data?.panel_port"
     @close="sheetCert = false"
     @done="loadCert"
+  />
+
+  <KeenHttpsSheet
+    :open="sheetKeenHttps"
+    :panel-port="status.data?.panel_port"
+    @close="sheetKeenHttps = false"
   />
 
   <PasswordSheet :open="sheetPassword" @close="sheetPassword = false" />
@@ -1145,10 +1275,38 @@ onBeforeUnmount(() => unregister?.());
   color: var(--accent);
   overflow-wrap: anywhere;
 }
+/* Адрес сервиса — ссылка, но живёт внутри строки с переключателем: свой
+   отдельный ряд, чтобы нажатие на неё не читалось как нажатие на строку. */
+.row-link {
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--accent);
+  align-self: flex-start;
+  overflow-wrap: anywhere;
+}
 .row-actions {
   display: flex;
   gap: 7px;
   flex-wrap: wrap;
+}
+
+/* ---- разделы в выбранной копии ---- */
+.sections {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--dim);
+  list-style: disc;
+}
+/* Имя раздела из файла — на случай, когда человеку нужно сверить его с копией,
+   а не с нашим переводом. */
+.sections .raw {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--faint);
 }
 
 /* Поле выбора файла умеет растягивать родителя по имени файла — не даём. */

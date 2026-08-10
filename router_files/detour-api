@@ -2833,10 +2833,21 @@ updates_overview)
             echo false
         fi
     }
-    P_STATUS=""; P_AVAIL=""
+    # Установленная версия, доступная версия и время последней проверки лежат в
+    # тех же state-файлах. Раньше overview их не отдавал, и панель не могла
+    # показать ни «проверяли N назад», ни «доступна X» — только сам факт «есть
+    # обновление». Имена полей у панели и у фид-каналов исторически разные
+    # (current_version/available_version vs current/available), здесь сводим их
+    # к одному виду. last_check — строка ISO-8601, как её пишет detour-update.
+    feed_cur()  { [ -f "$1" ] && json_val current "$1"   || true; }
+    feed_avail(){ [ -f "$1" ] && json_val available "$1" || true; }
+    st_check()  { [ -f "$1" ] && json_val last_check "$1" || true; }
+    P_STATUS=""; P_AVAIL=""; P_CUR=""; P_CHK=""
     if [ -f "$UPDATE_STATE" ]; then
         P_STATUS=$(json_val status "$UPDATE_STATE")
         P_AVAIL=$(json_val available_version "$UPDATE_STATE")
+        P_CUR=$(json_val current_version "$UPDATE_STATE")
+        P_CHK=$(st_check "$UPDATE_STATE")
     fi
     # up_ver  → latest upstream version string (detour-update's GitHub probe).
     # up_new  → "true"/"false": upstream is newer than installed AND the feed has
@@ -2861,11 +2872,14 @@ updates_overview)
     SB_UPV=$(up_ver "$BINS_STATE");   SB_UPN=$(up_new "$BINS_STATE");   SB_LOG=$(up_log "$BINS_STATE")
     TPWS_UPV=$(up_ver "$TPWS_STATE"); TPWS_UPN=$(up_new "$TPWS_STATE"); TPWS_LOG=$(up_log "$TPWS_STATE")
     NFQWS2_UPV=$(up_ver "$NFQWS2_STATE"); NFQWS2_UPN=$(up_new "$NFQWS2_STATE"); NFQWS2_LOG=$(up_log "$NFQWS2_STATE")
-    printf '{"panel":{"update_available":%s,"available_version":"%s","changelog_b64":"%s"},"singbox":{"update_available":%s,"upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"tpws":{"update_available":%s,"upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"nfqws2":{"update_available":%s,"upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"}}\n' \
-        "$P_UPD" "$P_AVAIL" "$P_LOG" \
-        "$SB_UPD" "$SB_UPV" "$SB_UPN" "$SB_LOG" \
-        "$TPWS_UPD" "$TPWS_UPV" "$TPWS_UPN" "$TPWS_LOG" \
-        "$NFQWS2_UPD" "$NFQWS2_UPV" "$NFQWS2_UPN" "$NFQWS2_LOG"
+    SB_CUR=$(feed_cur "$BINS_STATE");     SB_AV=$(feed_avail "$BINS_STATE");     SB_CHK=$(st_check "$BINS_STATE")
+    TPWS_CUR=$(feed_cur "$TPWS_STATE");   TPWS_AV=$(feed_avail "$TPWS_STATE");   TPWS_CHK=$(st_check "$TPWS_STATE")
+    NFQWS2_CUR=$(feed_cur "$NFQWS2_STATE"); NFQWS2_AV=$(feed_avail "$NFQWS2_STATE"); NFQWS2_CHK=$(st_check "$NFQWS2_STATE")
+    printf '{"panel":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","changelog_b64":"%s"},"singbox":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"tpws":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"nfqws2":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"}}\n' \
+        "$P_UPD" "$P_AVAIL" "$P_CUR" "$P_CHK" "$P_LOG" \
+        "$SB_UPD" "$SB_AV" "$SB_CUR" "$SB_CHK" "$SB_UPV" "$SB_UPN" "$SB_LOG" \
+        "$TPWS_UPD" "$TPWS_AV" "$TPWS_CUR" "$TPWS_CHK" "$TPWS_UPV" "$TPWS_UPN" "$TPWS_LOG" \
+        "$NFQWS2_UPD" "$NFQWS2_AV" "$NFQWS2_CUR" "$NFQWS2_CHK" "$NFQWS2_UPV" "$NFQWS2_UPN" "$NFQWS2_LOG"
     ;;
 
 # ==================== DPI-BYPASS ENGINE SWITCH (zapret | zapret2 | off) ====================
@@ -3065,8 +3079,34 @@ iptables)
     ;;
 
 conntrack)
-    CT=$(cat /proc/net/nf_conntrack 2>/dev/null | grep '45.88.174' | head -10 | json_escape)
-    printf '{"conntrack":"%s"}' "$CT"
+    # Таблица соединений. Фильтр приходит из запроса (?filter=), а не зашит в код:
+    # раньше здесь стоял `grep` по конкретному адресу сервера — отладочный остаток,
+    # из-за которого действие показывало десять строк про один хост и ничего больше,
+    # да ещё держало реальный адрес в коде репозитория.
+    # Подстановка идёт в grep -F, а значение сначала прогоняется через tr -cd:
+    # без этого строка из запроса попала бы в командную строку как есть.
+    CT_F=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]filter=\([^&]*\).*/\1/p' | head -1)
+    # Браузер кодирует «=» и «:» как %3D/%3A, а искать по «dport=12345» или
+    # «1.2.3.4:443» — самый частый случай. Разворачиваем их ДО отсева лишних
+    # символов, иначе от «dport=12345» осталось бы «dport3D12345».
+    CT_F=$(printf '%s' "$CT_F" | sed -e 's/%3[Dd]/=/g' -e 's/%3[Aa]/:/g')
+    CT_F=$(printf '%s' "$CT_F" | tr -cd 'A-Za-z0-9.:=_-' | cut -c1-64)
+    # На старых ядрах (Keenetic, 3.4) таблица лежит под прежним именем
+    # /proc/net/ip_conntrack — формат строки тот же, отличается только путь.
+    CT_SRC=/proc/net/nf_conntrack
+    [ -r "$CT_SRC" ] || CT_SRC=/proc/net/ip_conntrack
+    CT_TOTAL=$(wc -l < "$CT_SRC" 2>/dev/null | tr -d ' ')
+    [ -n "$CT_TOTAL" ] || CT_TOTAL=0
+    if [ -n "$CT_F" ]; then
+        CT_RAW=$(grep -F "$CT_F" "$CT_SRC" 2>/dev/null | head -200)
+    else
+        CT_RAW=$(head -200 "$CT_SRC" 2>/dev/null)
+    fi
+    CT_SHOWN=$(printf '%s' "$CT_RAW" | grep -c . 2>/dev/null)
+    [ -n "$CT_SHOWN" ] || CT_SHOWN=0
+    CT=$(printf '%s' "$CT_RAW" | json_escape)
+    printf '{"conntrack":"%s","total":%s,"shown":%s,"filter":"%s"}' \
+        "$CT" "$CT_TOTAL" "$CT_SHOWN" "$(printf '%s' "$CT_F" | json_escape)"
     ;;
 
 # Доли лент для схемы потока. Хелпер сам ставит свои счётчики при первом
@@ -3338,7 +3378,21 @@ profile_save)
     [ -z "$P_ID" ] && P_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     P_ID=$(sanitize_name "$P_ID")
     if [ -z "$P_ID" ]; then json_err "profile id/name required"; exit 0; fi
-    echo "$POST_DATA" > "$SINGBOX_PROFILES_DIR/$P_ID.json"
+    PS_FILE="$SINGBOX_PROFILES_DIR/$P_ID.json"
+    # Страховка от «обрезанного» сохранения. Запись идёт поверх файла целиком,
+    # поэтому payload без параметров подключения стирает сервер, порт и пароль,
+    # оставляя профиль на вид целым (имя и тип на месте). Так терялись профили
+    # при переносе между папками: панель отправляла сводку из profiles_list, где
+    # ни outbound, ни uri нет. Отказываем вместо молчаливой потери.
+    if [ -f "$PS_FILE" ] && grep -q '"server"[[:space:]]*:' "$PS_FILE"; then
+        PS_NEW_SRV=$(printf '%s' "$POST_DATA" | grep -c '"server"[[:space:]]*:')
+        PS_NEW_URI=$(printf '%s' "$POST_DATA" | sed -n 's/.*"uri"[[:space:]]*:[[:space:]]*"\([^"]\{1,\}\)".*/\1/p' | head -1)
+        if [ "$PS_NEW_SRV" = 0 ] && [ -z "$PS_NEW_URI" ]; then
+            json_err "в запросе нет параметров подключения (server/uri) — сохранение отклонено, чтобы не потерять профиль"
+            exit 0
+        fi
+    fi
+    echo "$POST_DATA" > "$PS_FILE"
     json_ok
     ;;
 

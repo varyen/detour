@@ -27,6 +27,14 @@ export const useProfilesStore = defineStore("profiles", () => {
   const activeChain = ref<string[]>([]);
   const ping = ref<Record<string, PingResult>>({});
   const health = ref<Record<string, HealthResult>>({});
+  /* Подписи целей проверки приходят тем же ответом, что и результаты: без них
+     health.delays[] — безымянный список чисел. Держим их здесь, чтобы экраны не
+     запрашивали health_status повторно ради одних заголовков. */
+  const healthTargets = ref<{ label: string; url: string }[]>([]);
+  /* Последнее авто-переключение приходит тем же ответом. Роутер мог сменить
+     профиль сам, пока панель была закрыта, — без этой отметки человек видит
+     чужой активный профиль и не знает, почему он сменился. */
+  const healthSwitch = ref<{ from?: string; to?: string; ts?: number } | null>(null);
   const loading = ref(false);
   const switching = ref("");
 
@@ -87,7 +95,11 @@ export const useProfilesStore = defineStore("profiles", () => {
   async function loadProbes() {
     const [p, h] = await Promise.allSettled([diag.pingStatus(), diag.healthStatus()]);
     if (p.status === "fulfilled") ping.value = p.value.results ?? {};
-    if (h.status === "fulfilled") health.value = h.value.results ?? {};
+    if (h.status === "fulfilled") {
+      health.value = h.value.results ?? {};
+      if (h.value.urls?.length) healthTargets.value = h.value.urls;
+      healthSwitch.value = h.value.switch ?? null;
+    }
   }
 
   async function loadChains() {
@@ -124,6 +136,8 @@ export const useProfilesStore = defineStore("profiles", () => {
     activeChain,
     ping,
     health,
+    healthTargets,
+    healthSwitch,
     loading,
     switching,
     rows,

@@ -11,6 +11,8 @@ import TileCard from "@/components/TileCard.vue";
 import UiButton from "@/components/UiButton.vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
+import SwitchToggle from "@/components/SwitchToggle.vue";
+import PField from "@/components/profiles/PField.vue";
 import ProfileList from "@/components/profiles/ProfileList.vue";
 import ProfileSheet from "@/components/profiles/ProfileSheet.vue";
 import ChainsPanel from "@/components/profiles/ChainsPanel.vue";
@@ -24,7 +26,7 @@ import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
 import { draftFromProfile, profileFromDraft } from "@/components/profiles/uri";
 import type { ProfileDraft } from "@/components/profiles/uri";
-import { fmtAgo } from "@/lib/format";
+import { fmtAgo, fmtSpeedKbps } from "@/lib/format";
 
 type Tab = "profiles" | "chains" | "subs" | "warp";
 
@@ -37,7 +39,12 @@ const tab = ref<Tab>("profiles");
 const selected = ref<string[]>([]);
 const busy = ref("");
 const probing = ref("");
+const flagBusy = ref("");
 const warpSupported = ref(false);
+/* Подписи целей проверки идут тем же ответом health_status, что и результаты, —
+   их складывает store.loadProbes(). Отдельный запрос ради заголовков означал бы
+   второе чтение результатов по всей сотне профилей. */
+const healthTargets = computed(() => store.healthTargets);
 
 const sheetOpen = ref(false);
 const sheetDraft = ref<ProfileDraft | null>(null);
@@ -79,9 +86,20 @@ const rowState = computed(() => {
         r.health.ts ? ` · ${fmtAgo(r.health.ts)}` : ""
       }`,
     );
+    /* По каждой цели отдельно: «не проходит» само по себе не говорит, что
+       именно отвалилось — YouTube или весь выход в сеть. */
+    const delays = r.health.delays ?? [];
+    for (let i = 0; i < delays.length; i++) {
+      const label = healthTargets.value[i]?.label || `Цель ${i + 1}`;
+      const d = delays[i];
+      /* Точка вместо отступа: пробелы в начале <li> браузер всё равно сожмёт. */
+      out.push(
+        `· ${label}: ${typeof d === "number" && d >= 0 ? `${Math.round(d)} мс` : "не отвечает"}`,
+      );
+    }
   }
-  if (r.autoswitch === false) out.push("Исключён из авто-переключения");
-  if (r.speedcheck === false) out.push("Исключён из проверки скорости");
+  const speed = fmtSpeedKbps(r.health?.dl);
+  out.push(`Скорость: ${speed ? `↓ ${speed}` : "ещё не измерена"}`);
   return out;
 });
 
@@ -136,17 +154,43 @@ async function healthOne(r: ProfileRow) {
     /* Вердикт лежит в result.ok: внешнее ok — это «запрос обработан», оно true
        и для профиля, который проверку не прошёл. */
     const res = (await diag.healthCheckOne(r.id)) as unknown as {
-      result?: { ok?: boolean };
+      result?: { ok?: boolean; dl?: number };
     };
     await store.loadProbes();
     const passed = res.result?.ok ?? store.health[r.id]?.ok === true;
+    /* Заодно замеряется скорость — если она есть, показываем сразу: ради неё
+       эту проверку чаще всего и запускают вручную. */
+    const speed = fmtSpeedKbps(res.result?.dl ?? store.health[r.id]?.dl);
     toast[passed ? "ok" : "error"](
-      passed ? `${r.name}: проверка пройдена` : `${r.name}: проверка не пройдена`,
+      passed
+        ? `${r.name}: проверка пройдена${speed ? ` · ↓ ${speed}` : ""}`
+        : `${r.name}: проверка не пройдена`,
     );
   } catch (e) {
     toast.fromError(e, "Проверка не удалась");
   } finally {
     probing.value = "";
+  }
+}
+
+/** Флаг одного профиля: то же, что массовая операция, но на один id. */
+async function setFlag(r: ProfileRow, kind: "autoswitch" | "speedcheck", value: boolean) {
+  if (flagBusy.value) return;
+  flagBusy.value = `${r.id}:${kind}`;
+  try {
+    if (kind === "autoswitch") await profilesApi.setAutoswitch([r.id], value);
+    else await profilesApi.setSpeedcheck([r.id], value);
+    /* Правим строку на месте: перечитывать сотню профилей и все пинги ради
+       одного флага — заметная пауза на каждое нажатие. */
+    const item = store.items.find((p) => p.id === r.id);
+    if (item) item[kind] = value;
+    /* Шторка держит снимок строки, а не саму строку списка — без этого тумблер
+       в ней остался бы в прежнем положении. */
+    if (rowItem.value?.id === r.id) rowItem.value[kind] = value;
+  } catch (e) {
+    toast.fromError(e, "Не удалось изменить настройку профиля");
+  } finally {
+    flagBusy.value = "";
   }
 }
 
@@ -259,6 +303,155 @@ async function bulkDelete() {
   }
 }
 
+/* ---------- папки (группы) ---------- */
+
+/* Папка — это строковое поле `group` у самого профиля, отдельной сущности на
+   роутере нет. Отсюда и всё поведение: «переименовать» — перезаписать поле у
+   всех профилей папки, «удалить» — очистить его (профили остаются, просто без
+   папки), а новая папка возникает в тот момент, когда в неё переносят первый
+   профиль. Пустых папок поэтому не существует: старая панель держала их в
+   sessionStorage, то есть они пропадали при закрытии вкладки. */
+
+/** Служебное значение в выборе папки. Такое имя папки запрещаем при вводе. */
+const NEW_FOLDER = "__new__";
+
+const moveOpen = ref(false);
+const moveTarget = ref("");
+const moveName = ref("");
+const foldersOpen = ref(false);
+const renamingFrom = ref("");
+const renameTo = ref("");
+/* Роутер правит профили по одному, а их в папке бывает несколько десятков —
+   без счётчика операция выглядит как зависшая кнопка. */
+const groupProgress = ref("");
+
+const folders = computed(() =>
+  groups.value.map((name) => ({ name, count: idsInGroup(name).length })),
+);
+
+function idsInGroup(name: string): string[] {
+  return store.rows.filter((r) => (r.group || "") === name).map((r) => r.id);
+}
+
+/** Проставить папку списку профилей. Возвращает число успешно сохранённых. */
+async function applyGroup(ids: string[], group: string): Promise<number> {
+  let done = 0;
+  for (let i = 0; i < ids.length; i++) {
+    groupProgress.value = `Сохраняю ${i + 1} из ${ids.length}`;
+    try {
+      await profilesApi.setGroup(ids[i], group);
+      done++;
+    } catch {
+      /* Один нечитаемый профиль не должен обрывать остальные — сколько прошло,
+         скажем в тосте. */
+    }
+  }
+  groupProgress.value = "";
+  return done;
+}
+
+function openMove() {
+  /* Если папок ещё нет, единственный осмысленный вариант — создать первую. */
+  moveTarget.value = groups.value[0] ?? NEW_FOLDER;
+  moveName.value = "";
+  moveOpen.value = true;
+}
+
+async function moveSelected() {
+  const ids = [...selected.value];
+  if (!ids.length) return;
+  let target = moveTarget.value;
+  if (target === NEW_FOLDER) {
+    target = moveName.value.trim();
+    if (!target) {
+      toast.error("Введите название папки");
+      return;
+    }
+    if (target === NEW_FOLDER) {
+      toast.error("Такое название занято служебным значением — выберите другое");
+      return;
+    }
+  }
+  busy.value = "bulk:group";
+  try {
+    const done = await applyGroup(ids, target);
+    const where = target ? `в «${target}»` : "из папок";
+    toast[done === ids.length ? "ok" : "error"](
+      done === ids.length
+        ? `Перенесено профилей ${where}: ${done}`
+        : `Перенесено ${done} из ${ids.length} — остальные роутер не отдал`,
+    );
+    moveOpen.value = false;
+    await reload(true);
+  } finally {
+    busy.value = "";
+  }
+}
+
+function startRename(name: string) {
+  renamingFrom.value = name;
+  renameTo.value = name;
+}
+
+async function renameFolder() {
+  const from = renamingFrom.value;
+  const to = renameTo.value.trim();
+  if (!to || to === from) {
+    renamingFrom.value = "";
+    return;
+  }
+  if (to === NEW_FOLDER) {
+    toast.error("Такое название занято служебным значением — выберите другое");
+    return;
+  }
+  const ids = idsInGroup(from);
+  /* Имя существующей папки — это не ошибка, а слияние; но молча сливать чужие
+     профили нельзя, поэтому спрашиваем. */
+  if (
+    groups.value.includes(to) &&
+    !window.confirm(`Папка «${to}» уже есть — профили (${ids.length}) сложатся вместе. Продолжить?`)
+  ) {
+    return;
+  }
+  busy.value = `folder:${from}`;
+  try {
+    const done = await applyGroup(ids, to);
+    toast[done === ids.length ? "ok" : "error"](
+      done === ids.length
+        ? `Папка переименована в «${to}» (профилей: ${done})`
+        : `Переименовано ${done} из ${ids.length} профилей — остальные роутер не отдал`,
+    );
+    renamingFrom.value = "";
+    await reload(true);
+  } finally {
+    busy.value = "";
+  }
+}
+
+async function deleteFolder(name: string) {
+  const ids = idsInGroup(name);
+  if (
+    !window.confirm(
+      `Удалить папку «${name}»? Профили (${ids.length}) останутся, но окажутся без папки.`,
+    )
+  ) {
+    return;
+  }
+  busy.value = `folder:${name}`;
+  try {
+    const done = await applyGroup(ids, "");
+    toast[done === ids.length ? "ok" : "error"](
+      done === ids.length
+        ? `Папка «${name}» удалена, профилей освобождено: ${done}`
+        : `Освобождено ${done} из ${ids.length} профилей — остальные роутер не отдал`,
+    );
+    if (renamingFrom.value === name) renamingFrom.value = "";
+    await reload(true);
+  } finally {
+    busy.value = "";
+  }
+}
+
 /* ---------- импорт и экспорт ---------- */
 
 async function exportAll() {
@@ -354,6 +547,16 @@ onMounted(async () => {
       run: () => void reload(true),
     },
     {
+      id: "pr:folders",
+      title: "Управление папками профилей",
+      group: "профили",
+      keywords: "группы переименовать удалить папку",
+      run: () => {
+        tab.value = "profiles";
+        foldersOpen.value = true;
+      },
+    },
+    {
       id: "pr:chain",
       title: "Новая цепочка",
       group: "профили",
@@ -399,14 +602,28 @@ onBeforeUnmount(() => unregister?.());
         :rows="store.rows"
         :switching="store.switching"
         :probing="probing"
+        :targets="healthTargets"
+        :flag-busy="flagBusy"
         @open="openRow"
         @connect="connect"
+        @ping="pingOne"
+        @health="healthOne"
+        @flag="setFlag($event.row, $event.kind, $event.value)"
       />
       <template #actions>
         <UiButton variant="primary" @click="addProfile">Добавить профиль</UiButton>
         <UiButton :busy="busy === 'export'" @click="exportAll">Экспорт в файл</UiButton>
         <UiButton :busy="busy === 'import'" @click="fileInput?.click()">Импорт из файла</UiButton>
         <UiButton :busy="store.loading" @click="reload(true)">Обновить</UiButton>
+        <!-- Флаги «участвует в проверке / в замерах» стоят на профилях здесь, а
+             сама проверка (расписание, цели, объём замера) настраивается в
+             «Журнале» — без этой кнопки связь между экранами не видна. -->
+        <UiButton @click="$router.push({ path: '/journal', query: { focus: 'health' } })">
+          Настройки проверки
+        </UiButton>
+        <UiButton :disabled="!folders.length" @click="foldersOpen = true">
+          Управление папками
+        </UiButton>
         <input
           ref="fileInput"
           class="hidden-file"
@@ -419,6 +636,7 @@ onBeforeUnmount(() => unregister?.());
 
     <div v-if="selected.length" class="bulk" role="group" aria-label="Действия над выбранными">
       <span class="bcount">Выбрано: {{ selected.length }}</span>
+      <UiButton :busy="busy === 'bulk:group'" @click="openMove">Перенести в папку</UiButton>
       <UiButton :busy="busy === 'bulk:autoswitch'" @click="bulkFlag('autoswitch', true)">
         Разрешить авто-переключение
       </UiButton>
@@ -466,8 +684,26 @@ onBeforeUnmount(() => unregister?.());
     @close="rowOpen = false"
   >
     <ul v-if="rowItem" class="info">
-      <li v-for="line in rowState" :key="line">{{ line }}</li>
+      <!-- Ключ по индексу: у двух целей проверки могут совпасть и подпись, и
+           задержка, а одинаковые строки-ключи Vue не переживает. -->
+      <li v-for="(line, i) in rowState" :key="i">{{ line }}</li>
     </ul>
+    <!-- На телефоне иконки в строке слишком мелкие, поэтому те же два флага
+         дублируются здесь полноразмерными тумблерами. -->
+    <div v-if="rowItem" class="rowflags">
+      <SwitchToggle
+        :model-value="rowItem.autoswitch !== false"
+        label="Участвует в авто-переключении"
+        :busy="flagBusy === `${rowItem.id}:autoswitch`"
+        @update:model-value="setFlag(rowItem, 'autoswitch', $event)"
+      />
+      <SwitchToggle
+        :model-value="rowItem.speedcheck !== false"
+        label="Участвует в замерах скорости"
+        :busy="flagBusy === `${rowItem.id}:speedcheck`"
+        @update:model-value="setFlag(rowItem, 'speedcheck', $event)"
+      />
+    </div>
     <div v-if="rowItem" class="rowacts">
       <UiButton
         variant="primary"
@@ -478,13 +714,105 @@ onBeforeUnmount(() => unregister?.());
       </UiButton>
       <UiButton :busy="probing === rowItem.id" @click="pingOne(rowItem)">Проверить пинг</UiButton>
       <UiButton :busy="probing === rowItem.id" @click="healthOne(rowItem)">
-        Проверить работоспособность
+        Проверить работу и скорость
       </UiButton>
       <UiButton :busy="busy === 'open'" @click="editRow(rowItem)">Править</UiButton>
       <UiButton variant="danger" :busy="busy === 'del'" @click="removeRow(rowItem)">
         Удалить
       </UiButton>
     </div>
+  </DrawerSheet>
+
+  <!-- Перенос выбранных профилей в папку: та же операция, что и правка поля
+       «Папка» в самом профиле, только сразу по всему выделению. -->
+  <DrawerSheet :open="moveOpen" title="Перенести в папку" @close="moveOpen = false">
+    <p class="lead">
+      Выбрано профилей: {{ selected.length }}. Папка — это метка у профиля, на
+      подключение она не влияет.
+    </p>
+    <div class="mgrid">
+      <PField label="Куда перенести">
+        <select v-model="moveTarget">
+          <option value="">Без папки</option>
+          <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
+          <option :value="NEW_FOLDER">Новая папка…</option>
+        </select>
+      </PField>
+      <PField
+        v-if="moveTarget === NEW_FOLDER"
+        label="Название новой папки"
+        hint="Папка появится, как только в неё попадёт первый профиль"
+      >
+        <input
+          v-model="moveName"
+          type="text"
+          spellcheck="false"
+          placeholder="Например, Европа"
+          @keydown.enter.prevent="moveSelected"
+        />
+      </PField>
+    </div>
+    <p v-if="groupProgress" class="prog">{{ groupProgress }}</p>
+    <template #footer>
+      <UiButton
+        variant="primary"
+        :busy="busy === 'bulk:group'"
+        :disabled="!selected.length"
+        @click="moveSelected"
+      >
+        Перенести
+      </UiButton>
+      <UiButton @click="moveOpen = false">Отмена</UiButton>
+    </template>
+  </DrawerSheet>
+
+  <!-- Папки целиком: переименование и удаление. Создание — переносом профилей
+       (см. шторку выше): папки без профилей роутер не хранит. -->
+  <DrawerSheet :open="foldersOpen" title="Папки профилей" @close="foldersOpen = false">
+    <p class="lead">
+      Переименование меняет папку у всех её профилей, удаление папки профили не
+      удаляет — они остаются без папки. Новая папка создаётся переносом:
+      выделите профили в списке и нажмите «Перенести в папку».
+    </p>
+    <p v-if="!folders.length" class="lead">Пока ни один профиль не разложен по папкам.</p>
+    <ul v-else class="folders">
+      <li v-for="f in folders" :key="f.name">
+        <template v-if="renamingFrom === f.name">
+          <input
+            v-model="renameTo"
+            class="rn"
+            type="text"
+            spellcheck="false"
+            :aria-label="`Новое название папки ${f.name}`"
+            @keydown.enter.prevent="renameFolder"
+            @keydown.esc="renamingFrom = ''"
+          />
+          <UiButton variant="primary" :busy="busy === `folder:${f.name}`" @click="renameFolder">
+            Сохранить
+          </UiButton>
+          <UiButton @click="renamingFrom = ''">Отмена</UiButton>
+        </template>
+        <template v-else>
+          <span class="fname">
+            {{ f.name }}
+            <small>{{ f.count }} профилей</small>
+          </span>
+          <UiButton :disabled="!!busy" @click="startRename(f.name)">Переименовать</UiButton>
+          <UiButton
+            variant="danger"
+            :busy="busy === `folder:${f.name}`"
+            :disabled="!!busy && busy !== `folder:${f.name}`"
+            @click="deleteFolder(f.name)"
+          >
+            Удалить
+          </UiButton>
+        </template>
+      </li>
+    </ul>
+    <p v-if="groupProgress" class="prog">{{ groupProgress }}</p>
+    <template #footer>
+      <UiButton @click="foldersOpen = false">Закрыть</UiButton>
+    </template>
   </DrawerSheet>
 </template>
 
@@ -540,6 +868,14 @@ onBeforeUnmount(() => unregister?.());
   font-size: 13.5px;
   color: var(--dim);
 }
+.rowflags {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
 .rowacts {
   display: flex;
   flex-direction: column;
@@ -548,6 +884,62 @@ onBeforeUnmount(() => unregister?.());
 .rowacts :deep(.btn) {
   justify-content: center;
   min-height: 46px;
+}
+.mgrid {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+/* Счётчик прогресса: роутер сохраняет профили по одному, и на папке из
+   нескольких десятков профилей операция идёт заметное время. */
+.prog {
+  font-size: 12.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.folders {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.folders li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.fname {
+  flex: 1 1 140px;
+  min-width: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.fname small {
+  display: block;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.rn {
+  flex: 1 1 140px;
+  min-width: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 8px 10px;
+  /* 16px — иначе iOS зумит страницу при фокусе. */
+  font-size: 16px;
+  min-height: 44px;
+  outline: none;
+}
+.rn:focus {
+  border-color: var(--accent);
 }
 
 @media (max-width: 860px) {

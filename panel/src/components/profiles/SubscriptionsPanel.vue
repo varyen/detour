@@ -4,8 +4,9 @@
    interval_hours — их и пишем, а лишние поля исходной записи сохраняем как
    есть, чтобы правка в панели не стирала то, чего панель не показывает
    (last_* отчёты фонового обновления, apply_routing и прочее). */
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
+import SwitchToggle from "@/components/SwitchToggle.vue";
 import TileCard from "@/components/TileCard.vue";
 import UiButton from "@/components/UiButton.vue";
 import PField from "@/components/profiles/PField.vue";
@@ -36,6 +37,43 @@ const isNew = ref(true);
 const draft = ref<SubRecord>(blank());
 const probe = ref("");
 const probeLines = ref<string[]>([]);
+
+/* Пресеты User-Agent. Поставщики отдают разным клиентам разный формат: одному
+   sing-box-JSON, другому base64-список ссылок, — и когда подписка «приходит
+   пустой», дело обычно в UA. Пресет не заменяет поле, а заполняет его: строку
+   всё равно можно поправить руками. Значения совпадают со старой панелью, чтобы
+   запись читалась там же (она хранит выбор в `user_agent_preset`). */
+const UA_PRESETS: { key: string; label: string; ua: string }[] = [
+  { key: "singbox", label: "sing-box", ua: "sing-box/1.13.2" },
+  { key: "happ", label: "Happ", ua: "Happ/1.43.0" },
+  { key: "v2rayng", label: "v2rayNG", ua: "v2rayNG/1.8.27" },
+  { key: "clash", label: "ClashMetaForAndroid", ua: "ClashMetaForAndroid/2.11.13.Meta" },
+];
+
+const uaPreset = ref("custom");
+
+/** Какому пресету отвечает строка в поле; «custom» — своя или пустая. */
+function presetForUa(ua?: string): string {
+  const v = (ua ?? "").trim();
+  return UA_PRESETS.find((p) => p.ua === v)?.key ?? "custom";
+}
+
+/* Строку правят и руками — тогда выбор пресета обязан честно съехать на «свой»,
+   иначе список показывал бы Happ там, где написано что-то своё. */
+watch(
+  () => draft.value.user_agent,
+  (v) => {
+    uaPreset.value = presetForUa(v);
+  },
+);
+
+function pickUaPreset(key: string) {
+  uaPreset.value = key;
+  const p = UA_PRESETS.find((x) => x.key === key);
+  /* «Свой» ничего не подставляет и НЕ чистит поле: стирать уже введённую
+     строку при выборе этого варианта — потеря данных. */
+  if (p) draft.value.user_agent = p.ua;
+}
 
 function blank(): SubRecord {
   return {
@@ -81,6 +119,7 @@ async function load() {
 
 function openNew() {
   draft.value = blank();
+  uaPreset.value = presetForUa(draft.value.user_agent);
   isNew.value = true;
   probe.value = "";
   probeLines.value = [];
@@ -89,6 +128,7 @@ function openNew() {
 
 function openEdit(s: SubRecord) {
   draft.value = { ...s };
+  uaPreset.value = presetForUa(draft.value.user_agent);
   isNew.value = false;
   probe.value = "";
   probeLines.value = [];
@@ -143,7 +183,13 @@ async function tryFetch() {
   }
 }
 
-async function save() {
+/**
+ * Сохранить запись. `refreshAfter` — сразу же дёрнуть обновление этой подписки:
+ * добавили ссылку и хотим профили сейчас, а не через сутки по расписанию. Это
+ * два запроса подряд (отдельного «сохранить и обновить» у роутера нет), поэтому
+ * неудача обновления сообщается отдельно — запись уже сохранена.
+ */
+async function save(refreshAfter = false) {
   const id = draft.value.id.trim();
   const url = draft.value.url.trim();
   if (!/^[a-zA-Z0-9._-]+$/.test(id)) {
@@ -158,7 +204,7 @@ async function save() {
     toast.error("Укажите группу — в неё попадут профили из подписки");
     return;
   }
-  busy.value = "save";
+  busy.value = refreshAfter ? "save-refresh" : "save";
   try {
     await subscriptions.saveOne({
       ...draft.value,
@@ -167,12 +213,28 @@ async function save() {
       group: draft.value.group.trim(),
       title: draft.value.title?.trim() ?? "",
       user_agent: draft.value.user_agent?.trim() ?? "",
+      /* Выбранный пресет пишем рядом со строкой: по одной строке нельзя
+         отличить «свой UA» от пресета, который поставщик потом сменит. */
+      user_agent_preset: uaPreset.value,
       interval_hours: intervalOf(draft.value),
       autoupdate: autoOf(draft.value),
+      apply_routing: draft.value.apply_routing === true,
     } as Subscription);
-    toast.ok("Подписка сохранена");
     sheetOpen.value = false;
+    if (!refreshAfter) toast.ok("Подписка сохранена");
     await load();
+    if (!refreshAfter) return;
+    toast.info("Сохранено, забираю список серверов — это может занять минуту");
+    try {
+      await subscriptions.refreshOne(id);
+      toast.ok("Подписка сохранена и обновлена");
+      await load();
+      await store.load(true);
+    } catch (e) {
+      /* Отдельный текст: запись на роутере уже лежит, повторно сохранять нечего
+         — достаточно нажать «Обновить» в списке. */
+      toast.fromError(e, "Подписка сохранена, но обновить её не удалось");
+    }
   } catch (e) {
     toast.fromError(e, "Не удалось сохранить подписку");
   } finally {
@@ -259,6 +321,9 @@ defineExpose({ openNew, refreshAll, reload: load });
             <span v-if="countOf(s)">{{ fmtInt(countOf(s)) }} профилей</span>
             <span v-if="s.last_refresh">обновлена {{ fmtAgo(s.last_refresh) }}</span>
             <span>раз в {{ intervalOf(s) }} ч</span>
+            <!-- Настройка меняет маршрутизацию всего роутера, а не только эту
+                 подписку, — про включённую стоит знать из списка. -->
+            <span v-if="s.apply_routing">применяет routing поставщика</span>
           </p>
           <p v-if="s.last_error" class="err">Последняя ошибка: {{ s.last_error }}</p>
         </div>
@@ -335,13 +400,31 @@ defineExpose({ openNew, refreshAll, reload: load });
         </select>
       </PField>
 
+      <PField label="Клиент для подписки" hint="Подставляет готовую строку User-Agent">
+        <select
+          :value="uaPreset"
+          @change="pickUaPreset(($event.target as HTMLSelectElement).value)"
+        >
+          <option v-for="p in UA_PRESETS" :key="p.key" :value="p.key">{{ p.label }}</option>
+          <option value="custom">свой</option>
+        </select>
+      </PField>
+
       <PField
         label="User-Agent"
         hint="Некоторые поставщики отдают разный формат разным клиентам. Пусто — sing-box"
-        wide
       >
         <input v-model="draft.user_agent" type="text" spellcheck="false" placeholder="sing-box" />
       </PField>
+    </div>
+
+    <div class="flags">
+      <SwitchToggle
+        :model-value="draft.apply_routing === true"
+        label="Применять routing из подписки"
+        hint="Режим маршрутизации и список исключений берутся из ответа поставщика (all-except + bypass) и перезаписывают текущие"
+        @update:model-value="draft.apply_routing = $event"
+      />
     </div>
 
     <div class="probe">
@@ -355,7 +438,10 @@ defineExpose({ openNew, refreshAll, reload: load });
     </div>
 
     <template #footer>
-      <UiButton variant="primary" :busy="busy === 'save'" @click="save">Сохранить</UiButton>
+      <UiButton variant="primary" :busy="busy === 'save'" @click="save()">Сохранить</UiButton>
+      <UiButton :busy="busy === 'save-refresh'" @click="save(true)">
+        Сохранить и обновить
+      </UiButton>
       <UiButton @click="sheetOpen = false">Отмена</UiButton>
     </template>
   </DrawerSheet>
@@ -435,6 +521,11 @@ defineExpose({ openNew, refreshAll, reload: load });
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+/* Тумблер вне сетки полей: он занимает всю ширину и с двумя строками подписи в
+   колонку 210px не влезает. */
+.flags {
+  margin-top: 14px;
 }
 .probe {
   margin-top: 16px;

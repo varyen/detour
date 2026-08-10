@@ -62,12 +62,26 @@ export interface SystemStatus {
   cpu_cores?: number;
 }
 
+/* Состояние WAN-порта. Поля описаны по реальному ответу detour-api: прежний
+   вариант (iface/speed/warn) не совпадал с бэкендом ни одним именем, и читать по
+   нему было нечего. `degraded` — единственный признак, по которому стоит
+   кричать: `peer_limited` значит лишь «сосед медленнее нашего порта», это
+   норма. */
 export interface WanLink {
   ok?: boolean;
-  iface?: string;
-  speed?: number | string;
+  supported?: boolean;
+  wan_if?: string;
+  speed_mbps?: number;
   duplex?: string;
-  warn?: string;
+  operstate?: string;
+  port_max_mbps?: number;
+  expected_mbps?: number;
+  peer_limited?: boolean;
+  degraded?: boolean;
+  /** Готовая формулировка проблемы с бэкенда — панель её не пересобирает. */
+  diagnosis?: string;
+  advice?: string;
+  last_ts?: number;
 }
 
 export interface StatusResponse {
@@ -136,16 +150,30 @@ export interface HealthStatusResponse {
   speed?: boolean;
   speed_bytes?: number;
   urls?: { label: string; url: string }[];
-  switch?: unknown;
+  /** Последнее авто-переключение: id профилей и время. null — переключений не было. */
+  switch?: { from?: string; to?: string; ts?: number } | null;
   results: Record<string, HealthResult>;
 }
 
 export interface BypassStatus {
+  /** Выбранный движок (persistent). Не путать с running: движок может быть
+      выбран и при этом остановлен — штатное состояние после bypass_stop или
+      после ребута без автозапуска. */
   mode: BypassMode;
-  autostart?: boolean;
-  running?: boolean;
+  /** detour-bypass пишет 0/1, а не true/false — сравнивать с true нельзя. */
+  autostart?: number | boolean;
+  /** Какой движок реально в памяти. Это СТРОКА («none», если ни один): как
+      boolean оно всегда истинно, и «не запущен» превращается в «запущен». */
+  running?: BypassMode | "none";
+  /** Авторитетный признак: учитывает и платформу, и наличие бинарника nfqws2
+      (binaries.nfqws2_supported проверяет только платформу). */
   zapret2_supported?: boolean;
   platform?: Platform;
+  /** Номер очереди NFQUEUE и число отданных в неё пакетов — только для zapret2. */
+  qnum?: number;
+  queued?: number;
+  /** Строка стратегии nfqws2 (одна строка аргументов). */
+  strategy?: string;
 }
 
 export interface UdpVpnResponse {
@@ -163,6 +191,22 @@ export interface UpdateChannelState {
   changelog_b64?: string;
   checked?: number;
   error?: string;
+  /**
+   * Время последней проверки — СТРОКА ISO-8601 («2026-08-10T15:00:14Z»), как её
+   * пишет detour-update в свой state-файл. Не unix-секунды: fmtAgo() принимать
+   * это напрямую не может, дату надо сначала разобрать.
+   */
+  last_check?: string;
+  /**
+   * Дальше — поля сырого state-файла обновлятора. Их отдают `*_update_status` и
+   * `*_update_check` (они просто `cat`-ят файл), тогда как `updates_overview`
+   * приводит всё к именам выше. Поэтому у ответа на ручную проверку версии
+   * лежат в current/available, а вердикт приходится считать самому.
+   */
+  status?: string;
+  message?: string;
+  current?: string;
+  available?: string;
 }
 
 export interface UpdatesOverview {

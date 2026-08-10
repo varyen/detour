@@ -21,11 +21,32 @@ export const useStatusStore = defineStore("status", () => {
 
   /* Возможности определяем по ответу бэкенда, а не по платформе: MT6000 —
      тоже openwrt, но без аппаратного офлоада, а проброс зависит от nginx и
-     выпущенного сертификата. Единственное честное исключение — NFQUEUE. */
-  const zapret2Supported = computed(
-    () => !isKeenetic.value && data.value?.binaries?.nfqws2_supported !== false,
+     выпущенного сертификата. Единственное честное исключение — NFQUEUE.
+
+     Приоритет у bypass_status.zapret2_supported: он проверяет и платформу, и
+     наличие /usr/bin/nfqws2. Платформенный binaries.nfqws2_supported знает
+     только про платформу, поэтому на OpenWrt без пакета он говорит «можно», и
+     клик по zapret2 падал бы в ошибку. Пока bypass_status не пришёл —
+     довольствуемся платформенным флагом. */
+  const zapret2Supported = computed(() => {
+    if (bypass.value?.zapret2_supported !== undefined) return bypass.value.zapret2_supported;
+    return !isKeenetic.value && data.value?.binaries?.nfqws2_supported !== false;
+  });
+  /** Платформа умеет, но пакет не установлен — это лечится установкой, а не «недоступно». */
+  const nfqws2Missing = computed(
+    () =>
+      !isKeenetic.value &&
+      data.value?.binaries?.nfqws2_supported !== false &&
+      bypass.value?.zapret2_supported === false,
   );
   const udpVpnSupported = computed(() => udp.value?.supported !== false && !isKeenetic.value);
+
+  /** Реально работающий движок обхода DPI — «none», если ни один. */
+  const bypassRunning = computed(() => bypass.value?.running ?? "none");
+  const bypassAutostart = computed(() => {
+    const a = bypass.value?.autostart;
+    return a === true || a === 1;
+  });
 
   const singboxRunning = computed(() => data.value?.singbox?.running === true);
   const activeProfile = computed(() => data.value?.singbox?.active_profile ?? "");
@@ -80,7 +101,14 @@ export const useStatusStore = defineStore("status", () => {
     stopPolling();
     timer = window.setInterval(() => {
       /* Во вкладке на фоне опрашивать роутер незачем. */
-      if (document.visibilityState === "visible") void refresh(true);
+      if (document.visibilityState !== "visible") return;
+      void refresh(true);
+      /* Режим обхода DPI и режим UDP в action=status не входят — их отдают
+         отдельные bypass_status/udp_vpn. Без них в поллинге плитки «Обход DPI»
+         и «UDP через VPN» показывали состояние на момент входа в панель: любое
+         изменение снаружи (или одна неудачная загрузка) оставалось на экране
+         как «Выкл» навсегда. */
+      void refreshExtras();
     }, POLL_MS);
   }
 
@@ -99,6 +127,9 @@ export const useStatusStore = defineStore("status", () => {
     platform,
     isKeenetic,
     zapret2Supported,
+    nfqws2Missing,
+    bypassRunning,
+    bypassAutostart,
     udpVpnSupported,
     singboxRunning,
     activeProfile,

@@ -20,10 +20,30 @@ const props = defineProps<{
 
 const emit = defineEmits<{ check: []; apply: []; changelog: [] }>();
 
-const current = computed(() => props.state?.current_version || props.installed || "");
-const available = computed(() => props.state?.available_version || "");
+/* Имена полей у state-файлов обновлятора и у сводки разные (current/available
+   против current_version/available_version) — читаем оба, иначе после ручной
+   проверки строка теряет версии и падает на fallback `installed`. */
+const current = computed(
+  () => props.state?.current_version || props.state?.current || props.installed || "",
+);
+const available = computed(
+  () => props.state?.available_version || props.state?.available || "",
+);
 const has = computed(() => props.state?.update_available === true);
-const checked = computed(() => fmtAgo(props.state?.checked));
+
+/* last_check — строка ISO-8601 («2026-08-10T15:00:14Z»), а fmtAgo ждёт unix-
+   секунды. Раньше здесь читалось поле `checked`, которого в ответах CGI нет
+   вообще, поэтому «проверяли N назад» не показывалось никогда. */
+const checked = computed(() => {
+  const raw = String(props.state?.last_check ?? "").trim();
+  if (raw) {
+    const ms = Date.parse(raw);
+    /* Неразбираемую дату молча пропускаем: соврать «только что» хуже, чем
+       не показать строку совсем. */
+    if (Number.isFinite(ms)) return fmtAgo(ms / 1000);
+  }
+  return fmtAgo(props.state?.checked);
+});
 const hasChangelog = computed(() => !!props.state?.changelog_b64);
 </script>
 

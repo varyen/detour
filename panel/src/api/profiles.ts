@@ -12,6 +12,31 @@ import type {
    всё равно не мгновенный. */
 const SWITCH_TIMEOUT = 90_000;
 
+/**
+ * Перевод профиля в другую папку. Отдельной ручки под группы у роутера нет:
+ * группа — обычное строковое поле профиля, так что правится тем же
+ * `profile_save`, что и всё остальное.
+ *
+ * Читаем профиль целиком (`profile_get`) и пишем обратно с новым `group`:
+ * `profile_save` НЕ сливает поля, а перезаписывает файл телом запроса, поэтому
+ * отправить укороченную запись из `profiles_list` (там нет ни outbound, ни
+ * ключей) значило бы потерять настройки подключения.
+ *
+ * Пустая строка — «без папки»: файл-хранилище не различает отсутствие поля и
+ * пустое значение, а панель и роутер везде читают `group` через «пусто = нет».
+ */
+async function setProfileGroup(id: string, group: string): Promise<void> {
+  const raw = await requestJson<Record<string, unknown>>("profile_get", {
+    params: { name: id },
+  });
+  /* id восстанавливаем из имени файла: в старых записях поля может не быть, а
+     без него profile_save вывел бы имя файла из name — и профиль уехал бы в
+     другой файл, оставив прежний на диске. */
+  await requestJson<{ ok: boolean }>("profile_save", {
+    body: { ...raw, id, group },
+  });
+}
+
 export const profiles = {
   list: () => requestJson<ProfilesListResponse>("profiles_list", { timeoutMs: 45_000 }),
 
@@ -20,6 +45,8 @@ export const profiles = {
 
   save: (profile: Record<string, unknown>) =>
     requestJson<{ ok: boolean }>("profile_save", { body: profile }),
+
+  setGroup: setProfileGroup,
 
   remove: (name: string) =>
     requestJson<{ ok: boolean }>("profile_delete", {

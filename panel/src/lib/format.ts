@@ -37,6 +37,21 @@ export function fmtBitrate(bytesPerSec: number): string {
   return `${Math.round(bits)} бит/с`;
 }
 
+/**
+ * Скорость из detour-health — она хранится в кбит/с. Пустая строка означает
+ * «не измерялась»: роутер отдаёт -1 (а иногда 0), и показать это нулём было бы
+ * враньём — канал не «нулевой», он просто ещё не проверялся.
+ *
+ * Ниже мегабита отдаём на откуп fmtBitrate, а мегабиты округляем сами: на
+ * 87 Мбит/с десятые доли — шум замера, в колонке от них только рябь.
+ */
+export function fmtSpeedKbps(kbps?: number | null): string {
+  if (typeof kbps !== "number" || !Number.isFinite(kbps) || kbps <= 0) return "";
+  if (kbps < 1000) return fmtBitrate((kbps * 1000) / 8);
+  const mbps = kbps / 1000;
+  return `${mbps >= 10 ? Math.round(mbps) : mbps.toFixed(1)} Мбит/с`;
+}
+
 /** «5 минут назад» — для отметок времени в секундах (unix). */
 export function fmtAgo(tsSeconds?: number): string {
   if (!tsSeconds) return "";

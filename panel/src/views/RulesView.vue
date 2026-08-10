@@ -17,6 +17,7 @@ import { useProfilesStore } from "@/stores/profiles";
 import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
 import { asNum, fmtAgo, fmtBytes, fmtInt } from "@/lib/format";
+import { useFocusTarget } from "@/lib/deeplink";
 import {
   countEntries,
   domainsLabel,
@@ -55,6 +56,17 @@ function toggle(id: string) {
   opened[id] = !opened[id];
   if (opened[id]) void onExpand(id);
 }
+
+/* Ссылки из карточек «Обзора»: `#/rules?focus=udp`. Область не только
+   раскрывается, но и подгружает своё содержимое — onExpand ленивый. */
+useFocusTarget(
+  (key) => {
+    if (opened[key]) return;
+    opened[key] = true;
+    void onExpand(key);
+  },
+  (key) => `rule-${key}`,
+);
 
 /* ---------- списки ---------- */
 type ListKey =
@@ -721,6 +733,7 @@ onBeforeUnmount(() => unregister?.());
   <div class="areas">
     <!-- 1. Режимы -->
     <RuleSection
+      id="rule-mode"
       title="Что уходит в туннель"
       :summary="modeSummary"
       :open="!!opened.mode"
@@ -773,6 +786,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 2. Домены через VPN -->
     <RuleSection
+      id="rule-domains"
       title="Сайты через VPN"
       :summary="domainsSummary"
       :open="!!opened.domains"
@@ -800,6 +814,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 3. Белый список -->
     <RuleSection
+      id="rule-whitelist"
       title="Всегда напрямую"
       :summary="whitelistSummary"
       :open="!!opened.whitelist"
@@ -824,6 +839,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 4. Домены обхода DPI -->
     <RuleSection
+      id="rule-zapret"
       title="Сайты через обход DPI"
       :summary="zapretSummary"
       :open="!!opened.zapret"
@@ -832,7 +848,7 @@ onBeforeUnmount(() => unregister?.());
       <p class="hint">
         Эти сайты открываются без туннеля: трафик идёт напрямую, но так, что
         провайдер не может его распознать. Список общий для обеих стратегий
-        обхода — сама стратегия включается на «Обзоре».
+        обхода — сам движок включается <RouterLink to="/">на «Обзоре»</RouterLink>.
       </p>
       <div class="row">
         <UiButton variant="primary" @click="openEditor('zapret')">
@@ -846,6 +862,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 5. Маршруты -->
     <RuleSection
+      id="rule-routes"
       title="Отдельные маршруты"
       :summary="routeSummary"
       :open="!!opened.routes"
@@ -868,6 +885,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 6. Перехват прокси -->
     <RuleSection
+      id="rule-si"
       title="Перехват трафика к прокси"
       :summary="siSummary"
       :open="!!opened.si"
@@ -921,6 +939,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 7. UDP через VPN -->
     <RuleSection
+      id="rule-udp"
       title="UDP через VPN — список"
       :summary="udpSummary"
       :open="!!opened.udp"
@@ -929,8 +948,12 @@ onBeforeUnmount(() => unregister?.());
     >
       <p class="hint">
         Голосовые чаты и игры работают по UDP, и обычный обход им не помогает.
-        Здесь перечислено, какой именно UDP-трафик заворачивать в туннель. Сам
-        режим включается на «Обзоре».
+        Здесь перечислено, какой именно UDP-трафик заворачивать в туннель.
+        <!-- Режим и список живут на разных экранах, поэтому упоминание «Обзора»
+             обязано быть ссылкой: иначе список выглядит бездействующим и
+             непонятно, где его включают. -->
+        Сам режим включается
+        <RouterLink to="/">на «Обзоре»</RouterLink>.
       </p>
       <p v-if="!status.udpVpnSupported" class="warn">
         На этой платформе перехват UDP недоступен: нужен TPROXY, которого здесь
@@ -948,6 +971,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 8. Блок-лист исходящих -->
     <RuleSection
+      id="rule-egress"
       title="Запрещённые адреса"
       :summary="egressSummary"
       :open="!!opened.egress"
@@ -969,6 +993,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 9. Российские подсети -->
     <RuleSection
+      id="rule-rulist"
       title="Российские адреса — напрямую"
       :summary="rulistSummary"
       :open="!!opened.rulist"
@@ -1035,6 +1060,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 10. Приоритетный hosts + Secure DNS -->
     <RuleSection
+      id="rule-hosts"
       title="Свой DNS-список и шифрование DNS"
       :summary="hostsSummary"
       :open="!!opened.hosts"
@@ -1220,6 +1246,9 @@ onBeforeUnmount(() => unregister?.());
   font-size: 12.5px;
   color: var(--dim);
   overflow-wrap: anywhere;
+}
+.hint a {
+  color: var(--accent);
 }
 .warn {
   font-size: 12.5px;

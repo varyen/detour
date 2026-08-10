@@ -11,6 +11,7 @@ import SegmentedControl from "@/components/SegmentedControl.vue";
 import JournalArea from "@/components/journal/JournalArea.vue";
 import LogPane from "@/components/journal/LogPane.vue";
 import CodeArea from "@/components/journal/CodeArea.vue";
+import MarkdownView from "@/components/journal/MarkdownView.vue";
 import UpdateRow from "@/components/journal/UpdateRow.vue";
 import { ServerRestartingError, diag, overview, poll, requestJson } from "@/api";
 import type {
@@ -24,6 +25,7 @@ import { useStatusStore } from "@/stores/status";
 import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
 import { fmtAgo, fmtInt, isSet } from "@/lib/format";
+import { useFocusTarget } from "@/lib/deeplink";
 
 const status = useStatusStore();
 const toast = useToastStore();
@@ -49,6 +51,15 @@ function openArea(key: AreaKey) {
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
 }
+
+/* Ссылки из карточек других разделов: `#/journal?focus=updates`. Ключ — та же
+   AreaKey, что и у палитры команд, поэтому чужой ключ просто игнорируется. */
+useFocusTarget(
+  (key) => {
+    if (key in areas) areas[key as AreaKey] = true;
+  },
+  (key) => `area-${key}`,
+);
 
 function ask(text: string): boolean {
   return window.confirm(text);
@@ -338,12 +349,29 @@ async function saveArgs() {
 
 const fwOpen = ref(false);
 const fwBusy = ref(false);
-const fwTab = ref<"nat" | "nft">("nat");
+const fwTab = ref<"nat" | "nft" | "ct">("nat");
 const fw = ref<{ nat: string; nft: string } | null>(null);
+/* Таблица соединений — отдельным запросом и только по требованию: правила
+   файрвола статичны, а conntrack живёт и на роутере бывает на десятки тысяч
+   строк. Фильтр по подстроке применяет сам роутер. */
+const ct = ref<{ conntrack: string; total?: number; shown?: number } | null>(null);
+const ctFilter = ref("");
+const ctBusy = ref(false);
 
-const fwText = computed(() =>
-  fwTab.value === "nat" ? (fw.value?.nat ?? "") : (fw.value?.nft ?? ""),
-);
+const fwText = computed(() => {
+  if (fwTab.value === "nat") return fw.value?.nat ?? "";
+  if (fwTab.value === "nft") return fw.value?.nft ?? "";
+  return ct.value?.conntrack ?? "";
+});
+
+const ctNote = computed(() => {
+  const c = ct.value;
+  if (!c) return "";
+  if (!c.shown) return ctFilter.value ? "Совпадений нет" : "Таблица соединений пуста";
+  const total = c.total ?? 0;
+  const tail = total > (c.shown ?? 0) ? ` из ${fmtInt(total)} всего` : "";
+  return `Строк: ${fmtInt(c.shown ?? 0)}${tail}`;
+});
 
 async function loadFw() {
   fwBusy.value = true;
@@ -355,6 +383,23 @@ async function loadFw() {
     fwBusy.value = false;
   }
 }
+
+async function loadCt() {
+  ctBusy.value = true;
+  try {
+    ct.value = await overview.conntrack(ctFilter.value.trim() || undefined);
+  } catch (e) {
+    toast.fromError(e, "Не удалось прочитать таблицу соединений");
+  } finally {
+    ctBusy.value = false;
+  }
+}
+
+/* Первое открытие вкладки подгружает данные само: пустое поле с кнопкой
+   «Перечитать» выглядит как поломка. */
+watch(fwTab, (t) => {
+  if (t === "ct" && !ct.value) void loadCt();
+});
 
 async function openFw() {
   fwOpen.value = true;
@@ -430,8 +475,9 @@ function b64ToText(b64?: string): string {
 
 function showChangelog(ch: Channel) {
   clTitle.value = `Что нового: ${CH_TITLE[ch]}`;
-  clText.value =
-    b64ToText(upd.value?.[ch]?.changelog_b64) || "Описание изменений не пришло.";
+  /* Пустую строку отдаём как есть: «нечего показать» рисует сам MarkdownView,
+     иначе подсказка попала бы в разметку абзацем. */
+  clText.value = b64ToText(upd.value?.[ch]?.changelog_b64);
   clOpen.value = true;
 }
 
@@ -444,14 +490,45 @@ async function loadUpdates() {
   if (a.status === "fulfilled") autocheck.value = a.value?.enabled === true;
 }
 
+/** Версия, которую нельзя показывать: обновлятор пишет так «не знаю». */
+function realVersion(v?: string): string {
+  const s = String(v ?? "").trim();
+  return s && s !== "?" && s !== "n/a" ? s : "";
+}
+
+/**
+ * Ответ на ручную проверку — это сырой state-файл обновлятора, а не сводка:
+ * у фид-каналов версии лежат в current/available, вердикта update_available
+ * там нет вообще, а об ошибке говорит status/message. Без приведения к виду
+ * updates_overview строка после проверки теряла и доступную версию, и зелёный
+ * чип «Есть обновление».
+ */
+function normalizeChannel(ch: Channel, r: UpdateChannelState): UpdateChannelState {
+  const out: UpdateChannelState = { ...r };
+  const cur = realVersion(r.current_version ?? r.current);
+  const avail = realVersion(r.available_version ?? r.available);
+  if (cur) out.current_version = cur;
+  if (avail) out.available_version = avail;
+  if (out.update_available === undefined) {
+    /* Панель сообщает вердикт статусом, фид-каналы — расхождением версий
+       (тот же критерий, что у feed_upd в CGI). */
+    out.update_available =
+      ch === "panel" ? r.status === "update_available" : !!cur && !!avail && cur !== avail;
+  }
+  if (!out.error && r.status === "error") out.error = r.message || "проверка не удалась";
+  return out;
+}
+
 async function checkChannel(ch: Channel) {
   updBusy.value = `check:${ch}`;
   try {
-    const r = await CH_CHECK[ch]();
+    const r = normalizeChannel(ch, await CH_CHECK[ch]());
     const next: UpdatesOverview = { ...(upd.value ?? {}) };
     next[ch] = r;
     upd.value = next;
-    if (r.update_available) {
+    if (r.error) {
+      toast.error(`${CH_TITLE[ch]}: ${r.error}`);
+    } else if (r.update_available) {
       toast.ok(`${CH_TITLE[ch]}: доступна версия ${r.available_version || "новее текущей"}`);
     } else {
       toast.info(`${CH_TITLE[ch]}: обновлений нет`);
@@ -463,35 +540,103 @@ async function checkChannel(ch: Channel) {
   }
 }
 
+/**
+ * Фолбэк, когда журнал установки не дожил до кода возврата. Основной свидетель
+ * установки — apply_log, но на Keenetic панель обслуживает собственный
+ * lighttpd, и при первом обновлении на сборку, которая умеет держать его во
+ * время установки, старый prerm всё ещё гасит веб-сервер: sentinel с кодом
+ * возврата в лог просто не попадает. Тогда исход знает только state-файл
+ * обновлятора — его и опрашиваем, как это делала старая панель.
+ *
+ * Сам «applied» в файле ничего не доказывает: он остаётся там с прошлого
+ * обновления. Верим ему только если видели «installing» или версия в файле
+ * уже отличается от той, что была до установки.
+ */
+async function followPanelStatus(preVersion: string, title: string) {
+  applyNote.value = "Журнал установки замолчал — спрашиваю состояние установщика…";
+  let sawInstalling = false;
+  let st: UpdateChannelState | null = null;
+  const fresh = (v: UpdateChannelState | null) => {
+    const cur = String(v?.current_version ?? "").trim();
+    return sawInstalling || (!!preVersion && !!cur && cur !== preVersion);
+  };
+  try {
+    st = await poll<UpdateChannelState | null>(() => diag.panelUpdateStatus(), {
+      done: (v) => {
+        const s = String(v?.status ?? "");
+        if (s === "installing") sawInstalling = true;
+        if (s === "error") return true;
+        return s === "applied" && fresh(v);
+      },
+      intervalMs: 4000,
+      timeoutMs: 180_000,
+    });
+  } catch {
+    /* Ни одного ответа за отведённое время — роутер всё ещё недоступен.
+       Ниже это превратится в подсказку перезагрузить страницу вручную. */
+  }
+  const s = String(st?.status ?? "");
+  const cur = String(st?.current_version ?? "").trim();
+  if (s === "error") {
+    applyNote.value = `Установщик сообщил об ошибке: ${st?.message || "причина не указана"}.`;
+    toast.error(`${title}: установка не удалась`);
+  } else if (s === "applied" && fresh(st)) {
+    applyNote.value = cur
+      ? `Установлена версия ${cur}. Обновите страницу, чтобы открылась новая панель.`
+      : "Установка завершилась. Обновите страницу, чтобы открылась новая панель.";
+    toast.ok(`${title}: обновление установлено`);
+  } else {
+    applyNote.value =
+      "Роутер долго не отвечает. Обновите страницу и проверьте версию панели.";
+  }
+}
+
 /** Живой хвост отсоединённой установки: единственный способ узнать её исход. */
 async function followApply(title: string, panelish: boolean) {
+  /* Версия ДО установки — по её смене фолбэк отличает свежий «applied» в
+     state-файле от того, что остался с прошлого обновления. */
+  const preVersion = String(status.data?.version ?? "").trim();
   try {
     const r = await poll<ApplyLogResponse | null>(() => diag.applyLog(), {
       done: (v) => v?.done === true,
       intervalMs: 2000,
-      timeoutMs: 420_000,
+      /* На Keenetic лог самообновления панели может не дожить до конца (см.
+         followPanelStatus) — ждать его семь минут незачем, раньше уйдём
+         спрашивать состояние установщика. Во всех остальных случаях лог идёт
+         живьём до кода возврата, и потолок остаётся большим. */
+      timeoutMs: panelish && status.isKeenetic ? 150_000 : 420_000,
       onTick: (v) => {
         if (v && typeof v.log === "string") applyText.value = v.log;
       },
     });
     const raw = String(r?.rc ?? "").trim();
     const rc = raw === "" ? null : Number(raw);
-    if (r?.done !== true) {
-      applyNote.value =
-        "Установка ещё идёт. Журнал обновится, как только роутер снова ответит.";
-    } else if (rc === 0) {
+    if (r?.done === true && rc === 0) {
       applyNote.value = panelish
         ? "Готово. Обновите страницу, чтобы открылась новая версия панели."
         : "Готово.";
       toast.ok(`${title}: обновление установлено`);
-    } else if (rc === null) {
-      applyNote.value = "Установка завершилась, код возврата не пришёл — смотрите журнал.";
-    } else {
+    } else if (r?.done === true && rc !== null) {
       applyNote.value = `Установка завершилась с кодом ${rc}. Что именно не получилось — видно в журнале.`;
       toast.error(`${title}: установка не удалась`);
+    } else if (panelish) {
+      /* Ни кода возврата, ни признака конца — идём за состоянием установщика. */
+      await followPanelStatus(preVersion, title);
+    } else if (r?.done === true) {
+      applyNote.value = "Установка завершилась, код возврата не пришёл — смотрите журнал.";
+    } else {
+      applyNote.value =
+        "Установка ещё идёт. Журнал обновится, как только роутер снова ответит.";
     }
   } catch (e) {
-    applyNote.value = e instanceof Error ? e.message : "Не удалось дождаться конца установки";
+    /* Лог мог не ответить ни разу: на Keenetic веб-сервер панели лежит всю
+       установку. Для панели это не ошибка, а повод спросить state-файл. */
+    if (panelish) {
+      await followPanelStatus(preVersion, title);
+    } else {
+      applyNote.value =
+        e instanceof Error ? e.message : "Не удалось дождаться конца установки";
+    }
   } finally {
     applyRunning.value = false;
     updBusy.value = "";
@@ -632,6 +777,7 @@ async function setHealth(patch: {
   enabled?: boolean;
   auto_switch?: boolean;
   speed?: boolean;
+  speed_bytes?: number;
 }) {
   healthBusy.value = Object.keys(patch)[0] ?? "";
   try {
@@ -656,6 +802,27 @@ const healthAuto = computed({
 const healthSpeed = computed({
   get: () => health.value?.speed === true,
   set: (v: boolean) => void setHealth({ speed: v }),
+});
+
+/* Объём пробной закачки. Маленький файл упирается в рукопожатие TLS и разгон
+   TCP, поэтому на быстром канале он всегда покажет «~50–60 Мбит/с»; большой
+   точнее, но это реальный трафик через VPN на каждый замер. Роутер зажимает
+   значение в 1–300 МБ, так что пресеты — только удобство. */
+const SPEED_SIZES = [
+  { value: "8000000", label: "8 МБ", hint: "Эконом — упирается примерно в 50–60 Мбит/с" },
+  { value: "30000000", label: "30 МБ", hint: "Стандарт — примерно до 150 Мбит/с" },
+  { value: "75000000", label: "75 МБ", hint: "Точный — примерно до 350 Мбит/с" },
+  { value: "150000000", label: "150 МБ", hint: "Максимум — примерно до 600 Мбит/с" },
+];
+
+const healthSpeedBytes = computed({
+  get: () => {
+    /* В settings.json может лежать значение не из пресетов (правили руками) —
+       показываем эконом, как это делала старая панель. */
+    const cur = String(health.value?.speed_bytes ?? "");
+    return SPEED_SIZES.some((o) => o.value === cur) ? cur : "8000000";
+  },
+  set: (v: string) => void setHealth({ speed_bytes: Number(v) }),
 });
 
 async function checkAll() {
@@ -1024,7 +1191,7 @@ onBeforeUnmount(() => {
       id="area-firewall"
       v-model:open="areas.firewall"
       title="Файрвол"
-      summary="дампы nat и nft — куда на самом деле уходит трафик"
+      summary="дампы nat, nft и живые соединения — куда на самом деле уходит трафик"
     >
       <p class="hint">
         Здесь видно правила перенаправления: попадает ли адрес в ipset и уходит ли он
@@ -1137,6 +1304,20 @@ onBeforeUnmount(() => {
         hint="Кроме доступности качается пробный файл — проверка идёт дольше"
       />
 
+      <div class="ssize" :class="{ off: !healthSpeed || health?.supported === false }">
+        <span class="ssize-l">Объём пробной закачки</span>
+        <SegmentedControl
+          v-model="healthSpeedBytes"
+          label="Объём пробной закачки"
+          :options="SPEED_SIZES"
+          :busy="healthBusy === 'speed_bytes' || !healthSpeed || health?.supported === false"
+        />
+        <small class="hint">
+          Больше файл — вернее цифра на быстром канале, но и реального трафика через VPN
+          за один замер уходит больше
+        </small>
+      </div>
+
       <p class="hint">
         Целей проверки: {{ health?.urls?.length ?? 0 }}<template
           v-if="healthStats.total"
@@ -1228,21 +1409,45 @@ onBeforeUnmount(() => {
           :options="[
             { value: 'nat', label: 'nat (iptables)' },
             { value: 'nft', label: 'nft (fw4)' },
+            { value: 'ct', label: 'соединения' },
           ]"
         />
       </div>
+      <div v-if="fwTab === 'ct'" class="ctbar">
+        <input
+          v-model="ctFilter"
+          type="text"
+          inputmode="text"
+          placeholder="фильтр: адрес или порт"
+          aria-label="Фильтр таблицы соединений"
+          @keyup.enter="loadCt"
+        />
+        <UiButton :busy="ctBusy" @click="loadCt">Показать</UiButton>
+      </div>
     </template>
     <div class="sheetc">
-      <p v-if="fwBusy" class="hint">Читаю правила…</p>
+      <p v-if="fwTab === 'ct'" class="hint">
+        Живые соединения роутера. Перехват виден в обратном направлении, по
+        <em>исходящему</em> порту: <code>sport=12345</code> — соединение забрал
+        sing-box, <code>sport=1081</code> — обход DPI через tpws. Фильтр —
+        подстрока: адрес устройства, домен-адрес или такой маркер.
+        {{ ctNote }}
+      </p>
+      <p v-if="fwBusy || ctBusy" class="hint">Читаю…</p>
       <LogPane
         :text="fwText"
         height="66vh"
-        empty-text="Дамп пуст — на этой платформе таблица не используется."
+        :empty-text="
+          fwTab === 'ct'
+            ? 'Пусто — попробуйте другой фильтр.'
+            : 'Дамп пуст — на этой платформе таблица не используется.'
+        "
       />
     </div>
     <template #footer>
       <div class="sheetc acts">
-        <UiButton :busy="fwBusy" @click="loadFw">Перечитать</UiButton>
+        <UiButton v-if="fwTab === 'ct'" :busy="ctBusy" @click="loadCt">Перечитать</UiButton>
+        <UiButton v-else :busy="fwBusy" @click="loadFw">Перечитать</UiButton>
         <UiButton @click="fwOpen = false">Закрыть</UiButton>
       </div>
     </template>
@@ -1279,7 +1484,7 @@ onBeforeUnmount(() => {
 
   <DrawerSheet :open="clOpen" wide :title="clTitle" @close="clOpen = false">
     <div class="sheetc">
-      <LogPane :text="clText" height="70vh" empty-text="Описание изменений не пришло." />
+      <MarkdownView :text="clText" empty-text="Описание изменений не пришло." />
     </div>
   </DrawerSheet>
 
@@ -1357,6 +1562,22 @@ onBeforeUnmount(() => {
   color: var(--dim);
   overflow-wrap: anywhere;
 }
+.ssize {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* Отбивка слева ровно под подписью тумблеров: селектор относится к «Мерить
+     скорость», а не к разделу целиком. */
+  padding-left: 49px;
+  min-width: 0;
+}
+.ssize.off {
+  opacity: 0.55;
+}
+.ssize-l {
+  font-size: 13px;
+  color: var(--dim);
+}
 .note-strong {
   font-size: 13.5px;
   color: var(--ink);
@@ -1409,6 +1630,29 @@ onBeforeUnmount(() => {
 }
 .sheetc.acts {
   flex-direction: row;
+}
+/* Фильтр соединений живёт в «шапке» шторки, рядом с переключателем таблиц. */
+.ctbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 9px;
+}
+.ctbar input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 9px 11px;
+  /* 16px — иначе iOS зумит страницу при фокусе. */
+  font-size: 16px;
+  min-height: 40px;
+  outline: none;
+}
+.ctbar input:focus {
+  border-color: var(--accent);
 }
 .field {
   display: flex;
@@ -1470,6 +1714,11 @@ onBeforeUnmount(() => {
     display: flex;
     flex-direction: column;
     justify-content: center;
+  }
+  /* На телефоне отбивка под тумблер отнимает у переключателя объёма почти
+     полсотни пикселей — связь с «Мерить скорость» и так читается по порядку. */
+  .ssize {
+    padding-left: 0;
   }
 }
 </style>

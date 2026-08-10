@@ -227,6 +227,10 @@ session.$subscribe((_m, s) => {
   position: sticky;
   top: 0;
   height: 100dvh;
+  /* sticky сам по себе создаёт stacking context, а карточки в .main — свой
+     (backdrop-filter). Без явного z-index рейка красится ПОД контентом и
+     тултипы разделов уезжают под карточки. Ниже шторок (50) и тостов (70). */
+  z-index: 20;
 }
 .rail-btn {
   width: 44px;

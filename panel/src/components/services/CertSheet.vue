@@ -27,6 +27,10 @@ const props = defineProps<{
   http80: string;
   wanIp: string;
   acmePresent: boolean;
+  /** На Keenetic 80-й порт занят своим вебом — подтверждение требует проброса. */
+  keenetic: boolean;
+  /** Порт панели с роутера: цель того самого проброса. */
+  panelPort?: number;
 }>();
 
 const emit = defineEmits<{ close: []; done: [] }>();
@@ -63,6 +67,15 @@ const http80Note = computed(() => {
     return "На 80-м порту роутера сейчас никто не отвечает — подтвердить владение доменом не выйдет, пока порт 80 не открыт снаружи.";
   }
   return "";
+});
+
+/* Порядок подсказок про 80-й порт важен: «никто не отвечает» — жёсткая
+   блокировка выпуска, и говорить про проброс поверх неё нечего. Поэтому
+   keenetic-подсказка показывается только когда порт вообще отвечает. */
+const keenPort80Note = computed(() => {
+  if (!props.keenetic || http80Note.value) return "";
+  const target = props.panelPort ? `на порт панели (${props.panelPort})` : "на порт панели";
+  return `На этом роутере 80-й порт занят его собственным веб-интерфейсом. Чтобы удостоверяющий центр попал именно в панель, проброс порта 80 из интернета должен вести ${target}, а не в веб-интерфейс роутера.`;
 });
 
 function valid(): string {
@@ -169,6 +182,7 @@ async function issue() {
         первом выпуске, если у роутера есть интернет.
       </p>
       <p v-if="http80Note" class="note warn">{{ http80Note }}</p>
+      <p v-if="keenPort80Note" class="note warn">{{ keenPort80Note }}</p>
       <p v-if="wanNote" class="note">{{ wanNote }}</p>
 
       <p v-if="progress" class="note live">{{ progress }}</p>

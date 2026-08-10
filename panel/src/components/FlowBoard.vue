@@ -35,6 +35,18 @@ const reduced =
 const pct = (n: number) => (props.hasShares ? `${Math.round(n)}%` : "—");
 const barWidth = (n: number) => (props.hasShares ? `${Math.round(n)}%` : "0%");
 
+/* SVG-текст не переносится и не обрезается по многоточию — он просто уезжает за
+   viewBox и молча срезается. Правая колонка подписей начинается с 712, и при
+   ширине viewBox 900 ей оставалось 188 px — в них не влезало даже штатное
+   «100% · всё, кроме белого списка». Поэтому viewBox расширен до 960 (схема от
+   этого лишь чуть мельче, ленты и узлы на месте), а длинные имена — цепочка это
+   «A → B → C» — всё равно режем: бюджет считан по замеру в браузере, худший
+   случай ≈8.3 px/символ у sans 13px (кириллица) и ≈6.5 у моно 9px. */
+const clip = (s: string, max: number) =>
+  s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
+const bigLine = (s: string) => clip(s, 28);
+const monoLine = (s: string) => clip(s, 36);
+
 /* Скорость точек привязана к доле ленты: пустая лента не должна выглядеть
    такой же оживлённой, как основная. */
 const dur = (share: number) => `${(4.2 - Math.min(share, 100) / 100 * 2.4).toFixed(2)}s`;
@@ -78,7 +90,7 @@ const lanes = computed(() => [
     <!-- Широкий экран: ленты со схемой -->
     <svg
       class="flow"
-      viewBox="0 0 900 200"
+      viewBox="0 0 960 200"
       role="img"
       :aria-label="`Трафик расходится на три ленты: напрямую ${pct(direct)}, через VPN ${pct(vpn)}, обход DPI ${pct(bypass)}`"
     >
@@ -86,19 +98,22 @@ const lanes = computed(() => [
       <text x="65" y="95" text-anchor="middle" class="big">{{ clients }} устройств</text>
       <text x="65" y="111" text-anchor="middle">в локальной сети</text>
 
-      <path class="lane" d="M126 100 L 150 100" />
-      <rect class="node hot" x="150" y="70" width="110" height="60" rx="12" />
-      <text x="205" y="94" text-anchor="middle" class="big">Detour</text>
-      <text x="205" y="112" text-anchor="middle">dnsmasq · ipset · nat</text>
+      <path class="lane" d="M126 100 L 146 100" />
+      <!-- Ширина узла подобрана под самую длинную подпись («dnsmasq · ipset ·
+           nat» — ~128 px моно 9px с letter-spacing): SVG-текст не переносится и
+           не обрезается, он просто вылезал за рамку. -->
+      <rect class="node hot" x="146" y="70" width="150" height="60" rx="12" />
+      <text x="221" y="94" text-anchor="middle" class="big">Detour</text>
+      <text x="221" y="112" text-anchor="middle">dnsmasq · ipset · nat</text>
 
-      <path id="lane-d" class="lane" d="M262 100 C 340 100, 360 44, 470 44 L 700 44" />
+      <path id="lane-d" class="lane" d="M298 100 C 372 100, 392 44, 480 44 L 700 44" />
       <path
         id="lane-v"
         class="lane"
         :class="{ hot: vpnUp }"
-        d="M262 100 L 700 100"
+        d="M298 100 L 700 100"
       />
-      <path id="lane-z" class="lane" d="M262 100 C 340 100, 360 156, 470 156 L 700 156" />
+      <path id="lane-z" class="lane" d="M298 100 C 372 100, 392 156, 480 156 L 700 156" />
 
       <template v-if="!reduced">
         <circle v-for="i in 3" :key="`d${i}`" class="pkt d" r="2.6">
@@ -123,11 +138,21 @@ const lanes = computed(() => [
       <text x="712" y="40" class="big">Напрямую</text>
       <text x="712" y="56">{{ pct(direct) }} трафика</text>
       <text x="712" y="96" class="big" :class="{ accent: vpnUp }">
-        {{ vpnUp ? `Через VPN → ${profileLabel}` : "VPN не запущен" }}
+        {{ bigLine(vpnUp ? `Через VPN → ${profileLabel}` : "VPN не запущен") }}
+        <title>{{ vpnUp ? `Через VPN → ${profileLabel}` : "VPN не запущен" }}</title>
       </text>
-      <text x="712" y="112">{{ pct(vpn) }} · {{ vpnScope }}</text>
-      <text x="712" y="152" class="big">Обход DPI → {{ bypassLabel }}</text>
-      <text x="712" y="168">{{ pct(bypass) }} · {{ bypassScope }}</text>
+      <text x="712" y="112">
+        {{ monoLine(`${pct(vpn)} · ${vpnScope}`) }}
+        <title>{{ pct(vpn) }} · {{ vpnScope }}</title>
+      </text>
+      <text x="712" y="152" class="big">
+        {{ bigLine(`Обход DPI → ${bypassLabel}`) }}
+        <title>Обход DPI → {{ bypassLabel }}</title>
+      </text>
+      <text x="712" y="168">
+        {{ monoLine(`${pct(bypass)} · ${bypassScope}`) }}
+        <title>{{ pct(bypass) }} · {{ bypassScope }}</title>
+      </text>
     </svg>
 
     <!-- Телефон: те же ленты столбиком -->

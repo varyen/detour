@@ -9,7 +9,7 @@
 import { computed, ref, watch } from "vue";
 import SectionIcon from "@/components/SectionIcon.vue";
 import type { ProfileRow } from "@/stores/profiles";
-import { fmtAgo } from "@/lib/format";
+import { fmtAgo, fmtSpeedKbps } from "@/lib/format";
 
 const props = defineProps<{
   rows: ProfileRow[];
@@ -17,15 +17,25 @@ const props = defineProps<{
   switching: string;
   /** Идентификатор профиля, по которому сейчас идёт проверка. */
   probing: string;
+  /**
+   * Цели функциональной проверки в том же порядке, в каком роутер складывает
+   * `health.delays` — только по ним и можно сказать, ЧТО именно не открылось.
+   */
+  targets?: { label: string; url: string }[];
+  /** Какой флаг сейчас сохраняется: `<id>:autoswitch` / `<id>:speedcheck`. */
+  flagBusy?: string;
 }>();
 
 const emit = defineEmits<{
   "update:selected": [string[]];
   open: [ProfileRow];
   connect: [ProfileRow];
+  ping: [ProfileRow];
+  health: [ProfileRow];
+  flag: [{ row: ProfileRow; kind: "autoswitch" | "speedcheck"; value: boolean }];
 }>();
 
-type SortKey = "name" | "type" | "group" | "ping" | "state";
+type SortKey = "name" | "type" | "group" | "ping" | "speed" | "state";
 
 const query = ref("");
 const group = ref("");
@@ -54,7 +64,11 @@ const visible = computed(() => {
   const out = props.rows.filter((r) => {
     if (g && (r.group || "Без группы") !== g) return false;
     if (!q) return true;
-    return `${r.name} ${r.type} ${r.group ?? ""} ${r.id}`.toLowerCase().includes(q);
+    /* Адрес узла тоже ищем: у подписок имена профилей похожи как две капли, и
+       найти нужный проще по хосту. */
+    return `${r.name} ${r.type} ${r.group ?? ""} ${r.id} ${r.ping?.server ?? ""}`
+      .toLowerCase()
+      .includes(q);
   });
   const dir = sortAsc.value ? 1 : -1;
   return [...out].sort((a, b) => {
@@ -72,6 +86,17 @@ const visible = computed(() => {
         const av = a.ping?.ok ? (a.ping.rtt ?? 1e8) : 1e9;
         const bv = b.ping?.ok ? (b.ping.rtt ?? 1e8) : 1e9;
         return dir * (av - bv);
+      }
+      case "speed": {
+        /* Неизмеренные тонут вниз в любом направлении: смысл сортировки по
+           скорости — увидеть самый быстрый канал, а не самый неизвестный. */
+        const av = speedKbps(a);
+        const bv = speedKbps(b);
+        if (av <= 0 || bv <= 0) {
+          if (av <= 0 && bv <= 0) return a.name.localeCompare(b.name, "ru", { numeric: true });
+          return av <= 0 ? 1 : -1;
+        }
+        return dir * (av - bv) || a.name.localeCompare(b.name, "ru", { numeric: true });
       }
       case "state":
         return dir * ((STATE_ORDER[a.state] ?? 9) - (STATE_ORDER[b.state] ?? 9));
@@ -129,7 +154,9 @@ function sortBy(key: SortKey) {
   if (sortKey.value === key) sortAsc.value = !sortAsc.value;
   else {
     sortKey.value = key;
-    sortAsc.value = true;
+    /* У скорости «по возрастанию» бесполезно: от колонки ждут, что сверху
+       окажется самый быстрый профиль. */
+    sortAsc.value = key !== "speed";
   }
 }
 
@@ -141,11 +168,64 @@ function pingText(r: ProfileRow): string {
   return (r.ping.rtt ?? -1) > 0 ? `${Math.round(r.ping.rtt as number)} мс` : "отвечает";
 }
 
+/**
+ * Адрес узла профиля. Берётся из кэша пингов: `profiles_list` адреса не отдаёт
+ * (это сокращённая запись), а вычитывать сотню профилей поштучно ради одной
+ * колонки — сотня запросов на открытие экрана. Порт роутер в этом кэше не
+ * хранит, поэтому показываем только хост, и до первого пинга — прочерк.
+ */
+function serverText(r: ProfileRow): string {
+  return r.ping?.server || "—";
+}
+
 function healthText(r: ProfileRow): string {
   const h = r.health;
   if (!h || h.ok === undefined) return "—";
   const when = fmtAgo(h.ts);
   return `${h.ok ? "проходит" : "не проходит"}${when ? ` · ${when}` : ""}`;
+}
+
+/** Скорость в кбит/с или -1: роутер отдаёт -1/0, когда замера не было. */
+function speedKbps(r: ProfileRow): number {
+  const v = r.health?.dl;
+  return typeof v === "number" && Number.isFinite(v) ? v : -1;
+}
+
+function speedText(r: ProfileRow): string {
+  const s = fmtSpeedKbps(speedKbps(r));
+  return s ? `↓ ${s}` : "—";
+}
+
+function speedTitle(r: ProfileRow): string {
+  const s = fmtSpeedKbps(speedKbps(r));
+  if (!s) {
+    return r.speedcheck === false
+      ? "скорость ещё не измерена · профиль исключён из фоновых замеров"
+      : "скорость ещё не измерена";
+  }
+  const when = fmtAgo(r.health?.ts);
+  return `скачивание через профиль: ${s}${when ? ` · замер ${when}` : ""}`;
+}
+
+/**
+ * Расшифровка проверки по каждой цели: «YouTube 120 мс · Google не отвечает».
+ * Без неё «не проходит» ничего не объясняет — а delays роутер отдаёт всегда.
+ */
+function healthTitle(r: ProfileRow): string {
+  const h = r.health;
+  if (!h || h.ok === undefined) return "проверка работоспособности ещё не выполнялась";
+  const delays = h.delays ?? [];
+  const parts = delays.map((d, i) => {
+    const label = props.targets?.[i]?.label || `цель ${i + 1}`;
+    return typeof d === "number" && d >= 0 ? `${label} ${Math.round(d)} мс` : `${label} не отвечает`;
+  });
+  const speed = fmtSpeedKbps(speedKbps(r));
+  const when = fmtAgo(h.ts);
+  return [parts.join(" · ") || "нет данных", speed ? `↓ ${speed}` : "", when].filter(Boolean).join(" · ");
+}
+
+function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean {
+  return props.flagBusy === `${r.id}:${kind}`;
 }
 </script>
 
@@ -176,6 +256,7 @@ function healthText(r: ProfileRow): string {
         <option value="type">По протоколу</option>
         <option value="group">По группе</option>
         <option value="ping">По пингу</option>
+        <option value="speed">По скорости</option>
         <option value="state">По состоянию</option>
       </select>
     </div>
@@ -197,16 +278,37 @@ function healthText(r: ProfileRow): string {
       <button type="button" :aria-pressed="sortKey === 'name'" @click="sortBy('name')">
         Имя
       </button>
-      <button type="button" :aria-pressed="sortKey === 'type'" @click="sortBy('type')">
+      <button
+        class="h-type"
+        type="button"
+        :aria-pressed="sortKey === 'type'"
+        @click="sortBy('type')"
+      >
         Протокол
       </button>
-      <button type="button" :aria-pressed="sortKey === 'group'" @click="sortBy('group')">
+      <button
+        class="h-grp"
+        type="button"
+        :aria-pressed="sortKey === 'group'"
+        @click="sortBy('group')"
+      >
         Группа
       </button>
+      <!-- Не кнопка: сортировать по адресу узла незачем, а колонка живёт только
+           на широком экране — её данные приходят из кэша пингов. -->
+      <span class="h-srv">Сервер</span>
       <button type="button" :aria-pressed="sortKey === 'ping'" @click="sortBy('ping')">
         Пинг
       </button>
-      <button type="button" :aria-pressed="sortKey === 'state'" @click="sortBy('state')">
+      <button type="button" :aria-pressed="sortKey === 'speed'" @click="sortBy('speed')">
+        Скорость
+      </button>
+      <button
+        class="h-chk"
+        type="button"
+        :aria-pressed="sortKey === 'state'"
+        @click="sortBy('state')"
+      >
         Проверка
       </button>
       <span></span>
@@ -236,6 +338,9 @@ function healthText(r: ProfileRow): string {
             {{ r.name }}
             <small>
               {{ r.type }}<template v-if="r.group"> · {{ r.group }}</template>
+              <!-- На телефоне колонки скрыты, а скорость — то, ради чего в этот
+                   список и заходят: показываем её прямо в подписи. -->
+              <span v-if="speedKbps(r) > 0" class="only-mob"> · {{ speedText(r) }}</span>
               <template v-if="r.autoswitch === false"> · без авто-переключения</template>
               <template v-if="r.speedcheck === false"> · без проверки скорости</template>
             </small>
@@ -245,10 +350,72 @@ function healthText(r: ProfileRow): string {
 
         <span class="cell type">{{ r.type }}</span>
         <span class="cell grp">{{ r.group || "—" }}</span>
+        <span class="cell srv mono" :title="serverText(r)">{{ serverText(r) }}</span>
         <span class="cell num">{{ pingText(r) }}</span>
-        <span class="cell chk-t">{{ healthText(r) }}</span>
+        <span
+          class="cell num speed"
+          :class="{ measured: speedKbps(r) > 0 }"
+          :title="speedTitle(r)"
+        >
+          {{ speedText(r) }}
+        </span>
+        <span class="cell chk-t" :title="healthTitle(r)">{{ healthText(r) }}</span>
 
         <span class="act">
+          <button
+            class="ico"
+            type="button"
+            role="switch"
+            :aria-checked="r.autoswitch !== false"
+            :class="{ on: r.autoswitch !== false }"
+            :disabled="flagBusyFor(r, 'autoswitch')"
+            :title="
+              r.autoswitch !== false
+                ? 'Участвует в авто-переключении — нажмите, чтобы исключить'
+                : 'Исключён из авто-переключения — нажмите, чтобы вернуть'
+            "
+            @click="emit('flag', { row: r, kind: 'autoswitch', value: r.autoswitch === false })"
+          >
+            <SectionIcon name="route" :size="15" />
+          </button>
+          <button
+            class="ico"
+            type="button"
+            role="switch"
+            :aria-checked="r.speedcheck !== false"
+            :class="{ on: r.speedcheck !== false }"
+            :disabled="flagBusyFor(r, 'speedcheck')"
+            :title="
+              r.speedcheck !== false
+                ? 'Участвует в фоновых замерах скорости — нажмите, чтобы исключить'
+                : 'Исключён из фоновых замеров скорости — нажмите, чтобы вернуть'
+            "
+            @click="emit('flag', { row: r, kind: 'speedcheck', value: r.speedcheck === false })"
+          >
+            <span class="glyph" aria-hidden="true">↓</span>
+          </button>
+          <button
+            class="ico"
+            type="button"
+            :disabled="!!probing"
+            :class="{ busy: probing === r.id }"
+            title="Проверить пинг сервера"
+            aria-label="Проверить пинг"
+            @click="emit('ping', r)"
+          >
+            <SectionIcon name="refresh" :size="15" />
+          </button>
+          <button
+            class="ico"
+            type="button"
+            :disabled="!!probing"
+            :class="{ busy: probing === r.id }"
+            title="Проверить работу и скорость через этот профиль"
+            aria-label="Проверить работу и скорость"
+            @click="emit('health', r)"
+          >
+            <SectionIcon name="gauge" :size="15" />
+          </button>
           <button
             class="mini"
             type="button"
@@ -319,7 +486,9 @@ function healthText(r: ProfileRow): string {
 .head,
 .row {
   display: grid;
-  grid-template-columns: 38px minmax(0, 2.4fr) 100px minmax(0, 1fr) 92px 150px auto;
+  grid-template-columns:
+    38px minmax(0, 2.4fr) 92px minmax(0, 1fr) minmax(0, 1.25fr)
+    78px 104px 132px auto;
   align-items: center;
   gap: 6px;
 }
@@ -327,7 +496,8 @@ function healthText(r: ProfileRow): string {
   padding: 0 6px 6px;
   border-bottom: 1px solid var(--line);
 }
-.head button {
+.head button,
+.head .h-srv {
   border: 0;
   background: transparent;
   padding: 4px 2px;
@@ -414,6 +584,21 @@ function healthText(r: ProfileRow): string {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Адрес узла длиннее любой другой ячейки, поэтому мельче: он нужен, чтобы
+   отличить два одноимённых профиля подписки, а не для чтения вслух. */
+.cell.srv {
+  font-size: 11.5px;
+  color: var(--faint);
+}
+/* Измеренная скорость — единственное число в строке, которое сравнивают
+   глазами между строками, поэтому выделяем её из общего серого. */
+.cell.speed.measured {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.only-mob {
+  display: none;
+}
 .act {
   display: flex;
   gap: 6px;
@@ -446,6 +631,73 @@ function healthText(r: ProfileRow): string {
   color: var(--dim);
   line-height: 1;
 }
+/* Иконочные кнопки строки: два флага-тумблера (участие в авто-переключении и в
+   фоновых замерах) и две разовые проверки. Узкие, потому что их четыре в каждой
+   из сотни строк; на телефоне ниже вырастают до 44px под палец. */
+.ico {
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-2);
+  background: transparent;
+  border-radius: var(--radius-sm);
+  width: 32px;
+  min-height: 32px;
+  padding: 0;
+  color: var(--faint);
+  flex: none;
+}
+.ico.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+.ico:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.ico:disabled {
+  opacity: 0.4;
+}
+.ico .glyph {
+  font-size: 14px;
+  line-height: 1;
+}
+.ico.busy {
+  animation: blink 1s ease-in-out infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Узкий десктоп и планшет: протокол с группой уже написаны в подписи под
+   именем, а адрес узла — справочная колонка, поэтому все три уходят первыми:
+   иначе имя сжимается в кашу. */
+@media (max-width: 1180px) {
+  .head,
+  .row {
+    grid-template-columns: 38px minmax(0, 2.4fr) 78px 104px 132px auto;
+  }
+  .head .h-type,
+  .head .h-grp,
+  .head .h-srv,
+  .cell.type,
+  .cell.grp,
+  .cell.srv {
+    display: none;
+  }
+}
+
+@media (max-width: 1000px) {
+  .head,
+  .row {
+    grid-template-columns: 38px minmax(0, 2.4fr) 78px 104px auto;
+  }
+  .head .h-chk,
+  .cell.chk-t {
+    display: none;
+  }
+}
 
 @media (max-width: 860px) {
   /* Телефон: строка-карточка. Колонки таблицы прячем, всё нужное — под именем,
@@ -459,8 +711,12 @@ function healthText(r: ProfileRow): string {
   }
   .cell.type,
   .cell.grp,
-  .cell.chk-t {
+  .cell.chk-t,
+  .cell.speed {
     display: none;
+  }
+  .only-mob {
+    display: inline;
   }
   .cell.num {
     font-size: 12px;
@@ -471,6 +727,14 @@ function healthText(r: ProfileRow): string {
     grid-column: 2 / -1;
     justify-content: flex-start;
     padding-left: 18px;
+    flex-wrap: wrap;
+  }
+  /* Иконочные контролы на телефоне убраны: шесть кнопок переносились во вторую
+     строку и удваивали высоту каждой из сотни карточек, а безымянные глифы в
+     44px всё равно не читались. Те же четыре действия — подписанными
+     тумблерами и кнопками в шторке, она открывается нажатием по строке. */
+  .ico {
+    display: none;
   }
   .mini,
   .dots {

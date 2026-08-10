@@ -23,6 +23,17 @@ export const overview = {
   /** Дампы nat/nft для раздела «Файрвол». */
   firewall: () => requestJson<{ nat: string; nft: string }>("iptables"),
 
+  /* Таблица соединений. Фильтр — подстрока (адрес, порт); пустой значит «первые
+     строки как есть». Роутер отдаёт не больше 200 строк и общее число рядом:
+     полный /proc/net/nf_conntrack бывает на десятки тысяч записей. */
+  conntrack: (filter?: string) =>
+    requestJsonTolerant<{
+      conntrack: string;
+      total?: number;
+      shown?: number;
+      filter?: string;
+    }>("conntrack", filter ? { params: { filter } } : undefined),
+
   /* Счётчики по лентам схемы потока. На роутерах со старой прошивкой действия
      ещё нет — тогда приходит {ok:false,"unknown action"}, и схема честно
      показывает прочерки вместо выдуманных долей. */
