@@ -7,6 +7,7 @@ import SwitchToggle from "@/components/SwitchToggle.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
 import ProfilePicker from "@/components/ProfilePicker.vue";
 import BypassTile from "@/components/overview/BypassTile.vue";
+import UplinksTile from "@/components/overview/UplinksTile.vue";
 import { diag, overview } from "@/api";
 import type { LanClient, TrafficLanes, UdpVpnMode } from "@/api";
 import DrawerSheet from "@/components/DrawerSheet.vue";
@@ -74,18 +75,43 @@ const mptcpBroken = computed(() => {
    новая проблема (уже другая) молча унаследует старое «не показывать». */
 const WAN_DISMISS_KEY = "detour:wan-dismissed";
 const wanDismissed = ref(localStorage.getItem(WAN_DISMISS_KEY) ?? "");
-const wanAlert = computed(() => {
+
+/* Плоский degraded описывает только тот канал, который держит маршрут по
+   умолчанию. С двумя провайдерами просевший РЕЗЕРВ через него не виден вовсе —
+   а узнать про него надо заранее, а не в момент, когда он понадобился. Поэтому
+   сначала ищем просадку по всему массиву и только потом откатываемся на плоские
+   поля (их отдаёт и старый detour-wan-link, панель обновляется отдельно). */
+const wanDegradedText = computed(() => {
   const w = wan.value;
-  if (!w?.degraded) return null;
-  const text = w.diagnosis || "WAN-порт работает медленнее, чем может";
-  return wanDismissed.value === text ? null : { text, advice: w.advice };
+  if (!w) return "";
+  const bad = w.uplinks?.find((u) => u.degraded);
+  if (bad) return bad.diagnosis || `Канал «${bad.label}» работает медленнее, чем может`;
+  if (w.degraded) return w.diagnosis || "WAN-порт работает медленнее, чем может";
+  return "";
+});
+
+const wanAlert = computed(() => {
+  const text = wanDegradedText.value;
+  if (!text) return null;
+  return wanDismissed.value === text ? null : { text, advice: wan.value?.advice };
 });
 
 function dismissWan() {
-  const t = wan.value?.diagnosis || "WAN-порт работает медленнее, чем может";
+  const t = wanDegradedText.value;
+  if (!t) return;
   wanDismissed.value = t;
   localStorage.setItem(WAN_DISMISS_KEY, t);
 }
+
+/* При нескольких каналах строка «WAN … Мбит/с» в «Системе» описывала бы только
+   один из них рядом с плиткой, где расписаны все — уводим её, чтобы не было двух
+   разных ответов на один вопрос. */
+const showSysWan = computed(
+  () =>
+    wan.value?.supported !== false &&
+    !!wan.value?.speed_mbps &&
+    (wan.value?.uplinks?.length ?? 0) < 2,
+);
 
 /* В режиме all-except список доменов не используется: в туннель идёт всё,
    кроме белого списка. Показывать там «0 доменов» — прямая дезинформация. */
@@ -448,6 +474,8 @@ onBeforeUnmount(() => {
       </template>
     </TileCard>
 
+    <UplinksTile />
+
     <TileCard title="Система">
       <p class="meta col">
         <span>
@@ -457,9 +485,10 @@ onBeforeUnmount(() => {
         <span>Память {{ sys?.memory ?? "—" }}</span>
         <span>Свободно на диске {{ sys?.disk_free ?? "—" }}</span>
         <!-- Скорость WAN показываем всегда, а не только при деградации: иначе
-             скрытый баннер означал бы, что состояние линка вообще негде увидеть. -->
-        <span v-if="wan?.supported !== false && wan?.speed_mbps">
-          WAN {{ wan.speed_mbps }} Мбит/с<template v-if="wan.duplex">
+             скрытый баннер означал бы, что состояние линка вообще негде увидеть.
+             При нескольких каналах это берёт на себя плитка «Каналы в интернет». -->
+        <span v-if="showSysWan">
+          WAN {{ wan?.speed_mbps }} Мбит/с<template v-if="wan?.duplex">
             · {{ wan.duplex }}</template
           >
         </span>

@@ -6,6 +6,8 @@ import type {
   PortmapStatus,
   PushConfig,
   SwapStatus,
+  WanpinMode,
+  WanpinStatus,
 } from "./types";
 
 export const services = {
@@ -57,6 +59,13 @@ export const services = {
     requestJson<OffloadStatus>("offload_set", { body: { mode } }),
   offloadKick: () =>
     requestJson<OffloadStatus>("offload_kick", { method: "POST", timeoutMs: 90_000 }),
+
+  /* --- ответ тем же каналом, которым пришёл запрос --- */
+  wanpinStatus: () => requestJsonTolerant<WanpinStatus>("wanpin_status"),
+  wanpinSetMode: (mode: WanpinMode) =>
+    requestJson<WanpinStatus>("wanpin_set", { body: { mode } }),
+  wanpinSetPublic: (id: string) =>
+    requestJson<WanpinStatus>("wanpin_set", { body: { public: id } }),
 
   /* --- файл подкачки (только Keenetic) --- */
   swapStatus: () => requestJsonTolerant<SwapStatus>("swap_status"),

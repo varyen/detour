@@ -82,6 +82,48 @@ export interface WanLink {
   diagnosis?: string;
   advice?: string;
   last_ts?: number;
+  /** Аплинков больше одного. */
+  multi?: boolean;
+  count?: number;
+  /** Все аплинки, от меньшей метрики к большей. */
+  uplinks?: WanUplink[];
+}
+
+/* Один аплинк. Плоские поля WanLink описывают только тот канал, который прямо
+   сейчас держит маршрут по умолчанию — второй в них не помещается, поэтому
+   бэкенд отдаёт ещё и полный массив (внутри того же wan_link, чтобы не менять
+   CGI).
+
+   `up` и `carrier` — РАЗНЫЕ вещи, и различие диагностическое: carrier=1 при
+   up=false значит «провод воткнут, но адреса от провайдера нет».
+   speed_mbps/duplex при carrier=0 намеренно обнулены: VLAN-интерфейс наследует
+   скорость родительского свича и иначе рапортует 10 Гбит на мёртвом канале. */
+export interface WanUplink {
+  id: string;
+  label: string;
+  iface: string;
+  phy_if?: string;
+  /** Держит маршрут по умолчанию прямо сейчас. */
+  active?: boolean;
+  /** Поднят по данным netifd: сконфигурирован и получил адрес. */
+  up?: boolean;
+  proto?: string;
+  ip?: string;
+  gateway?: string;
+  metric?: number;
+  /** Вес в балансировщике (kmwan). 0 — веса нет или балансировщик отсутствует. */
+  weight?: number;
+  carrier?: number;
+  speed_mbps?: number;
+  duplex?: string;
+  operstate?: string;
+  partner_max_mbps?: number;
+  port_max_mbps?: number;
+  expected_mbps?: number;
+  best_speed_mbps?: number;
+  peer_limited?: boolean;
+  degraded?: boolean;
+  diagnosis?: string;
 }
 
 export interface StatusResponse {
@@ -314,6 +356,34 @@ export interface OffloadStatus {
   supported: boolean;
   mode?: "auto" | "notify" | "off";
   state?: string;
+}
+
+export type WanpinMode = "auto" | "on" | "off";
+
+/* Привязка входящих соединений к каналу, которым они пришли. Отдельный запрос,
+   а не часть status: нужна только на экране с каналами и меняется редко. */
+export interface WanpinPin {
+  id: string;
+  iface: string;
+  ip?: string;
+  gateway?: string;
+  /** Метка connmark этого канала — показываем только в диагностике. */
+  mark?: string;
+  table?: number;
+  /** Канал, который наши публичные сервисы считают своим адресом. */
+  public?: boolean;
+}
+
+export interface WanpinStatus {
+  ok?: boolean;
+  mode?: WanpinMode;
+  /** Правила реально стоят в файрволе (в режиме auto при одном канале — нет). */
+  installed?: boolean;
+  public?: string;
+  /** Непустая строка = список интерфейсов со строгим rp_filter, он молча роняет
+      входящие пакеты на «неправильном» канале и выглядит как поломка привязки. */
+  rp_filter_strict?: string;
+  pins?: WanpinPin[];
 }
 
 export interface RulistStatus {

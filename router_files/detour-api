@@ -75,6 +75,7 @@ CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written b
 OFFLOAD_BIN="/usr/sbin/detour-offload"      # QCA HW-offload watchdog/recovery — backs the offload_* actions
 PORTMAP_BIN="/usr/sbin/detour-portmap"      # публикация внутренних сервисов наружу — backs the portmap_* actions
 WANLINK_BIN="/usr/sbin/detour-wan-link"     # WAN PHY/link-speed monitor — warns on 100M negotiation (not offload-related)
+WANPIN_BIN="/usr/sbin/detour-wanpin"        # reply-routing по аплинкам — ответ уходит тем каналом, которым пришёл запрос
 WARP_BIN="/usr/sbin/detour-warp"            # Cloudflare WARP (последний хоп цепочки) — backs the warp_* actions
 METER_BIN="/usr/sbin/detour-meter"          # счётчики трафика по лентам — backs the traffic_counters action
 WARP_STATE="/var/state/detour-warp.json"    # ход регистрации WARP (пишет detour-warp; CGI её детачит)
@@ -165,6 +166,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     OFFLOAD_BIN="$OPT/sbin/detour-offload"   # QCA-only; no-op on Keenetic (no NSS accelerator)
     PORTMAP_BIN="$OPT/sbin/detour-portmap"
     WANLINK_BIN="$OPT/sbin/detour-wan-link"
+    WANPIN_BIN="$OPT/sbin/detour-wanpin"
     WARP_BIN="$OPT/sbin/detour-warp"
     WARP_STATE="$OPT/var/state/detour-warp.json"
     METER_BIN="$OPT/sbin/detour-meter"
@@ -4339,6 +4341,34 @@ offload_kick)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$OFFLOAD_BIN" ] || { json_err "not supported on this platform"; exit 0; }
     "$OFFLOAD_BIN" kick
+    ;;
+
+# ==================== АПЛИНКИ: ответ тем же каналом ====================
+# С двумя провайдерами у роутера два публичных адреса, а маршрут по умолчанию
+# один — ответ на входящее соединение норовит уйти не тем каналом, и проброс
+# портов, HTTPS-панель и продление сертификата начинают работать через раз.
+# detour-wanpin чинит это connmark'ом; здесь панель им управляет.
+wanpin_status)
+    if [ -x "$WANPIN_BIN" ]; then "$WANPIN_BIN" status
+    else printf '{"ok":true,"mode":"off","installed":false,"public":"","pins":[]}'; fi
+    ;;
+
+wanpin_set)
+    # Body = {"public":"<id>"} и/или {"mode":"auto|on|off"}.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$WANPIN_BIN" ] || { json_err "not supported on this platform"; exit 0; }
+    WP_MODE=$(printf '%s' "$POST_DATA" | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    WP_PUB=$(printf '%s' "$POST_DATA" | sed -n 's/.*"public"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    if [ -n "$WP_MODE" ]; then
+        case "$WP_MODE" in auto|on|off) ;; *) json_err "invalid mode"; exit 0 ;; esac
+        "$WANPIN_BIN" set-mode "$WP_MODE" >/dev/null
+    fi
+    if [ -n "$WP_PUB" ]; then
+        # Валидацию имени канала делает сам хелпер — он знает список аплинков.
+        "$WANPIN_BIN" set-public "$WP_PUB"
+    else
+        "$WANPIN_BIN" status
+    fi
     ;;
 
 # ==================== SWAP FILE (Keenetic/Entware flash) ====================

@@ -614,6 +614,17 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=True):
         out, _, _ = exec_cmd(ssh, "crontab -l 2>/dev/null | grep detour-wan-link")
         print(f"  cron: {out.strip() or 'NOT INSTALLED'}")
 
+    # 8d-bis. Reply-routing по аплинкам: ответ уходит тем каналом, которым пришёл
+    #     запрос. Своей строки в cron не заводит — его дёргает detour-wan-link tick,
+    #     а при единственном канале он вообще ничего не ставит.
+    wanpin_local = os.path.join(ROUTER_FILES, "detour-wanpin")
+    if os.path.isfile(wanpin_local):
+        with open(wanpin_local, "rb") as f:
+            n = upload(ssh, f.read(), "/usr/sbin/detour-wanpin", "0755")
+        print(f"  /usr/sbin/detour-wanpin: {n} bytes")
+        out, _, _ = exec_cmd(ssh, "/usr/sbin/detour-wanpin apply 2>&1; /usr/sbin/detour-wanpin status")
+        print(f"  wanpin: {out.strip()[:160] or 'NO OUTPUT'}")
+
     # 8e. Let's Encrypt helper (acme.sh, HTTP-01 webroot) — backs the panel's HTTPS
     #     section + auto-renewal. Issuance is user-triggered (needs a domain + open :80).
     cert_local = os.path.join(ROUTER_FILES, "detour-cert")

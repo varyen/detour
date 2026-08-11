@@ -44,6 +44,7 @@ LIGHTTPD_CONFD=/opt/etc/lighttpd/conf.d
 LIGHTTPD_CONF="$LIGHTTPD_CONFD/detour-portmap.conf"
 LOG=/var/log/detour-portmap.log
 LAN_IF=br-lan
+WANPIN_BIN=/usr/sbin/detour-wanpin
 PLATFORM=openwrt
 
 # Ports the stack itself owns — refusing them up front beats a confusing
@@ -61,6 +62,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     CERT_CONF="$DETOUR_DIR/cert.conf"
     LOG=/opt/var/log/detour-portmap.log
     LAN_IF=br0
+    WANPIN_BIN=/opt/sbin/detour-wanpin
     [ -f "$DETOUR_DIR/detour.conf" ] && . "$DETOUR_DIR/detour.conf" 2>/dev/null
     mkdir -p /opt/var/log /opt/var/state 2>/dev/null
 fi
@@ -600,8 +602,17 @@ rule_packets() {  # $1 id  $2 port
 }
 
 wan_ip() {
-    # The address the outside world would connect to. uci first (it knows which
-    # interface is WAN), then the source address of the default route.
+    # The address the outside world would connect to.
+    #
+    # With two uplinks the last two fallbacks below are actively wrong: they
+    # describe whichever channel currently holds the default route, while the
+    # service may well be published on the other one — and then check-external
+    # probes a port on the wrong address and reports it closed. So the chosen
+    # public uplink wins whenever one is known.
+    _ip=$([ -x "$WANPIN_BIN" ] && "$WANPIN_BIN" public-ip 2>/dev/null)
+    case "$_ip" in ''|*[!0-9.]*) _ip="" ;; esac
+    [ -n "$_ip" ] && { printf '%s' "$_ip"; return 0; }
+
     _ip=$(uci -q get network.wan.ipaddr 2>/dev/null)
     case "$_ip" in ''|*[!0-9.]*) _ip="" ;; esac
     [ -n "$_ip" ] || _ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -1)

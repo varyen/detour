@@ -100,6 +100,11 @@ FILES = [
     # WAN PHY watchdog (shared source, /opt shim). Detects a physical negotiation
     # downgrade to 100 Mbps and alerts with cable/peer-port guidance.
     (os.path.join(ROUTER_FILES, "detour-wan-link"), "opt/sbin/detour-wan-link", 0o755, True),
+    # Reply-routing по аплинкам (shared source, /opt шим): входящее соединение
+    # отвечает тем же каналом, которым пришло. На Keenetic iptables есть, но
+    # цепочки сносит ndm — их возвращает ndm/netfilter.d/50-detour.sh.
+    # ⚠ НЕ проверено на живом Keenetic. fix_shebang → /opt/bin/sh.
+    (os.path.join(ROUTER_FILES, "detour-wanpin"), "opt/sbin/detour-wanpin", 0o755, True),
     # Let's Encrypt helper (acme.sh, /opt shim). Best-effort on Keenetic: :80 is the
     # stock router UI, so HTTP-01 needs :80 forwarded to lighttpd. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-cert"), "opt/sbin/detour-cert", 0o755, True),

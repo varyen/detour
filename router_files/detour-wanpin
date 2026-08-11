@@ -1,0 +1,327 @@
+#!/bin/sh
+# detour-wanpin — send the reply to an inbound connection back out the uplink it
+# arrived on.
+#
+# THE PROBLEM. With two uplinks the router has two public addresses, and the
+# routing table knows only one default route. Somebody connects to us on uplink
+# B — port forward, the HTTPS panel, an ACME HTTP-01 challenge, a WireGuard
+# handshake — and our reply follows the default route out of uplink A instead.
+# The far end gets an answer from an address it never talked to and drops it;
+# many ISPs drop it even earlier, on egress. The symptom is maddening: the
+# service "works sometimes", depending on which uplink the balancer happened to
+# pick, and every diagnostic aimed at the service itself comes back clean.
+#
+# GL.iNet's own multi-WAN (kmwan) balances OUTBOUND flows by weight and does
+# nothing about this, so turning balancing on without this script actively
+# breaks detour-portmap, the panel over HTTPS and certificate renewal.
+#
+# THE FIX is the standard one: remember which uplink a connection came in on
+# (a connmark), restore that mark onto every packet of the connection, and give
+# each uplink an ip rule pointing at its own routing table. Replies then leave
+# the way they came, whatever the default route says.
+#
+# WHAT IT DELIBERATELY DOES NOT DO. It does not pin outbound traffic. Forcing
+# router-originated connections onto one uplink would drag sing-box's tunnel
+# dials along with it, and which uplink the VPN should use is a separate
+# decision with separate trade-offs. Only inbound-initiated conversations are
+# touched here.
+#
+# MARK ALLOCATION. The 0x000f0000 nibble, which is free on this platform:
+# 0x0000f000 belongs to GL.iNet (and the fw4 rule lan_drop_leak_adgdns DROPS
+# LAN traffic that has no 0xf000 mark, so that nibble must not be disturbed),
+# 0x1e is our UDP TPROXY mark, 0x40000000 is nfqws2's bypass bit. Every mark
+# operation here carries an explicit mask so none of those are touched.
+
+DETOUR_DIR=/etc/detour
+STATEDIR=/var/state/detour-wan
+CONF=/etc/detour/wan.conf
+LOG=/var/log/detour-wanpin.log
+WANLINK_BIN=/usr/sbin/detour-wan-link
+PLATFORM=openwrt
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DETOUR_DIR=/opt/etc/detour
+    STATEDIR=/opt/var/state/detour-wan
+    CONF=/opt/etc/detour/wan.conf
+    LOG=/opt/var/log/detour-wanpin.log
+    WANLINK_BIN=/opt/sbin/detour-wan-link
+    mkdir -p /opt/var/state /opt/var/log 2>/dev/null
+fi
+
+MASK=0x000f0000
+CHAIN_IN=DETOUR_WANPIN
+CHAIN_OUT=DETOUR_WANPIN_OUT
+TBL_BASE=1210     # 1211..1225; clear of 106 (our TPROXY) and 16800 (GL)
+PRIO_BASE=12200   # after our TPROXY rule at 12106, before main at 32766
+PINMAP="$STATEDIR/pinmap"
+SIGFILE="$STATEDIR/wanpin.sig"
+MAX_UPLINKS=15    # one nibble
+
+[ -f "$CONF" ] && . "$CONF" 2>/dev/null
+: "${WANPIN_MODE:=auto}"
+
+log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+json_str() {
+    case "$1" in
+        *\\*|*\"*) printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')" ;;
+        *) printf '"%s"' "$1" ;;
+    esac
+}
+
+# --- config -----------------------------------------------------------------
+
+set_conf() {
+    _k="$1"; _v="$2"
+    mkdir -p "$(dirname "$CONF")" 2>/dev/null
+    [ -f "$CONF" ] || : > "$CONF"
+    _t="$CONF.tmp.$$"
+    grep -v "^${_k}=" "$CONF" > "$_t" 2>/dev/null
+    echo "${_k}=${_v}" >> "$_t"
+    mv "$_t" "$CONF"
+}
+
+# --- uplink inventory --------------------------------------------------------
+
+# id \t iface \t ip \t gateway \t up \t metric, lowest metric first.
+uplinks() {
+    [ -x "$WANLINK_BIN" ] || return 1
+    "$WANLINK_BIN" routes 2>/dev/null
+}
+
+# An uplink keeps its mark index for as long as it exists. Deriving the index
+# from sort order instead would reshuffle every index the moment a metric
+# changes, and live conntrack entries would suddenly point at another uplink's
+# routing table.
+pin_index() {
+    _id="$1"
+    if [ -f "$PINMAP" ]; then
+        _got=$(awk -v id="$_id" '$1 == id { print $2; exit }' "$PINMAP" 2>/dev/null)
+        [ -n "$_got" ] && { printf '%s' "$_got"; return 0; }
+    fi
+    mkdir -p "$STATEDIR" 2>/dev/null
+    [ -f "$PINMAP" ] || : > "$PINMAP"
+    _n=1
+    while [ "$_n" -le "$MAX_UPLINKS" ]; do
+        awk -v n="$_n" '$2 == n { found = 1 } END { exit !found }' "$PINMAP" 2>/dev/null || break
+        _n=$((_n + 1))
+    done
+    [ "$_n" -le "$MAX_UPLINKS" ] || return 1
+    printf '%s %s\n' "$_id" "$_n" >> "$PINMAP"
+    printf '%s' "$_n"
+}
+
+mark_for() { printf '0x000%x0000' "$1"; }
+
+# --- teardown ----------------------------------------------------------------
+
+clear_rules() {
+    # Jumps first, so no packet can enter a half-built chain.
+    while iptables -t mangle -D PREROUTING -j "$CHAIN_IN" 2>/dev/null; do :; done
+    while iptables -t mangle -D OUTPUT -j "$CHAIN_OUT" 2>/dev/null; do :; done
+    iptables -t mangle -F "$CHAIN_IN" 2>/dev/null
+    iptables -t mangle -X "$CHAIN_IN" 2>/dev/null
+    iptables -t mangle -F "$CHAIN_OUT" 2>/dev/null
+    iptables -t mangle -X "$CHAIN_OUT" 2>/dev/null
+
+    _n=1
+    while [ "$_n" -le "$MAX_UPLINKS" ]; do
+        _p=$((PRIO_BASE + _n))
+        # A previous run may have left duplicates; delete until none are left.
+        while ip rule del priority "$_p" 2>/dev/null; do :; done
+        ip route flush table $((TBL_BASE + _n)) 2>/dev/null
+        _n=$((_n + 1))
+    done
+}
+
+# --- setup -------------------------------------------------------------------
+
+# Uplinks worth pinning: up, with a gateway and an interface. A configured but
+# unplugged spare has no gateway and nothing to route to.
+usable_uplinks() {
+    uplinks | while IFS="$(printf '\t')" read -r _id _if _ip _gw _up _m; do
+        [ -n "$_id" ] && [ -n "$_if" ] && [ -n "$_gw" ] || continue
+        [ "$_up" = "true" ] || continue
+        printf '%s\t%s\t%s\t%s\n' "$_id" "$_if" "$_ip" "$_gw"
+    done
+}
+
+wanted() {
+    case "$WANPIN_MODE" in
+        off|0|no|false) return 1 ;;
+        on|1|yes|true)  return 0 ;;
+    esac
+    # auto: only worth doing with a second uplink to get confused between.
+    [ "$(usable_uplinks | wc -l | tr -d ' ')" -ge 2 ]
+}
+
+# Everything the installed rules depend on. `apply` runs once a minute off the
+# wan-link tick, and tearing the rules down and back up each time would open a
+# window — small, but once a minute, forever — where an established inbound
+# connection routes out of the wrong uplink.
+desired_sig() {
+    printf '%s|' "$WANPIN_MODE"
+    usable_uplinks | while IFS="$(printf '\t')" read -r _id _if _ip _gw; do
+        printf '%s:%s:%s;' "$_id" "$_if" "$_gw"
+    done
+}
+
+apply() {
+    _sig=$(desired_sig)
+    _old=$(cat "$SIGFILE" 2>/dev/null)
+    if [ "$_sig" = "$_old" ]; then
+        # The signature matching is not enough on its own: ndm on Keenetic (and
+        # any firewall reload) wipes our chains behind our back, so confirm the
+        # rules are really in the state the signature claims.
+        if wanted; then
+            installed && return 0
+        else
+            installed || return 0
+        fi
+    fi
+
+    clear_rules
+
+    if ! wanted; then
+        mkdir -p "$STATEDIR" 2>/dev/null
+        printf '%s' "$_sig" > "$SIGFILE" 2>/dev/null
+        log "apply: nothing to do (mode=$WANPIN_MODE)"
+        return 0
+    fi
+
+    iptables -t mangle -N "$CHAIN_IN" 2>/dev/null
+    iptables -t mangle -N "$CHAIN_OUT" 2>/dev/null
+
+    _count=0
+    usable_uplinks | while IFS="$(printf '\t')" read -r _id _if _ip _gw; do
+        _n=$(pin_index "$_id") || continue
+        _mk=$(mark_for "$_n")
+        _tbl=$((TBL_BASE + _n))
+        _prio=$((PRIO_BASE + _n))
+
+        ip route replace default via "$_gw" dev "$_if" table "$_tbl" 2>/dev/null
+        ip rule add fwmark "$_mk/$MASK" lookup "$_tbl" priority "$_prio" 2>/dev/null
+
+        # Stamp the connection on its first packet only; later packets of the
+        # same connection get the stored mark back from the restore below.
+        iptables -t mangle -A "$CHAIN_IN" -i "$_if" -m conntrack --ctstate NEW \
+            -j CONNMARK --set-xmark "$_mk/$MASK" 2>/dev/null
+        log "pin $_id -> iface=$_if mark=$_mk table=$_tbl gw=$_gw"
+    done
+
+    # Restore must come after the stamping rules: on the first packet the stamp
+    # writes the connmark and the restore copies it onto the packet.
+    iptables -t mangle -A "$CHAIN_IN" -j CONNMARK \
+        --restore-mark --nfmask "$MASK" --ctmask "$MASK" 2>/dev/null
+    # Locally generated replies (panel, wgserver, ACME) never pass PREROUTING;
+    # mangle OUTPUT is followed by a reroute check, so a mark set here still
+    # changes which uplink the packet leaves by.
+    iptables -t mangle -A "$CHAIN_OUT" -j CONNMARK \
+        --restore-mark --nfmask "$MASK" --ctmask "$MASK" 2>/dev/null
+
+    # Appended, not inserted: detour-meter owns PREROUTING positions 1-2 and
+    # marking after its counters is harmless — the routing decision happens
+    # after the whole table has run.
+    iptables -t mangle -A PREROUTING -j "$CHAIN_IN" 2>/dev/null
+    iptables -t mangle -A OUTPUT -j "$CHAIN_OUT" 2>/dev/null
+
+    _count=$(usable_uplinks | wc -l | tr -d ' ')
+    mkdir -p "$STATEDIR" 2>/dev/null
+    printf '%s' "$_sig" > "$SIGFILE" 2>/dev/null
+    log "apply: $_count uplinks pinned (mode=$WANPIN_MODE)"
+}
+
+# --- reporting ---------------------------------------------------------------
+
+installed() {
+    iptables -t mangle -S PREROUTING 2>/dev/null | grep -q -- "-j $CHAIN_IN"
+}
+
+# Strict reverse-path filtering silently drops inbound packets that arrive on
+# the "wrong" uplink, which looks exactly like this script not working.
+rp_strict() {
+    _out=""
+    [ "$(cat /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null)" = "1" ] && _out="all"
+    _ifs=$(usable_uplinks | while IFS="$(printf '\t')" read -r _id _if _ip _gw; do
+        if [ "$(cat "/proc/sys/net/ipv4/conf/$_if/rp_filter" 2>/dev/null)" = "1" ]; then
+            printf '%s ' "$_if"
+        fi
+    done)
+    _ifs=$(printf '%s' "$_ifs" | sed 's/  *$//')
+    if [ -n "$_ifs" ]; then
+        [ -n "$_out" ] && _out="$_out $_ifs" || _out="$_ifs"
+    fi
+    printf '%s' "$_out"
+}
+
+status_json() {
+    _pub=$(public_id)
+    _inst=false
+    installed && _inst=true
+    _arr=""
+    usable_uplinks | while IFS="$(printf '\t')" read -r _id _if _ip _gw; do
+        _n=$(pin_index "$_id") || continue
+        printf '{"id":%s,"iface":%s,"ip":%s,"gateway":%s,"mark":%s,"table":%s,"public":%s}\n' \
+            "$(json_str "$_id")" "$(json_str "$_if")" "$(json_str "$_ip")" \
+            "$(json_str "$_gw")" "$(json_str "$(mark_for "$_n")")" "$((TBL_BASE + _n))" \
+            "$([ "$_id" = "$_pub" ] && echo true || echo false)"
+    done > /tmp/.wanpin.$$ 2>/dev/null
+    _arr=$(tr '\n' ',' < /tmp/.wanpin.$$ | sed 's/,$//')
+    rm -f /tmp/.wanpin.$$
+
+    printf '{"ok":true,"mode":%s,"installed":%s,"public":%s,"rp_filter_strict":%s,"pins":[%s]}\n' \
+        "$(json_str "$WANPIN_MODE")" "$_inst" "$(json_str "$_pub")" \
+        "$(json_str "$(rp_strict)")" "$_arr"
+}
+
+# The uplink our public services should advertise. Defaults to the first usable
+# one, which is the lowest-metric uplink — the same one the default route uses.
+public_id() {
+    if [ -n "$PUBLIC_UPLINK" ]; then
+        if usable_uplinks | cut -f1 | grep -qx "$PUBLIC_UPLINK"; then
+            printf '%s' "$PUBLIC_UPLINK"
+            return 0
+        fi
+    fi
+    usable_uplinks | head -1 | cut -f1
+}
+
+public_ip() {
+    _p=$(public_id)
+    [ -n "$_p" ] || return 1
+    usable_uplinks | awk -v id="$_p" -F"\t" '$1 == id { print $3; exit }'
+}
+
+case "${1:-status}" in
+    apply)  apply ;;
+    clear)  clear_rules; rm -f "$SIGFILE" 2>/dev/null; log "cleared" ;;
+    status) status_json ;;
+    public) public_id ;;
+    public-ip) public_ip ;;
+    set-public)
+        [ -n "$2" ] || { echo '{"ok":false,"error":"no uplink"}'; exit 0; }
+        if ! uplinks | cut -f1 | grep -qx "$2"; then
+            echo '{"ok":false,"error":"unknown uplink"}'
+            exit 0
+        fi
+        set_conf PUBLIC_UPLINK "$2"
+        PUBLIC_UPLINK="$2"
+        log "public uplink set to $2"
+        status_json
+        ;;
+    set-mode)
+        case "$2" in
+            auto|on|off) ;;
+            *) echo '{"ok":false,"error":"bad mode"}'; exit 0 ;;
+        esac
+        set_conf WANPIN_MODE "$2"
+        WANPIN_MODE="$2"
+        apply
+        status_json
+        ;;
+    *)
+        echo "usage: detour-wanpin {apply|clear|status|public|public-ip|set-public <id>|set-mode auto|on|off}" >&2
+        exit 2
+        ;;
+esac

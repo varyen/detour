@@ -411,4 +411,12 @@ if [ -x /opt/sbin/detour-meter ] && [ -f /tmp/detour-meter.state ]; then
     /opt/sbin/detour-meter install >/dev/null 2>&1
 fi
 
+# Reply-routing по аплинкам. В отличие от счётчиков эти цепочки решают, каким
+# каналом уйдёт ответ, поэтому их потеря — не косметика: проброс портов и
+# HTTPS-панель начнут отвечать не с того адреса. Скрипт сам решает, нужен ли он
+# (при одном канале ничего не ставит), так что вызываем безусловно.
+if [ -x /opt/sbin/detour-wanpin ]; then
+    /opt/sbin/detour-wanpin apply >/dev/null 2>&1
+fi
+
 exit 0

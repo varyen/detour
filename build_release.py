@@ -146,6 +146,10 @@ PANEL_FILES = [
     # Публикация LAN-сервисов наружу (HTTPS-реверс-прокси на nginx / DNAT через uci).
     (("router_files", "detour-portmap"), "usr/sbin/detour-portmap", 0o755),
     (("router_files", "detour-wan-link"), "usr/sbin/detour-wan-link", 0o755),
+    # Ответ на входящее соединение уходит тем же каналом, что и пришёл (connmark
+    # + таблица на аплинк). Без него балансировка kmwan ломает проброс портов,
+    # HTTPS-панель и продление сертификата. При одном канале — no-op.
+    (("router_files", "detour-wanpin"), "usr/sbin/detour-wanpin", 0o755),
     (("router_files", "detour-hosts"), "usr/sbin/detour-hosts", 0o755),
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
     # Managed RU-subnet block of the all-except direct list (own file + refresher).
@@ -592,6 +596,11 @@ echo "=== detour prerm start pid=$$ args:$* ==="
 # Drop the dnsmasq addn-hosts snippet (on a full removal it must not linger; on
 # upgrade the new postinst's `start` re-applies it from the preserved config).
 /etc/init.d/detour-hosts stop >/dev/null 2>&1
+
+# Снять reply-routing по аплинкам: ip rule и таблицы маршрутизации живут вне
+# пакета и после удаления остались бы висеть, отправляя помеченный трафик в
+# пустоту.
+[ -x /usr/sbin/detour-wanpin ] && /usr/sbin/detour-wanpin clear >/dev/null 2>&1
 
 # Strip our cron entries (the postinst of the new version will re-add them
 # during upgrade; on a full removal they're correctly gone).

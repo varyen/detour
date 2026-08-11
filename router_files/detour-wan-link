@@ -1,24 +1,43 @@
 #!/bin/sh
-# detour-wan-link — monitor the negotiated WAN Ethernet speed and warn when the
-# physical uplink comes up SLOWER THAN THE PORT ITSELF CAN DO. This is not the
-# same failure mode as a wedged offload engine: when the WAN PHY negotiates
-# below its capability, no software kick can restore the speed until the cable /
-# peer port / copper path is fixed.
+# detour-wan-link — watch every WAN uplink: the negotiated Ethernet speed and
+# whether the uplink is carrying traffic at all.
 #
-# The reference speed is NOT a hardcoded gigabit: plenty of routers (many
-# Keenetic models, older Fast-Ethernet boxes) top out at 100 Mbps, and there
-# 100 Mbps is perfect health, not a fault. The port ceiling is resolved as:
+# Two distinct failure modes are reported, and they need different reactions:
+#
+#   1) The physical link comes up SLOWER THAN THE PORT ITSELF CAN DO. This is
+#      not a wedged offload engine: when the PHY negotiates below its
+#      capability, no software kick restores the speed until the cable / peer
+#      port / copper path is fixed.
+#   2) A configured uplink is down entirely. With a second uplink present that
+#      is survivable — traffic moves to the remaining one — but the user still
+#      wants to know, because they are now without a spare.
+#
+# The reference speed for (1) is NOT a hardcoded gigabit: plenty of routers
+# (many Keenetic models, older Fast-Ethernet boxes) top out at 100 Mbps, and
+# there 100 Mbps is perfect health, not a fault. The port ceiling is resolved
+# as:
 #   1) WAN_LINK_MAX_MBPS in detour.conf (manual override),
 #   2) ethtool "Supported link modes" of our own PHY,
-#   3) the highest speed ever observed on this router (learned, persisted),
+#   3) the highest speed ever observed on this port (learned, persisted),
 # and if none of those is known we stay silent instead of crying wolf. A peer
 # that only advertises 100 Mbps is reported as a peer limit, not as our fault.
 # Set WAN_LINK_MONITOR=off in detour.conf to switch the whole check off.
+#
+# Multi-uplink notes. `status` still emits the flat single-uplink object it
+# always did (describing the primary uplink), so older panels keep working
+# unchanged; the per-uplink detail rides along in a new "uplinks" array inside
+# that same object, which means the CGI needs no change to pass it through.
+# Per-uplink edge-trigger state lives in one small KEY=VALUE file per uplink
+# under $STATEDIR — re-parsing a JSON array in ash on every tick is not worth
+# the pain, and a single shared boolean cannot express "uplink A degraded while
+# uplink B is fine".
 
 DETOUR_DIR=/etc/detour
 STATE=/var/state/detour-wan-link.json
+STATEDIR=/var/state/detour-wan
 LOG=/var/log/detour-wan-link.log
 PUSH_BIN=/usr/sbin/detour-push
+WANPIN_BIN=/usr/sbin/detour-wanpin
 PLATFORM=openwrt
 ADVICE="Проверьте: 1) WAN-кабель 2) аплинк-порт ONU/модема/свитча 3) переходники, патч-панель и розетки"
 
@@ -27,8 +46,10 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
     DETOUR_DIR=/opt/etc/detour
     STATE=/opt/var/state/detour-wan-link.json
+    STATEDIR=/opt/var/state/detour-wan
     LOG=/opt/var/log/detour-wan-link.log
     PUSH_BIN=/opt/sbin/detour-push
+    WANPIN_BIN=/opt/sbin/detour-wanpin
     mkdir -p /opt/var/state /opt/var/log 2>/dev/null
 fi
 
@@ -37,18 +58,74 @@ fi
 NOW=$(date +%s 2>/dev/null)
 [ -n "$NOW" ] || NOW=0
 
-log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
-json_str() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"; }
+MEMBERS_CACHE="$STATEDIR/members"
+MEMBERS_TTL=60
 
+log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+
+# Escaping via sed+tr costs three forks per call. With one uplink that was
+# noise; with a dozen fields per uplink it became the single most expensive
+# thing this script does on the panel's poll path. Almost every value we emit
+# (interface names, addresses, "full", "up", the Russian diagnosis strings) has
+# nothing to escape, so check first and only pay for the pipeline when it is
+# actually needed.
+JSON_CTL=$(printf '\n\r\t')
+json_str() {
+    case "$1" in
+        *\\*|*\"*|*[$JSON_CTL]*)
+            printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"
+            ;;
+        *)
+            printf '"%s"' "$1"
+            ;;
+    esac
+}
+
+num_or_zero() {
+    case "$1" in
+        ''|*[!0-9]*) printf '0' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# --- ubus / uci probes -------------------------------------------------------
+
+# One `ubus call` per uplink is enough for every field we need, but ash has no
+# associative arrays to cache it in, so callers that want several fields should
+# grab the blob once via ubus_status and feed it to ubus_pick.
+ubus_status() {
+    [ "$PLATFORM" = "openwrt" ] || return 1
+    ubus call "network.interface.$1" status 2>/dev/null
+}
+
+ubus_pick() {
+    printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
+}
+
+ubus_pick_num() {
+    printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" | head -1
+}
+
+ubus_pick_bool() {
+    printf '%s' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p" | head -1
+}
+
+# Back-compat wrapper: the old single-WAN helper, still used for the primary.
 ubus_field() {
-    _field="$1"
-    ubus call network.interface.wan status 2>/dev/null | \
-        sed -n "s/.*\"$_field\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
+    ubus_pick "$(ubus_status wan)" "$1"
 }
 
 default_route_dev() {
     ip route show default 2>/dev/null | awk '/^default /{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
 }
+
+# Every device carrying a default route. Under a load balancer there can be
+# more than one, so membership — not equality — decides who is "active".
+default_route_devs() {
+    ip route show default 2>/dev/null | awk '/^default /{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}'
+}
+
+# --- interface geometry (unchanged from the single-WAN version) --------------
 
 iface_speed() {
     _sp=$(cat "/sys/class/net/$1/speed" 2>/dev/null)
@@ -139,13 +216,17 @@ fallback_phy_iface() {
     unique_phy_candidate 1 || unique_phy_candidate 0
 }
 
+# WAN_IF / WAN_PHY_IF are single-WAN escape hatches from the days when there was
+# exactly one uplink to describe, so they only apply when we still find exactly
+# one. With several uplinks discovery is authoritative and a single global
+# override could not say which one it meant anyway.
 resolve_phy_iface() {
-    [ -n "$WAN_PHY_IF" ] && {
+    _orig="$1"
+    [ -n "$WAN_PHY_IF" ] && [ "$SINGLE_UPLINK" = "1" ] && {
         printf '%s' "$WAN_PHY_IF"
         return 0
     }
-    _orig="$1"
-    _cur="$1"
+    _cur="$_orig"
     _hops=0
     while [ -n "$_cur" ] && [ "$_hops" -lt 6 ]; do
         if iface_speed "$_cur" >/dev/null 2>&1; then
@@ -197,122 +278,387 @@ ethtool_caps() {
     END { print sup " " par }'
 }
 
-num_or_zero() {
-    case "$1" in
-        ''|*[!0-9]*) printf '0' ;;
-        *) printf '%s' "$1" ;;
-    esac
+# --- uplink discovery --------------------------------------------------------
+
+# GL.iNet ships its own multi-WAN manager (kmwan, a kernel module — not mwan3),
+# and its member list is the most faithful description of "every uplink this
+# router is allowed to use", complete with metric and weight. IPv6 members and
+# administratively disabled ones are not uplinks for our purposes.
+#
+# The whole config is parsed in ONE `uci show`: a `uci -q get` per option costs a
+# fork each, and with eight members that alone took longer than everything else
+# this script does put together.
+#
+# Emits "metric|interface|weight" records.
+kmwan_records() {
+    [ -f /etc/config/kmwan ] || return 1
+    uci show kmwan 2>/dev/null | awk '
+    {
+        eq = index($0, "=")
+        if (eq == 0) next
+        lhs = substr($0, 1, eq - 1)
+        val = substr($0, eq + 1)
+        gsub(/^'"'"'|'"'"'$/, "", val)
+        # "\\." and not "." — awk treats a multi-char separator as a regex, and
+        # a bare dot would match every character.
+        if (split(lhs, p, "\\.") < 3 || p[1] != "kmwan") next
+        sec = p[2]; opt = p[3]
+        if (opt == "interface")      { iface[sec] = val; seen[sec] = 1 }
+        else if (opt == "metric")    metric[sec] = val
+        else if (opt == "weight")    weight[sec] = val
+        else if (opt == "addr_type") atype[sec] = val
+        else if (opt == "disabled")  dis[sec] = val
+    }
+    END {
+        for (s in seen) {
+            if (atype[s] != "4") continue
+            if (dis[s] == "1") continue
+            print (metric[s] == "" ? 999 : metric[s]) "|" iface[s] "|" (weight[s] == "" ? 0 : weight[s])
+        }
+    }'
 }
 
-current_wan_iface() {
-    [ -n "$WAN_IF" ] && { printf '%s' "$WAN_IF"; return 0; }
+# Stock OpenWrt (and GL boxes without kmwan, e.g. older Flint): whatever the
+# firewall calls the wan zone is the uplink set. Only reached when kmwan is
+# absent, so the per-interface `uci get` forks here are not on the hot path.
+fw_zone_records() {
+    _i=0
+    _nets=""
+    while [ "$_i" -lt 24 ]; do
+        _zn=$(uci -q get "firewall.@zone[$_i].name" 2>/dev/null)
+        [ -n "$_zn" ] || break
+        if [ "$_zn" = "wan" ]; then
+            _nets=$(uci -q get "firewall.@zone[$_i].network" 2>/dev/null)
+            break
+        fi
+        _i=$((_i + 1))
+    done
+    [ -n "$_nets" ] || return 1
+    for _n in $_nets; do
+        _m=$(uci -q get "network.$_n.metric" 2>/dev/null)
+        printf '%s|%s|0\n' "${_m:-999}" "$_n"
+    done
+}
+
+# A logical interface counts as an uplink only if netifd actually knows about
+# it. `available:false` is what a never-configured placeholder looks like (on a
+# GL box the unused wwan/tethering slots sit there permanently), whereas a
+# configured-but-unplugged uplink reports available:true, up:false — exactly the
+# one we must keep showing, because that is the spare going missing.
+uplink_is_real() {
+    _st=$(ubus_status "$1")
+    [ -n "$_st" ] || return 1
+    [ "$(ubus_pick_bool "$_st" available)" = "true" ] || return 1
+    case "$(ubus_pick "$_st" proto)" in
+        *v6|*6) return 1 ;;
+    esac
+    return 0
+}
+
+# Which uplinks EXIST changes only when the user reconfigures one, but `status`
+# is on the panel's poll path — so the expensive half (parsing uci, asking
+# netifd whether each candidate is real) is cached for MEMBERS_TTL seconds.
+# Everything that can actually change between polls — up/down, carrier, speed,
+# address — is always read fresh in collect_uplink. `tick` refreshes the cache
+# unconditionally, so a reconfigured uplink shows up within one tick regardless.
+members_fresh() {
+    [ -f "$MEMBERS_CACHE" ] || return 1
+    _ts=$(head -1 "$MEMBERS_CACHE" 2>/dev/null)
+    case "$_ts" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$((NOW - _ts))" -lt "$MEMBERS_TTL" ] 2>/dev/null
+}
+
+refresh_members() {
+    [ "$PLATFORM" = "openwrt" ] || return 0
+    _recs=$(kmwan_records)
+    [ -n "$_recs" ] || _recs=$(fw_zone_records)
+    [ -n "$_recs" ] || _recs="999|wan|0"
+    mkdir -p "$STATEDIR" 2>/dev/null
+    {
+        printf '%s\n' "$NOW"
+        printf '%s\n' "$_recs" | sed '/^$/d' | sort -t'|' -k1,1n | \
+            while IFS='|' read -r _m _id _w; do
+                [ -n "$_id" ] || continue
+                # `if` and not `&&`: the loop's exit status is the last command
+                # it ran, and a trailing non-uplink (a GL box lists unused
+                # wwan/tethering slots last, by metric) would make the whole
+                # redirect block "fail" and skip the commit below.
+                if uplink_is_real "$_id"; then
+                    printf '%s|%s|%s\n' "$_id" "$_m" "$_w"
+                fi
+            done
+    } > "$MEMBERS_CACHE.tmp" 2>/dev/null && mv "$MEMBERS_CACHE.tmp" "$MEMBERS_CACHE" 2>/dev/null
+}
+
+# KeeneticOS has no ubus and ndmc is frequently not reachable from the Entware
+# shell (the same caveat detour-cert-preflight.sh documents), so uplink
+# discovery there is best-effort: whoever holds a default route is an uplink.
+# That finds the channels actually in use, and misses a configured-but-idle
+# spare — honest degradation rather than a wrong answer. Metric comes off the
+# route itself; there is no weight to speak of.
+discover_uplinks_keenetic() {
+    ip route show default 2>/dev/null | awk '
+        /^default /{
+            d = ""; m = 999
+            for (i = 1; i <= NF; i++) {
+                if ($i == "dev")    d = $(i + 1)
+                if ($i == "metric") m = $(i + 1)
+            }
+            if (d != "" && !(d in seen)) { seen[d] = 1; print m "|" d "|0" }
+        }' | sort -t'|' -k1,1n | while IFS='|' read -r _m _d _w; do
+            printf '%s|%s|%s\n' "$_d" "$_m" "$_w"
+        done
+}
+
+# Emits "id|metric|weight" records, lowest metric first.
+discover_uplinks() {
     if [ "$PLATFORM" = "openwrt" ]; then
-        _v=$(ubus_field l3_device)
-        [ -n "$_v" ] && { printf '%s' "$_v"; return 0; }
-        _v=$(ubus_field device)
-        [ -n "$_v" ] && { printf '%s' "$_v"; return 0; }
-        _v=$(uci -q get network.wan.device 2>/dev/null || uci -q get network.wan.ifname 2>/dev/null)
-        [ -n "$_v" ] && { printf '%s' "$_v"; return 0; }
+        members_fresh || refresh_members
+        _list=$(tail -n +2 "$MEMBERS_CACHE" 2>/dev/null)
+    else
+        _list=$(discover_uplinks_keenetic)
     fi
-    _v=$(default_route_dev)
-    [ -n "$_v" ] && printf '%s' "$_v"
+    if [ -z "$_list" ]; then
+        _list=$(default_route_devs | sed '/^$/d' | sort -u | while read -r _d; do
+            printf '%s|999|0\n' "$_d"
+        done)
+    fi
+    printf '%s\n' "$_list" | sed '/^$/d'
 }
 
-read_prev_best() {
-    [ -f "$STATE" ] || { printf '0'; return 0; }
-    _b=$(sed -n 's/.*"best_speed_mbps"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$STATE" 2>/dev/null | head -1)
-    num_or_zero "$_b"
+# Human label for the panel. The logical names OpenWrt uses are stable enough to
+# map directly; anything unrecognised falls back to the raw name rather than a
+# guess.
+uplink_label() {
+    case "$1" in
+        wan)        printf 'Основной' ;;
+        secondwan)  printf 'Второй' ;;
+        wwan)       printf 'Wi-Fi репитер' ;;
+        tethering)  printf 'USB-модем' ;;
+        modem*)     printf 'Мобильный' ;;
+        *)          printf '%s' "$1" ;;
+    esac
 }
 
-collect_live() {
-    WL_SUPPORTED=false
-    WL_DEGRADED=false
-    WL_WAN_IF=$(current_wan_iface)
-    WL_PHY_IF=$(resolve_phy_iface "$WL_WAN_IF")
-    WL_SPEED=0
-    WL_PARTNER=0
-    WL_PORT_MAX=0
-    WL_EXPECTED=0
-    WL_BEST=$(read_prev_best)
-    WL_PEER_LIMITED=false
-    WL_DUPLEX=""
-    WL_OPERSTATE=""
-    WL_CARRIER=0
-    WL_DIAGNOSIS=""
+# --- per-uplink edge-trigger state ------------------------------------------
 
-    # Kill switch for anyone who does not want the check at all.
-    case "$WAN_LINK_MONITOR" in
-        off|0|no|false)
-            WL_DIAGNOSIS="Мониторинг WAN-линка выключен (WAN_LINK_MONITOR)"
-            return 0
-            ;;
+# One tiny KEY=VALUE file per uplink. Sourcing shell is cheaper and far less
+# fragile in ash than digging a specific object out of a JSON array.
+state_path() {
+    printf '%s/%s' "$STATEDIR" "$(printf '%s' "$1" | sed 's/[^A-Za-z0-9_.-]/_/g')"
+}
+
+state_get() {
+    _f=$(state_path "$1")
+    [ -f "$_f" ] || return 1
+    sed -n "s/^$2=//p" "$_f" 2>/dev/null | tail -1
+}
+
+state_put() {
+    mkdir -p "$STATEDIR" 2>/dev/null
+    _f=$(state_path "$1")
+    printf 'BEST=%s\nDEGRADED=%s\nUP=%s\n' "$2" "$3" "$4" > "$_f" 2>/dev/null
+}
+
+# --- collect one uplink ------------------------------------------------------
+
+# Fills the U_* globals. Kept as globals rather than a printed record because
+# there are a dozen fields and ash gives us no better option.
+# Takes one "id|metric|weight" record from discover_uplinks.
+collect_uplink() {
+    U_ID=${1%%|*}
+    _rest=${1#*|}
+    U_METRIC=$(num_or_zero "${_rest%%|*}")
+    U_WEIGHT=$(num_or_zero "${_rest##*|}")
+    U_LABEL=$(uplink_label "$U_ID")
+    U_IFACE=""
+    U_PROTO=""
+    U_IP=""
+    U_GW=""
+    U_UP=false
+    U_ACTIVE=false
+    U_SPEED=0
+    U_PARTNER=0
+    U_PORT_MAX=0
+    U_EXPECTED=0
+    U_PEER_LIMITED=false
+    U_DEGRADED=false
+    U_DUPLEX=""
+    U_OPERSTATE=""
+    U_CARRIER=0
+    U_DIAGNOSIS=""
+
+    if [ "$PLATFORM" = "openwrt" ]; then
+        _st=$(ubus_status "$U_ID")
+        U_IFACE=$(ubus_pick "$_st" l3_device)
+        [ -n "$U_IFACE" ] || U_IFACE=$(ubus_pick "$_st" device)
+        [ -n "$U_IFACE" ] || U_IFACE=$(uci -q get "network.$U_ID.device" 2>/dev/null)
+        U_PROTO=$(ubus_pick "$_st" proto)
+        U_IP=$(ubus_pick "$_st" address)
+        U_GW=$(ubus_pick "$_st" nexthop)
+        # The live metric beats the configured one when netifd has it.
+        _m=$(ubus_pick_num "$_st" metric)
+        [ -n "$_m" ] && U_METRIC=$_m
+        [ "$(ubus_pick_bool "$_st" up)" = "true" ] && U_UP=true
+    else
+        # On Keenetic the id IS the device — discovery works off routes.
+        U_IFACE="$U_ID"
+        U_GW=$(ip route show default 2>/dev/null | awk -v d="$U_ID" '/^default /{g="";for(i=1;i<=NF;i++){if($i=="via")g=$(i+1); if($i=="dev"&&$(i+1)==d){print g; exit}}}')
+        U_IP=$(ip -4 addr show dev "$U_ID" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -1)
+        [ -n "$U_IP" ] && U_UP=true
+    fi
+
+    [ -n "$U_IFACE" ] || U_IFACE="$U_ID"
+    # Same single-WAN-only scope as WAN_PHY_IF, see resolve_phy_iface.
+    [ -n "$WAN_IF" ] && [ "$SINGLE_UPLINK" = "1" ] && U_IFACE="$WAN_IF"
+    U_PHY=$(resolve_phy_iface "$U_IFACE")
+
+    case " $ACTIVE_DEVS " in
+        *" $U_IFACE "*) U_ACTIVE=true ;;
     esac
 
-    [ -n "$WL_PHY_IF" ] || {
-        WL_DIAGNOSIS="Не удалось определить WAN интерфейс"
+    U_BEST=$(num_or_zero "$(state_get "$U_ID" BEST)")
+
+    [ -n "$U_PHY" ] || {
+        U_DIAGNOSIS="Не удалось определить интерфейс канала"
         return 0
     }
 
-    WL_DUPLEX=$(iface_duplex "$WL_PHY_IF")
-    WL_OPERSTATE=$(iface_operstate "$WL_PHY_IF")
-    WL_CARRIER=$(iface_carrier "$WL_PHY_IF")
-    _sp=$(iface_speed "$WL_PHY_IF")
-    if [ -n "$_sp" ]; then
-        WL_SPEED=$_sp
-        WL_SUPPORTED=true
+    U_OPERSTATE=$(iface_operstate "$U_PHY")
+    U_CARRIER=$(iface_carrier "$U_PHY")
+
+    # No carrier means no negotiation happened, so every ethtool-derived number
+    # would be stale or meaningless — and skipping the call keeps the hot path
+    # cheaper than the old single-WAN version was for a down link.
+    #
+    # speed/duplex must be zeroed rather than reported: a VLAN sub-interface
+    # inherits them from its parent in sysfs, so an unplugged uplink riding a
+    # live switch port cheerfully claims the switch's 10 Gbit.
+    if [ "$U_CARRIER" != "1" ]; then
+        U_SPEED=0
+        U_DUPLEX=""
+        U_PORT_MAX=$(num_or_zero "$WAN_LINK_MAX_MBPS")
+        [ "$U_PORT_MAX" -le 0 ] 2>/dev/null && U_PORT_MAX=$U_BEST
+        U_DIAGNOSIS="Линк канала «$U_LABEL» сейчас down"
+        return 0
     fi
-    _caps=$(ethtool_caps "$WL_PHY_IF")
-    WL_PARTNER=$(num_or_zero "$(printf '%s' "$_caps" | awk '{print $2}')")
+
+    U_DUPLEX=$(iface_duplex "$U_PHY")
+    _sp=$(iface_speed "$U_PHY")
+    [ -n "$_sp" ] && U_SPEED=$_sp
+
+    _caps=$(ethtool_caps "$U_PHY")
+    U_PARTNER=$(num_or_zero "$(printf '%s' "$_caps" | awk '{print $2}')")
 
     # Learn the ceiling from what this port has actually reached. On a 100 Mbps
     # router this stays 100 forever — exactly the point: no false «просело» alarm.
-    [ "$WL_CARRIER" = "1" ] && [ "$WL_SPEED" -gt "$WL_BEST" ] 2>/dev/null && WL_BEST=$WL_SPEED
+    [ "$U_SPEED" -gt "$U_BEST" ] 2>/dev/null && U_BEST=$U_SPEED
 
-    WL_PORT_MAX=$(num_or_zero "$WAN_LINK_MAX_MBPS")
-    if [ "$WL_PORT_MAX" -le 0 ] 2>/dev/null; then
-        WL_PORT_MAX=$(num_or_zero "$(printf '%s' "$_caps" | awk '{print $1}')")
+    U_PORT_MAX=$(num_or_zero "$WAN_LINK_MAX_MBPS")
+    if [ "$U_PORT_MAX" -le 0 ] 2>/dev/null; then
+        U_PORT_MAX=$(num_or_zero "$(printf '%s' "$_caps" | awk '{print $1}')")
     fi
-    [ "$WL_PORT_MAX" -le 0 ] 2>/dev/null && WL_PORT_MAX=$WL_BEST
+    [ "$U_PORT_MAX" -le 0 ] 2>/dev/null && U_PORT_MAX=$U_BEST
 
     # What this link can realistically negotiate: our port, capped by what the
     # peer advertises. A peer that only does 100 Mbps is its own limit, not a
     # fault of our cable — report it, but do not raise an alarm about it.
-    WL_EXPECTED=$WL_PORT_MAX
-    if [ "$WL_PARTNER" -gt 0 ] 2>/dev/null && [ "$WL_PORT_MAX" -gt 0 ] 2>/dev/null \
-        && [ "$WL_PARTNER" -lt "$WL_PORT_MAX" ]; then
-        WL_EXPECTED=$WL_PARTNER
-        WL_PEER_LIMITED=true
+    U_EXPECTED=$U_PORT_MAX
+    if [ "$U_PARTNER" -gt 0 ] 2>/dev/null && [ "$U_PORT_MAX" -gt 0 ] 2>/dev/null \
+        && [ "$U_PARTNER" -lt "$U_PORT_MAX" ]; then
+        U_EXPECTED=$U_PARTNER
+        U_PEER_LIMITED=true
     fi
 
-    if [ "$WL_CARRIER" != "1" ]; then
-        WL_DIAGNOSIS="Линк WAN сейчас down"
-        return 0
-    fi
-    if [ "$WL_SPEED" -le 0 ] 2>/dev/null; then
-        WL_DIAGNOSIS="Скорость линка недоступна для $WL_PHY_IF"
-        return 0
-    fi
-    if [ "$WL_EXPECTED" -le 0 ] 2>/dev/null; then
-        WL_DIAGNOSIS="Не удалось определить максимум WAN-порта — проверка пропущена"
-        return 0
-    fi
-    if [ "$WL_SPEED" -lt "$WL_EXPECTED" ] 2>/dev/null; then
-        WL_DEGRADED=true
-        WL_DIAGNOSIS="WAN поднялся на ${WL_SPEED} Мбит/с вместо ${WL_EXPECTED}"
-    elif [ "$WL_PEER_LIMITED" = true ]; then
-        WL_DIAGNOSIS="Линк на максимуме соседнего порта: ${WL_SPEED} Мбит/с (порт роутера умеет ${WL_PORT_MAX})"
+    if [ "$U_SPEED" -le 0 ] 2>/dev/null; then
+        U_DIAGNOSIS="Скорость линка недоступна для $U_PHY"
+    elif [ "$U_EXPECTED" -le 0 ] 2>/dev/null; then
+        U_DIAGNOSIS="Не удалось определить максимум порта — проверка пропущена"
+    elif [ "$U_SPEED" -lt "$U_EXPECTED" ] 2>/dev/null; then
+        U_DEGRADED=true
+        U_DIAGNOSIS="Канал «$U_LABEL» поднялся на ${U_SPEED} Мбит/с вместо ${U_EXPECTED}"
+    elif [ "$U_PEER_LIMITED" = true ]; then
+        U_DIAGNOSIS="Линк на максимуме соседнего порта: ${U_SPEED} Мбит/с (порт роутера умеет ${U_PORT_MAX})"
     else
-        WL_DIAGNOSIS="WAN линк в норме: ${WL_SPEED} Мбит/с — максимум для этого порта"
+        U_DIAGNOSIS="Канал «$U_LABEL» в норме: ${U_SPEED} Мбит/с — максимум для этого порта"
     fi
 }
 
+uplink_json() {
+    printf '{"id":%s,"label":%s,"iface":%s,"phy_if":%s,"active":%s,"up":%s,' \
+        "$(json_str "$U_ID")" "$(json_str "$U_LABEL")" "$(json_str "$U_IFACE")" \
+        "$(json_str "$U_PHY")" "$U_ACTIVE" "$U_UP"
+    printf '"proto":%s,"ip":%s,"gateway":%s,"metric":%s,"weight":%s,' \
+        "$(json_str "$U_PROTO")" "$(json_str "$U_IP")" "$(json_str "$U_GW")" \
+        "${U_METRIC:-0}" "${U_WEIGHT:-0}"
+    printf '"carrier":%s,"speed_mbps":%s,"duplex":%s,"operstate":%s,' \
+        "${U_CARRIER:-0}" "${U_SPEED:-0}" "$(json_str "$U_DUPLEX")" "$(json_str "$U_OPERSTATE")"
+    printf '"partner_max_mbps":%s,"port_max_mbps":%s,"expected_mbps":%s,"best_speed_mbps":%s,' \
+        "${U_PARTNER:-0}" "${U_PORT_MAX:-0}" "${U_EXPECTED:-0}" "${U_BEST:-0}"
+    printf '"peer_limited":%s,"degraded":%s,"diagnosis":%s}' \
+        "${U_PEER_LIMITED:-false}" "${U_DEGRADED:-false}" "$(json_str "$U_DIAGNOSIS")"
+}
+
+# --- whole-router collection -------------------------------------------------
+
+collect_all() {
+    WL_MONITOR_OFF=false
+    case "$WAN_LINK_MONITOR" in
+        off|0|no|false) WL_MONITOR_OFF=true ;;
+    esac
+
+    ACTIVE_DEVS=$(default_route_devs | tr '\n' ' ')
+    UPLINKS=$(discover_uplinks | tr '\n' ' ')
+    UPLINK_COUNT=$(printf '%s' "$UPLINKS" | wc -w | tr -d ' ')
+    [ "$UPLINK_COUNT" = "1" ] && SINGLE_UPLINK=1 || SINGLE_UPLINK=0
+}
+
+# The flat, historical shape: identical field set to the single-WAN version so
+# that an older panel reading wan_link.* sees exactly what it used to. It
+# describes the first uplink carrying a default route, falling back to the first
+# discovered one — chosen during the same pass that builds the array, so the
+# hot path walks the uplinks exactly once.
+# Expects collect_all to have run.
 write_json() {
-    printf '{"ok":true,"supported":%s,"wan_if":%s,"phy_if":%s,"speed_mbps":%s,"duplex":%s,"operstate":%s,"carrier":%s,"partner_max_mbps":%s,"port_max_mbps":%s,"expected_mbps":%s,"best_speed_mbps":%s,"peer_limited":%s,"degraded":%s,"diagnosis":%s,"advice":%s,"last_ts":%s}\n' \
-        "$WL_SUPPORTED" "$(json_str "$WL_WAN_IF")" "$(json_str "$WL_PHY_IF")" \
-        "${WL_SPEED:-0}" "$(json_str "$WL_DUPLEX")" "$(json_str "$WL_OPERSTATE")" \
-        "${WL_CARRIER:-0}" "${WL_PARTNER:-0}" "${WL_PORT_MAX:-0}" "${WL_EXPECTED:-0}" \
-        "${WL_BEST:-0}" "${WL_PEER_LIMITED:-false}" "$WL_DEGRADED" \
-        "$(json_str "$WL_DIAGNOSIS")" "$(json_str "$ADVICE")" "$NOW"
+    if [ "$WL_MONITOR_OFF" = true ]; then
+        printf '{"ok":true,"supported":false,"wan_if":"","phy_if":"","speed_mbps":0,"duplex":"","operstate":"","carrier":0,"partner_max_mbps":0,"port_max_mbps":0,"expected_mbps":0,"best_speed_mbps":0,"peer_limited":false,"degraded":false,"diagnosis":%s,"advice":%s,"multi":false,"count":0,"uplinks":[],"last_ts":%s}\n' \
+            "$(json_str "Мониторинг WAN-линка выключен (WAN_LINK_MONITOR)")" \
+            "$(json_str "$ADVICE")" "$NOW"
+        return 0
+    fi
+
+    _arr=""
+    _n=0
+    _p_supported=false
+    _p_fields=""
+    _p_locked=0
+    for _u in $UPLINKS; do
+        collect_uplink "$_u"
+        _j=$(uplink_json)
+        [ -n "$_arr" ] && _arr="$_arr,$_j" || _arr="$_j"
+        _n=$((_n + 1))
+        if [ "$_p_locked" != "1" ] && { [ "$U_ACTIVE" = true ] || [ -z "$_p_fields" ]; }; then
+            [ "$U_ACTIVE" = true ] && _p_locked=1
+            _p_supported=false
+            [ "${U_SPEED:-0}" -gt 0 ] 2>/dev/null && _p_supported=true
+            _p_fields=$(printf '"wan_if":%s,"phy_if":%s,"speed_mbps":%s,"duplex":%s,"operstate":%s,"carrier":%s,"partner_max_mbps":%s,"port_max_mbps":%s,"expected_mbps":%s,"best_speed_mbps":%s,"peer_limited":%s,"degraded":%s,"diagnosis":%s' \
+                "$(json_str "$U_IFACE")" "$(json_str "$U_PHY")" "${U_SPEED:-0}" \
+                "$(json_str "$U_DUPLEX")" "$(json_str "$U_OPERSTATE")" "${U_CARRIER:-0}" \
+                "${U_PARTNER:-0}" "${U_PORT_MAX:-0}" "${U_EXPECTED:-0}" "${U_BEST:-0}" \
+                "${U_PEER_LIMITED:-false}" "${U_DEGRADED:-false}" "$(json_str "$U_DIAGNOSIS")")
+        fi
+    done
+
+    if [ -z "$_p_fields" ]; then
+        _p_fields=$(printf '"wan_if":"","phy_if":"","speed_mbps":0,"duplex":"","operstate":"","carrier":0,"partner_max_mbps":0,"port_max_mbps":0,"expected_mbps":0,"best_speed_mbps":0,"peer_limited":false,"degraded":false,"diagnosis":%s' \
+            "$(json_str "Не удалось определить WAN интерфейс")")
+    fi
+
+    [ "$_n" -gt 1 ] && _multi=true || _multi=false
+    printf '{"ok":true,"supported":%s,%s,"advice":%s,"multi":%s,"count":%s,"uplinks":[%s],"last_ts":%s}\n' \
+        "$_p_supported" "$_p_fields" "$(json_str "$ADVICE")" "$_multi" "$_n" "$_arr" "$NOW"
 }
 
 write_state() {
@@ -320,45 +666,142 @@ write_state() {
     write_json > "$STATE"
 }
 
-read_prev_degraded() {
-    [ -f "$STATE" ] || { echo false; return 0; }
-    sed -n 's/.*"degraded"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$STATE" 2>/dev/null | head -1
+send_alert() {
+    [ -x "$PUSH_BIN" ] || return 0
+    "$PUSH_BIN" send "$1" "$2" >/dev/null 2>&1 || true
 }
 
-send_alert() {
-    _title="$1"
-    _body="$2"
-    [ -x "$PUSH_BIN" ] || return 0
-    "$PUSH_BIN" send "$_title" "$_body" >/dev/null 2>&1 || true
+# Names of the uplinks still carrying a default route, for the "traffic moved
+# to X" half of a down alert.
+surviving_uplinks() {
+    _out=""
+    for _rec in $UPLINKS; do
+        _sid=${_rec%%|*}
+        [ "$_sid" = "$1" ] && continue
+        _dev=""
+        if [ "$PLATFORM" = "openwrt" ]; then
+            _st=$(ubus_status "$_sid")
+            _dev=$(ubus_pick "$_st" l3_device)
+            [ -n "$_dev" ] || _dev=$(ubus_pick "$_st" device)
+        else
+            _dev="$_sid"
+        fi
+        case " $ACTIVE_DEVS " in
+            *" $_dev "*) [ -n "$_out" ] && _out="$_out, $(uplink_label "$_sid")" || _out="$(uplink_label "$_sid")" ;;
+        esac
+    done
+    printf '%s' "$_out"
 }
 
 tick() {
-    collect_live
-    _prev=$(read_prev_degraded)
-    [ -n "$_prev" ] || _prev=false
-    if [ "$WL_DEGRADED" = true ] && [ "$_prev" != true ]; then
-        log "WAN degraded: speed=${WL_SPEED} expected=${WL_EXPECTED} port_max=${WL_PORT_MAX} partner=${WL_PARTNER} iface=${WL_PHY_IF}"
-        send_alert "Detour: WAN линк просел до ${WL_SPEED} Мбит" \
-            "Kick offload не поможет. ${WL_DIAGNOSIS}. ${ADVICE}."
-    elif [ "$WL_DEGRADED" != true ] && [ "$_prev" = true ] \
-        && [ "$WL_SPEED" -gt 0 ] 2>/dev/null && [ "$WL_SPEED" -ge "${WL_EXPECTED:-0}" ] 2>/dev/null; then
-        log "WAN recovered: speed=${WL_SPEED} expected=${WL_EXPECTED} iface=${WL_PHY_IF}"
-        send_alert "Detour: WAN линк восстановлен" \
-            "WAN снова поднялся на ${WL_SPEED} Мбит (${WL_PHY_IF}) — это максимум для этого линка."
-    fi
+    # Unconditionally re-read membership: `status` may have been serving a
+    # cached list for up to MEMBERS_TTL, and the tick is where a newly
+    # configured or removed uplink should be noticed.
+    refresh_members
+    collect_all
+    [ "$WL_MONITOR_OFF" = true ] && { write_state; return 0; }
+
+    for _u in $UPLINKS; do
+        collect_uplink "$_u"
+
+        _known=1
+        [ -f "$(state_path "$U_ID")" ] || _known=0
+        _prev_deg=$(state_get "$U_ID" DEGRADED)
+        _prev_up=$(state_get "$U_ID" UP)
+        [ -n "$_prev_deg" ] || _prev_deg=false
+        [ -n "$_prev_up" ] || _prev_up=true
+
+        # First sighting of an uplink only seeds the baseline: alerting on it
+        # would fire for every uplink on a fresh install and after every reboot
+        # that clears /var/state.
+        if [ "$_known" = "1" ]; then
+            if [ "$U_UP" != true ] && [ "$_prev_up" = true ]; then
+                _alive=$(surviving_uplinks "$U_ID")
+                log "uplink down: $U_ID ($U_IFACE); surviving=${_alive:-none}"
+                if [ -n "$_alive" ]; then
+                    send_alert "Detour: канал «$U_LABEL» пропал" \
+                        "Трафик идёт через: ${_alive}. Резервного канала сейчас нет."
+                else
+                    send_alert "Detour: канал «$U_LABEL» пропал" \
+                        "Других живых каналов не осталось."
+                fi
+            elif [ "$U_UP" = true ] && [ "$_prev_up" != true ]; then
+                log "uplink up: $U_ID ($U_IFACE) ip=$U_IP"
+                send_alert "Detour: канал «$U_LABEL» вернулся" \
+                    "Адрес ${U_IP:-—}, линк ${U_SPEED} Мбит/с."
+            elif [ "$U_DEGRADED" = true ] && [ "$_prev_deg" != true ]; then
+                log "link degraded: $U_ID speed=$U_SPEED expected=$U_EXPECTED port_max=$U_PORT_MAX partner=$U_PARTNER iface=$U_PHY"
+                send_alert "Detour: канал «$U_LABEL» просел до ${U_SPEED} Мбит" \
+                    "Kick offload не поможет. ${U_DIAGNOSIS}. ${ADVICE}."
+            elif [ "$U_DEGRADED" != true ] && [ "$_prev_deg" = true ] \
+                && [ "$U_SPEED" -gt 0 ] 2>/dev/null && [ "$U_SPEED" -ge "${U_EXPECTED:-0}" ] 2>/dev/null; then
+                log "link recovered: $U_ID speed=$U_SPEED expected=$U_EXPECTED iface=$U_PHY"
+                send_alert "Detour: канал «$U_LABEL» восстановлен" \
+                    "Линк снова ${U_SPEED} Мбит (${U_PHY}) — это максимум для него."
+            fi
+        fi
+
+        state_put "$U_ID" "${U_BEST:-0}" "${U_DEGRADED:-false}" "${U_UP:-false}"
+    done
+
+    # Forget uplinks that no longer exist. A left-behind UP=true fires a bogus
+    # "канал пропал" on the day that id comes back — which is exactly what a
+    # renamed or reconfigured interface looks like.
+    _live=""
+    for _u in $UPLINKS; do
+        _live="$_live $(basename "$(state_path "${_u%%|*}")")"
+    done
+    for _f in "$STATEDIR"/*; do
+        [ -f "$_f" ] || continue
+        _b=$(basename "$_f")
+        [ "$_b" = "members" ] && continue
+        case " $_live " in
+            *" $_b "*) ;;
+            *) rm -f "$_f" 2>/dev/null ;;
+        esac
+    done
+
     write_state
+
+    # Reply-routing зависит ровно от того, что мы только что пересчитали: какие
+    # каналы живы и какие у них шлюзы. Своей строки в cron не заводим — тик и
+    # так ходит раз в минуту, а detour-wanpin сам сравнивает желаемое состояние
+    # с установленным и в подавляющем большинстве тиков не делает ничего.
+    [ -x "$WANPIN_BIN" ] && "$WANPIN_BIN" apply >/dev/null 2>&1
+    return 0
 }
 
 case "${1:-status}" in
     status)
-        collect_live
+        collect_all
         write_json
         ;;
     tick)
         tick
         ;;
+    list)
+        collect_all
+        for _u in $UPLINKS; do
+            collect_uplink "$_u"
+            printf '%s\t%s\t%s\tup=%s\tactive=%s\t%s Mbps\t%s\n' \
+                "$U_ID" "$U_LABEL" "$U_IFACE" "$U_UP" "$U_ACTIVE" "$U_SPEED" "${U_IP:-–}"
+        done
+        ;;
+    routes)
+        # Stable machine-readable view for detour-wanpin: it needs the gateway,
+        # which the human `list` does not carry. Order is discovery order, i.e.
+        # by metric, and that order defines the per-uplink mark index — so it
+        # must stay deterministic.
+        # id \t iface \t ip \t gateway \t up \t metric
+        collect_all
+        for _u in $UPLINKS; do
+            collect_uplink "$_u"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$U_ID" "$U_IFACE" "$U_IP" "$U_GW" "$U_UP" "${U_METRIC:-0}"
+        done
+        ;;
     *)
-        echo "usage: detour-wan-link {status|tick}" >&2
+        echo "usage: detour-wan-link {status|tick|list|routes}" >&2
         exit 2
         ;;
 esac
