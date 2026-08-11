@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import FlowBoard from "@/components/FlowBoard.vue";
+import TrafficChart from "@/components/overview/TrafficChart.vue";
 import TileCard from "@/components/TileCard.vue";
 import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
@@ -205,14 +206,31 @@ const activeHealth = computed(() => {
    профиль», а через день это уже история. */
 const SWITCH_SHOW_S = 86_400;
 
+/* Закрывается — но ключом служит САМО СОБЫТИЕ (метка времени + куда ушли), а не
+   факт «пользователь однажды нажал скрыть». Поэтому следующее авто-переключение
+   поднимет плашку снова: это новое событие с новым ключом. Скрыть их все разом
+   намеренно нельзя — иначе роутер молча сменит профиль, и объяснения «почему
+   активен не тот» не будет. */
+const SWITCH_DISMISS_KEY = "detour:switch-dismissed";
+const switchDismissed = ref(localStorage.getItem(SWITCH_DISMISS_KEY) ?? "");
+
 const autoSwitch = computed(() => {
   const sw = profiles.healthSwitch;
   if (!sw?.to || !sw.ts) return null;
   if (Math.floor(Date.now() / 1000) - sw.ts > SWITCH_SHOW_S) return null;
+  const key = `${sw.ts}:${sw.from ?? ""}>${sw.to}`;
+  if (switchDismissed.value === key) return null;
   const nameOf = (id?: string) =>
     (id && profiles.rows.find((r) => r.id === id)?.name) || id || "?";
-  return { from: nameOf(sw.from), to: nameOf(sw.to), when: fmtAgo(sw.ts) };
+  return { from: nameOf(sw.from), to: nameOf(sw.to), when: fmtAgo(sw.ts), key };
 });
+
+function dismissSwitch() {
+  const k = autoSwitch.value?.key;
+  if (!k) return;
+  switchDismissed.value = k;
+  localStorage.setItem(SWITCH_DISMISS_KEY, k);
+}
 
 const healthCounts = computed(() => {
   const rows = profiles.rows;
@@ -460,6 +478,7 @@ onBeforeUnmount(() => {
         }}.
       </p>
     </div>
+    <UiButton @click="dismissSwitch">Скрыть</UiButton>
   </div>
 
   <!-- Вышла новая версия — это единственная новость, ради которой на главной
@@ -519,6 +538,16 @@ onBeforeUnmount(() => {
         :external-ip="sb?.external_ip"
         :vpn-up="status.singboxRunning"
       />
+    </div>
+
+    <div
+      v-if="dash.isVisible('traffic')"
+      class="slot full"
+      :style="{ order: dash.orderOf('traffic') }"
+    >
+      <TileCard title="Трафик по лентам">
+        <TrafficChart />
+      </TileCard>
     </div>
 
     <div

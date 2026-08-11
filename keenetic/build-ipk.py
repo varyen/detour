@@ -78,6 +78,7 @@ FILES = [
     # detour-cron; на Keenetic качает базу через curl -4 — Entware wget-ssl не
     # умеет HTTPS к GitHub по IPv6. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-geo"), "opt/sbin/detour-geo", 0o755, True),
+    (os.path.join(ROUTER_FILES, "detour-trafficlog"), "opt/sbin/detour-trafficlog", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-bootstrap-install"), "opt/sbin/detour-bootstrap-install", 0o755, True),
     # Self-update (shared source, /opt shim for Keenetic): pulls detour-keenetic_*.ipk.
     (os.path.join(ROUTER_FILES, "detour-update"), "opt/sbin/detour-update", 0o755, True),
@@ -275,7 +276,7 @@ if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
 fi
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \
-    /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp /opt/sbin/detour-geo \
+    /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp /opt/sbin/detour-geo /opt/sbin/detour-trafficlog \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\

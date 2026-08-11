@@ -17,6 +17,7 @@ export interface DashTile {
 /** Каталог в порядке по умолчанию. Порядок здесь = порядок на чистой панели. */
 export const DASH_TILES: DashTile[] = [
   { id: "flow", title: "Поток трафика", hint: "схема: куда уходит трафик и в каких долях", wide: true },
+  { id: "traffic", title: "Трафик по лентам", hint: "график за сутки и за месяц: сколько ушло напрямую, через VPN и в обход DPI", wide: true },
   { id: "connection", title: "Активное подключение", hint: "какой VPN включён, автозапуск, старт и стоп", wide: true },
   { id: "scope", title: "Область действия", hint: "«Все через VPN» и UDP через VPN" },
   { id: "bypass", title: "Обход DPI", hint: "движок, стратегия, автозапуск" },

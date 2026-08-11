@@ -80,6 +80,7 @@ WANLINK_BIN="/usr/sbin/detour-wan-link"     # WAN PHY/link-speed monitor — war
 WANPIN_BIN="/usr/sbin/detour-wanpin"        # reply-routing по аплинкам — ответ уходит тем каналом, которым пришёл запрос
 WARP_BIN="/usr/sbin/detour-warp"            # Cloudflare WARP (последний хоп цепочки) — backs the warp_* actions
 METER_BIN="/usr/sbin/detour-meter"          # счётчики трафика по лентам — backs the traffic_counters action
+TRAFFICLOG_BIN="/usr/sbin/detour-trafficlog" # временной ряд трафика (cron) — backs the traffic_series action
 WARP_STATE="/var/state/detour-warp.json"    # ход регистрации WARP (пишет detour-warp; CGI её детачит)
 # Swap file (Keenetic/Entware only — /opt on a USB flash needs swap or the stack
 # gets OOM-killed). Managed via the S05swap init script; backs the swap_* actions.
@@ -174,6 +175,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     WARP_BIN="$OPT/sbin/detour-warp"
     WARP_STATE="$OPT/var/state/detour-warp.json"
     METER_BIN="$OPT/sbin/detour-meter"
+    TRAFFICLOG_BIN="$OPT/sbin/detour-trafficlog"
     SWAPFILE="$OPT/swapfile"
     SWAP_INITD="$OPT/etc/init.d/S05swap"
     SWAP_STATE="$OPT/var/state/detour-swap.json"
@@ -3129,6 +3131,28 @@ traffic_counters)
         fi
     else
         printf '{"ok":false,"supported":false,"error":"нет detour-meter"}'
+    fi
+    ;;
+
+# История трафика для графика. Ряд копит cron (detour-trafficlog), здесь только
+# отдача: `minute` — сутки поминутно из tmpfs, `hour` — месяц по часам с флеша.
+# Пустой ряд — не ошибка: сборщик мог стартовать минуту назад, панель это
+# показывает как «данные копятся», а не как поломку.
+traffic_series)
+    RANGE=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]range=\([^&]*\).*/\1/p' | head -1 | tr -cd 'a-z')
+    case "$RANGE" in
+        minute | hour) ;;
+        *) RANGE=minute ;;
+    esac
+    if [ -x "$TRAFFICLOG_BIN" ]; then
+        OUT=$("$TRAFFICLOG_BIN" series "$RANGE" 2>/dev/null)
+        if [ -n "$OUT" ]; then
+            echo "$OUT"
+        else
+            printf '{"ok":false,"supported":false,"error":"ряд недоступен"}'
+        fi
+    else
+        printf '{"ok":false,"supported":false,"error":"нет detour-trafficlog"}'
     fi
     ;;
 

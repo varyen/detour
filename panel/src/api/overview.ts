@@ -40,6 +40,17 @@ export const overview = {
   traffic: () =>
     requestJsonTolerant<TrafficLanes & { supported?: boolean }>("traffic_counters"),
 
+  /* История трафика для графика. Ряд копит cron на роутере, поэтому запрос
+     дешёвый и его можно звать при каждом открытии «Обзора». Пустой points —
+     не ошибка: сборщик мог стартовать только что. */
+  trafficSeries: (range: "minute" | "hour") =>
+    requestJsonTolerant<{
+      ok: boolean;
+      supported?: boolean;
+      step?: number;
+      points?: { ts: number; direct: number; vpn: number; bypass: number }[];
+    }>("traffic_series", { params: { range } }),
+
   allvpnOn: () =>
     requestJson<{ ok: boolean }>("allvpn_on", {
       method: "POST",

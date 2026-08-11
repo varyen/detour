@@ -57,21 +57,21 @@ const lanes = computed(() => [
     label: "Напрямую",
     detail: "мимо туннеля",
     share: props.direct,
-    color: "var(--faint)",
+    color: "var(--lane-direct)",
   },
   {
     key: "vpn",
     label: props.vpnUp ? `Через VPN → ${props.profileLabel}` : "VPN не запущен",
     detail: props.vpnScope,
     share: props.vpn,
-    color: "var(--accent)",
+    color: "var(--lane-vpn)",
   },
   {
     key: "bypass",
     label: `Обход DPI → ${props.bypassLabel}`,
     detail: props.bypassScope,
     share: props.bypass,
-    color: "var(--warn)",
+    color: "var(--lane-bypass)",
   },
 ]);
 </script>
@@ -168,9 +168,9 @@ const lanes = computed(() => [
     </ul>
 
     <div class="legend">
-      <div><i class="sw" style="background: var(--faint)"></i> Напрямую <b class="num">{{ pct(direct) }}</b></div>
-      <div><i class="sw" style="background: var(--accent)"></i> Через VPN <b class="num">{{ pct(vpn) }}</b></div>
-      <div><i class="sw" style="background: var(--warn)"></i> Обход DPI <b class="num">{{ pct(bypass) }}</b></div>
+      <div><i class="sw" style="background: var(--lane-direct)"></i> Напрямую <b class="num">{{ pct(direct) }}</b></div>
+      <div><i class="sw" style="background: var(--lane-vpn)"></i> Через VPN <b class="num">{{ pct(vpn) }}</b></div>
+      <div><i class="sw" style="background: var(--lane-bypass)"></i> Обход DPI <b class="num">{{ pct(bypass) }}</b></div>
       <div class="ip">
         <span class="eyebrow">{{
           !hasShares ? "счётчики не включены" : exact ? "по счётчикам" : "оценка"

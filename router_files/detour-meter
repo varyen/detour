@@ -82,8 +82,16 @@ have_set() {
 
 # Режим маршрутизации: от него зависит, какая лента измеряется напрямую, а
 # какая остаётся остатком.
+#
+# ⚠ ЗДЕСЬ ОБЯЗАНА БЫТЬ ОБРАТНАЯ ССЫЛКА \1 — два символа, а не управляющий байт
+# 0x01. В файле лежал именно байт (следствие правки через printf/echo -e с
+# интерпретацией escape): sed подставлял его вместо режима, функция никогда не
+# возвращала all-except, и в режиме «всё, кроме белого списка» ВЕСЬ трафик
+# туннеля подписывался как «Напрямую». Проверено живьём: 33.5 МБ, скачанные
+# через VPN, легли в direct, а vpn остался нулём. Правя эту строку, не пропускай
+# её через лишний слой шелл-экранирования.
 routing_mode() {
-    sed -n 's/.*"routing_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*//p'         "$ETC/sing-box/settings.json" 2>/dev/null | head -1
+    sed -n 's/.*"routing_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ETC/sing-box/settings.json" 2>/dev/null | head -1
 }
 
 # --- установка правил ------------------------------------------------------
@@ -247,6 +255,32 @@ EOF
     printf '"span":%d,"wan":"%s"}\n' "$span" "$wan"
 }
 
+# --- неразрушающий снимок --------------------------------------------------
+
+# `read` отдаёт дельту с прошлого чтения и ПЕРЕЗАПИСЫВАЕТ общий $STATE, поэтому
+# второй потребитель крадёт интервал у первого: с открытой панелью (опрос раз в
+# 3 с) фоновый сборщик получал бы огрызки, а панель — провалы. `sample` состояние
+# не трогает вовсе: печатает АБСОЛЮТНЫЕ значения, а базу пусть каждый потребитель
+# держит свою. Заодно это позволяет ему честно поймать сброс цепочек: значение
+# поехало назад — интервал выбрасываем, а не пишем в график отрицательный всплеск.
+sample_counters() {
+    now=$(date +%s)
+    wan=$(wan_iface)
+    set -- $(iface_bytes "$wan")
+    wan_rx=${1:-0}
+    wan_tx=${2:-0}
+
+    vpn=$(($(chain_bytes $CHAIN_UP sb) + $(chain_bytes $CHAIN_DOWN sb)))
+    zap=$(($(chain_bytes $CHAIN_UP zp) + $(chain_bytes $CHAIN_DOWN zp)))
+    wl=$(($(chain_bytes $CHAIN_UP wl) + $(chain_bytes $CHAIN_DOWN wl)))
+
+    printf '{"ok":true,"ts":%d,"wan":"%s","mode":"%s",' \
+        "$now" "$wan" "$(routing_mode)"
+    printf '"wan_rx":%d,"wan_tx":%d,"wan_total":%d,' \
+        "$wan_rx" "$wan_tx" "$((wan_rx + wan_tx))"
+    printf '"vpn":%d,"zap":%d,"wl":%d}\n' "$vpn" "$zap" "$wl"
+}
+
 case "${1:-read}" in
     install) install_chain ;;
     remove) remove_chain ;;
@@ -269,8 +303,17 @@ case "${1:-read}" in
         fi
         read_counters
         ;;
+    sample)
+        if ! installed; then
+            install_chain 2>/dev/null || {
+                echo '{"ok":false,"supported":false,"error":"нет iptables mangle"}'
+                exit 0
+            }
+        fi
+        sample_counters
+        ;;
     *)
-        echo "usage: detour-meter install|remove|status|read" >&2
+        echo "usage: detour-meter install|remove|status|read|sample" >&2
         exit 1
         ;;
 esac

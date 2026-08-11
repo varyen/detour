@@ -1,0 +1,186 @@
+#!/bin/sh
+# detour-trafficlog — временной ряд трафика по лентам для графика в панели.
+#
+# ЗАЧЕМ ОТДЕЛЬНЫЙ СБОРЩИК, А НЕ ОПРОС `detour-meter read`. `read` отдаёт дельту с
+# прошлого чтения и перезаписывает ОБЩИЙ файл состояния. Потребителей у него уже
+# двое (панель опрашивает раз в 3 с), и третий — фоновый сборщик — воровал бы у
+# них интервалы: панель показывала бы провалы, график — огрызки. Измерено на
+# home: при открытой панели span стабильно 3 с вместо ожидаемых 10. Поэтому
+# сборщик ходит в `detour-meter sample` (абсолютные значения, состояние не
+# трогает) и держит СВОЮ базу.
+#
+# ЦЕНА. Один съём — ~60 мс на GL-BE9300, раз в минуту это 0.1% одного ядра.
+# Сутки поминутно (1440 точек) + месяц по часам (720 точек) ≈ 90 КБ.
+#
+# ГДЕ ЛЕЖИТ. Минутный ряд — в tmpfs: писать на флеш раз в минуту нельзя, это
+# износ. Часовой ряд сбрасывается на флеш раз в час, поэтому после перезагрузки
+# теряется максимум последний час мелкой детализации, а история по часам цела.
+
+set -u
+
+PLATFORM=openwrt
+[ -d /opt/etc/ndm ] && PLATFORM=keenetic
+[ -f /opt/etc/detour/platform ] && PLATFORM=keenetic
+
+if [ "$PLATFORM" = keenetic ]; then
+    ETC=/opt/etc
+    METER=/opt/sbin/detour-meter
+    PATH=/opt/bin:/opt/sbin:$PATH
+    export PATH
+else
+    ETC=/etc
+    METER=/usr/sbin/detour-meter
+fi
+
+STATE=/tmp/detour-trafficlog.state   # СВОЯ база, не общая с панелью
+MIN=/tmp/detour-traffic.tsv          # ts direct vpn bypass  (поминутно, сутки)
+HOUR=$ETC/detour/traffic-hour.tsv    # то же по часам (месяц, переживает ребут)
+MIN_KEEP=1440
+HOUR_KEEP=720
+
+jnum() { echo "$1" | sed -n "s/.*\"$2\":\([0-9][0-9]*\).*/\1/p" | head -1; }
+jstr() { echo "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" | head -1; }
+
+# --- сбор -----------------------------------------------------------------
+
+tick() {
+    snap=$($METER sample 2>/dev/null)
+    case "$snap" in
+        *'"ok":true'*) ;;
+        *) echo "detour-trafficlog: detour-meter sample не отвечает" >&2; return 1 ;;
+    esac
+
+    ts=$(jnum "$snap" ts)
+    wan=$(jnum "$snap" wan_total)
+    vpn=$(jnum "$snap" vpn)
+    zap=$(jnum "$snap" zap)
+    wl=$(jnum "$snap" wl)
+    mode=$(jstr "$snap" mode)
+    [ -n "${ts:-}" ] || return 1
+
+    p_ts=0 p_wan=0 p_vpn=0 p_zap=0 p_wl=0 p_hour=0
+    if [ -f "$STATE" ]; then
+        . "$STATE" 2>/dev/null || true
+        p_ts=${T_TS:-0} p_wan=${T_WAN:-0} p_vpn=${T_VPN:-0}
+        p_zap=${T_ZAP:-0} p_wl=${T_WL:-0} p_hour=${T_HOUR:-0}
+    fi
+
+    cur_hour=$((ts / 3600))
+    write_state() {
+        cat > "$STATE" <<EOF
+T_TS=$ts
+T_WAN=$wan
+T_VPN=$vpn
+T_ZAP=$zap
+T_WL=$wl
+T_HOUR=${1:-$p_hour}
+EOF
+    }
+
+    # Первый запуск — базы нет, дельту брать не от чего.
+    if [ "$p_ts" -eq 0 ]; then
+        write_state "$cur_hour"
+        return 0
+    fi
+
+    # Счётчик поехал назад — цепочки пересоздали (перезапуск sing-box) или
+    # интерфейс переподняли. Интервал выбрасываем целиком: в график лучше
+    # дырка, чем отрицательный всплеск или фальшивый пик на всю историю.
+    if [ "$wan" -lt "$p_wan" ] || [ "$vpn" -lt "$p_vpn" ] ||
+        [ "$zap" -lt "$p_zap" ] || [ "$wl" -lt "$p_wl" ]; then
+        write_state "$cur_hour"
+        return 0
+    fi
+
+    span=$((ts - p_ts))
+    [ "$span" -gt 0 ] || return 0
+
+    d_wan=$((wan - p_wan))
+    d_zap=$((zap - p_zap))
+    # Та же логика лент, что и в detour-meter: в режиме «всё, кроме белого
+    # списка» измерима ПРЯМАЯ лента (белый список), а VPN — остаток; в обычном
+    # режиме наоборот. Раньше режим не читался вовсе, и весь трафик туннеля
+    # подписывался как «Напрямую» — см. комментарий в detour-meter.
+    if [ "$mode" = all-except ]; then
+        d_dir=$((wl - p_wl))
+        d_vpn=$((d_wan - d_dir - d_zap))
+        [ "$d_vpn" -lt 0 ] && d_vpn=0
+    else
+        d_vpn=$((vpn - p_vpn))
+        d_dir=$((d_wan - d_vpn - d_zap))
+        [ "$d_dir" -lt 0 ] && d_dir=0
+    fi
+
+    printf '%s\t%s\t%s\t%s\n' "$ts" "$d_dir" "$d_vpn" "$d_zap" >> "$MIN"
+    # BusyBox sort/tail без -i: пишем во временный файл и переносим.
+    if [ "$(wc -l < "$MIN" 2>/dev/null || echo 0)" -gt "$MIN_KEEP" ]; then
+        tail -n "$MIN_KEEP" "$MIN" > "$MIN.tmp" && mv "$MIN.tmp" "$MIN"
+    fi
+
+    # Час сменился — сворачиваем прошлый час в постоянный ряд. Единственная
+    # запись на флеш, раз в час.
+    if [ "$cur_hour" -gt "$p_hour" ] && [ "$p_hour" -gt 0 ]; then
+        flush_hour "$p_hour"
+    fi
+    write_state "$cur_hour"
+}
+
+flush_hour() {
+    _h=$1
+    _from=$((_h * 3600))
+    _to=$((_from + 3600))
+    mkdir -p "$(dirname "$HOUR")" 2>/dev/null
+    awk -v a="$_from" -v b="$_to" -F '\t' '
+        $1 >= a && $1 < b { d += $2; v += $3; z += $4; n++ }
+        END { if (n > 0) printf "%d\t%d\t%d\t%d\n", a, d, v, z }
+    ' "$MIN" >> "$HOUR" 2>/dev/null
+    if [ "$(wc -l < "$HOUR" 2>/dev/null || echo 0)" -gt "$HOUR_KEEP" ]; then
+        tail -n "$HOUR_KEEP" "$HOUR" > "$HOUR.tmp" && mv "$HOUR.tmp" "$HOUR"
+    fi
+}
+
+# --- выдача в панель --------------------------------------------------------
+
+series() {
+    _what=${1:-minute}
+    if [ "$_what" = hour ]; then
+        _file=$HOUR
+        _step=3600
+    else
+        _file=$MIN
+        _step=60
+    fi
+    printf '{"ok":true,"step":%d,"points":[' "$_step"
+    if [ -f "$_file" ]; then
+        awk -F '\t' 'BEGIN { first = 1 }
+            NF >= 4 {
+                if (!first) printf ","
+                printf "{\"ts\":%d,\"direct\":%d,\"vpn\":%d,\"bypass\":%d}", $1, $2, $3, $4
+                first = 0
+            }' "$_file"
+    fi
+    printf ']}\n'
+}
+
+selftest() {
+    _ok=0
+    [ -x "$METER" ] || { echo "нет $METER"; _ok=1; }
+    "$METER" sample >/dev/null 2>&1 || { echo "detour-meter sample не работает"; _ok=1; }
+    tick || { echo "tick завершился ошибкой"; _ok=1; }
+    [ -f "$STATE" ] || { echo "не создался $STATE"; _ok=1; }
+    series minute >/dev/null || { echo "series minute сломан"; _ok=1; }
+    series hour >/dev/null || { echo "series hour сломан"; _ok=1; }
+    [ "$_ok" -eq 0 ] && echo "selftest: ок"
+    return $_ok
+}
+
+case "${1:-tick}" in
+    tick) tick ;;
+    series) series "${2:-minute}" ;;
+    flush) flush_hour "$(( $(date +%s) / 3600 - 1 ))" ;;
+    selftest) selftest ;;
+    *)
+        echo "usage: detour-trafficlog tick|series [minute|hour]|flush|selftest" >&2
+        exit 1
+        ;;
+esac
