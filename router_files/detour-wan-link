@@ -121,8 +121,32 @@ default_route_dev() {
 
 # Every device carrying a default route. Under a load balancer there can be
 # more than one, so membership — not equality — decides who is "active".
+# Devices that actually carry the default route. `dead`/`linkdown` routes must be
+# skipped: a multi-WAN daemon leaves the failed uplink's default route in place
+# and only flags it, so counting it would report a dead channel as «в работе» —
+# and, worse, as a working spare that does not exist.
 default_route_devs() {
-    ip route show default 2>/dev/null | awk '/^default /{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}'
+    ip route show default 2>/dev/null | awk '
+        /^default / {
+            for (i = 1; i <= NF; i++) if ($i == "dead" || $i == "linkdown") next
+            for (i = 1; i <= NF; i++) if ($i == "dev") print $(i + 1)
+        }'
+}
+
+# The other half of the same picture: an uplink holding a default route that the
+# multi-WAN daemon has flagged `dead` has an address and looks up, but carries no
+# traffic. Without this it shows as a healthy spare — the single most misleading
+# thing this tile could say, because the whole point of a spare is that it works.
+dead_route_devs() {
+    ip route show default 2>/dev/null | awk '
+        /^default / {
+            d = ""; bad = 0
+            for (i = 1; i <= NF; i++) {
+                if ($i == "dev") d = $(i + 1)
+                if ($i == "dead" || $i == "linkdown") bad = 1
+            }
+            if (bad && d != "") print d
+        }'
 }
 
 # --- interface geometry (unchanged from the single-WAN version) --------------
@@ -141,6 +165,16 @@ iface_carrier() {
     }
     printf '%s' "$_car"
     return 0
+}
+
+# A VLAN sub-interface reports its PARENT's speed in sysfs, so an uplink riding a
+# switch trunk claims the trunk's rate — a 500 Mbit channel on a 10G trunk reads
+# as «10000 Мбит/с, в норме». The number is real but describes the wrong link, so
+# it must never be presented as the channel's speed.
+iface_is_vlan() {
+    [ -f "/proc/net/vlan/$1" ] && return 0
+    case "$1" in *.[0-9]*) return 0 ;; esac
+    return 1
 }
 
 iface_operstate() {
@@ -479,6 +513,7 @@ collect_uplink() {
     U_GW=""
     U_UP=false
     U_ACTIVE=false
+    U_DEAD=false
     U_SPEED=0
     U_PARTNER=0
     U_PORT_MAX=0
@@ -518,6 +553,9 @@ collect_uplink() {
     case " $ACTIVE_DEVS " in
         *" $U_IFACE "*) U_ACTIVE=true ;;
     esac
+    case " $DEAD_DEVS " in
+        *" $U_IFACE "*) U_DEAD=true ;;
+    esac
 
     U_BEST=$(num_or_zero "$(state_get "$U_ID" BEST)")
 
@@ -542,6 +580,20 @@ collect_uplink() {
         U_PORT_MAX=$(num_or_zero "$WAN_LINK_MAX_MBPS")
         [ "$U_PORT_MAX" -le 0 ] 2>/dev/null && U_PORT_MAX=$U_BEST
         U_DIAGNOSIS="Линк канала «$U_LABEL» сейчас down"
+        return 0
+    fi
+
+    # See iface_is_vlan: the inherited trunk rate says nothing about this channel,
+    # and feeding it to the checks below would both claim a false speed and arm a
+    # false «просело» alarm the moment the trunk renegotiates. Report no speed and
+    # put the real number in the diagnosis, where it cannot be mistaken for one.
+    if iface_is_vlan "$U_PHY"; then
+        _tsp=$(iface_speed "$U_PHY")
+        U_SPEED=0
+        U_DUPLEX=""
+        U_PORT_MAX=0
+        U_EXPECTED=0
+        U_DIAGNOSIS="Канал «$U_LABEL» идёт VLAN-ом через свич${_tsp:+ (транк ${_tsp} Мбит/с)} — скорость самого канала отсюда не видна"
         return 0
     fi
 
@@ -587,9 +639,9 @@ collect_uplink() {
 }
 
 uplink_json() {
-    printf '{"id":%s,"label":%s,"iface":%s,"phy_if":%s,"active":%s,"up":%s,' \
+    printf '{"id":%s,"label":%s,"iface":%s,"phy_if":%s,"active":%s,"up":%s,"route_dead":%s,' \
         "$(json_str "$U_ID")" "$(json_str "$U_LABEL")" "$(json_str "$U_IFACE")" \
-        "$(json_str "$U_PHY")" "$U_ACTIVE" "$U_UP"
+        "$(json_str "$U_PHY")" "$U_ACTIVE" "$U_UP" "$U_DEAD"
     printf '"proto":%s,"ip":%s,"gateway":%s,"metric":%s,"weight":%s,' \
         "$(json_str "$U_PROTO")" "$(json_str "$U_IP")" "$(json_str "$U_GW")" \
         "${U_METRIC:-0}" "${U_WEIGHT:-0}"
@@ -610,6 +662,7 @@ collect_all() {
     esac
 
     ACTIVE_DEVS=$(default_route_devs | tr '\n' ' ')
+    DEAD_DEVS=$(dead_route_devs | tr '\n' ' ')
     UPLINKS=$(discover_uplinks | tr '\n' ' ')
     UPLINK_COUNT=$(printf '%s' "$UPLINKS" | wc -w | tr -d ' ')
     [ "$UPLINK_COUNT" = "1" ] && SINGLE_UPLINK=1 || SINGLE_UPLINK=0

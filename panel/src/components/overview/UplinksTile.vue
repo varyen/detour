@@ -99,8 +99,12 @@ function labelFor(id: string): string {
 const allDown = computed(() => show.value && uplinks.value.every((u) => !u.up));
 
 /* Резерв есть, только если живых каналов больше одного: один живой при трёх
-   настроенных — это не «есть резерв», это «резерва не осталось». */
-const spares = computed(() => uplinks.value.filter((u) => u.up && !u.active).length);
+   настроенных — это не «есть резерв», это «резерва не осталось».
+   Канал с мёртвым маршрутом резервом не считается: адрес у него есть, транзита
+   нет — засчитать его значит пообещать подстраховку, которой не существует. */
+const spares = computed(
+  () => uplinks.value.filter((u) => u.up && !u.active && !u.route_dead).length,
+);
 
 type Kind = "ok" | "warn" | "off";
 
@@ -111,6 +115,9 @@ function describe(u: WanUplink): { kind: Kind; state: string } {
     if (u.carrier === 1) return { kind: "warn", state: "линк есть, адреса нет" };
     return { kind: "off", state: "нет линка" };
   }
+  /* Раньше проверки `up` было достаточно, но адрес от провайдера ещё не значит
+     интернет: канал может отвечать на ARP и молчать дальше первого хопа. */
+  if (u.route_dead) return { kind: "warn", state: "адрес есть, интернета нет" };
   if (u.degraded) return { kind: "warn", state: `просел до ${u.speed_mbps} Мбит/с` };
   return { kind: "ok", state: u.active ? "в работе" : "в резерве" };
 }
