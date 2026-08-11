@@ -24,6 +24,7 @@ import { useSessionStore } from "@/stores/session";
 import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
 import { fmtAgo, fmtDate, fmtInt } from "@/lib/format";
+import { useFocusTarget } from "@/lib/deeplink";
 import { getRegistration, swSupported } from "@/pwa";
 
 const status = useStatusStore();
@@ -131,6 +132,16 @@ const open = reactive<Record<string, boolean>>({
   backup: false,
   account: false,
 });
+
+/* Ссылки из карточки «Сервисы и доступ» на «Обзоре»: `#/services?focus=cert`.
+   Без этого ссылка приводила к списку из семи свёрнутых областей, где нужную
+   ещё надо найти. */
+useFocusTarget(
+  (key) => {
+    if (key in open) open[key] = true;
+  },
+  (key) => `svc-${key}`,
+);
 
 /** Какое действие сейчас выполняется: одна строка на весь экран. */
 const busy = ref("");
@@ -786,6 +797,7 @@ onBeforeUnmount(() => unregister?.());
   <div class="areas">
     <!-- ===== проброс сервисов ===== -->
     <ServicePanel
+      id="svc-portmap"
       v-model:open="open.portmap"
       title="Доступ к домашним устройствам снаружи"
       :summary="portmapSummary"
@@ -876,6 +888,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- ===== сертификат ===== -->
     <ServicePanel
+      id="svc-cert"
       v-model:open="open.cert"
       title="Свой домен и защищённое соединение"
       :summary="certSummary"
@@ -916,6 +929,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- ===== уведомления ===== -->
     <ServicePanel
+      id="svc-push"
       v-model:open="open.push"
       title="Уведомления в браузер"
       :summary="pushSummary"
@@ -984,6 +998,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- ===== аппаратное ускорение ===== -->
     <ServicePanel
       v-if="offloadSupported"
+      id="svc-offload"
       v-model:open="open.offload"
       title="Аппаратное ускорение"
       :summary="offloadSummary"
@@ -1029,6 +1044,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- ===== файл подкачки ===== -->
     <ServicePanel
       v-if="swapSupported"
+      id="svc-swap"
       v-model:open="open.swap"
       title="Файл подкачки"
       :summary="swapSummary"
@@ -1089,6 +1105,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- ===== резервная копия ===== -->
     <ServicePanel
+      id="svc-backup"
       v-model:open="open.backup"
       title="Резервная копия настроек"
       summary="Списки доменов, правила обхода и настройки панели одним файлом"
@@ -1145,6 +1162,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- ===== вход в панель ===== -->
     <ServicePanel
+      id="svc-account"
       v-model:open="open.account"
       title="Вход в панель"
       :summary="session.user ? `Вы вошли как ${session.user}` : 'Учётная запись панели'"

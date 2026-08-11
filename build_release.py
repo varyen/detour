@@ -722,6 +722,43 @@ def sign_ipk(ipk_path):
 
 # ============ git/notes ============
 
+def read_changelog_notes(version):
+    """Pull the `## [X.Y.Z] — date` section out of CHANGELOG.md.
+
+    This is the DEFAULT source of release notes. Without it a release published
+    without --notes/--from-git got the literal placeholder "(no notes)" as its
+    GitHub body — and that body is exactly what the panel shows in «Что нового»,
+    so every self-update modal read "(no notes)" while a fully written changelog
+    section sat in the repo.
+
+    The heading is matched on the version only: the dash and the date differ
+    between entries (em dash, hyphen, none at all).
+    """
+    path = os.path.join(HERE, "CHANGELOG.md")
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except Exception:
+        return ""
+    out, taking = [], False
+    for line in lines:
+        if line.startswith("## "):
+            # `## [1.45.0] — 2026-08-11` / `## 1.45.0`: take everything after the
+            # matching heading up to the next version heading.
+            head = line[3:].strip()
+            if taking:
+                break
+            ver = head.split("]")[0].lstrip("[").split()[0] if head else ""
+            if ver == version:
+                taking = True
+            continue
+        if taking:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
 def read_git_log_for_notes(version):
     try:
         # encoding=utf-8: git emits UTF-8; without this, text=True decodes with the
@@ -922,6 +959,8 @@ def main():
     ap.add_argument("--notes", default=None, help="Release notes (plain text)")
     ap.add_argument("--from-git", action="store_true",
                     help="Derive notes from git log since previous tag")
+    ap.add_argument("--no-changelog", action="store_true",
+                    help="Don't fall back to the CHANGELOG.md section for this version")
     ap.add_argument("--publish", action="store_true",
                     help="After building, upload all artefacts to GH release v<version>")
     ap.add_argument("--publish-existing", action="store_true",
@@ -954,9 +993,20 @@ def main():
             die(f"release dir already exists: {out_dir} — pass --allow-existing or rm -rf")
     os.makedirs(out_dir, exist_ok=False)
 
+    # Приоритет: явные --notes → git log (--from-git) → секция CHANGELOG.md.
+    # Последнее — умолчание, а не запасной вариант: заметки к релизу уже написаны
+    # в CHANGELOG, и именно их читает панель в «Что нового».
     notes = args.notes
     if not notes and args.from_git:
         notes = read_git_log_for_notes(version)
+    if not notes and not args.no_changelog:
+        notes = read_changelog_notes(version)
+        if notes:
+            print(f"[notes] taken from CHANGELOG.md section [{version}] "
+                  f"({len(notes.splitlines())} lines)")
+        else:
+            print(f"[notes] WARNING: CHANGELOG.md has no section for {version} — "
+                  f"the release body will say «(no notes)»")
 
     built = []  # (label, ipk_path, sig_path)
     print(f"=== Building detour v{version} ===")

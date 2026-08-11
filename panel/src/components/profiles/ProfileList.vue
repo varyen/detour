@@ -160,6 +160,29 @@ function sortBy(key: SortKey) {
   }
 }
 
+/* Направление сортировки должно быть видно, а не угадываться: колонок семь, а
+   у скорости и пинга «по возрастанию» и «по убыванию» отвечают на прямо
+   противоположные вопросы. */
+function arrow(key: SortKey): string {
+  if (sortKey.value !== key) return "";
+  return sortAsc.value ? "↑" : "↓";
+}
+
+const SORT_HINT: Record<SortKey, [string, string]> = {
+  name: ["А→Я", "Я→А"],
+  type: ["А→Я", "Я→А"],
+  group: ["А→Я", "Я→А"],
+  ping: ["сначала быстрые", "сначала медленные"],
+  speed: ["сначала медленные", "сначала быстрые"],
+  state: ["сначала рабочие", "сначала нерабочие"],
+};
+
+function sortTitle(key: SortKey, label: string): string {
+  const [asc, desc] = SORT_HINT[key];
+  if (sortKey.value !== key) return `Сортировать по «${label}»: ${asc}`;
+  return `${label}: ${sortAsc.value ? asc : desc} — нажмите, чтобы перевернуть`;
+}
+
 function pingText(r: ProfileRow): string {
   if (props.probing === r.id) return "проверяю…";
   if (!r.ping || r.ping.ok === undefined) return "—";
@@ -266,55 +289,78 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
         · выбрано {{ selected.length }}</template>
     </p>
 
-    <div class="head" role="row">
-      <label class="chk">
-        <input
-          type="checkbox"
-          :checked="allChecked"
-          aria-label="Выделить всё видимое"
-          @change="toggleAll"
-        />
-      </label>
-      <button type="button" :aria-pressed="sortKey === 'name'" @click="sortBy('name')">
-        Имя
-      </button>
-      <button
-        class="h-type"
-        type="button"
-        :aria-pressed="sortKey === 'type'"
-        @click="sortBy('type')"
-      >
-        Протокол
-      </button>
-      <button
-        class="h-grp"
-        type="button"
-        :aria-pressed="sortKey === 'group'"
-        @click="sortBy('group')"
-      >
-        Группа
-      </button>
-      <!-- Не кнопка: сортировать по адресу узла незачем, а колонка живёт только
-           на широком экране — её данные приходят из кэша пингов. -->
-      <span class="h-srv">Сервер</span>
-      <button type="button" :aria-pressed="sortKey === 'ping'" @click="sortBy('ping')">
-        Пинг
-      </button>
-      <button type="button" :aria-pressed="sortKey === 'speed'" @click="sortBy('speed')">
-        Скорость
-      </button>
-      <button
-        class="h-chk"
-        type="button"
-        :aria-pressed="sortKey === 'state'"
-        @click="sortBy('state')"
-      >
-        Проверка
-      </button>
-      <span></span>
-    </div>
-
     <div class="list">
+      <!-- Шапка живёт ВНУТРИ прокручиваемого списка, и это не украшательство:
+           снаружи у неё своя ширина (без полосы прокрутки) и свой расчёт колонки
+           `auto`, поэтому подписи разъезжались со столбцами тем сильнее, чем
+           шире окно. Внутри — та же ширина, та же сетка, плюс шапка остаётся
+           видимой при прокрутке сотни строк. -->
+      <div class="head" role="row">
+        <label class="chk">
+          <input
+            type="checkbox"
+            :checked="allChecked"
+            aria-label="Выделить всё видимое"
+            @change="toggleAll"
+          />
+        </label>
+        <button
+          type="button"
+          :aria-pressed="sortKey === 'name'"
+          :title="sortTitle('name', 'Имя')"
+          @click="sortBy('name')"
+        >
+          Имя<i class="arw" aria-hidden="true">{{ arrow("name") }}</i>
+        </button>
+        <button
+          class="h-type"
+          type="button"
+          :aria-pressed="sortKey === 'type'"
+          :title="sortTitle('type', 'Протокол')"
+          @click="sortBy('type')"
+        >
+          Протокол<i class="arw" aria-hidden="true">{{ arrow("type") }}</i>
+        </button>
+        <button
+          class="h-grp"
+          type="button"
+          :aria-pressed="sortKey === 'group'"
+          :title="sortTitle('group', 'Группа')"
+          @click="sortBy('group')"
+        >
+          Группа<i class="arw" aria-hidden="true">{{ arrow("group") }}</i>
+        </button>
+        <!-- Не кнопка: сортировать по адресу узла незачем, а колонка живёт только
+             на широком экране — её данные приходят из кэша пингов. -->
+        <span class="h-srv">Сервер</span>
+        <button
+          type="button"
+          :aria-pressed="sortKey === 'ping'"
+          :title="sortTitle('ping', 'Пинг')"
+          @click="sortBy('ping')"
+        >
+          Пинг<i class="arw" aria-hidden="true">{{ arrow("ping") }}</i>
+        </button>
+        <button
+          type="button"
+          :aria-pressed="sortKey === 'speed'"
+          :title="sortTitle('speed', 'Скорость')"
+          @click="sortBy('speed')"
+        >
+          Скорость<i class="arw" aria-hidden="true">{{ arrow("speed") }}</i>
+        </button>
+        <button
+          class="h-chk"
+          type="button"
+          :aria-pressed="sortKey === 'state'"
+          :title="sortTitle('state', 'Проверка')"
+          @click="sortBy('state')"
+        >
+          Проверка<i class="arw" aria-hidden="true">{{ arrow("state") }}</i>
+        </button>
+        <span class="h-act"></span>
+      </div>
+
       <p v-if="!visible.length" class="empty">Ничего не нашлось</p>
 
       <div
@@ -440,6 +486,12 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
   flex-direction: column;
   gap: 10px;
   min-width: 0;
+  /* Ширина колонки действий — ЧИСЛОМ, а не `auto`. Шапка и строки это разные
+     grid-контейнеры, поэтому `auto` каждый считал по своему содержимому: у строк
+     там шесть кнопок (~290px), у шапки — пустой span (0). Разницу забирали
+     резиновые колонки, и подписи уезжали от своих столбцов тем сильнее, чем шире
+     окно. Здесь: 4 иконки по 32 + «Подключить» + «…» на 36 + пять зазоров. */
+  --act-w: 296px;
 }
 .tools {
   display: flex;
@@ -488,13 +540,20 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
   display: grid;
   grid-template-columns:
     38px minmax(0, 2.4fr) 92px minmax(0, 1fr) minmax(0, 1.25fr)
-    78px 104px 132px auto;
+    78px 104px 132px var(--act-w);
   align-items: center;
   gap: 6px;
 }
 .head {
-  padding: 0 6px 6px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 2px 6px 6px;
   border-bottom: 1px solid var(--line);
+  /* Плитка полупрозрачная, поэтому «фон как у плитки» — это её тон, положенный
+     поверх непрозрачного фона страницы. Просто var(--panel) не годится: сквозь
+     липкую шапку просвечивали бы уезжающие под неё строки. */
+  background: linear-gradient(var(--panel), var(--panel)) var(--ground);
 }
 .head button,
 .head .h-srv {
@@ -509,7 +568,19 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
   color: var(--faint);
   font-weight: 600;
 }
+.head button {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  min-width: 0;
+}
 .head button[aria-pressed="true"] {
+  color: var(--accent);
+}
+.arw {
+  font-style: normal;
+  font-size: 11px;
+  line-height: 1;
   color: var(--accent);
 }
 .list {
@@ -604,8 +675,15 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
   gap: 6px;
   align-items: center;
   justify-content: flex-end;
+  min-width: 0;
 }
 .mini {
+  /* Колонка фиксированной ширины: если подпись кнопки окажется длиннее
+     расчётной (другой шрифт, другой язык), сжимается она, а не столбец. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   border: 1px solid var(--line-2);
   background: transparent;
   border-radius: var(--radius-sm);
@@ -676,7 +754,7 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
 @media (max-width: 1180px) {
   .head,
   .row {
-    grid-template-columns: 38px minmax(0, 2.4fr) 78px 104px 132px auto;
+    grid-template-columns: 38px minmax(0, 2.4fr) 78px 104px 132px var(--act-w);
   }
   .head .h-type,
   .head .h-grp,
@@ -691,7 +769,7 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
 @media (max-width: 1000px) {
   .head,
   .row {
-    grid-template-columns: 38px minmax(0, 2.4fr) 78px 104px auto;
+    grid-template-columns: 38px minmax(0, 2.4fr) 78px 104px var(--act-w);
   }
   .head .h-chk,
   .cell.chk-t {

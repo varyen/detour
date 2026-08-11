@@ -8,6 +8,9 @@ import SegmentedControl from "@/components/SegmentedControl.vue";
 import ProfilePicker from "@/components/ProfilePicker.vue";
 import BypassTile from "@/components/overview/BypassTile.vue";
 import UplinksTile from "@/components/overview/UplinksTile.vue";
+import RoutingTile from "@/components/overview/RoutingTile.vue";
+import ServicesTile from "@/components/overview/ServicesTile.vue";
+import DashboardEditor from "@/components/overview/DashboardEditor.vue";
 import { diag, overview } from "@/api";
 import type { LanClient, TrafficLanes, UdpVpnMode } from "@/api";
 import DrawerSheet from "@/components/DrawerSheet.vue";
@@ -15,14 +18,19 @@ import { useStatusStore } from "@/stores/status";
 import { useProfilesStore } from "@/stores/profiles";
 import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
+import { normalizeChannel, useUpdatesStore } from "@/stores/updates";
+import { useDashboardStore } from "@/stores/dashboard";
 import { fmtAgo, fmtBitrate, fmtSpeedKbps, isSet } from "@/lib/format";
 
 const status = useStatusStore();
 const profiles = useProfilesStore();
 const toast = useToastStore();
 const commands = useCommandStore();
+const updates = useUpdatesStore();
+const dash = useDashboardStore();
 
 const pickerOpen = ref(false);
+const dashOpen = ref(false);
 const busy = ref("");
 const lanes = ref<(TrafficLanes & { warming?: boolean; span?: number; bytes?: Record<string, number> }) | null>(null);
 const clients = ref(0);
@@ -127,6 +135,42 @@ const vpnScopeShort = computed(() =>
   allExcept.value ? "всё, кроме белого списка" : `${sb.value?.domains ?? 0} доменов`,
 );
 
+/* Обновления. Раньше про вышедшую версию знал только «Журнал» — на главной не
+   было даже намёка, и панель месяцами оставалась старой просто потому, что
+   повода зайти в «Журнал» не возникало. Здесь: плашка сверху и версия-чип в
+   плитке «Версии». */
+const hotUpdates = computed(() => updates.hot);
+
+/** Подпись плашки: что именно вышло, с версиями, если роутер их знает. */
+const updateText = computed(() =>
+  hotUpdates.value
+    .map((h) => `${h.title}${h.available ? ` ${h.available}` : ""}`)
+    .join(", "),
+);
+
+/* Скрытие привязано к самим версиям: как только выйдет следующая, плашка
+   вернётся. Иначе одно нажатие навсегда выключило бы разговор об обновлениях. */
+const UPD_DISMISS_KEY = "detour:updates-dismissed";
+const updDismissed = ref(localStorage.getItem(UPD_DISMISS_KEY) ?? "");
+
+const updSignature = computed(() =>
+  hotUpdates.value.map((h) => `${h.key}:${h.available || "?"}`).join("|"),
+);
+
+const updateAlert = computed(() =>
+  updSignature.value && updDismissed.value !== updSignature.value ? updateText.value : "",
+);
+
+function dismissUpdates() {
+  updDismissed.value = updSignature.value;
+  localStorage.setItem(UPD_DISMISS_KEY, updSignature.value);
+}
+
+/** Доступная версия канала — для чипа рядом со строкой в плитке «Версии». */
+function newVersion(key: "panel" | "singbox" | "tpws"): string {
+  return hotUpdates.value.find((h) => h.key === key)?.available ?? "";
+}
+
 /* Проверка и замер скорости активного профиля. Данные приходят тем же
    health_status, что и для списка, но на «Обзоре» их не было вовсе — про рабочий
    ли сейчас VPN и с какой скоростью приходилось идти в другой раздел. */
@@ -214,16 +258,68 @@ async function setUdp(mode: UdpVpnMode) {
   }
 }
 
-async function restart() {
-  busy.value = "restart";
+async function svc(tag: string, fn: () => Promise<unknown>, ok: string, fail: string) {
+  busy.value = tag;
   try {
-    await diag.singboxRestart();
-    toast.ok("sing-box перезапущен");
+    await fn();
+    toast.ok(ok);
   } catch (e) {
-    toast.fromError(e, "Перезапуск не удался");
+    toast.fromError(e, fail);
   } finally {
     busy.value = "";
     void status.refresh(true);
+  }
+}
+
+/* Перезапуск и остановка не «рвут» защиту: правила REDIRECT снимаются только
+   при ручной остановке, а на время перезапуска остаются — соединения в этот
+   момент отказывают, а не уходят мимо туннеля. */
+function restart() {
+  return svc("restart", () => diag.singboxRestart(), "sing-box перезапущен", "Перезапуск не удался");
+}
+
+function start() {
+  return svc("start", () => diag.singboxStart(), "sing-box запущен", "Не удалось запустить");
+}
+
+function stop() {
+  return svc(
+    "stop",
+    () => diag.singboxStop(),
+    "sing-box остановлен — трафик идёт напрямую",
+    "Не удалось остановить",
+  );
+}
+
+const sbAutostart = computed({
+  get: () => sb.value?.enabled === true,
+  set: (on: boolean) =>
+    void svc(
+      "sbauto",
+      () => (on ? diag.singboxEnable() : diag.singboxDisable()),
+      on ? "sing-box будет подниматься при старте роутера" : "Автозапуск sing-box выключен",
+      "Не удалось изменить автозапуск",
+    ),
+});
+
+/* «Проверить» спрашивает GitHub про версию панели: у бинарников свой канал
+   (opkg-фид), его дёргает cron и кнопки в «Журнале» — здесь достаточно самой
+   панели, а остальное подтянется перечитыванием сводки. */
+async function checkUpdates() {
+  busy.value = "updcheck";
+  try {
+    const r = normalizeChannel("panel", await diag.panelUpdateCheck());
+    updates.setChannel("panel", r);
+    if (r.error) toast.error(`Панель: ${r.error}`);
+    else if (r.update_available)
+      toast.ok(`Доступна версия ${r.available_version || "новее текущей"}`);
+    else toast.info("Обновлений нет");
+    /* Сводка могла обновиться и по другим каналам, пока роутер ходил в сеть. */
+    void updates.load(true);
+  } catch (e) {
+    toast.fromError(e, "Проверка не удалась");
+  } finally {
+    busy.value = "";
   }
 }
 
@@ -289,6 +385,29 @@ onMounted(async () => {
       run: () => void restart(),
     },
     {
+      id: "ov:stop",
+      title: "Остановить sing-box",
+      group: "подключение",
+      keywords: "стоп выключить",
+      run: () => void stop(),
+    },
+    {
+      id: "ov:updcheck",
+      title: "Проверить обновления",
+      group: "обновления",
+      keywords: "версия update",
+      run: () => void checkUpdates(),
+    },
+    {
+      id: "ov:dash",
+      title: "Настроить главную страницу",
+      group: "вид",
+      keywords: "карточки плитки состав порядок скрыть",
+      run: () => {
+        dashOpen.value = true;
+      },
+    },
+    {
       id: "ov:checkall",
       title: "Проверить все профили",
       group: "подключение",
@@ -299,6 +418,9 @@ onMounted(async () => {
   await profiles.load();
   void profiles.loadProbes();
   void loadExtras();
+  /* Сводку обновлений роутер держит у себя (её раз в шесть часов освежает cron),
+     поэтому это дешёвое чтение файла, а не поход в GitHub. */
+  void updates.load();
 });
 
 onBeforeUnmount(() => {
@@ -332,6 +454,25 @@ onBeforeUnmount(() => {
     </div>
   </div>
 
+  <!-- Вышла новая версия — это единственная новость, ради которой на главной
+       стоит появляться плашке в спокойном состоянии: установка в один переход. -->
+  <div v-if="updateAlert" class="wanwarn upd">
+    <div>
+      <b>Есть обновления: {{ updateAlert }}</b>
+      <p>
+        Установлена панель {{ status.data?.version ?? "—" }}. Установка и описание
+        изменений — в «Журнале».
+      </p>
+    </div>
+    <UiButton
+      variant="primary"
+      @click="$router.push({ path: '/journal', query: { focus: 'updates' } })"
+    >
+      Обновить
+    </UiButton>
+    <UiButton @click="dismissUpdates">Скрыть</UiButton>
+  </div>
+
   <div v-if="mptcpBroken" class="wanwarn bad">
     <div>
       <b>MPTCP включён (net.mptcp.enabled = {{ sys?.mptcp }})</b>
@@ -342,25 +483,42 @@ onBeforeUnmount(() => {
     </div>
   </div>
 
-  <FlowBoard
-    :direct="lanes?.direct ?? 0"
-    :vpn="lanes?.vpn ?? 0"
-    :bypass="lanes?.bypass ?? 0"
-    :exact="lanes?.exact ?? false"
-    :has-shares="hasShares"
-    :speed="speedText"
-    :clients="clients"
-    :profile-label="profileLabel"
-    :bypass-label="bypassLabel"
-    :vpn-scope="vpnScopeShort"
-    :bypass-scope="`${zp?.domains ?? 0} доменов`"
-    :connections="sb?.ipset_count"
-    :external-ip="sb?.external_ip"
-    :vpn-up="status.singboxRunning"
-  />
+  <!-- Состав и порядок карточек — личная настройка (см. stores/dashboard).
+       Каждая карточка живёт в слоте: у слота задан `order`, поэтому сетка
+       остаётся сеткой, а меняется только место карточки в ней. -->
+  <div class="dashbar">
+    <button class="cfg" type="button" @click="dashOpen = true">
+      Настроить главную<template v-if="dash.hidden.length">
+        · показано {{ dash.visibleCount }} из {{ dash.tiles.length }}</template>
+    </button>
+  </div>
 
   <div class="tiles">
-    <TileCard title="Активное подключение" span>
+    <div v-if="dash.isVisible('flow')" class="slot full" :style="{ order: dash.orderOf('flow') }">
+      <FlowBoard
+        :direct="lanes?.direct ?? 0"
+        :vpn="lanes?.vpn ?? 0"
+        :bypass="lanes?.bypass ?? 0"
+        :exact="lanes?.exact ?? false"
+        :has-shares="hasShares"
+        :speed="speedText"
+        :clients="clients"
+        :profile-label="profileLabel"
+        :bypass-label="bypassLabel"
+        :vpn-scope="vpnScopeShort"
+        :bypass-scope="`${zp?.domains ?? 0} доменов`"
+        :connections="sb?.ipset_count"
+        :external-ip="sb?.external_ip"
+        :vpn-up="status.singboxRunning"
+      />
+    </div>
+
+    <div
+      v-if="dash.isVisible('connection')"
+      class="slot span"
+      :style="{ order: dash.orderOf('connection') }"
+    >
+    <TileCard title="Активное подключение">
       <p class="big">
         {{ profileLabel }}
         <small v-if="sb?.active_type">{{ sb.active_type }}</small>
@@ -381,13 +539,33 @@ onBeforeUnmount(() => {
         </span>
         <span v-else-if="activeHealth.when">{{ activeHealth.when }}</span>
       </p>
+      <!-- Автозапуск и остановка были только в «Журнале», хотя это ровно та же
+           пара действий, что у обхода DPI на соседней плитке: после
+           перезагрузки роутера «почему нет VPN» решается здесь, а не поиском по
+           разделам. -->
+      <SwitchToggle
+        v-model="sbAutostart"
+        label="Автозапуск"
+        :busy="busy === 'sbauto'"
+        :hint="
+          sbAutostart
+            ? 'Поднимется сам после перезагрузки роутера'
+            : 'После перезагрузки роутера останется выключенным'
+        "
+      />
       <template #actions>
         <UiButton variant="primary" @click="pickerOpen = true">Сменить VPN</UiButton>
-        <UiButton :busy="busy === 'restart'" @click="restart">Перезапустить</UiButton>
+        <template v-if="status.singboxRunning">
+          <UiButton :busy="busy === 'restart'" @click="restart">Перезапустить</UiButton>
+          <UiButton :busy="busy === 'stop'" @click="stop">Стоп</UiButton>
+        </template>
+        <UiButton v-else :busy="busy === 'start'" @click="start">Старт</UiButton>
         <UiButton @click="checkAll">Проверить все</UiButton>
       </template>
     </TileCard>
+    </div>
 
+    <div v-if="dash.isVisible('scope')" class="slot" :style="{ order: dash.orderOf('scope') }">
     <TileCard title="Область действия">
       <SwitchToggle
         v-model="allvpn"
@@ -446,9 +624,13 @@ onBeforeUnmount(() => {
         </p>
       </div>
     </TileCard>
+    </div>
 
-    <BypassTile />
+    <div v-if="dash.isVisible('bypass')" class="slot" :style="{ order: dash.orderOf('bypass') }">
+      <BypassTile />
+    </div>
 
+    <div v-if="dash.isVisible('health')" class="slot" :style="{ order: dash.orderOf('health') }">
     <TileCard title="Здоровье профилей">
       <p class="big num">
         {{ healthCounts.ok }}<small>из {{ healthCounts.total }} проходят проверку</small>
@@ -473,9 +655,23 @@ onBeforeUnmount(() => {
         </UiButton>
       </template>
     </TileCard>
+    </div>
 
-    <UplinksTile />
+    <div v-if="dash.isVisible('uplinks')" class="slot" :style="{ order: dash.orderOf('uplinks') }">
+      <UplinksTile />
+    </div>
 
+    <div v-if="dash.isVisible('routing')" class="slot" :style="{ order: dash.orderOf('routing') }">
+      <RoutingTile />
+    </div>
+
+    <!-- Единственная карточка со своими запросами: пока она выключена, панель их
+         не делает вовсе. -->
+    <div v-if="dash.isVisible('services')" class="slot" :style="{ order: dash.orderOf('services') }">
+      <ServicesTile />
+    </div>
+
+    <div v-if="dash.isVisible('system')" class="slot" :style="{ order: dash.orderOf('system') }">
     <TileCard title="Система">
       <p class="meta col">
         <span>
@@ -499,20 +695,51 @@ onBeforeUnmount(() => {
         </UiButton>
       </template>
     </TileCard>
+    </div>
 
+    <div v-if="dash.isVisible('versions')" class="slot" :style="{ order: dash.orderOf('versions') }">
     <TileCard title="Версии">
+      <!-- Чип с доступной версией прямо в строке: «панель 1.43.2» само по себе
+           не отвечает на вопрос, старая она или свежая. -->
+      <template #badge>
+        <span v-if="hotUpdates.length" class="pill">
+          {{ hotUpdates.length }}
+          {{ hotUpdates.length === 1 ? "обновление" : "обновления" }}
+        </span>
+      </template>
       <p class="meta col">
-        <span>Панель {{ status.data?.version ?? "—" }}</span>
-        <span>sing-box {{ status.data?.binaries?.singbox_version ?? "—" }}</span>
-        <span>tpws {{ status.data?.binaries?.tpws_version ?? "—" }}</span>
+        <span>
+          Панель {{ status.data?.version ?? "—" }}
+          <i v-if="newVersion('panel')" class="up">→ {{ newVersion("panel") }}</i>
+        </span>
+        <span>
+          sing-box {{ status.data?.binaries?.singbox_version ?? "—" }}
+          <i v-if="newVersion('singbox')" class="up">→ {{ newVersion("singbox") }}</i>
+        </span>
+        <span>
+          tpws {{ status.data?.binaries?.tpws_version ?? "—" }}
+          <i v-if="newVersion('tpws')" class="up">→ {{ newVersion("tpws") }}</i>
+        </span>
       </p>
       <template #actions>
-        <UiButton @click="$router.push({ path: '/journal', query: { focus: 'updates' } })">
-          Обновления
+        <UiButton
+          :variant="hotUpdates.length ? 'primary' : 'ghost'"
+          @click="$router.push({ path: '/journal', query: { focus: 'updates' } })"
+        >
+          {{ hotUpdates.length ? "Установить обновления" : "Обновления" }}
         </UiButton>
+        <UiButton :busy="busy === 'updcheck'" @click="checkUpdates">Проверить</UiButton>
       </template>
     </TileCard>
+    </div>
+
+    <p v-if="!dash.visibleCount" class="empty">
+      Все карточки скрыты.
+      <button type="button" class="link" @click="dashOpen = true">Вернуть</button>
+    </p>
   </div>
+
+  <DashboardEditor :open="dashOpen" @close="dashOpen = false" />
 
   <ProfilePicker :open="pickerOpen" @close="pickerOpen = false" />
 
@@ -545,6 +772,54 @@ onBeforeUnmount(() => {
   .tiles {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
+/* Слот — обёртка ради `order`: сама карточка о своём месте ничего не знает.
+   Растягиваем её на весь слот, иначе карточки в одном ряду выйдут разной
+   высоты. */
+.slot {
+  display: flex;
+  min-width: 0;
+}
+.slot > * {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.slot.span {
+  grid-column: span 2;
+}
+.slot.full {
+  grid-column: 1 / -1;
+}
+@media (max-width: 700px) {
+  .slot.span {
+    grid-column: span 1;
+  }
+}
+.dashbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+.cfg,
+.link {
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font-size: 12.5px;
+  padding: 4px 2px;
+  min-height: 32px;
+}
+.cfg:hover,
+.link:hover {
+  color: var(--accent);
+}
+.link {
+  color: var(--accent);
+}
+.empty {
+  grid-column: 1 / -1;
+  font-size: 13.5px;
+  color: var(--dim);
 }
 .big {
   font-size: 24px;
@@ -640,6 +915,24 @@ onBeforeUnmount(() => {
 .wanwarn.bad {
   border-color: color-mix(in srgb, var(--bad) 45%, transparent);
   background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+/* Обновление — не авария: тот же формат плашки, но в цвете акцента, чтобы
+   амбер остался за настоящими проблемами. */
+.wanwarn.upd {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.pill {
+  font-size: 10.5px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.up {
+  font-style: normal;
+  color: var(--accent);
 }
 .wanwarn div {
   min-width: 0;

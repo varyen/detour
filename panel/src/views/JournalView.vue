@@ -19,11 +19,16 @@ import type {
   HealthStatusResponse,
   LogName,
   UpdateChannelState,
-  UpdatesOverview,
 } from "@/api";
 import { useStatusStore } from "@/stores/status";
 import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
+import {
+  CHANNEL_TITLE as CH_TITLE,
+  normalizeChannel,
+  useUpdatesStore,
+  type UpdateChannel as Channel,
+} from "@/stores/updates";
 import { fmtAgo, fmtInt, isSet } from "@/lib/format";
 import { useFocusTarget } from "@/lib/deeplink";
 
@@ -408,14 +413,6 @@ async function openFw() {
 
 /* ==================== обновления ==================== */
 
-type Channel = "panel" | "singbox" | "tpws" | "nfqws2";
-
-const CH_TITLE: Record<Channel, string> = {
-  panel: "Панель",
-  singbox: "sing-box",
-  tpws: "tpws (обход DPI)",
-  nfqws2: "nfqws2 (zapret2)",
-};
 const CH_CHECK: Record<Channel, () => Promise<UpdateChannelState>> = {
   panel: () => diag.panelUpdateCheck(),
   singbox: () => diag.binsCheck(),
@@ -429,7 +426,11 @@ const CH_APPLY: Record<Channel, () => Promise<unknown>> = {
   nfqws2: () => diag.nfqws2Apply(),
 };
 
-const upd = ref<UpdatesOverview | null>(null);
+/* Сводка обновлений — общая с «Обзором»: на главной по ней рисуется плашка
+   «вышла новая версия», и после ручной проверки здесь она должна измениться
+   там же. */
+const updates = useUpdatesStore();
+const upd = computed(() => updates.data);
 const autocheck = ref(false);
 const autocheckBusy = ref(false);
 const updBusy = ref("");
@@ -450,10 +451,8 @@ const ipkFile = ref<File | null>(null);
 const updatesSummary = computed(() => {
   const o = upd.value;
   if (!o) return "проверка панели и бинарников";
-  const hot = (Object.keys(CH_TITLE) as Channel[]).filter(
-    (c) => o[c]?.update_available === true,
-  );
-  if (hot.length) return `есть обновления: ${hot.map((c) => CH_TITLE[c]).join(", ")}`;
+  if (updates.hot.length)
+    return `есть обновления: ${updates.hot.map((h) => h.title).join(", ")}`;
   return `панель ${o.panel?.current_version || status.data?.version || "—"} · всё свежее`;
 });
 
@@ -482,50 +481,18 @@ function showChangelog(ch: Channel) {
 }
 
 async function loadUpdates() {
-  const [o, a] = await Promise.allSettled([
-    diag.updatesOverview(),
+  const [, a] = await Promise.allSettled([
+    updates.load(true),
     diag.autocheckStatus(),
   ]);
-  if (o.status === "fulfilled" && o.value) upd.value = o.value;
   if (a.status === "fulfilled") autocheck.value = a.value?.enabled === true;
-}
-
-/** Версия, которую нельзя показывать: обновлятор пишет так «не знаю». */
-function realVersion(v?: string): string {
-  const s = String(v ?? "").trim();
-  return s && s !== "?" && s !== "n/a" ? s : "";
-}
-
-/**
- * Ответ на ручную проверку — это сырой state-файл обновлятора, а не сводка:
- * у фид-каналов версии лежат в current/available, вердикта update_available
- * там нет вообще, а об ошибке говорит status/message. Без приведения к виду
- * updates_overview строка после проверки теряла и доступную версию, и зелёный
- * чип «Есть обновление».
- */
-function normalizeChannel(ch: Channel, r: UpdateChannelState): UpdateChannelState {
-  const out: UpdateChannelState = { ...r };
-  const cur = realVersion(r.current_version ?? r.current);
-  const avail = realVersion(r.available_version ?? r.available);
-  if (cur) out.current_version = cur;
-  if (avail) out.available_version = avail;
-  if (out.update_available === undefined) {
-    /* Панель сообщает вердикт статусом, фид-каналы — расхождением версий
-       (тот же критерий, что у feed_upd в CGI). */
-    out.update_available =
-      ch === "panel" ? r.status === "update_available" : !!cur && !!avail && cur !== avail;
-  }
-  if (!out.error && r.status === "error") out.error = r.message || "проверка не удалась";
-  return out;
 }
 
 async function checkChannel(ch: Channel) {
   updBusy.value = `check:${ch}`;
   try {
     const r = normalizeChannel(ch, await CH_CHECK[ch]());
-    const next: UpdatesOverview = { ...(upd.value ?? {}) };
-    next[ch] = r;
-    upd.value = next;
+    updates.setChannel(ch, r);
     if (r.error) {
       toast.error(`${CH_TITLE[ch]}: ${r.error}`);
     } else if (r.update_available) {
