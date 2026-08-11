@@ -63,6 +63,8 @@ UNSUPP_MARK=/tmp/detour-health.unsupported   # set when sing-box has no working 
 ASTATE=/tmp/detour-health.active-state       # `active` mode: "<id>\t<ok>" of last functional result (drives push transitions)
 ALOCK=/tmp/detour-health.active.lock         # `active` mode's OWN lock (independent of the sweep/tick LOCK so a long sweep can't starve the sub-minute active check)
 PUSH_BIN=/usr/sbin/detour-push               # Web Push sender — alerts on active VPN down / auto-switch
+WANPIN_BIN=/usr/sbin/detour-wanpin           # знает метки каналов — ими проба разводится по аплинкам
+PROBE_MARK=0                                 # SO_MARK для пробы; 0 = обычный маршрут
 LOCK=/tmp/detour-health.lock
 WORK="/tmp/detour-health.work.$$"
 URLS_RESOLVED="/tmp/detour-health.urls.$$"
@@ -131,6 +133,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     API_BIN=/opt/share/www/cgi-bin/detour-api
     LOG=/opt/var/log/detour-health.log
     PUSH_BIN=/opt/sbin/detour-push
+    WANPIN_BIN=/opt/sbin/detour-wanpin
     # Default to a single check per invocation, BUT honor an explicit budget from the
     # caller: detour-cron now launches `active` BACKGROUNDED with a ~full-tick budget so
     # it self-paces at 30–60 s (parity with OpenWrt) without blocking the shared loop.
@@ -373,9 +376,13 @@ URL_COUNT=$(grep -c . "$URLS_RESOLVED" 2>/dev/null)
 # each retagged h<n>) and an id<TAB>tag map. Invoked once per chunk / per profile.
 build_cfg() { # $1 = ids file, writes $SB_CONF + $SB_MAP
     : > "$SB_MAP"
-    lua - "$PROFILES" "$1" "$CLASH_ADDR" "$SB_CONF" "$SB_MAP" <<'LUA' 2>/dev/null
+    lua - "$PROFILES" "$1" "$CLASH_ADDR" "$SB_CONF" "$SB_MAP" "${PROBE_MARK:-0}" <<'LUA' 2>/dev/null
 local cjson = require("cjson.safe")
 local pdir, idfile, clash, cout, mout = arg[1], arg[2], arg[3], arg[4], arg[5]
+-- Метка исходящего сокета (SO_MARK), чтобы проба ушла через конкретный аплинк:
+-- ip rule от detour-wanpin разведёт её в таблицу нужного канала. Обязательно
+-- ЧИСЛОМ — строку sing-box отвергнет. 0 = не метить (обычная проверка).
+local mark = tonumber(arg[6] or "") or 0
 local outbounds = { { type = "direct", tag = "direct" } }
 local endpoints = {}
 local map = {}
@@ -426,6 +433,7 @@ if idf then
             n = n + 1
             local tag = "h" .. n
             ob.tag = tag
+            if mark > 0 then ob.routing_mark = mark end
             if ob.type == "wireguard" then
               endpoints[#endpoints + 1] = ob
             else
@@ -732,6 +740,49 @@ autoswitch_active() {
 # недоступен" alert — fired ONCE per down-episode of a profile, INCLUDING a fresh
 # connect to an already-broken profile (PREVID != active), but suppressed while we are
 # already known-down on the same profile (no nagging). Drives transitions via $ASTATE.
+# Каналы, через которые проверку МОЖНО развести по-настоящему: "<id>:<mark>".
+#
+# Гейт здесь не формальность. routing_mark без соответствующего `ip rule` не
+# ошибка — пакет просто уходит по главной таблице. То есть «проверим через
+# второй канал» ушло бы через первый и вернуло бы бодрое «жив», а мы бы на этом
+# основании сделали неверный вывод. Поэтому: только если detour-wanpin
+# подтверждает, что правила РЕАЛЬНО стоят, и каналов больше одного.
+uplink_marks() {
+    [ -x "$WANPIN_BIN" ] || return 0
+    _wst=$("$WANPIN_BIN" status 2>/dev/null)
+    case "$_wst" in
+        *'"installed":true'*) ;;
+        *) return 0 ;;
+    esac
+    printf '%s' "$_wst" | sed 's/},{/}\
+{/g' | sed -n 's/.*"id":"\([^"]*\)".*"mark":"\([^"]*\)".*/\1:\2/p'
+}
+
+# Проверить тот же профиль через каждый канал. Печатает id первого канала, на
+# котором профиль ожил, иначе пусто.
+active_try_uplinks() {
+    _list=$(uplink_marks | tr '\n' ' ')
+    _cnt=0
+    for _e in $_list; do _cnt=$((_cnt + 1)); done
+    [ "$_cnt" -ge 2 ] || return 0
+
+    _found=""
+    for _e in $_list; do
+        _uid=${_e%%:*}
+        _umk=${_e#*:}
+        [ -n "$_umk" ] || continue
+        # sing-box ждёт число; метки у нас шестнадцатеричные.
+        PROBE_MARK=$((_umk))
+        if probe_idfile "$WORK/.active-ids" \
+            && [ "$(awk -F'\t' 'NR==1{print $2}' "$WORK/$1" 2>/dev/null)" = "1" ]; then
+            _found="$_uid"
+            break
+        fi
+    done
+    PROBE_MARK=0
+    printf '%s' "$_found"
+}
+
 active_check_once() {
     _A=$(jstr active_profile "$SETTINGS")
     _ACH=$(jstr active_chain "$SETTINGS")
@@ -764,16 +815,30 @@ active_check_once() {
     _SUM=$(probe_summary "$_A")
     if [ "$_NEWOK" = "0" ]; then
         _ANAME=$(profile_name "$_A")
+        # У двух провайдеров разные ТСПУ и разный пиринг, поэтому «профиль не
+        # работает» и «профиль не работает ЧЕРЕЗ ЭТОТ КАНАЛ» — разные диагнозы, и
+        # лечатся они по-разному. Выясняем, какой из них наш, до того как
+        # объявить профиль мёртвым. При одном канале проверка не делается вовсе.
+        _ALTUP=$(active_try_uplinks "$_A")
         if ! { [ "$_PREVID" = "$_A" ] && [ "$_PREVOK" = "0" ]; }; then
-            log "active-check: $_A confirmed DOWN ($_SUM)"
+            if [ -n "$_ALTUP" ]; then
+                log "active-check: $_A confirmed DOWN ($_SUM), НО жив через канал $_ALTUP"
+            else
+                log "active-check: $_A confirmed DOWN ($_SUM)"
+            fi
         fi
+        # Решение об автопереключении профиля не меняем: перевести живой sing-box
+        # на другой аплинк мы пока не умеем, а смена профиля всё ещё может помочь
+        # (сосед может пролезть и через текущий канал). Диагноз добавляем в текст.
+        _ALTMSG=""
+        [ -n "$_ALTUP" ] && _ALTMSG=" Через канал «$_ALTUP» этот же профиль работает — дело в канале, а не в VPN."
         if autoswitch_active "$_A" "$_ANAME"; then
             log "active-check: $_A down → auto-switched"
         elif ! { [ "$_PREVID" = "$_A" ] && [ "$_PREVOK" = "0" ]; }; then
             # Not switched (off / no candidate / cooldown) and this is a NEW down for
             # this profile (was up, or just connected to it, or boot) → alert once.
             push_alert "VPN недоступен: «$_ANAME»" \
-                "Профиль «$_ANAME» не работает — проверочные адреса не открываются через VPN. Остаёмся на нём: $ASW_REASON."
+                "Профиль «$_ANAME» не работает — проверочные адреса не открываются через VPN. Остаёмся на нём: $ASW_REASON.$_ALTMSG"
             log "active-check: $_A DOWN — push sent"
         fi
     elif ! { [ "$_PREVID" = "$_A" ] && [ "$_PREVOK" = "1" ]; }; then
