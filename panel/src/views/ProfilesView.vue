@@ -26,7 +26,7 @@ import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
 import { draftFromProfile, profileFromDraft } from "@/components/profiles/uri";
 import type { ProfileDraft } from "@/components/profiles/uri";
-import { fmtAgo, fmtSpeedKbps } from "@/lib/format";
+import { ccFromName, countryName, fmtAgo, fmtSpeedKbps } from "@/lib/format";
 
 type Tab = "profiles" | "chains" | "subs" | "warp";
 
@@ -40,6 +40,7 @@ const selected = ref<string[]>([]);
 const busy = ref("");
 const probing = ref("");
 const flagBusy = ref("");
+const geoBusy = ref(false);
 const warpSupported = ref(false);
 /* Подписи целей проверки идут тем же ответом health_status, что и результаты, —
    их складывает store.loadProbes(). Отдельный запрос ради заголовков означал бы
@@ -100,6 +101,14 @@ const rowState = computed(() => {
   }
   const speed = fmtSpeedKbps(r.health?.dl);
   out.push(`Скорость: ${speed ? `↓ ${speed}` : "ещё не измерена"}`);
+  /* Страна УЗЛА, к которому подключаемся, — не та, что обещает имя профиля.
+     У подписок с разделением вход/выход они почти всегда разные (на живом
+     роутере совпали у 5 профилей из 83), поэтому строка подписана явно и
+     показывается только когда действительно отличается от флага в имени. */
+  const nodeCc = (r.cc || "").toUpperCase();
+  if (nodeCc && nodeCc !== ccFromName(r.name)) {
+    out.push(`Узел подключения: ${countryName(nodeCc) || nodeCc}`);
+  }
   return out;
 });
 
@@ -205,6 +214,28 @@ async function setFlag(r: ProfileRow, kind: "autoswitch" | "speedcheck", value: 
     toast.fromError(e, "Не удалось изменить настройку профиля");
   } finally {
     flagBusy.value = "";
+  }
+}
+
+/**
+ * Определить страны эндпоинтов (detour-geo). Долгая операция: сотня nslookup-ов,
+ * плюс 11 МБ базы, если попались незнакомые адреса, — поэтому явный тост о
+ * начале и перезагрузка списка в конце, а не молчаливое ожидание.
+ */
+async function scanGeo() {
+  if (geoBusy.value) return;
+  geoBusy.value = true;
+  toast.info("Определяю страны — это займёт до минуты");
+  try {
+    const st = await profilesApi.geoScan();
+    await store.load();
+    const known = Number(st?.known ?? 0);
+    if (known > 0) toast.ok(`Страна определена у ${known} профилей`);
+    else toast.error(st?.error || "Страны определить не удалось");
+  } catch (e) {
+    toast.fromError(e, "Не удалось определить страны");
+  } finally {
+    geoBusy.value = false;
   }
 }
 
@@ -618,12 +649,14 @@ onBeforeUnmount(() => unregister?.());
         :probing="probing"
         :targets="healthTargets"
         :flag-busy="flagBusy"
+        :geo-busy="geoBusy"
         @open="openRow"
         @connect="connect"
         @stop="stopActive"
         @ping="pingOne"
         @health="healthOne"
         @flag="setFlag($event.row, $event.kind, $event.value)"
+        @geoscan="scanGeo"
       />
       <template #actions>
         <UiButton variant="primary" @click="addProfile">Добавить профиль</UiButton>

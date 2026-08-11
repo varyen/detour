@@ -15,7 +15,7 @@
 import { computed, ref, watch } from "vue";
 import SectionIcon from "@/components/SectionIcon.vue";
 import type { ProfileRow } from "@/stores/profiles";
-import { fmtAgo, fmtSpeedKbps } from "@/lib/format";
+import { ccFromName, countryName, flagOf, fmtAgo, fmtSpeedKbps } from "@/lib/format";
 
 const props = defineProps<{
   rows: ProfileRow[];
@@ -30,6 +30,8 @@ const props = defineProps<{
   targets?: { label: string; url: string }[];
   /** Какой флаг сейчас сохраняется: `<id>:autoswitch` / `<id>:speedcheck`. */
   flagBusy?: string;
+  /** Идёт скан стран (detour-geo): кнопка глобуса заблокирована. */
+  geoBusy?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -40,12 +42,14 @@ const emit = defineEmits<{
   ping: [ProfileRow];
   health: [ProfileRow];
   flag: [{ row: ProfileRow; kind: "autoswitch" | "speedcheck"; value: boolean }];
+  geoscan: [];
 }>();
 
 type SortKey = "name" | "type" | "group" | "ping" | "speed" | "state";
 
 const query = ref("");
 const group = ref("");
+const country = ref("");
 const sortKey = ref<SortKey>("name");
 const sortAsc = ref(true);
 let lastIndex = -1;
@@ -65,15 +69,48 @@ const groups = computed(() => {
   return [...set].sort((a, b) => a.localeCompare(b, "ru"));
 });
 
+/**
+ * Страна профиля для фильтра и поиска. Сначала флаг из имени — это страна
+ * ВЫХОДА, ради которой профиль и покупали; и только если провайдер имя не
+ * подписал (прямые SOCKS/HTTP-прокси), берём страну узла из detour-geo — у
+ * такого прокси эндпоинт и есть выход, так что там она верна.
+ */
+function profileCc(r: ProfileRow): string {
+  return ccFromName(r.name) || (r.cc || "").toUpperCase();
+}
+
+/* Страны, которые реально встречаются в списке: пустой фильтр из 250 стран мира
+   бесполезен. Сортируем по названию, а не по коду — «Нидерланды» ищут глазами,
+   а не как NL. */
+const countries = computed(() => {
+  const set = new Set<string>();
+  for (const r of props.rows) {
+    const cc = profileCc(r);
+    if (cc) set.add(cc);
+  }
+  return [...set]
+    .map((cc) => ({ cc, name: countryName(cc) || cc }))
+    .sort((a, b) => a.name.localeCompare(b.name, "ru"));
+});
+
 const visible = computed(() => {
   const q = query.value.trim().toLowerCase();
   const g = group.value;
+  const c = country.value;
   const out = props.rows.filter((r) => {
     if (g && (r.group || "Без группы") !== g) return false;
+    if (c && profileCc(r) !== c) return false;
     if (!q) return true;
     /* Адрес узла тоже ищем: у подписок имена профилей похожи как две капли, и
-       найти нужный проще по хосту. */
-    return `${r.name} ${r.type} ${r.group ?? ""} ${r.id} ${r.ping?.server ?? ""}`
+       найти нужный проще по хосту. Страна ищется и словом, и кодом: «нидерл» и
+       «nl» должны находить одно и то же.
+       Страна УЗЛА в поиск намеренно не входит, хотя данные есть: иначе запрос
+       «германия» выдавал бы и Буэнос-Айрес с Софией (их узлы в DE) — поиск начал
+       бы противоречить фильтру над ним. Узел показан в шторке профиля. */
+    const cc = profileCc(r);
+    return `${r.name} ${r.type} ${r.group ?? ""} ${r.id} ${r.ping?.server ?? ""} ${cc} ${countryName(
+      cc,
+    )}`
       .toLowerCase()
       .includes(q);
   });
@@ -309,6 +346,28 @@ function stateTile(r: ProfileRow): string {
         <option value="">Все группы</option>
         <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
       </select>
+      <!-- Список стран пуст, пока detour-geo не отработал: показывать выпадашку
+           с одним пунктом «Все страны» незачем — вместо неё кнопка запуска. -->
+      <select v-if="countries.length" v-model="country" aria-label="Страна">
+        <option value="">Все страны</option>
+        <option v-for="c in countries" :key="c.cc" :value="c.cc">
+          {{ flagOf(c.cc) }} {{ c.name }}
+        </option>
+      </select>
+      <button
+        class="geo"
+        type="button"
+        :disabled="geoBusy"
+        :title="
+          countries.length
+            ? 'Обновить страны эндпоинтов'
+            : 'Определить страны эндпоинтов'
+        "
+        aria-label="Определить страны эндпоинтов"
+        @click="emit('geoscan')"
+      >
+        <SectionIcon name="globe" :size="15" />
+      </button>
       <select
         :value="sortKey"
         aria-label="Сортировка"
@@ -345,6 +404,14 @@ function stateTile(r: ProfileRow): string {
     <p class="count">
       {{ visible.length }} из {{ rows.length }}<template v-if="selected.length">
         · выбрано {{ selected.length }}</template>
+      <!-- Требование лицензии CC-BY базы DB-IP: там, где показаны её результаты,
+           обязана быть ссылка на источник. Убирать нельзя. -->
+      <template v-if="countries.length">
+        ·
+        <a class="attrib" href="https://db-ip.com" target="_blank" rel="noopener noreferrer"
+          >IP Geolocation by DB-IP</a
+        >
+      </template>
     </p>
 
     <div class="list">
@@ -439,7 +506,20 @@ function stateTile(r: ProfileRow): string {
         <button class="nm" type="button" @click="emit('open', r)">
           <i class="hdot" :class="`h-${r.state}`" :title="STATE_TEXT[r.state]"></i>
           <span class="nm-t">
-            <span class="nm-n">{{ r.name }}</span>
+            <span class="nm-n">
+              <!-- Флаг рисуем ТОЛЬКО если провайдер не поставил свой в имени:
+                   почти все подписки начинают имя с флага, и второй — вычисленный
+                   по адресу узла — встал бы рядом и противоречил ему (проверено:
+                   у 78 из 83 профилей узел в другой стране, чем обещает имя).
+                   Здесь же, а не отдельной плиткой: на 360px ряд плиток занят
+                   скоростью/пингом/проверкой, четвёртая ушла бы на вторую строку. -->
+              <span
+                v-if="!ccFromName(r.name) && flagOf(profileCc(r))"
+                class="cflag"
+                :title="countryName(profileCc(r))"
+                >{{ flagOf(profileCc(r)) }}</span
+              >{{ r.name }}</span
+            >
             <small>
               {{ r.type }}<template v-if="r.group"> · {{ r.group }}</template>
               <template v-if="r.autoswitch === false"> · без авто-переключения</template>
@@ -609,9 +689,42 @@ function stateTile(r: ProfileRow): string {
   min-height: 44px;
   max-width: 100%;
 }
+/* Кнопка скана стран — той же высоты, что и соседние контролы, чтобы не ломать
+   ряд, и квадратная: подпись ей не нужна, смысл несут title и глобус. */
+.geo {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  min-height: 44px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--dim);
+  cursor: pointer;
+}
+.geo:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.geo:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .count {
   font-size: 12px;
   color: var(--faint);
+}
+.attrib {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* Флаг не должен растягивать строку имени: эмодзи выше строчных букв, поэтому
+   держим его на той же высоте и отделяем узким зазором. */
+.cflag {
+  margin-right: 6px;
+  font-size: 13px;
+  line-height: 1;
 }
 .head,
 .row {
@@ -863,6 +976,15 @@ function stateTile(r: ProfileRow): string {
      действия открываются нажатием по строке. */
   .head {
     display: none;
+  }
+  /* Обе выпадашки и глобус — в одну строку. По умолчанию select занимает ширину
+     самого длинного пункта («Все страны» + название страны), из-за чего каждый
+     контрол уезжал на свою строку и список начинался у середины экрана. */
+  .tools select {
+    flex: 1 1 130px;
+    min-width: 0;
+    /* Ширину задаёт flex, а не самый длинный пункт списка. */
+    width: 0;
   }
   .row {
     /* Колонка отметки уже: место нужнее плиткам метрик, а сам квадратик 18px. */

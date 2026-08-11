@@ -111,6 +111,13 @@ while :; do
         /opt/sbin/detour-rulist update-cron >"$LOGDIR/detour-rulist.log" 2>&1
     fi
 
+    # Страна эндпоинта каждого профиля — ещё четверть цикла в сторону от rulist,
+    # чтобы тики не слипались. Обычный проход только резолвит адреса; 11 МБ базы
+    # качаются, лишь когда появился НЕизвестный адрес (или раз в 30 дней).
+    if [ $((n % 72)) -eq 54 ] && [ -x /opt/sbin/detour-geo ]; then
+        /opt/sbin/detour-geo update-cron >"$LOGDIR/detour-geo.log" 2>&1
+    fi
+
     n=$(((n + 1) % 72))
     sleep "$TICK"
 done

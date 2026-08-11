@@ -154,6 +154,7 @@ PANEL_FILES = [
     (("router_files", "detour-hosts.initd"), "etc/init.d/detour-hosts", 0o755),
     # Managed RU-subnet block of the all-except direct list (own file + refresher).
     (("router_files", "detour-rulist"), "usr/sbin/detour-rulist", 0o755),
+    (("router_files", "detour-geo"), "usr/sbin/detour-geo", 0o755),
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
     (("router_files", "detour-bypass"), "usr/sbin/detour-bypass", 0o755),
     (("router_files", "detour-bypass.initd"), "etc/init.d/detour-bypass", 0o755),
@@ -538,7 +539,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -553,6 +554,10 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   # Managed RU-subnet list. Runs twice a day but self-limits to a weekly refresh
   # (and no-ops entirely when auto is off), so a missed window still catches up.
   echo "41 4 * * * /usr/sbin/detour-rulist update-cron >/var/log/detour-rulist.log 2>&1"
+  # Страна эндпоинта каждого профиля. Ежедневный запуск дешёвый: скан качает
+  # 11 МБ базы, только если появились НЕизвестные адреса (новая подписка), а
+  # полное обновление — раз в 30 дней (STALE_AFTER внутри detour-geo).
+  echo "34 5 * * * /usr/sbin/detour-geo update-cron >/var/log/detour-geo.log 2>&1"
   # HW-offload watchdog — QCA/ipq53xx only; a safe no-op on non-QCA hardware. Detects a
   # wedged NSS/PPE accelerator (LAN<->WAN forwarding fell to the CPU → ~100 Mbit until a
   # reboot) and recovers it in place. Mode lives in /etc/detour/offload.conf (default auto).
@@ -563,6 +568,13 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
 ) | crontab -
 /etc/init.d/cron enable >/dev/null 2>&1
 /etc/init.d/cron restart >/dev/null 2>&1
+
+# 4b) Первый скан стран — в фоне и только если кэша ещё нет. Без него флаги и
+# фильтр по стране появились бы лишь со следующим ночным тиком cron, а держать
+# opkg install на загрузке 11 МБ базы нельзя.
+if [ ! -s /etc/detour/geo.db ] && [ -x /usr/sbin/detour-geo ]; then
+    ( /usr/sbin/detour-geo scan >/dev/null 2>&1 & ) &
+fi
 
 # 5) Drop our usign public key into opkg's standard keyring directory so the
 # OpenWrt opkg ecosystem also trusts it (the file is shipped by data.tar.gz,
@@ -613,6 +625,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-offload' \\
                       | grep -v 'detour-wan-link' \\
                       | grep -v 'detour-rulist' \\
+                      | grep -v 'detour-geo' \\
                       | crontab - 2>/dev/null
 echo "=== detour prerm end pid=$$ args:$* ==="
 exit 0

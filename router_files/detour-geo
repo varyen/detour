@@ -1,0 +1,338 @@
+#!/bin/sh
+# detour-geo — country of every profile's endpoint, resolved OFFLINE.
+#
+# WHY THIS EXISTS: the panel lists a hundred profiles named by whoever sold the
+# subscription. "Extra-07" tells you nothing about where the exit actually is,
+# and the one field that does — the endpoint host — is a hostname more often
+# than not. This maps profile -> endpoint IP -> ISO country code so the panel can
+# show a flag, search by country and filter by it.
+#
+# WHY NOT AN ONLINE LOOKUP (ip-api.com and friends): that would hand a third
+# party the full list of the user's VPN endpoints. The whole project touches
+# exactly one external service (detour-portmap check-external, and only for the
+# WAN IP). Here the database travels to us instead: a plain CSV is streamed
+# through awk and never lands on flash, so nothing about the endpoints leaves
+# the router.
+#
+# THE DATABASE: DB-IP IP-to-Country Lite via sapics/ip-location-db, plain CSV,
+#   1.0.16.0,1.0.31.255,JP
+# sorted by range start. ~11 MB — which is why it is *streamed* (curl | awk) and
+# matched in a single ordered merge pass instead of being downloaded to /tmp:
+# Keenetic has 256 MB of RAM and no business holding 11 MB of it, and tmpfs
+# writes on OpenWrt are RAM too.
+#
+# LICENCE (CC-BY 4.0): DB-IP requires attribution wherever results are shown.
+# The panel carries the "IP Geolocation by DB-IP" link — do not drop it.
+#
+# Cache (persistent; /etc/detour/ is in the sysupgrade keeplist):
+#   /etc/detour/geo.db    TSV, one line per profile: <id>\t<ip>\t<cc>\t<ts>
+#   /etc/detour/geo.json  status for the panel
+#
+# Subcommands: scan [--force] | update-cron | status | selftest
+
+DETOUR_DIR=/etc/detour
+PROFILES=/etc/sing-box/profiles
+GEO_DB="$DETOUR_DIR/geo.db"
+GEO_JSON="$DETOUR_DIR/geo.json"
+LOCK=/tmp/detour-geo.lock
+# Endpoints resolve in parallel: a mostly-dead subscription of 100 profiles would
+# otherwise spend 100 x up-to-3s in nslookup alone (see detour-ping's MAXJOBS).
+MAXJOBS=16
+# Re-download even when every endpoint is already known, so reassigned ranges do
+# not stay wrong forever. Incremental scans (new profile appears) are free.
+STALE_AFTER=2592000   # 30 days
+
+# Keenetic/Entware platform shim (mirrors detour-api / detour-ping / detour-rulist).
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DETOUR_DIR=/opt/etc/detour
+    PROFILES=/opt/etc/sing-box/profiles
+    GEO_DB="$DETOUR_DIR/geo.db"
+    GEO_JSON="$DETOUR_DIR/geo.json"
+fi
+
+NOW=$(date +%s 2>/dev/null)
+[ -z "$NOW" ] && NOW=0
+
+# Primary + same-data mirror, exactly like detour-rulist: raw.githubusercontent
+# is throttled from RU often enough that a fallback is not optional.
+src_urls() {
+    echo "https://raw.githubusercontent.com/sapics/ip-location-db/main/dbip-country/dbip-country-ipv4.csv"
+    echo "https://cdn.jsdelivr.net/gh/sapics/ip-location-db@main/dbip-country/dbip-country-ipv4.csv"
+}
+
+# Streams the URL to stdout — nothing is stored. `-4` is not cosmetic: Entware's
+# wget-ssl stalls on IPv6 to GitHub and curl is the only reliable fetcher there
+# (see detour-update's feed_curl_v4).
+fetch_stream() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -sS -L -4 --max-time 600 -A "detour-geo" "$1" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O - "$1" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+jstr() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
+
+# ---- state ------------------------------------------------------------------
+
+UPDATED=0; COUNT=0; KNOWN=0; LAST_ERR=""; SOURCE=""
+
+read_state() {
+    [ -f "$GEO_JSON" ] || return 0
+    UPDATED=$(sed -n 's/.*"updated"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$GEO_JSON" | head -1)
+    SOURCE=$(jstr url "$GEO_JSON")
+    LAST_ERR=$(jstr error "$GEO_JSON")
+    [ -z "$UPDATED" ] && UPDATED=0
+}
+
+write_state() {
+    mkdir -p "$DETOUR_DIR" 2>/dev/null
+    printf '{"updated":%s,"count":%s,"known":%s,"url":"%s","error":"%s"}\n' \
+        "$UPDATED" "$COUNT" "$KNOWN" \
+        "$(json_escape "$SOURCE")" "$(json_escape "$LAST_ERR")" > "$GEO_JSON.tmp" 2>/dev/null
+    mv "$GEO_JSON.tmp" "$GEO_JSON" 2>/dev/null || rm -f "$GEO_JSON.tmp"
+}
+
+print_status() {
+    read_state
+    COUNT=$(wc -l < "$GEO_DB" 2>/dev/null | tr -d ' ')
+    [ -z "$COUNT" ] && COUNT=0
+    KNOWN=$(awk -F'\t' '$3 != "" && $3 != "??" { n++ } END { print n + 0 }' "$GEO_DB" 2>/dev/null)
+    [ -z "$KNOWN" ] && KNOWN=0
+    printf '{"updated":%s,"count":%s,"known":%s,"url":"%s","error":"%s","attribution":"IP Geolocation by DB-IP","attribution_url":"https://db-ip.com"}\n' \
+        "$UPDATED" "$COUNT" "$KNOWN" "$(json_escape "$SOURCE")" "$(json_escape "$LAST_ERR")"
+}
+
+# ---- endpoint resolution ----------------------------------------------------
+
+# Same timeout dance as detour-api's nslookup_with_timeout: busybox has no
+# usable `timeout`, so run it detached and shoot it after ~2s.
+nslookup_to() {
+    _h="$1"
+    _tmpf="/tmp/detour-geo.ns.$$.$2"
+    nslookup "$_h" > "$_tmpf" 2>/dev/null &
+    _p=$!
+    _c=0
+    while kill -0 "$_p" 2>/dev/null; do
+        if [ "$_c" -ge 2 ]; then
+            kill "$_p" 2>/dev/null
+            sleep 1
+            kill -9 "$_p" 2>/dev/null
+            break
+        fi
+        sleep 1
+        _c=$((_c + 1))
+    done
+    wait "$_p" 2>/dev/null
+    # Skip the resolver's own address (the first "Address:" block is the server
+    # nslookup asked) by taking answers only — same awk as collect_upstream_ips.
+    awk '/^Address [0-9]+: /{print $3} /^Address: /{print $2}' "$_tmpf" 2>/dev/null \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+        | grep -vE '^127\.' | head -1
+    rm -f "$_tmpf"
+}
+
+# Endpoint host of one profile -> WORK/<id> as "<id>\t<ip>". Mirrors detour-ping's
+# extraction, wireguard/WARP included (no "server" key — the node lives in
+# peers[].address).
+resolve_one() {
+    _id="$1"
+    _pf="$PROFILES/$_id.json"
+    [ -f "$_pf" ] || return 0
+    _srv=$(jstr server "$_pf")
+    _ty=$(jstr type "$_pf")
+    if [ -z "$_srv" ] && [ "$_ty" = "wireguard" ]; then
+        _srv=$(sed -n 's/.*"address"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_pf" 2>/dev/null | head -1)
+    fi
+    [ -n "$_srv" ] || return 0
+    # Strip a :port or IPv6 brackets that some subscription formats leave in.
+    _srv=$(printf '%s' "$_srv" | sed 's/^\[//; s/\].*$//')
+    case "$_srv" in
+        *[!0-9.]*) _ip=$(nslookup_to "$_srv" "$_id") ;;   # hostname
+        *)         _ip="$_srv" ;;                          # already dotted-quad
+    esac
+    case "$_ip" in
+        [0-9]*.[0-9]*.[0-9]*.[0-9]*) printf '%s\t%s\n' "$_id" "$_ip" > "$WORK/$_id" ;;
+    esac
+}
+
+# ---- scan -------------------------------------------------------------------
+
+do_scan() {
+    _force=""
+    [ "$1" = "--force" ] && _force=1
+    read_state
+
+    [ -d "$PROFILES" ] || { LAST_ERR="нет каталога профилей"; write_state; return 1; }
+
+    if mkdir "$LOCK" 2>/dev/null; then
+        :
+    else
+        _lts=$(cat "$LOCK/ts" 2>/dev/null); [ -z "$_lts" ] && _lts=0
+        if [ "$((NOW - _lts))" -lt 1800 ]; then
+            echo '{"error":"scan already running"}'
+            return 1
+        fi
+        rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || return 1
+    fi
+    echo "$NOW" > "$LOCK/ts"
+    WORK="/tmp/detour-geo.work.$$"
+    rm -rf "$WORK"; mkdir -p "$WORK"
+    trap 'rm -rf "$LOCK" "$WORK"' EXIT INT TERM
+
+    # 1) profile -> endpoint IP, in parallel.
+    _jobs=0
+    for _f in "$PROFILES"/*.json; do
+        [ -f "$_f" ] || continue
+        _pid=$(basename "$_f" .json)
+        resolve_one "$_pid" &
+        _jobs=$((_jobs + 1))
+        if [ "$_jobs" -ge "$MAXJOBS" ]; then wait; _jobs=0; fi
+    done
+    wait
+
+    cat "$WORK"/* 2>/dev/null | sort > "$WORK/pairs"
+    if [ ! -s "$WORK/pairs" ]; then
+        LAST_ERR="ни один эндпоинт не разрешился"
+        write_state
+        return 1
+    fi
+
+    # 2) Which IPs do we already know? A scan after adding one profile must not
+    #    re-download 11 MB, so only genuinely new IPs become lookup targets.
+    : > "$WORK/known"
+    if [ -z "$_force" ] && [ -f "$GEO_DB" ] && [ "$((NOW - UPDATED))" -lt "$STALE_AFTER" ]; then
+        awk -F'\t' '$2 != "" && $3 != "" && $3 != "??" { print $2 "\t" $3 }' "$GEO_DB" 2>/dev/null \
+            | sort -u > "$WORK/known"
+    fi
+
+    # Targets = distinct endpoint IPs with no country yet, sorted NUMERICALLY by
+    # their integer value — the merge below relies on that order.
+    # Files are told apart by FILENAME, not by the usual `NR == FNR`: the known-IP
+    # file is legitimately empty on a first run, and with an empty first file
+    # NR == FNR is still true for the second file's first record — which would
+    # silently swallow one profile.
+    awk -F'\t' -v KF="$WORK/known" '
+        FILENAME == KF { k[$1] = 1; next }
+        !($2 in k) && !seen[$2]++ {
+            split($2, p, ".")
+            printf "%.0f\t%s\n", ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4], $2
+        }
+    ' "$WORK/known" "$WORK/pairs" | sort -n > "$WORK/targets"
+
+    _need=$(wc -l < "$WORK/targets" 2>/dev/null | tr -d ' ')
+    [ -z "$_need" ] && _need=0
+
+    : > "$WORK/found"
+    if [ "$_need" -gt 0 ]; then
+        _got=""
+        for _u in $(src_urls); do
+            # Single ordered merge pass over the stream: both sides are sorted by
+            # integer, so this is O(rows + targets), not targets-per-row. `exit`
+            # once every target is placed closes the pipe and stops the download.
+            fetch_stream "$_u" | awk -F, -v TF="$WORK/targets" '
+                function ip2int(s,   p) {
+                    split(s, p, ".")
+                    return ((p[1] * 256 + p[2]) * 256 + p[3]) * 256 + p[4]
+                }
+                BEGIN {
+                    n = 0
+                    while ((getline ln < TF) > 0) {
+                        split(ln, f, "\t")
+                        n++; TI[n] = f[1] + 0; TIP[n] = f[2]
+                    }
+                    close(TF)
+                    i = 1
+                    if (n == 0) exit
+                }
+                NF >= 3 {
+                    rows++
+                    s = ip2int($1); e = ip2int($2)
+                    while (i <= n && TI[i] < s) i++
+                    while (i <= n && TI[i] <= e) { print TIP[i] "\t" $3; i++ }
+                    if (i > n) exit
+                }
+                # Row count rides on stdout as a marker line rather than through
+                # /dev/stderr — busybox awk cannot be relied on to have it.
+                END { print "#rows\t" rows + 0 }
+            ' > "$WORK/found.try"
+            _rows=$(awk -F'\t' '/^#rows/ { print $2 }' "$WORK/found.try" 2>/dev/null | tail -1)
+            [ -z "$_rows" ] && _rows=0
+            # A throttled mirror answers with an HTML error page, not 200k CSV
+            # rows — same "is this really the list?" guard detour-rulist uses.
+            if [ "$_rows" -ge 1000 ]; then
+                grep -v '^#rows' "$WORK/found.try" > "$WORK/found" 2>/dev/null
+                _got="$_u"
+                break
+            fi
+        done
+        if [ -z "$_got" ]; then
+            LAST_ERR="не удалось скачать базу стран"
+            write_state
+            return 1
+        fi
+        SOURCE="$_got"
+        UPDATED="$NOW"
+    fi
+
+    # 3) Join: profile -> ip -> cc, keeping already-known IPs. Unknown stays "" so
+    #    the panel can tell "not looked up yet" from "looked up, no country".
+    cat "$WORK/known" "$WORK/found" 2>/dev/null | sort -u > "$WORK/map"
+    awk -F'\t' -v ts="$NOW" -v MF="$WORK/map" '
+        FILENAME == MF { cc[$1] = $2; next }
+        { print $1 "\t" $2 "\t" ($2 in cc ? cc[$2] : "") "\t" ts }
+    ' "$WORK/map" "$WORK/pairs" > "$WORK/db"
+
+    if [ -s "$WORK/db" ]; then
+        mkdir -p "$DETOUR_DIR" 2>/dev/null
+        mv "$WORK/db" "$GEO_DB" 2>/dev/null
+        chmod 0644 "$GEO_DB" 2>/dev/null
+    fi
+    [ "$UPDATED" = "0" ] && UPDATED="$NOW"
+    LAST_ERR=""
+    COUNT=$(wc -l < "$GEO_DB" 2>/dev/null | tr -d ' '); [ -z "$COUNT" ] && COUNT=0
+    KNOWN=$(awk -F'\t' '$3 != "" { n++ } END { print n + 0 }' "$GEO_DB" 2>/dev/null)
+    [ -z "$KNOWN" ] && KNOWN=0
+    write_state
+    logger -t detour-geo "scan: $KNOWN/$COUNT профилей со страной (новых адресов: $_need)" 2>/dev/null
+    print_status
+}
+
+case "$1" in
+    scan)
+        do_scan "$2"
+        ;;
+    update-cron)
+        # Cron path: quiet, and a full refresh only when the data went stale.
+        read_state
+        if [ "$((NOW - UPDATED))" -ge "$STALE_AFTER" ]; then
+            do_scan --force >/dev/null 2>&1
+        else
+            do_scan >/dev/null 2>&1
+        fi
+        ;;
+    status)
+        print_status
+        ;;
+    selftest)
+        echo "platform:  $([ -d /opt/etc/ndm ] && echo keenetic || echo openwrt)"
+        echo "curl:      $(command -v curl || echo MISSING)"
+        echo "wget:      $(command -v wget || echo MISSING)"
+        echo "nslookup:  $(command -v nslookup || echo MISSING)"
+        echo "profiles:  $(ls -1 "$PROFILES"/*.json 2>/dev/null | wc -l | tr -d ' ')"
+        echo "cache:     $GEO_DB ($(wc -l < "$GEO_DB" 2>/dev/null | tr -d ' ') lines)"
+        read_state
+        echo "updated:   $UPDATED"
+        echo "source:    ${SOURCE:-—}"
+        echo "error:     ${LAST_ERR:-—}"
+        ;;
+    *)
+        echo "usage: detour-geo scan [--force] | update-cron | status | selftest" >&2
+        exit 1
+        ;;
+esac

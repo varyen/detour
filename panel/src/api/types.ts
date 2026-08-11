@@ -149,6 +149,27 @@ export interface ProfileSummary {
   routing_mode?: string;
   autoswitch?: boolean;
   speedcheck?: boolean;
+  /**
+   * ISO-код страны эндпоинта (`NL`, `DE`, …) из кэша detour-geo. Пусто, если
+   * скан ещё не прошёл или адрес не нашёлся в базе — панель в этом случае
+   * просто не показывает флаг, а не рисует «неизвестно».
+   */
+  cc?: string;
+}
+
+/** Ответ `geo_status`: состояние кэша стран (detour-geo). */
+export interface GeoStatus {
+  supported?: boolean;
+  /** unix-время последнего успешного скана. */
+  updated?: number;
+  /** сколько профилей в кэше и у скольких из них определилась страна. */
+  count?: number;
+  known?: number;
+  url?: string;
+  error?: string;
+  /** Условие лицензии CC-BY базы DB-IP — панель обязана показать ссылку. */
+  attribution?: string;
+  attribution_url?: string;
 }
 
 export interface ProfilesListResponse {

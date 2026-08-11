@@ -2,6 +2,7 @@ import { requestJson, requestJsonTolerant } from "./client";
 import type {
   Chain,
   ChainsResponse,
+  GeoStatus,
   ProfilesListResponse,
   Subscription,
   WarpStatus,
@@ -74,6 +75,19 @@ export const profiles = {
     requestJson<{ ok: boolean }>("speedcheck_set", {
       params: { eligible: eligible ? 1 : 0 },
       body: ids.join("\n"),
+    }),
+
+  /* --- страна эндпоинта (detour-geo) --- */
+  geoStatus: () => requestJsonTolerant<GeoStatus>("geo_status"),
+  /**
+   * Скан идёт с большим таймаутом не из-за сети, а из-за резолва: сотня
+   * эндпоинтов по nslookup + возможная загрузка 11 МБ базы, если появились
+   * незнакомые адреса.
+   */
+  geoScan: (force = false) =>
+    requestJson<GeoStatus>("geo_scan", {
+      body: force ? { force: true } : "",
+      timeoutMs: 300_000,
     }),
 };
 

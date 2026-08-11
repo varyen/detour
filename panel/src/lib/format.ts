@@ -63,6 +63,68 @@ export function fmtAgo(tsSeconds?: number): string {
 }
 
 /**
+ * Флаг страны из ISO-кода: `NL` → 🇳🇱. Две буквы переводятся в regional indicator
+ * symbols, поэтому ни картинок, ни справочника флагов везти не надо — рисует
+ * системный шрифт. Пустая строка на всё, что не похоже на код страны.
+ */
+export function flagOf(cc?: string): string {
+  const s = String(cc ?? "")
+    .trim()
+    .toUpperCase();
+  if (!/^[A-Z]{2}$/.test(s)) return "";
+  return String.fromCodePoint(
+    0x1f1e6 + (s.charCodeAt(0) - 65),
+    0x1f1e6 + (s.charCodeAt(1) - 65),
+  );
+}
+
+/**
+ * Обратная операция: флаг-эмодзи из имени профиля → ISO-код. Подписки почти
+ * всегда ставят флаг первым символом («🇬🇷 Афины, Греция, Extra»), и это — та
+ * страна, которую человек покупал.
+ *
+ * Проверено на 103 живых профилях: страна ВЫХОДА (флаг в имени) совпала со
+ * страной эндпоинта лишь у 5, разошлась у 78 — провайдер держит несколько
+ * входных узлов в DE/US/NL и разводит трафик по нужной стране уже внутри своей
+ * сети. Поэтому для фильтра «по стране» верен именно флаг из имени, а не
+ * geoip по адресу узла.
+ */
+export function ccFromName(name?: string): string {
+  const m = String(name ?? "").match(
+    /([\u{1F1E6}-\u{1F1FF}])([\u{1F1E6}-\u{1F1FF}])/u,
+  );
+  if (!m) return "";
+  return (
+    String.fromCharCode(m[1].codePointAt(0)! - 0x1f1e6 + 65) +
+    String.fromCharCode(m[2].codePointAt(0)! - 0x1f1e6 + 65)
+  );
+}
+
+/* Названия стран по-русски даёт сама платформа (Intl.DisplayNames) — 250 строк
+   справочника в бандле не нужны. Инстанс дорогой, поэтому создаём его один раз и
+   лениво; там, где Intl.DisplayNames нет (старый WebView), откатываемся на код. */
+let regionNames: Intl.DisplayNames | null | undefined;
+
+export function countryName(cc?: string): string {
+  const s = String(cc ?? "")
+    .trim()
+    .toUpperCase();
+  if (!/^[A-Z]{2}$/.test(s)) return "";
+  if (regionNames === undefined) {
+    try {
+      regionNames = new Intl.DisplayNames(["ru"], { type: "region" });
+    } catch {
+      regionNames = null;
+    }
+  }
+  try {
+    return regionNames?.of(s) ?? s;
+  } catch {
+    return s;
+  }
+}
+
+/**
  * Дата в человеческом виде. `openssl x509 -enddate` отдаёт «Oct 27 05:29:33 2026
  * GMT» — показывать это как есть на русском экране незачем. Что не разобралось,
  * возвращаем нетронутым: соврать датой хуже, чем показать сырую строку.

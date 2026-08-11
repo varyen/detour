@@ -63,6 +63,8 @@ HEALTH_SWITCH="/tmp/detour-health.switch"   # last auto-switch event marker (JSO
 HEALTH_UNSUPP="/tmp/detour-health.unsupported" # set by detour-health when sing-box lacks clash_api
 HEALTH_URLS="/etc/sing-box/health-urls.list" # health-check targets: "label|url" per line (panel-editable)
 HEALTH_BIN="/usr/sbin/detour-health"
+GEO_DB="/etc/detour/geo.db"                 # profile -> endpoint IP -> country (TSV; written by detour-geo)
+GEO_BIN="/usr/sbin/detour-geo"
 EGRESS_IP_STATE="/tmp/detour-egress-ip.tsv"    # active chain -> last known public egress IP (TSV cache)
 EGRESS_IP_LOCK="/tmp/detour-egress-ip.lock"    # single-flight lock for the background refresh
 EGRESS_IP_LOG="/tmp/detour-egress-ip.log"
@@ -160,6 +162,8 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     RULIST_BIN="$OPT/sbin/detour-rulist"
     HEALTH_URLS="$OPT/etc/sing-box/health-urls.list"  # HEALTH_DB/SWITCH stay /tmp (not remapped, like PING_DB)
     HEALTH_BIN="$OPT/sbin/detour-health"
+    GEO_DB="$OPT/etc/detour/geo.db"   # persistent (unlike PING_DB) — a rescan costs an 11 MB download
+    GEO_BIN="$OPT/sbin/detour-geo"
     PUSH_BIN="$OPT/sbin/detour-push"   # PUSH_MSG stays /tmp (not remapped, like HEALTH_DB)
     CERT_BIN="$OPT/sbin/detour-cert"
     CERT_STATE="$OPT/var/state/detour-cert.json"
@@ -3186,9 +3190,10 @@ profiles_list)
     # которого панель вообще пустая, и терять её из-за сломанного cjson нельзя.
     PL_TMP="/tmp/detour-profiles.$$"
     lua - "$PLATFORM" "$AUTOSWITCH_EXCLUDE" "$SPEEDCHECK_EXCLUDE" \
-          "$(get_active_profile)" "$(get_active_chain)" \
+          "$(get_active_profile)" "$(get_active_chain)" "$GEO_DB" \
           "$SINGBOX_PROFILES_DIR"/*.json > "$PL_TMP" 2>/dev/null <<'LUA'
-local platform, ex_as, ex_sc, active, chain_csv = arg[1], arg[2], arg[3], arg[4], arg[5]
+local platform, ex_as, ex_sc, active, chain_csv, geo_db =
+    arg[1], arg[2], arg[3], arg[4], arg[5], arg[6]
 if platform == "keenetic" then
     package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
 end
@@ -3212,11 +3217,26 @@ end
 local no_autoswitch = read_set(ex_as)
 local no_speedcheck = read_set(ex_sc)
 
+-- Страна эндпоинта: тот же приём, что и со списками исключений — один проход по
+-- кэшу detour-geo вместо grep-а на каждый профиль. Файла может не быть вовсе
+-- (скан ещё не гоняли) — тогда просто пустые cc, панель это переживает.
+local geo = {}
+if geo_db and geo_db ~= "" then
+    local f = io.open(geo_db, "r")
+    if f then
+        for line in f:lines() do
+            local id, cc = line:match("^([^\t]+)\t[^\t]*\t([^\t]*)")
+            if id and cc and cc ~= "" then geo[id] = cc end
+        end
+        f:close()
+    end
+end
+
 -- Массивы собираем конкатенацией, а не одним cjson.encode всего ответа: пустую
 -- таблицу cjson отдал бы как {}, и панель упала бы на `profiles.map` там, где
 -- профилей ещё нет (свежий роутер).
 local parts = {}
-local i = 6
+local i = 7
 while arg[i] do
     local path = arg[i]
     local id = path:match("([^/]+)%.json$")
@@ -3233,6 +3253,7 @@ while arg[i] do
             routing_mode = str(obj.routing_mode),
             autoswitch = not no_autoswitch[id],
             speedcheck = not no_speedcheck[id],
+            cc = geo[id] or "",
         })
     end
     i = i + 1
@@ -3274,12 +3295,14 @@ LUA
         else
             PSC=true
         fi
+        # Страна эндпоинта из кэша detour-geo (пусто, если скан не гоняли).
+        PCC=$(awk -F'\t' -v id="$PNAME" '$1 == id { print $3; exit }' "$GEO_DB" 2>/dev/null)
         if [ "$FIRST" = "1" ]; then FIRST=0; else printf ','; fi
-        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s","autoswitch":%s,"speedcheck":%s}' \
+        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s","autoswitch":%s,"speedcheck":%s,"cc":"%s"}' \
             "$PNAME" "$PTYPE" \
             "$(echo "$PDESC" | json_escape)" \
             "$(echo "$PGROUP" | json_escape)" \
-            "$PRMODE" "$PAS" "$PSC"
+            "$PRMODE" "$PAS" "$PSC" "$PCC"
     done
     printf '],"active":"%s","active_chain":' "$(get_active_profile)"
     print_csv_json_array "$(get_active_chain)"
@@ -3662,6 +3685,22 @@ whitelist_save_restart)
 # The country block of the "all-except" direct list is owned by /usr/sbin/detour-rulist:
 # its own file, refreshed from a public source, with `nomatch` exceptions. These handlers
 # are thin wrappers relaying its JSON — all logic lives in the script.
+geo_status)
+    [ -x "$GEO_BIN" ] || { echo '{"supported":false,"error":"detour-geo not installed"}'; exit 0; }
+    "$GEO_BIN" status 2>/dev/null | sed 's|^{|{"supported":true,|'
+    ;;
+
+geo_scan)
+    # POST {"force":true} — перечитать страны. Без force скан инкрементальный:
+    # уже известные адреса не заставляют качать базу заново (см. detour-geo).
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$GEO_BIN" ] || { json_err "detour-geo not installed"; exit 0; }
+    case "$POST_DATA" in
+        *'"force":true'*|*'"force": true'*) "$GEO_BIN" scan --force 2>/dev/null ;;
+        *)                                  "$GEO_BIN" scan 2>/dev/null ;;
+    esac
+    ;;
+
 rulist_status)
     [ -x "$RULIST_BIN" ] || { echo '{"supported":false,"error":"detour-rulist not installed"}'; exit 0; }
     "$RULIST_BIN" status 2>/dev/null | sed 's|^{|{"supported":true,|'

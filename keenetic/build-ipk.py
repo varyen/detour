@@ -74,6 +74,10 @@ FILES = [
     # Managed RU-subnet block of the all-except direct list (shared source, /opt shim).
     # S50detour-dns calls `detour-rulist ipset-load` after building the whitelist ipset.
     (os.path.join(ROUTER_FILES, "detour-rulist"), "opt/sbin/detour-rulist", 0o755, True),
+    # Страна эндпоинта профиля (общий источник, /opt-шим внутри). Гоняется из
+    # detour-cron; на Keenetic качает базу через curl -4 — Entware wget-ssl не
+    # умеет HTTPS к GitHub по IPv6. fix_shebang → /opt/bin/sh.
+    (os.path.join(ROUTER_FILES, "detour-geo"), "opt/sbin/detour-geo", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-bootstrap-install"), "opt/sbin/detour-bootstrap-install", 0o755, True),
     # Self-update (shared source, /opt shim for Keenetic): pulls detour-keenetic_*.ipk.
     (os.path.join(ROUTER_FILES, "detour-update"), "opt/sbin/detour-update", 0o755, True),
@@ -271,7 +275,7 @@ if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
 fi
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \
-    /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp \
+    /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp /opt/sbin/detour-geo \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\
@@ -319,6 +323,12 @@ if [ -f /opt/etc/crontabs/root ]; then
 fi
 # (Re)start the scheduler daemon now; rc.unslung also boot-starts it via S90.
 /opt/etc/init.d/S90detour-cron restart 2>/dev/null
+# Первый скан стран эндпоинтов — в фоне и только если кэша ещё нет: держать
+# opkg на загрузке 11 МБ базы нельзя, а без скана флаги и фильтр по стране
+# появились бы лишь с очередным тиком detour-cron (паритет с OpenWrt-postinst).
+if [ ! -s /opt/etc/detour/geo.db ] && [ -x /opt/sbin/detour-geo ]; then
+    ( /opt/sbin/detour-geo scan >/dev/null 2>&1 & ) &
+fi
 # sing-box comes from the Entware `sing-box-go` package, which ships its own
 # auto-start /opt/etc/init.d/S99sing-box (with a default config). Disable it so
 # ONLY detour's S52detour-singbox drives the daemon — otherwise two sing-box
