@@ -58,6 +58,14 @@ defineProps<{ name: string; size?: number }>();
     <template v-else-if="name === 'close'">
       <path d="M6 6l12 12M18 6L6 18" />
     </template>
+    <!-- Заливка задаётся на самой фигуре: у svg выше fill="none", а «играть» и
+         «стоп» узнаются именно сплошными. -->
+    <template v-else-if="name === 'play'">
+      <path d="M8.5 5.7l10 6.3-10 6.3z" fill="currentColor" stroke-linejoin="round" />
+    </template>
+    <template v-else-if="name === 'stop'">
+      <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" />
+    </template>
     <template v-else-if="name === 'grip'">
       <path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" />
     </template>

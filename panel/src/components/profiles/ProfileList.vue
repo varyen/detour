@@ -5,7 +5,13 @@
 
    Разметка одна на все экраны: на широком это таблица (колонки заданы
    grid-template-columns), на телефоне те же строки превращаются в карточки —
-   таблица с горизонтальной прокруткой на 360px нечитаема. */
+   таблица с горизонтальной прокруткой на 360px нечитаема.
+
+   Телефонная карточка сделана «метриками-плитками»: под именем ряд плиток
+   (скорость акцентом, пинг, проверка), а справа одна круглая кнопка ▶/■. Раньше
+   там лежал второй ряд с «Подключить» и «…» — два контрола по 44px удваивали
+   высоту каждой из сотни карточек. Остальные действия никуда не делись: тап по
+   строке открывает шторку, где они подписаны словами. */
 import { computed, ref, watch } from "vue";
 import SectionIcon from "@/components/SectionIcon.vue";
 import type { ProfileRow } from "@/stores/profiles";
@@ -30,6 +36,7 @@ const emit = defineEmits<{
   "update:selected": [string[]];
   open: [ProfileRow];
   connect: [ProfileRow];
+  stop: [ProfileRow];
   ping: [ProfileRow];
   health: [ProfileRow];
   flag: [{ row: ProfileRow; kind: "autoswitch" | "speedcheck"; value: boolean }];
@@ -250,6 +257,39 @@ function healthTitle(r: ProfileRow): string {
 function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean {
   return props.flagBusy === `${r.id}:${kind}`;
 }
+
+/* Сортировка на телефоне — видимыми чипами, а не выпадашкой: в списке на сотню
+   профилей важно с одного взгляда понимать, по чему он сейчас отсортирован.
+   Порядок — по частоте: скорость и есть тот вопрос, ради которого сюда заходят. */
+const SORT_CHIPS: [SortKey, string][] = [
+  ["speed", "Скорость"],
+  ["ping", "Пинг"],
+  ["state", "Статус"],
+  ["name", "Имя"],
+];
+
+/**
+ * Плитка скорости: акцентная, потому что её сравнивают между строками. Значка
+ * молнии нет намеренно — цвет и так выделяет плитку, а на экране 360px эти
+ * лишние 14px переносили ряд плиток на вторую строку.
+ */
+function speedTile(r: ProfileRow): string {
+  return fmtSpeedKbps(speedKbps(r)) || "";
+}
+
+function stateTile(r: ProfileRow): string {
+  if (props.probing === r.id) return "проверяю…";
+  switch (r.state) {
+    case "ok":
+      return "✓ проверка";
+    case "slow":
+      return "медленно";
+    case "dead":
+      return "✕ не отвечает";
+    default:
+      return "не проверялся";
+  }
+}
 </script>
 
 <template>
@@ -282,6 +322,24 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
         <option value="speed">По скорости</option>
         <option value="state">По состоянию</option>
       </select>
+    </div>
+
+    <!-- Тот же выбор, что и в `.sortsel`, но кнопками: на телефоне выпадашка
+         прячет и сам факт сортировки, и её направление. Повторное нажатие по
+         активному чипу переворачивает порядок — как по колонке в таблице. -->
+    <div class="chips" role="group" aria-label="Сортировка">
+      <button
+        v-for="[k, label] in SORT_CHIPS"
+        :key="k"
+        type="button"
+        class="chip"
+        :class="{ on: sortKey === k }"
+        :aria-pressed="sortKey === k"
+        :title="sortTitle(k, label)"
+        @click="sortBy(k)"
+      >
+        {{ label }}<i v-if="sortKey === k" class="arw" aria-hidden="true">{{ arrow(k) }}</i>
+      </button>
     </div>
 
     <p class="count">
@@ -381,15 +439,21 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
         <button class="nm" type="button" @click="emit('open', r)">
           <i class="hdot" :class="`h-${r.state}`" :title="STATE_TEXT[r.state]"></i>
           <span class="nm-t">
-            {{ r.name }}
+            <span class="nm-n">{{ r.name }}</span>
             <small>
               {{ r.type }}<template v-if="r.group"> · {{ r.group }}</template>
-              <!-- На телефоне колонки скрыты, а скорость — то, ради чего в этот
-                   список и заходят: показываем её прямо в подписи. -->
-              <span v-if="speedKbps(r) > 0" class="only-mob"> · {{ speedText(r) }}</span>
               <template v-if="r.autoswitch === false"> · без авто-переключения</template>
               <template v-if="r.speedcheck === false"> · без проверки скорости</template>
             </small>
+            <!-- Плитки только на телефоне: на широком экране те же три числа
+                 стоят своими колонками, и дублировать их под именем незачем. -->
+            <span class="mrow">
+              <!-- Плитки скорости у неизмеренного профиля нет вовсе: «скорость —»
+                   занимала треть строки и переносила остальные на вторую. -->
+              <span v-if="speedKbps(r) > 0" class="m spd measured">{{ speedTile(r) }}</span>
+              <span class="m" :class="{ bad: r.ping && !r.ping.ok }">{{ pingText(r) }}</span>
+              <span class="m" :class="`s-${r.state}`">{{ stateTile(r) }}</span>
+            </span>
           </span>
           <span v-if="r.isActive" class="badge">активен</span>
         </button>
@@ -473,6 +537,20 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
           </button>
           <button class="dots" type="button" aria-label="Действия" @click="emit('open', r)">
             …
+          </button>
+          <!-- Телефонная замена паре «Подключить»/«…»: одно прямое действие в
+               строке. У активного профиля это «стоп» — тот же самый, что и на
+               «Обзоре», другого способа выключить туннель отсюда нет. -->
+          <button
+            class="go"
+            type="button"
+            :class="{ stop: r.isActive, busy: switching === r.id }"
+            :disabled="!!switching"
+            :title="r.isActive ? 'Остановить sing-box' : 'Подключить'"
+            :aria-label="r.isActive ? `Остановить ${r.name}` : `Подключить ${r.name}`"
+            @click="r.isActive ? emit('stop', r) : emit('connect', r)"
+          >
+            <SectionIcon :name="r.isActive ? 'stop' : 'play'" :size="15" />
           </button>
         </span>
       </div>
@@ -667,7 +745,10 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
-.only-mob {
+/* Чипы сортировки и плитки метрик живут только на телефоне (медиазапрос ниже). */
+.chips,
+.mrow,
+.go {
   display: none;
 }
 .act {
@@ -784,39 +865,149 @@ function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean 
     display: none;
   }
   .row {
-    grid-template-columns: 38px minmax(0, 1fr) auto;
+    /* Колонка отметки уже: место нужнее плиткам метрик, а сам квадратик 18px. */
+    grid-template-columns: 30px minmax(0, 1fr) auto;
     padding: 6px 4px;
+    gap: 4px;
+  }
+  .chk {
+    min-width: 30px;
+  }
+  /* Имя — в одну строку с многоточием: у профилей из подписок оно длинное, и
+     перенос добавлял каждой карточке лишнюю строку. */
+  .nm-n {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .nm {
+    gap: 8px;
+    min-height: 0;
+    align-items: flex-start;
+    padding-top: 8px;
+  }
+  /* Точка здоровья убрана: то же самое словами говорит плитка проверки, а
+     её место нужно самим плиткам, чтобы они умещались в одну строку. */
+  .hdot {
+    display: none;
+  }
+  /* Активная карточка — не полоса во всю ширину, а выделенная плитка. */
+  .row.on {
+    border-radius: 12px;
+    border-bottom-color: transparent;
   }
   .cell.type,
   .cell.grp,
   .cell.chk-t,
-  .cell.speed {
+  .cell.speed,
+  /* Пинг и проверка переехали в плитки под именем. */
+  .cell.num {
     display: none;
   }
-  .only-mob {
-    display: inline;
+  .chips {
+    display: flex;
+    gap: 7px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 2px;
   }
-  .cell.num {
-    font-size: 12px;
-    text-align: right;
-    grid-column: 3;
+  .chips::-webkit-scrollbar {
+    display: none;
+  }
+  .chip {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border: 1px solid var(--line-2);
+    background: var(--panel-2);
+    color: var(--dim);
+    border-radius: 999px;
+    padding: 7px 13px;
+    font-size: 12.5px;
+    min-height: 36px;
+    white-space: nowrap;
+  }
+  .chip.on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-on);
+    font-weight: 600;
+  }
+  /* Стрелка направления внутри залитого чипа — цветом чипа, иначе не видна. */
+  .chip .arw {
+    color: inherit;
+  }
+  /* Выпадашка сортировки дублировала бы чипы. Группы остаются списком: их
+     бывает десяток, чипами это уже полоса на два экрана. */
+  .sortsel {
+    display: none;
+  }
+  .mrow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .m {
+    font-size: 11px;
+    line-height: 1.45;
+    border-radius: 7px;
+    padding: 2px 7px;
+    white-space: nowrap;
+    background: var(--panel-2);
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .m.spd.measured {
+    background: var(--accent-wash);
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .m.bad,
+  .m.s-dead {
+    color: var(--bad);
+  }
+  .m.s-ok {
+    color: var(--ok);
   }
   .act {
-    grid-column: 2 / -1;
-    justify-content: flex-start;
-    padding-left: 18px;
-    flex-wrap: wrap;
+    grid-column: 3;
+    flex-wrap: nowrap;
   }
-  /* Иконочные контролы на телефоне убраны: шесть кнопок переносились во вторую
-     строку и удваивали высоту каждой из сотни карточек, а безымянные глифы в
-     44px всё равно не читались. Те же четыре действия — подписанными
-     тумблерами и кнопками в шторке, она открывается нажатием по строке. */
-  .ico {
-    display: none;
-  }
+  /* В строке остаётся одно действие — круглая ▶/■. Остальные (пинг, замер,
+     оба флага, правка, удаление) подписаны словами в шторке, которая
+     открывается нажатием по строке. */
+  .ico,
   .mini,
   .dots {
-    min-height: 44px;
+    display: none;
+  }
+  .go {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--accent-on);
+    box-shadow: 0 2px 8px var(--accent-wash);
+  }
+  .go.stop {
+    background: transparent;
+    color: var(--bad);
+    border: 1.5px solid var(--bad);
+    box-shadow: none;
+  }
+  .go:disabled {
+    opacity: 0.35;
+  }
+  .go.busy {
+    animation: blink 1s ease-in-out infinite;
+    opacity: 1;
   }
   .list {
     /* На телефоне крутим страницу целиком: вложенная прокрутка под пальцем

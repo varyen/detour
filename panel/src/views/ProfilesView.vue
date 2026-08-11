@@ -127,6 +127,20 @@ async function connect(r: ProfileRow) {
   }
 }
 
+/* «Стоп» у активного профиля в списке — тот же самый, что на «Обзоре»:
+   останавливается служба целиком, потому что активный профиль в ней один. */
+async function stopActive(r: ProfileRow) {
+  rowOpen.value = false;
+  try {
+    await diag.singboxStop();
+    toast.ok(`Остановлено: ${r.name} — трафик идёт напрямую`);
+    void status.refresh(true);
+    void store.load(true);
+  } catch (e) {
+    toast.fromError(e, "Не удалось остановить");
+  }
+}
+
 async function pingOne(r: ProfileRow) {
   if (probing.value) return;
   probing.value = r.id;
@@ -606,6 +620,7 @@ onBeforeUnmount(() => unregister?.());
         :flag-busy="flagBusy"
         @open="openRow"
         @connect="connect"
+        @stop="stopActive"
         @ping="pingOne"
         @health="healthOne"
         @flag="setFlag($event.row, $event.kind, $event.value)"
