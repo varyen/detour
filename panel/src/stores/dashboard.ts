@@ -112,6 +112,15 @@ export const useDashboardStore = defineStore("dashboard", () => {
     order.value = list;
   }
 
+  /** Перенос карточки на произвольное место — это перетаскивание в редакторе. */
+  function reorder(from: number, to: number) {
+    const list = [...order.value];
+    if (from < 0 || from >= list.length || to < 0 || to >= list.length || from === to) return;
+    const [id] = list.splice(from, 1);
+    list.splice(to, 0, id);
+    order.value = list;
+  }
+
   function reset() {
     order.value = [...IDS];
     hidden.value = [];
@@ -127,6 +136,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
     orderOf,
     toggle,
     move,
+    reorder,
     reset,
   };
 });
