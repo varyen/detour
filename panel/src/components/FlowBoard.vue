@@ -3,7 +3,8 @@
    На широком экране это ленты с бегущими пакетами (SMIL: анимация живёт в
    разметке и не крутит JS-таймеры), на телефоне — те же три ленты столбиком с
    полосами долей: тянуть 900 px схемы на 375 px бессмысленно. */
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import { useElementWidth } from "../composables/useElementWidth";
 
 const props = defineProps<{
   /** Доли лент 0..100. */
@@ -35,17 +36,31 @@ const reduced =
 const pct = (n: number) => (props.hasShares ? `${Math.round(n)}%` : "—");
 const barWidth = (n: number) => (props.hasShares ? `${Math.round(n)}%` : "0%");
 
+/* Схема РАСТЯГИВАЕТСЯ, но не МАСШТАБИРУЕТСЯ. Раньше viewBox был фиксированный
+   (960×200) при width:100%, и на широком экране браузер увеличивал схему
+   целиком: на 1728 px подписи узлов вырастали до 24 px против 13 px во всём
+   остальном интерфейсе — та самая «непропорциональность». Теперь единица
+   viewBox равна пикселю (ширину меряет ResizeObserver), узлы и подписи стоят в
+   своём размере, а лишнюю ширину забирают ленты — им длина только на пользу. */
+const flow = ref<SVGSVGElement | null>(null);
+const W = useElementWidth(flow, 960);
+
+/* Правая колонка подписей: не уже прежних 248 px (в них влезает штатное
+   «100% · всё, кроме белого списка») и не шире 420 — дальше строка отрывается
+   от своей ленты. Ленты упираются в неё, отступив 12 px. */
+const labelW = computed(() => Math.min(420, Math.max(248, Math.round(W.value * 0.3))));
+const labelX = computed(() => Math.max(560, W.value - labelW.value));
+const laneEnd = computed(() => labelX.value - 12);
+
 /* SVG-текст не переносится и не обрезается по многоточию — он просто уезжает за
-   viewBox и молча срезается. Правая колонка подписей начинается с 712, и при
-   ширине viewBox 900 ей оставалось 188 px — в них не влезало даже штатное
-   «100% · всё, кроме белого списка». Поэтому viewBox расширен до 960 (схема от
-   этого лишь чуть мельче, ленты и узлы на месте), а длинные имена — цепочка это
-   «A → B → C» — всё равно режем: бюджет считан по замеру в браузере, худший
-   случай ≈8.3 px/символ у sans 13px (кириллица) и ≈6.5 у моно 9px. */
+   viewBox и молча срезается. Поэтому длинные имена (цепочка это «A → B → C»)
+   режем сами по ширине колонки: бюджет считан по замеру в браузере, худший
+   случай ≈8.6 px/символ у sans 13px (кириллица) и ≈6.8 у моно 9px. На широком
+   экране колонка больше — и режется меньше. */
 const clip = (s: string, max: number) =>
   s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
-const bigLine = (s: string) => clip(s, 28);
-const monoLine = (s: string) => clip(s, 36);
+const bigLine = (s: string) => clip(s, Math.floor(labelW.value / 8.6));
+const monoLine = (s: string) => clip(s, Math.floor(labelW.value / 6.8));
 
 /* Скорость точек привязана к доле ленты: пустая лента не должна выглядеть
    такой же оживлённой, как основная. */
@@ -89,8 +104,9 @@ const lanes = computed(() => [
 
     <!-- Широкий экран: ленты со схемой -->
     <svg
+      ref="flow"
       class="flow"
-      viewBox="0 0 960 200"
+      :viewBox="`0 0 ${W} 200`"
       role="img"
       :aria-label="`Трафик расходится на три ленты: напрямую ${pct(direct)}, через VPN ${pct(vpn)}, обход DPI ${pct(bypass)}`"
     >
@@ -106,16 +122,23 @@ const lanes = computed(() => [
       <text x="221" y="94" text-anchor="middle" class="big">Detour</text>
       <text x="221" y="112" text-anchor="middle">dnsmasq · ipset · nat</text>
 
-      <path id="lane-d" class="lane" d="M298 100 C 372 100, 392 44, 480 44 L 700 44" />
+      <!-- Изгиб ленты — фигура фиксированного размера (298→480), лишнюю ширину
+           забирает прямой участок: растягивать сам изгиб значило бы менять
+           рисунок вслед за окном. -->
+      <path id="lane-d" class="lane" :d="`M298 100 C 372 100, 392 44, 480 44 L ${laneEnd} 44`" />
       <path
         id="lane-v"
         class="lane"
         :class="{ hot: vpnUp }"
-        d="M298 100 L 700 100"
+        :d="`M298 100 L ${laneEnd} 100`"
       />
-      <path id="lane-z" class="lane" d="M298 100 C 372 100, 392 156, 480 156 L 700 156" />
+      <path id="lane-z" class="lane" :d="`M298 100 C 372 100, 392 156, 480 156 L ${laneEnd} 156`" />
 
-      <template v-if="!reduced">
+      <!-- Ключ включает ширину: animateMotion берёт траекторию у mpath один
+           раз, и после ресайза пакеты бежали бы по старой, укороченной ленте.
+           Ресайз редок — перемонтировать три кружка дешевле, чем следить за
+           этим руками. -->
+      <g v-if="!reduced" :key="W">
         <circle v-for="i in 3" :key="`d${i}`" class="pkt d" r="2.6">
           <animateMotion :dur="dur(direct)" :begin="`${(i - 1) * 1.05}s`" repeatCount="indefinite">
             <mpath href="#lane-d" />
@@ -133,23 +156,23 @@ const lanes = computed(() => [
             <mpath href="#lane-z" />
           </animateMotion>
         </circle>
-      </template>
+      </g>
 
-      <text x="712" y="40" class="big">Напрямую</text>
-      <text x="712" y="56">{{ pct(direct) }} трафика</text>
-      <text x="712" y="96" class="big" :class="{ accent: vpnUp }">
+      <text :x="labelX" y="40" class="big">Напрямую</text>
+      <text :x="labelX" y="56">{{ pct(direct) }} трафика</text>
+      <text :x="labelX" y="96" class="big" :class="{ accent: vpnUp }">
         {{ bigLine(vpnUp ? `Через VPN → ${profileLabel}` : "VPN не запущен") }}
         <title>{{ vpnUp ? `Через VPN → ${profileLabel}` : "VPN не запущен" }}</title>
       </text>
-      <text x="712" y="112">
+      <text :x="labelX" y="112">
         {{ monoLine(`${pct(vpn)} · ${vpnScope}`) }}
         <title>{{ pct(vpn) }} · {{ vpnScope }}</title>
       </text>
-      <text x="712" y="152" class="big">
+      <text :x="labelX" y="152" class="big">
         {{ bigLine(`Обход DPI → ${bypassLabel}`) }}
         <title>Обход DPI → {{ bypassLabel }}</title>
       </text>
-      <text x="712" y="168">
+      <text :x="labelX" y="168">
         {{ monoLine(`${pct(bypass)} · ${bypassScope}`) }}
         <title>{{ pct(bypass) }} · {{ bypassScope }}</title>
       </text>
@@ -225,7 +248,10 @@ const lanes = computed(() => [
 
 .flow {
   width: 100%;
-  height: auto;
+  /* Высота — в пикселях, ровно как высота viewBox: с `height:auto` браузер
+     считал бы её из соотношения сторон, и на кадре сразу после ресайза (viewBox
+     ещё старый) схема прыгала бы по вертикали. */
+  height: 200px;
   display: block;
   margin-top: 4px;
 }

@@ -17,10 +17,15 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { overview } from "../../api";
+import { useElementWidth } from "../../composables/useElementWidth";
 import { fmtBytes } from "../../lib/format";
 
 type Point = { ts: number; direct: number; vpn: number; bypass: number };
-type Range = "minute" | "hour";
+/* Источник — то, что реально копит роутер: `minute` (сутки поминутно, tmpfs) и
+   `hour` (30 дней по часам, флеш). Все диапазоны панели — это ОКНА поверх этих
+   двух рядов, а не новые запросы к бэкенду: роутер уже отдаёт оба целиком. */
+type Source = "minute" | "hour";
+type PresetKey = "1h" | "6h" | "24h" | "7d" | "30d" | "custom";
 
 const LANES = [
   { key: "direct", label: "Напрямую", color: "var(--lane-direct)" },
@@ -28,16 +33,76 @@ const LANES = [
   { key: "bypass", label: "Обход DPI", color: "var(--lane-bypass)" },
 ] as const;
 
-const range = ref<Range>("minute");
-const points = ref<Point[]>([]);
+/* windowSec — сколько секунд от последней точки показать; null — весь ряд
+   (столько, сколько источник вообще хранит). */
+const PRESETS: {
+  key: Exclude<PresetKey, "custom">;
+  label: string;
+  source: Source;
+  windowSec: number | null;
+}[] = [
+  { key: "1h", label: "Час", source: "minute", windowSec: 3600 },
+  { key: "6h", label: "6 ч", source: "minute", windowSec: 6 * 3600 },
+  { key: "24h", label: "Сутки", source: "minute", windowSec: null },
+  { key: "7d", label: "Неделя", source: "hour", windowSec: 7 * 86400 },
+  { key: "30d", label: "Месяц", source: "hour", windowSec: null },
+];
+
+/* Пределы истории: минутный ряд держит сутки, часовой — 30 дней. Вне их данных
+   нет, поэтому кастомный интервал по ним же и ограничивается. */
+const MINUTE_WINDOW = 24 * 3600;
+const HOUR_WINDOW = 30 * 86400;
+
+const preset = ref<PresetKey>("24h");
+/* Кэш обоих рядов: переключение пресетов внутри одного источника не гоняет сеть
+   лишний раз, а кастомный интервал может выбирать источник на лету. */
+const minutePoints = ref<Point[]>([]);
+const hourPoints = ref<Point[]>([]);
 const supported = ref(true);
 const loading = ref(false);
 const showTable = ref(false);
 const hover = ref<number | null>(null);
 
-/* Геометрия в единицах viewBox: SVG тянется по ширине, поэтому пиксельных
-   размеров здесь нет вовсе. */
-const W = 720;
+/* Применённый кастомный интервал (границы в unix-секундах + выбранный источник).
+   Отдельно от полей ввода: пока не нажали «Показать», график не дёргается. */
+const customOpen = ref(false);
+const customFrom = ref("");
+const customTo = ref("");
+const customErr = ref("");
+const applied = ref<{ from: number; to: number; source: Source } | null>(null);
+
+const currentSource = computed<Source>(() =>
+  preset.value === "custom"
+    ? applied.value?.source ?? "hour"
+    : PRESETS.find((p) => p.key === preset.value)!.source,
+);
+
+const points = computed<Point[]>(() => {
+  const src = currentSource.value === "minute" ? minutePoints.value : hourPoints.value;
+  if (!src.length) return src;
+  if (preset.value === "custom") {
+    const c = applied.value;
+    if (!c) return [];
+    return src.filter((p) => p.ts >= c.from && p.ts <= c.to);
+  }
+  const cfg = PRESETS.find((p) => p.key === preset.value)!;
+  if (cfg.windowSec == null) return src;
+  /* Окно считаем от ПОСЛЕДНЕЙ точки данных, а не от текущего времени: если сбор
+     на минуту отставал, показываем последний час собранного, а не пустой хвост
+     из-за расхождения часов браузера и роутера. */
+  const cutoff = src[src.length - 1].ts - cfg.windowSec;
+  return src.filter((p) => p.ts >= cutoff);
+});
+
+/* Геометрия — В ПИКСЕЛЯХ: viewBox равен реальному размеру поля, замеренному
+   ResizeObserver. Раньше здесь стояла фиксированная ширина 720 и
+   `preserveAspectRatio="none"`, и на широком экране браузер растягивал
+   картинку по X в два с лишним раза — вместе с ней плющились подписи осей и
+   обводки лент (вертикаль при этом не менялась: высота задана в пикселях).
+   Единица viewBox = пиксель, поэтому 10px-подпись остаётся 10px при любой
+   ширине карточки. */
+const plot = ref<HTMLElement | null>(null);
+const W = useElementWidth(plot);
 const H = 180;
 const PAD_L = 8;
 const PAD_R = 8;
@@ -46,16 +111,19 @@ const PAD_B = 18;
 
 let timer: number | undefined;
 
-async function load() {
+async function load(src: Source = currentSource.value) {
   loading.value = true;
   try {
-    const r = await overview.trafficSeries(range.value);
+    const r = await overview.trafficSeries(src);
     if (r?.supported === false || r?.ok === false) {
       supported.value = false;
-      points.value = [];
+      if (src === "minute") minutePoints.value = [];
+      else hourPoints.value = [];
     } else {
       supported.value = true;
-      points.value = Array.isArray(r?.points) ? r.points : [];
+      const pts = Array.isArray(r?.points) ? r.points : [];
+      if (src === "minute") minutePoints.value = pts;
+      else hourPoints.value = pts;
     }
   } finally {
     loading.value = false;
@@ -64,11 +132,14 @@ async function load() {
 
 onMounted(() => {
   void load();
-  /* Минутный ряд пополняется раз в минуту — чаще спрашивать нечего. */
+  /* Оба ряда пополняются не чаще раза в минуту (минутный — по cron, часовой —
+     и того реже), поэтому опрашиваем текущий источник раз в минуту. */
   timer = window.setInterval(() => void load(), 60_000);
 });
 onUnmounted(() => timer && clearInterval(timer));
-watch(range, () => void load());
+/* Смена источника — единственный повод сходить в сеть заранее; окно того же
+   источника перестраивается из кэша без запроса. */
+watch(currentSource, (s) => void load(s));
 
 const totals = computed(() => {
   const t = { direct: 0, vpn: 0, bypass: 0 };
@@ -90,8 +161,10 @@ const peak = computed(() =>
 const geom = computed(() => {
   const pts = points.value;
   const n = pts.length;
-  if (n === 0 || peak.value <= 0) return null;
-  const x = (i: number) => PAD_L + (i * (W - PAD_L - PAD_R)) / Math.max(1, n - 1);
+  /* Меньше двух точек — рисовать площадь не из чего (одна точка дала бы
+     вырожденный отрезок и пустую сетку). Отдаём null → показываем заглушку. */
+  if (n < 2 || peak.value <= 0) return null;
+  const x = (i: number) => PAD_L + (i * (W.value - PAD_L - PAD_R)) / Math.max(1, n - 1);
   const y = (v: number) => PAD_T + (H - PAD_T - PAD_B) * (1 - v / peak.value);
 
   /* Стек снизу вверх: напрямую → VPN → обход. Каждая лента — замкнутая
@@ -134,28 +207,109 @@ function onMove(e: MouseEvent) {
   const g = geom.value;
   if (!g) return;
   const box = (e.currentTarget as SVGElement).getBoundingClientRect();
-  const rel = ((e.clientX - box.left) / box.width) * W;
-  const step = (W - PAD_L - PAD_R) / Math.max(1, g.n - 1);
+  const rel = ((e.clientX - box.left) / box.width) * W.value;
+  const step = (W.value - PAD_L - PAD_R) / Math.max(1, g.n - 1);
   const i = Math.round((rel - PAD_L) / step);
   hover.value = Math.min(g.n - 1, Math.max(0, i));
 }
 
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/* Размах показанного окна в секундах — по нему выбираем формат подписи оси. */
+const spanSec = computed(() => {
+  const p = points.value;
+  return p.length >= 2 ? p[p.length - 1].ts - p[0].ts : 0;
+});
+
+/* Подпись оси адаптивна к масштабу: внутри суток — время, на неделе/месяце —
+   дата (с часом, пока окно не переросло несколько дней). */
 function fmtTime(ts: number) {
   const d = new Date(ts * 1000);
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  if (range.value === "hour") {
-    return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")} ${hh}:00`;
+  const day = `${pad(d.getDate())}.${pad(d.getMonth() + 1)}`;
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (currentSource.value === "hour") {
+    return spanSec.value > 3 * 86400 ? day : `${day} ${pad(d.getHours())}:00`;
   }
-  return `${hh}:${mm}`;
+  /* Минутное окно максимум сутки, но может пересечь полночь — тогда полезнее
+     показать и день. */
+  return spanSec.value > 12 * 3600 ? `${day} ${time}` : time;
+}
+
+/* В подсказке всегда полная дата-время: точка может быть где угодно в месяце. */
+function fmtTip(ts: number) {
+  const d = new Date(ts * 1000);
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 const axisLabels = computed(() => {
   const pts = points.value;
   if (pts.length < 2) return [];
-  const idx = [0, Math.floor(pts.length / 2), pts.length - 1];
-  return idx.map((i) => ({ i, text: fmtTime(pts[i].ts), x: geom.value?.x(i) ?? 0 }));
+  /* Больше подписей на широком поле — на узком они бы наехали друг на друга. */
+  const count = W.value > 560 ? 5 : 3;
+  const seen = new Set<number>();
+  const out: { i: number; text: string; x: number; anchor: string }[] = [];
+  for (let k = 0; k < count; k++) {
+    const i = Math.round((k * (pts.length - 1)) / (count - 1));
+    if (seen.has(i)) continue;
+    seen.add(i);
+    out.push({
+      i,
+      text: fmtTime(pts[i].ts),
+      x: geom.value?.x(i) ?? 0,
+      anchor: i === 0 ? "start" : i === pts.length - 1 ? "end" : "middle",
+    });
+  }
+  return out;
 });
+
+/* --- кастомный интервал --- */
+
+/* Date → строка для <input type="datetime-local"> в ЛОКАЛЬНОМ времени (значение
+   без таймзоны, поэтому toISOString с его UTC-сдвигом тут не годится). */
+function toLocalInput(d: Date) {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/* Границы полей: раньше 30 дней истории всё равно нет. */
+const customMin = computed(() => toLocalInput(new Date(Date.now() - HOUR_WINDOW * 1000)));
+const customMax = computed(() => toLocalInput(new Date()));
+
+function openCustom() {
+  customErr.value = "";
+  if (!customFrom.value || !customTo.value) {
+    const now = new Date();
+    customTo.value = toLocalInput(now);
+    customFrom.value = toLocalInput(new Date(now.getTime() - 3 * 3600 * 1000));
+  }
+  customOpen.value = true;
+}
+
+function pickPreset(k: PresetKey) {
+  preset.value = k;
+  customOpen.value = false;
+}
+
+function applyCustom() {
+  const from = Math.floor(new Date(customFrom.value).getTime() / 1000);
+  const to = Math.floor(new Date(customTo.value).getTime() / 1000);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) {
+    customErr.value = "Укажи обе границы";
+    return;
+  }
+  if (to <= from) {
+    customErr.value = "Конец раньше начала";
+    return;
+  }
+  /* Минутное разрешение доступно, только если весь интервал попадает в сутки,
+     которые хранит tmpfs-ряд; иначе берём часовой (30 дней). */
+  const nowSec = Date.now() / 1000;
+  const source: Source =
+    to - from <= MINUTE_WINDOW && from >= nowSec - MINUTE_WINDOW - 120 ? "minute" : "hour";
+  applied.value = { from, to, source };
+  customErr.value = "";
+  preset.value = "custom";
+  void load(source);
+}
 </script>
 
 <template>
@@ -164,39 +318,61 @@ const axisLabels = computed(() => {
       <div>
         <h3>Трафик по лентам</h3>
         <p class="sub">
-          <template v-if="grandTotal > 0">
+          <template v-if="geom && grandTotal > 0">
             Всего за период {{ fmtBytes(grandTotal) }}
           </template>
           <template v-else-if="!supported">Сборщик не установлен</template>
           <template v-else-if="loading">Загружаю…</template>
-          <template v-else>Данные копятся — точки появляются раз в минуту</template>
+          <template v-else-if="points.length < 2">
+            Данные копятся — график появится через пару минут
+          </template>
+          <template v-else>За период трафика не было</template>
         </p>
       </div>
-      <!-- Фильтры одной строкой над графиком. -->
+      <!-- Пресеты периода одной строкой над графиком; последний чип —
+           произвольный интервал. -->
       <div class="ranges" role="group" aria-label="Период">
         <button
+          v-for="r in PRESETS"
+          :key="r.key"
           type="button"
-          :class="{ on: range === 'minute' }"
-          :aria-pressed="range === 'minute'"
-          @click="range = 'minute'"
+          :class="{ on: preset === r.key }"
+          :aria-pressed="preset === r.key"
+          @click="pickPreset(r.key)"
         >
-          Сутки
+          {{ r.label }}
         </button>
         <button
           type="button"
-          :class="{ on: range === 'hour' }"
-          :aria-pressed="range === 'hour'"
-          @click="range = 'hour'"
+          class="custom-chip"
+          :class="{ on: preset === 'custom' || customOpen }"
+          :aria-pressed="preset === 'custom'"
+          @click="customOpen ? (customOpen = false) : openCustom()"
         >
-          Месяц
+          Свой…
         </button>
       </div>
     </header>
 
-    <div v-if="geom" class="plot">
+    <!-- Редактор произвольного интервала: раскрывается по чипу «Свой…». -->
+    <div v-if="customOpen" class="custom" role="group" aria-label="Свой интервал">
+      <label>
+        <span>С</span>
+        <input v-model="customFrom" type="datetime-local" :min="customMin" :max="customMax" />
+      </label>
+      <label>
+        <span>По</span>
+        <input v-model="customTo" type="datetime-local" :min="customMin" :max="customMax" />
+      </label>
+      <button type="button" class="apply" @click="applyCustom">Показать</button>
+      <span v-if="customErr" class="cerr">{{ customErr }}</span>
+      <span v-else class="chint">История: сутки поминутно, 30 дней по часам</span>
+    </div>
+
+    <div ref="plot" class="plot">
       <svg
+        v-if="geom"
         :viewBox="`0 0 ${W} ${H}`"
-        preserveAspectRatio="none"
         role="img"
         :aria-label="`График трафика: всего ${fmtBytes(grandTotal)}`"
         @mousemove="onMove"
@@ -232,24 +408,33 @@ const axisLabels = computed(() => {
           class="axis"
           :x="l.x"
           :y="H - 4"
-          :text-anchor="l.i === 0 ? 'start' : l.i === points.length - 1 ? 'end' : 'middle'"
+          :text-anchor="l.anchor"
         >
           {{ l.text }}
         </text>
       </svg>
 
+      <!-- Заглушка живёт ВНУТРИ поля: контейнер должен существовать всегда,
+           иначе мерить нечего и первый кадр с данными нарисуется по
+           запасной ширине. -->
+      <p v-else class="empty">
+        {{
+          !supported
+            ? "Нет detour-trafficlog"
+            : points.length < 2
+              ? "Мало данных за этот период — точки ещё копятся"
+              : "За этот период трафика не было"
+        }}
+      </p>
+
       <div v-if="hoverPoint" class="tip">
-        <b>{{ fmtTime(hoverPoint.p.ts) }}</b>
+        <b>{{ fmtTip(hoverPoint.p.ts) }}</b>
         <span v-for="lane in LANES" :key="lane.key">
           <i class="sw" :style="{ background: lane.color }"></i>
           {{ lane.label }} <b>{{ fmtBytes(hoverPoint.p[lane.key]) }}</b>
         </span>
       </div>
     </div>
-
-    <p v-else class="empty">
-      {{ supported ? "Пока нечего показать" : "Нет detour-trafficlog" }}
-    </p>
 
     <!-- Легенда обязательна: три ленты, идентичность не должна держаться на
          одном цвете. Числа рядом — те самые видимые подписи. -->
@@ -275,7 +460,7 @@ const axisLabels = computed(() => {
       </thead>
       <tbody>
         <tr v-for="p in points.slice(-24).reverse()" :key="p.ts">
-          <td>{{ fmtTime(p.ts) }}</td>
+          <td>{{ fmtTip(p.ts) }}</td>
           <td>{{ fmtBytes(p.direct) }}</td>
           <td>{{ fmtBytes(p.vpn) }}</td>
           <td>{{ fmtBytes(p.bypass) }}</td>
@@ -296,6 +481,11 @@ header {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
+}
+header > div:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 h3 {
   margin: 0;
@@ -310,7 +500,8 @@ h3 {
 .ranges {
   display: flex;
   gap: 4px;
-  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .ranges button {
   border: 1px solid var(--line-2);
@@ -327,6 +518,55 @@ h3 {
   border-color: var(--accent);
   color: var(--accent-on);
   font-weight: 600;
+}
+.custom-chip {
+  border-style: dashed !important;
+}
+
+/* Редактор произвольного интервала. */
+.custom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.custom label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dim);
+}
+.custom input {
+  border: 1px solid var(--line-2);
+  background: var(--panel);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  color-scheme: dark light;
+}
+.custom .apply {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+  border-radius: 999px;
+  padding: 5px 13px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.custom .chint {
+  color: var(--faint);
+}
+.custom .cerr {
+  color: var(--bad);
 }
 .plot {
   position: relative;
