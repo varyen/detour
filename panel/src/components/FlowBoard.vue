@@ -1,13 +1,15 @@
 <script setup lang="ts">
 /* Схема потока — главный экран панели: видно, куда трафик уходит прямо сейчас.
-   На широком экране это ленты с бегущими пакетами (SMIL: анимация живёт в
-   разметке и не крутит JS-таймеры), на телефоне — те же три ленты столбиком с
-   полосами долей: тянуть 900 px схемы на 375 px бессмысленно. */
+   Три направления (в коде — `lane`, по-русски именно НАПРАВЛЕНИЕ, а не «лента»:
+   «лента» читается как лента новостей): напрямую, через VPN, обход DPI. На
+   широком экране это дорожки с бегущими пакетами (SMIL: анимация живёт в
+   разметке и не крутит JS-таймеры), в узкой карточке — те же три направления
+   столбиком с полосами долей: тянуть 900 px схемы на 375 px бессмысленно. */
 import { computed, ref } from "vue";
 import { useElementWidth } from "../composables/useElementWidth";
 
 const props = defineProps<{
-  /** Доли лент 0..100. */
+  /** Доли направлений 0..100. */
   direct: number;
   vpn: number;
   bypass: number;
@@ -41,16 +43,32 @@ const barWidth = (n: number) => (props.hasShares ? `${Math.round(n)}%` : "0%");
    целиком: на 1728 px подписи узлов вырастали до 24 px против 13 px во всём
    остальном интерфейсе — та самая «непропорциональность». Теперь единица
    viewBox равна пикселю (ширину меряет ResizeObserver), узлы и подписи стоят в
-   своём размере, а лишнюю ширину забирают ленты — им длина только на пользу. */
-const flow = ref<SVGSVGElement | null>(null);
-const W = useElementWidth(flow, 960);
+   своём размере, а лишнюю ширину забирают дорожки — им длина только на пользу. */
+const board = ref<HTMLElement | null>(null);
+/* Меряем КАРТОЧКУ, а не сам svg: карточку теперь можно сузить до трети ряда, и
+   в узкой схема не живёт — вместо неё те же три направления столбиком. Раньше выбор
+   делала медиа-запрос по ширине ОКНА; с настраиваемой шириной плиток это
+   неверный вопрос — важна ширина места, которое карточке досталось. */
+const boardW = useElementWidth(board, 960);
+const W = computed(() => Math.max(320, boardW.value - 36)); // минус горизонтальные поля
+const compact = computed(() => W.value < 620);
 
-/* Правая колонка подписей: не уже прежних 248 px (в них влезает штатное
-   «100% · всё, кроме белого списка») и не шире 420 — дальше строка отрывается
-   от своей ленты. Ленты упираются в неё, отступив 12 px. */
-const labelW = computed(() => Math.min(420, Math.max(248, Math.round(W.value * 0.3))));
-const labelX = computed(() => Math.max(560, W.value - labelW.value));
+/* Правая колонка подписей — треть поля, но не уже 200 px (иначе от имени
+   профиля остаётся огрызок) и не шире 420 — дальше строка отрывается от своей
+   дорожки. Дорожки упираются в неё, отступив 12 px. */
+const labelW = computed(() => Math.min(420, Math.max(200, Math.round(W.value * 0.34))));
+const labelX = computed(() => W.value - labelW.value);
 const laneEnd = computed(() => labelX.value - 12);
+
+/* Изгиб дорожки — фигура фиксированного размера (298→480 при полной ширине), и
+   лишнюю ширину забирает прямой участок. Но карточка может быть и в половину
+   ряда: тогда на изгиб просто нет 182 px, и он сжимается, а не вылезает на
+   подписи. Контрольные точки заданы долями длины изгиба — форма сохраняется. */
+const bend = computed(() => {
+  const room = laneEnd.value - 298;
+  const len = Math.max(60, Math.min(182, room * 0.55));
+  return { c1: 298 + len * 0.41, c2: 298 + len * 0.52, end: 298 + len };
+});
 
 /* SVG-текст не переносится и не обрезается по многоточию — он просто уезжает за
    viewBox и молча срезается. Поэтому длинные имена (цепочка это «A → B → C»)
@@ -62,8 +80,8 @@ const clip = (s: string, max: number) =>
 const bigLine = (s: string) => clip(s, Math.floor(labelW.value / 8.6));
 const monoLine = (s: string) => clip(s, Math.floor(labelW.value / 6.8));
 
-/* Скорость точек привязана к доле ленты: пустая лента не должна выглядеть
-   такой же оживлённой, как основная. */
+/* Скорость точек привязана к доле направления: пустое не должно выглядеть
+   таким же оживлённым, как основное. */
 const dur = (share: number) => `${(4.2 - Math.min(share, 100) / 100 * 2.4).toFixed(2)}s`;
 
 const lanes = computed(() => [
@@ -92,7 +110,7 @@ const lanes = computed(() => [
 </script>
 
 <template>
-  <section class="board">
+  <section ref="board" class="board">
     <div class="head">
       <span class="eyebrow">Поток трафика</span>
       <span class="live">
@@ -102,13 +120,13 @@ const lanes = computed(() => [
       </span>
     </div>
 
-    <!-- Широкий экран: ленты со схемой -->
+    <!-- Широкая карточка: направления схемой -->
     <svg
-      ref="flow"
+      v-if="!compact"
       class="flow"
       :viewBox="`0 0 ${W} 200`"
       role="img"
-      :aria-label="`Трафик расходится на три ленты: напрямую ${pct(direct)}, через VPN ${pct(vpn)}, обход DPI ${pct(bypass)}`"
+      :aria-label="`Трафик расходится на три направления: напрямую ${pct(direct)}, через VPN ${pct(vpn)}, обход DPI ${pct(bypass)}`"
     >
       <rect class="node" x="6" y="76" width="118" height="48" rx="10" />
       <text x="65" y="95" text-anchor="middle" class="big">{{ clients }} устройств</text>
@@ -122,20 +140,25 @@ const lanes = computed(() => [
       <text x="221" y="94" text-anchor="middle" class="big">Detour</text>
       <text x="221" y="112" text-anchor="middle">dnsmasq · ipset · nat</text>
 
-      <!-- Изгиб ленты — фигура фиксированного размера (298→480), лишнюю ширину
-           забирает прямой участок: растягивать сам изгиб значило бы менять
-           рисунок вслед за окном. -->
-      <path id="lane-d" class="lane" :d="`M298 100 C 372 100, 392 44, 480 44 L ${laneEnd} 44`" />
+      <path
+        id="lane-d"
+        class="lane"
+        :d="`M298 100 C ${bend.c1} 100, ${bend.c2} 44, ${bend.end} 44 L ${laneEnd} 44`"
+      />
       <path
         id="lane-v"
         class="lane"
         :class="{ hot: vpnUp }"
         :d="`M298 100 L ${laneEnd} 100`"
       />
-      <path id="lane-z" class="lane" :d="`M298 100 C 372 100, 392 156, 480 156 L ${laneEnd} 156`" />
+      <path
+        id="lane-z"
+        class="lane"
+        :d="`M298 100 C ${bend.c1} 100, ${bend.c2} 156, ${bend.end} 156 L ${laneEnd} 156`"
+      />
 
       <!-- Ключ включает ширину: animateMotion берёт траекторию у mpath один
-           раз, и после ресайза пакеты бежали бы по старой, укороченной ленте.
+           раз, и после ресайза пакеты бежали бы по старой, укороченной дорожке.
            Ресайз редок — перемонтировать три кружка дешевле, чем следить за
            этим руками. -->
       <g v-if="!reduced" :key="W">
@@ -178,8 +201,8 @@ const lanes = computed(() => [
       </text>
     </svg>
 
-    <!-- Телефон: те же ленты столбиком -->
-    <ul class="stack">
+    <!-- Узкая карточка (или телефон): те же направления столбиком -->
+    <ul v-else class="stack">
       <li v-for="l in lanes" :key="l.key">
         <div class="lrow">
           <span class="lname">{{ l.label }}</span>
@@ -190,7 +213,7 @@ const lanes = computed(() => [
       </li>
     </ul>
 
-    <div class="legend">
+    <div v-if="!compact" class="legend">
       <div><i class="sw" style="background: var(--lane-direct)"></i> Напрямую <b class="num">{{ pct(direct) }}</b></div>
       <div><i class="sw" style="background: var(--lane-vpn)"></i> Через VPN <b class="num">{{ pct(vpn) }}</b></div>
       <div><i class="sw" style="background: var(--lane-bypass)"></i> Обход DPI <b class="num">{{ pct(bypass) }}</b></div>
@@ -211,7 +234,11 @@ const lanes = computed(() => [
   background: var(--panel);
   backdrop-filter: blur(10px);
   padding: 16px 18px 8px;
-  margin-bottom: 14px;
+  /* Своих отступов у карточки нет: расстояние между карточками задаёт `gap`
+     сетки. Пока схема висела отдельным блоком НАД сеткой, здесь стоял
+     margin-bottom — и в общем ряду он делал её на 14 px ниже соседа. */
+  display: flex;
+  flex-direction: column;
 }
 .head {
   display: flex;
@@ -250,10 +277,16 @@ const lanes = computed(() => [
   width: 100%;
   /* Высота — в пикселях, ровно как высота viewBox: с `height:auto` браузер
      считал бы её из соотношения сторон, и на кадре сразу после ресайза (viewBox
-     ещё старый) схема прыгала бы по вертикали. */
-  height: 200px;
+     ещё старый) схема прыгала бы по вертикали. Лишнюю высоту (карточки в ряду
+     равняются по самой высокой) поле забирает себе, а рисунок остаётся в своём
+     размере и встаёт по центру — это делает preserveAspectRatio по умолчанию. */
+  min-height: 200px;
+  flex: 1 1 auto;
   display: block;
   margin-top: 4px;
+}
+.stack {
+  flex: 1 1 auto;
 }
 .flow .lane {
   fill: none;
@@ -298,7 +331,7 @@ const lanes = computed(() => [
 }
 
 .stack {
-  display: none;
+  display: flex;
   list-style: none;
   margin: 10px 0 4px;
   padding: 0;
@@ -367,18 +400,12 @@ const lanes = computed(() => [
   margin-left: auto;
 }
 
+/* Что показывать — схему или столбик — решает ширина карточки (см. `compact` в
+   скрипте), а не медиа-запрос: карточку теперь можно сузить до трети ряда на
+   любом экране. */
 @media (max-width: 860px) {
   .board {
     padding: 14px 14px 6px;
-  }
-  .flow {
-    display: none;
-  }
-  .stack {
-    display: flex;
-  }
-  .legend {
-    display: none;
   }
 }
 </style>

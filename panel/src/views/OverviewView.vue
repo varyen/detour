@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, provide, ref } from "vue";
 import FlowBoard from "@/components/FlowBoard.vue";
 import TrafficChart from "@/components/overview/TrafficChart.vue";
 import TileCard from "@/components/TileCard.vue";
@@ -11,7 +11,9 @@ import BypassTile from "@/components/overview/BypassTile.vue";
 import UplinksTile from "@/components/overview/UplinksTile.vue";
 import RoutingTile from "@/components/overview/RoutingTile.vue";
 import ServicesTile from "@/components/overview/ServicesTile.vue";
-import DashboardEditor from "@/components/overview/DashboardEditor.vue";
+import DashSlot from "@/components/overview/DashSlot.vue";
+import { EDIT_KEY } from "@/components/overview/dash-edit";
+import { useTileDrag } from "@/composables/useTileDrag";
 import { diag, overview } from "@/api";
 import type { LanClient, TrafficLanes, UdpVpnMode } from "@/api";
 import DrawerSheet from "@/components/DrawerSheet.vue";
@@ -31,7 +33,13 @@ const updates = useUpdatesStore();
 const dash = useDashboardStore();
 
 const pickerOpen = ref(false);
-const dashOpen = ref(false);
+/* Правка состава живёт прямо на поле: карточки переносят там же, где смотрят.
+   Отдельной шторки-редактора больше нет — два места для одной настройки только
+   путали, какое из них главное. */
+const editing = ref(false);
+const tilesEl = ref<HTMLElement | null>(null);
+const drag = useTileDrag(tilesEl, (id, to) => dash.place(id, to));
+provide(EDIT_KEY, { editing, ...drag });
 const busy = ref("");
 const lanes = ref<(TrafficLanes & { warming?: boolean; span?: number; bytes?: Record<string, number> }) | null>(null);
 const clients = ref(0);
@@ -428,9 +436,9 @@ onMounted(async () => {
       id: "ov:dash",
       title: "Настроить главную страницу",
       group: "вид",
-      keywords: "карточки плитки состав порядок скрыть",
+      keywords: "карточки плитки состав порядок ширина скрыть",
       run: () => {
-        dashOpen.value = true;
+        editing.value = true;
       },
     },
     {
@@ -514,14 +522,26 @@ onBeforeUnmount(() => {
        Каждая карточка живёт в слоте: у слота задан `order`, поэтому сетка
        остаётся сеткой, а меняется только место карточки в ней. -->
   <div class="dashbar">
-    <button class="cfg" type="button" @click="dashOpen = true">
-      Настроить главную<template v-if="dash.hidden.length">
-        · показано {{ dash.visibleCount }} из {{ dash.tiles.length }}</template>
-    </button>
+    <template v-if="!editing">
+      <button class="cfg" type="button" @click="editing = true">
+        Настроить главную<template v-if="dash.hidden.length">
+          · показано {{ dash.visibleCount }} из {{ dash.tiles.length }}</template>
+      </button>
+    </template>
+    <template v-else>
+      <span class="hint">
+        Тяните карточки за ручку, ширину выбирайте кнопками ⅓ ½ ⅔ 1. Настройка
+        хранится в этом браузере.
+      </span>
+      <button class="link" type="button" :disabled="!dash.customized" @click="dash.reset()">
+        Вернуть как было
+      </button>
+      <UiButton variant="primary" @click="editing = false">Готово</UiButton>
+    </template>
   </div>
 
-  <div class="tiles">
-    <div v-if="dash.isVisible('flow')" class="slot full" :style="{ order: dash.orderOf('flow') }">
+  <div ref="tilesEl" class="tiles" :class="{ editing }">
+    <DashSlot id="flow">
       <FlowBoard
         :direct="lanes?.direct ?? 0"
         :vpn="lanes?.vpn ?? 0"
@@ -538,23 +558,15 @@ onBeforeUnmount(() => {
         :external-ip="sb?.external_ip"
         :vpn-up="status.singboxRunning"
       />
-    </div>
+    </DashSlot>
 
-    <div
-      v-if="dash.isVisible('traffic')"
-      class="slot full"
-      :style="{ order: dash.orderOf('traffic') }"
-    >
-      <TileCard title="Трафик по лентам">
+    <DashSlot id="traffic">
+      <TileCard title="Трафик по направлениям">
         <TrafficChart />
       </TileCard>
-    </div>
+    </DashSlot>
 
-    <div
-      v-if="dash.isVisible('connection')"
-      class="slot span"
-      :style="{ order: dash.orderOf('connection') }"
-    >
+    <DashSlot id="connection">
     <TileCard title="Активное подключение">
       <p class="big">
         {{ profileLabel }}
@@ -600,9 +612,9 @@ onBeforeUnmount(() => {
         <UiButton @click="checkAll">Проверить все</UiButton>
       </template>
     </TileCard>
-    </div>
+    </DashSlot>
 
-    <div v-if="dash.isVisible('scope')" class="slot" :style="{ order: dash.orderOf('scope') }">
+    <DashSlot id="scope">
     <TileCard title="Область действия">
       <SwitchToggle
         v-model="allvpn"
@@ -661,13 +673,13 @@ onBeforeUnmount(() => {
         </p>
       </div>
     </TileCard>
-    </div>
+    </DashSlot>
 
-    <div v-if="dash.isVisible('bypass')" class="slot" :style="{ order: dash.orderOf('bypass') }">
+    <DashSlot id="bypass">
       <BypassTile />
-    </div>
+    </DashSlot>
 
-    <div v-if="dash.isVisible('health')" class="slot" :style="{ order: dash.orderOf('health') }">
+    <DashSlot id="health">
     <TileCard title="Здоровье профилей">
       <p class="big num">
         {{ healthCounts.ok }}<small>из {{ healthCounts.total }} проходят проверку</small>
@@ -692,23 +704,23 @@ onBeforeUnmount(() => {
         </UiButton>
       </template>
     </TileCard>
-    </div>
+    </DashSlot>
 
-    <div v-if="dash.isVisible('uplinks')" class="slot" :style="{ order: dash.orderOf('uplinks') }">
+    <DashSlot id="uplinks">
       <UplinksTile />
-    </div>
+    </DashSlot>
 
-    <div v-if="dash.isVisible('routing')" class="slot" :style="{ order: dash.orderOf('routing') }">
+    <DashSlot id="routing">
       <RoutingTile />
-    </div>
+    </DashSlot>
 
     <!-- Единственная карточка со своими запросами: пока она выключена, панель их
          не делает вовсе. -->
-    <div v-if="dash.isVisible('services')" class="slot" :style="{ order: dash.orderOf('services') }">
+    <DashSlot id="services">
       <ServicesTile />
-    </div>
+    </DashSlot>
 
-    <div v-if="dash.isVisible('system')" class="slot" :style="{ order: dash.orderOf('system') }">
+    <DashSlot id="system">
     <TileCard title="Система">
       <p class="meta col">
         <span>
@@ -732,9 +744,9 @@ onBeforeUnmount(() => {
         </UiButton>
       </template>
     </TileCard>
-    </div>
+    </DashSlot>
 
-    <div v-if="dash.isVisible('versions')" class="slot" :style="{ order: dash.orderOf('versions') }">
+    <DashSlot id="versions">
     <TileCard title="Версии">
       <!-- Чип с доступной версией прямо в строке: «панель 1.43.2» само по себе
            не отвечает на вопрос, старая она или свежая. -->
@@ -768,15 +780,29 @@ onBeforeUnmount(() => {
         <UiButton :busy="busy === 'updcheck'" @click="checkUpdates">Проверить</UiButton>
       </template>
     </TileCard>
-    </div>
+    </DashSlot>
 
     <p v-if="!dash.visibleCount" class="empty">
       Все карточки скрыты.
-      <button type="button" class="link" @click="dashOpen = true">Вернуть</button>
+      <button type="button" class="link" @click="editing = true">Вернуть</button>
     </p>
   </div>
 
-  <DashboardEditor :open="dashOpen" @close="dashOpen = false" />
+  <!-- Скрытые карточки видны только в правке — и сразу же с кнопкой «вернуть»:
+       иначе «скрыл и не знаю, где искать» становится тупиком. -->
+  <div v-if="editing && dash.hidden.length" class="stash">
+    <span class="eyebrow">Скрытые карточки</span>
+    <button
+      v-for="t in dash.tiles.filter((x) => !dash.isVisible(x.id))"
+      :key="t.id"
+      type="button"
+      class="back"
+      :title="t.hint"
+      @click="dash.toggle(t.id)"
+    >
+      {{ t.title }} <span aria-hidden="true">+</span>
+    </button>
+  </div>
 
   <ProfilePicker :open="pickerOpen" @close="pickerOpen = false" />
 
@@ -800,42 +826,76 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* Сетка на ШЕСТЬ колонок, а не на три: только в шести выражаются и трети (2),
+   и половины (3), и две трети (4) — а именно половина нужна «Потоку трафика»
+   с графиком справа. Ширину каждой карточки хранит dashboard-стор и отдаёт
+   слоту через `--span`. */
 .tiles {
   display: grid;
   gap: 14px;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
+}
+/* Планшет: колонок две, а «широкая» карточка (⅔ и больше) занимает обе. Держать
+   здесь все шесть нельзя — треть от 800 px это 260 px, в них не живёт ни одна
+   карточка. */
+@media (min-width: 700px) and (max-width: 1099.98px) {
+  .tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  /* Верхняя граница обязательна: без неё это правило (оно специфичнее) забирает
+     ширину и на большом экране — «⅔» превращалось в половину. */
+  .tiles :deep(.slot.wide) {
+    grid-column: span 2;
+  }
 }
 @media (min-width: 1100px) {
   .tiles {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+  .tiles :deep(.slot) {
+    grid-column: span var(--span, 2);
   }
 }
-/* Слот — обёртка ради `order`: сама карточка о своём месте ничего не знает.
-   Растягиваем её на весь слот, иначе карточки в одном ряду выйдут разной
-   высоты. */
-.slot {
-  display: flex;
-  min-width: 0;
-}
-.slot > * {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.slot.span {
-  grid-column: span 2;
-}
-.slot.full {
-  grid-column: 1 / -1;
-}
-@media (max-width: 700px) {
-  .slot.span {
-    grid-column: span 1;
-  }
+/* В правке сетке нужен воздух: у карточек появляется панелька, висящая над
+   верхней кромкой. */
+.tiles.editing {
+  gap: 30px 14px;
+  margin-top: 16px;
 }
 .dashbar {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 12px;
   margin-bottom: 8px;
+}
+.dashbar .hint {
+  font-size: 12.5px;
+  color: var(--faint);
+  margin-right: auto;
+}
+.stash {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.stash .back {
+  border: 1px dashed var(--line-2);
+  background: transparent;
+  color: var(--dim);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.stash .back:hover {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .cfg,
 .link {
