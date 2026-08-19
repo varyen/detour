@@ -61,8 +61,13 @@ DEPENDS = ("iptables, ipset, dnsmasq-full, lighttpd, lighttpd-mod-cgi, "
 FILES = [
     # Source from router_files/ (canonical) — same source as the OpenWrt build, so
     # the Keenetic package never drifts behind. (router-backup/ was the old source.)
-    (os.path.join(ROUTER_FILES, "index.html"), "opt/share/www/detour/index.html", 0o644, False),
-    (os.path.join(ROUTER_FILES, "sw.js"), "opt/share/www/detour/sw.js", 0o644, False),
+    # Старая однофайловая панель — переехала на /detour-old/ (главной стала Vue).
+    # favicon.svg раньше не паковался вообще, хотя sw.js ссылался на него в
+    # уведомлениях — иконка молча не грузилась; теперь кладём рядом. Это ассеты,
+    # а не скрипты, поэтому fix=False (шебанга в них нет).
+    (os.path.join(ROUTER_FILES, "index.html"), "opt/share/www/detour-old/index.html", 0o644, False),
+    (os.path.join(ROUTER_FILES, "sw.js"), "opt/share/www/detour-old/sw.js", 0o644, False),
+    (os.path.join(ROUTER_FILES, "favicon.svg"), "opt/share/www/detour-old/favicon.svg", 0o644, False),
     (os.path.join(ROUTER_FILES, "detour-api"), "opt/share/www/cgi-bin/detour-api", 0o755, True),
     # Subscription refresh helper (Lua) + a bundled pure-Lua cjson.safe, since the
     # Entware feed has no lua-cjson. fix_shebang rewrites #!/usr/bin/lua → /opt/bin/lua.
@@ -163,12 +168,14 @@ FILES = [
     (os.path.join(HERE, "etc", "detour.conf"), "opt/etc/detour/detour.conf", 0o644, False),
 ]
 
-# Собранная Vue-панель (panel/dist) → /opt/share/www/detour-next/. Docroot lighttpd
-# это /opt/share/www, поэтому она открывается по /detour-next/ — тем же адресом, что
-# и на OpenWrt. Список строится обходом каталога: имена чанков содержат хэш и
-# меняются от сборки к сборке, перечислять их вручную нельзя.
+# Собранная Vue-панель (panel/dist) → /opt/share/www/detour/. Docroot lighttpd
+# это /opt/share/www, поэтому она открывается по /detour/ — тем же адресом, что и
+# на OpenWrt, и тем же, по которому раньше жила старая панель: новая стала
+# главной, старая сдвинута на /detour-old/ ещё на один релизный цикл. Список
+# строится обходом каталога: имена чанков содержат хэш и меняются от сборки к
+# сборке, перечислять их вручную нельзя.
 PANEL_NEXT_DIR = os.path.join(ROOT, "panel", "dist")
-PANEL_NEXT_DEST = "opt/share/www/detour-next"
+PANEL_NEXT_DEST = "opt/share/www/detour"
 
 
 def panel_next_files():
@@ -274,6 +281,10 @@ touch /opt/etc/detour/platform            # the panel CGI's platform shim keys o
 if ! grep -qs '^[[:space:]]*prefer_family' /opt/etc/wgetrc 2>/dev/null; then
     printf 'prefer_family = IPv4\\ntimeout = 30\\ntries = 3\\n' >> /opt/etc/wgetrc
 fi
+# Снести промежуточный адрес новой панели. Файлы, которые клал opkg, он удалит
+# сам (их нет в новом списке), но deploy_panel_next.py во время разработки лил
+# dist туда же напрямую — этих файлов opkg не знает и не тронет.
+rm -rf /opt/share/www/detour-next
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \
     /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp /opt/sbin/detour-geo /opt/sbin/detour-trafficlog \

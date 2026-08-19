@@ -37,7 +37,7 @@ def local_md5(path):
 
 FILES = [
     ("detour-api", "/www/cgi-bin/detour-api", "0755"),
-    ("index.html", "/www/detour/index.html", "0644"),
+    ("index.html", "/www/detour-old/index.html", "0644"),
     ("detour-update", "/usr/sbin/detour-update", "0755"),
 ]
 CRON_LINE = "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"

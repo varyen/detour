@@ -2969,14 +2969,16 @@
             title="На главную"
             >Detour</span
           >
-          <!-- Ссылка на новую панель (Vue, /detour-next/). Своя раскладка, а не
-               .ver-chip: чипы версий на узком экране скрываются, а эта ссылка
-               нужна прежде всего на телефоне. -->
+          <!-- Ссылка на основную панель (Vue, /detour/). Эта, старая, теперь
+               живёт на /detour-old/ и остаётся ещё на релиз — на случай, если в
+               новой чего-то не хватает. Своя раскладка, а не .ver-chip: чипы
+               версий на узком экране скрываются, а эта ссылка нужна прежде
+               всего на телефоне. -->
           <a
             class="next-link"
-            href="/detour-next/"
-            title="Открыть новую панель (эта остаётся на месте)"
-            >Новая панель →</a
+            href="/detour/"
+            title="Вернуться в основную панель (эта, старая, остаётся на /detour-old/)"
+            >Основная панель →</a
           >
           <span
             id="panel-version"
@@ -11593,12 +11595,14 @@
       }
 
       // ===== PUSH NOTIFICATIONS (Web Push, settings under the gear) =====
-      // The router sends payload-LESS VAPID pushes; our service worker (/detour/sw.js)
-      // fetches the message text from the CGI on each push. Web Push needs a secure
-      // context (HTTPS / localhost) — on http://IP the APIs are simply absent, so we
-      // detect that and show a hint instead of a broken toggle.
-      var PUSH_SW_URL = "/detour/sw.js";
-      var PUSH_SCOPE = "/detour/";
+      // The router sends payload-LESS VAPID pushes; our service worker
+      // (/detour-old/sw.js) fetches the message text from the CGI on each push. Web
+      // Push needs a secure context (HTTPS / localhost) — on http://IP the APIs are
+      // simply absent, so we detect that and show a hint instead of a broken toggle.
+      // Путь и scope обязаны двигаться вместе: скрипт, лежащий в /detour-old/, не
+      // может claim'ить scope выше своего каталога — регистрация с /detour/ упала бы.
+      var PUSH_SW_URL = "/detour-old/sw.js";
+      var PUSH_SCOPE = "/detour-old/";
 
       function pushSupported() {
         return (

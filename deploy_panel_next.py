@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Залить собранную Vue-панель (panel/dist) на роутер в /www/detour-next/.
+"""Залить собранную Vue-панель (panel/dist) на роутер в /www/detour/.
 
 Только для итерации во время разработки: в релиз панель уезжает пакетом
 (build_release.py / keenetic/build-ipk.py кладут те же файлы). Здесь нет ни
@@ -52,7 +52,11 @@ def main():
         sys.exit("нет panel/dist — собери: cd panel && npm ci && npm run build")
 
     keenetic = str(cfg.get("platform", "")).lower() == "keenetic"
-    dest = "/opt/share/www/detour-next" if keenetic else "/www/detour-next"
+    # Новая панель — главная, поэтому цель это /detour/. Ниже каталог сносится
+    # целиком (rm -rf), и это безопасно ровно потому, что своего в нём ничего
+    # чужого не лежит: старая однофайловая панель переехала на /detour-old/,
+    # а CGI живёт отдельно в /www/cgi-bin/ (на Keenetic — /opt/share/www/cgi-bin/).
+    dest = "/opt/share/www/detour" if keenetic else "/www/detour"
 
     blob = make_tar()
     print(f"panel/dist → {cfg['host']}:{dest}  ({len(blob)} байт tar.gz)")

@@ -73,7 +73,7 @@ fi
 # Directory skeleton on the Entware volume.
 mkdir -p /opt/sbin /opt/etc/sing-box/profiles /opt/etc/zapret-tpws \
          /opt/etc/detour /opt/var/log /opt/var/run \
-         /opt/share/www/detour /opt/share/www/cgi-bin \
+         /opt/share/www/detour /opt/share/www/detour-old /opt/share/www/cgi-bin \
          /opt/etc/ndm/netfilter.d /opt/etc/lighttpd/conf.d
 
 echo "[bootstrap] done. Next: install the panel (it pulls sing-box + tpws from the feed):"

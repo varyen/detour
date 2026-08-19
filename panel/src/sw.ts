@@ -33,7 +33,7 @@ interface PushMessage {
   body?: string;
 }
 
-/** База панели («/detour-next/») — подставляется на сборке. */
+/** База панели («/detour/») — берётся из scope регистрации, не зашита. */
 const BASE = self.registration.scope;
 const API = "/cgi-bin/detour-api?action=push_message";
 

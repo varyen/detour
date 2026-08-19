@@ -22,9 +22,31 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { overview } from "../../api";
 import { useElementWidth } from "../../composables/useElementWidth";
-import { fmtBytes } from "../../lib/format";
+import { fmtBytes, fmtBitrate } from "../../lib/format";
 
-type Point = { ts: number; direct: number; vpn: number; bypass: number };
+/* Живая скорость прямо сейчас — из traffic_counters (дельта rx/tx за span),
+   которую «Обзор» и так опрашивает раз в 10 с. Второго читателя этого действия
+   заводить нельзя: `read` разрушающий, два опроса делят интервал пополам.
+   Поэтому число приходит пропсами, а не своим запросом. null — «прогрев» либо
+   счётчик поехал назад: показываем «—», а не ноль. */
+const props = defineProps<{
+  rxSpeed?: number | null;
+  txSpeed?: number | null;
+}>();
+
+/* Что показывает поле: доли по направлениям (напрямую/VPN/DPI) или скорость
+   приёма и передачи во времени. Живой показ ↓/↑ виден в обоих режимах. */
+type Mode = "lanes" | "speed";
+const mode = ref<Mode>("lanes");
+
+type Point = {
+  ts: number;
+  direct: number;
+  vpn: number;
+  bypass: number;
+  rx: number;
+  tx: number;
+};
 /* Источник — то, что реально копит роутер: `minute` (сутки поминутно, tmpfs) и
    `hour` (30 дней по часам, флеш). Все диапазоны панели — это ОКНА поверх этих
    двух рядов, а не новые запросы к бэкенду: роутер уже отдаёт оба целиком. */
@@ -125,7 +147,16 @@ async function load(src: Source = currentSource.value) {
       else hourPoints.value = [];
     } else {
       supported.value = true;
-      const pts = Array.isArray(r?.points) ? r.points : [];
+      /* Роутер со старым сборщиком отдаёт точки без rx/tx — приводим к нулю,
+         чтобы график скорости не падал на undefined, а честно показал разрыв. */
+      const pts: Point[] = (Array.isArray(r?.points) ? r.points : []).map((p) => ({
+        ts: p.ts,
+        direct: p.direct,
+        vpn: p.vpn,
+        bypass: p.bypass,
+        rx: p.rx ?? 0,
+        tx: p.tx ?? 0,
+      }));
       if (src === "minute") minutePoints.value = pts;
       else hourPoints.value = pts;
     }
@@ -155,6 +186,17 @@ const totals = computed(() => {
   return t;
 });
 const grandTotal = computed(() => totals.value.direct + totals.value.vpn + totals.value.bypass);
+
+/* Суммы приёма и передачи за окно — байты, а не скорость. Средняя скорость в
+   легенде = сумма / длину окна: одно понятное число вместо мельтешащего пика. */
+const dirTotals = computed(() => {
+  const t = { rx: 0, tx: 0 };
+  for (const p of points.value) {
+    t.rx += p.rx;
+    t.tx += p.tx;
+  }
+  return t;
+});
 
 /* Пик суммы задаёт шкалу. Ноль в знаменателе означает «трафика не было» —
    рисуем пустое поле, а не делим на ноль. */
@@ -200,22 +242,92 @@ const geom = computed(() => {
   return { x, y, areas, n };
 });
 
+/* --- скорость приёма/передачи во времени --- */
+
+const DIRS = [
+  { key: "rx", label: "Приём", color: "var(--dir-rx)" },
+  { key: "tx", label: "Передача", color: "var(--dir-tx)" },
+] as const;
+
+/* Точки ряда — это байты ЗА интервал, а не скорость. Переводим в байты/с по
+   РАЗНОСТИ соседних ts, а не по step: на Keenetic нет crond, шаг ряда там 300 с
+   против 60 на OpenWrt, и деление на step завысило бы скорость в пять раз.
+   Индекс совпадает с points, поэтому наведение и подписи оси общие для обоих
+   режимов. Для первой точки берём интервал второй (её собственный неизвестен). */
+const rates = computed(() => {
+  const pts = points.value;
+  if (pts.length < 2) return [] as { ts: number; rx: number; tx: number }[];
+  const dt0 = Math.max(1, pts[1].ts - pts[0].ts);
+  return pts.map((p, i) => {
+    const dt = i > 0 ? Math.max(1, p.ts - pts[i - 1].ts) : dt0;
+    return { ts: p.ts, rx: p.rx / dt, tx: p.tx / dt };
+  });
+});
+
+/* Пик — по большей из двух скоростей: шкала симметрична относительно оси, но
+   общая, чтобы приём и передача сравнивались честно (передача обычно много
+   меньше — эту асимметрию график и показывает, а не прячет двумя шкалами). */
+const speedPeak = computed(() =>
+  rates.value.reduce((m, r) => Math.max(m, r.rx, r.tx), 0),
+);
+
+const speedGeom = computed(() => {
+  const rs = rates.value;
+  const n = rs.length;
+  if (n < 2 || speedPeak.value <= 0) return null;
+  const x = (i: number) => PAD_L + (i * (W.value - PAD_L - PAD_R)) / Math.max(1, n - 1);
+  const half = (H - PAD_T - PAD_B) / 2;
+  const axisY = PAD_T + half;
+  const yUp = (v: number) => axisY - half * (v / speedPeak.value); // приём — вверх
+  const yDn = (v: number) => axisY + half * (v / speedPeak.value); // передача — вниз
+
+  const build = (pick: (r: { rx: number; tx: number }) => number, yv: (v: number) => number) => {
+    const line: string[] = [];
+    rs.forEach((r, i) => line.push(`${x(i).toFixed(1)},${yv(pick(r)).toFixed(1)}`));
+    const x0 = x(0).toFixed(1);
+    const xn = x(n - 1).toFixed(1);
+    const a = axisY.toFixed(1);
+    return {
+      fill: `M${x0},${a}L${line.join("L")}L${xn},${a}Z`,
+      line: `M${line.join("L")}`,
+    };
+  };
+
+  const rx = build((r) => r.rx, yUp);
+  const tx = build((r) => r.tx, yDn);
+  return { x, n, axisY, rx, tx };
+});
+
+/* Общее число точек активного режима — по нему считаем наведение и подписи. */
+const activeN = computed(() =>
+  mode.value === "speed" ? speedGeom.value?.n ?? 0 : geom.value?.n ?? 0,
+);
+
 const hoverPoint = computed(() => {
   const i = hover.value;
   if (i === null || !points.value[i]) return null;
   const p = points.value[i];
-  return { i, p, total: p.direct + p.vpn + p.bypass };
+  const r = rates.value[i];
+  return { i, p, r, total: p.direct + p.vpn + p.bypass };
 });
 
 function onMove(e: MouseEvent) {
-  const g = geom.value;
-  if (!g) return;
+  const n = activeN.value;
+  if (n < 2) return;
   const box = (e.currentTarget as SVGElement).getBoundingClientRect();
   const rel = ((e.clientX - box.left) / box.width) * W.value;
-  const step = (W.value - PAD_L - PAD_R) / Math.max(1, g.n - 1);
+  const step = (W.value - PAD_L - PAD_R) / Math.max(1, n - 1);
   const i = Math.round((rel - PAD_L) / step);
-  hover.value = Math.min(g.n - 1, Math.max(0, i));
+  hover.value = Math.min(n - 1, Math.max(0, i));
 }
+
+/* Живая скорость сейчас — строкой; «—», когда прогрев или откат счётчика. */
+const rxNow = computed(() =>
+  typeof props.rxSpeed === "number" ? fmtBitrate(props.rxSpeed) : "—",
+);
+const txNow = computed(() =>
+  typeof props.txSpeed === "number" ? fmtBitrate(props.txSpeed) : "—",
+);
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -248,6 +360,10 @@ function fmtTip(ts: number) {
 const axisLabels = computed(() => {
   const pts = points.value;
   if (pts.length < 2) return [];
+  /* x берём у активной геометрии: в режиме скорости ленточная geom может быть
+     null (доли нулевые, а приём/передача есть) — тогда подписи схлопнулись бы в
+     ноль. Обе геометрии считают x по одной формуле, поэтому позиции совпадают. */
+  const xf = mode.value === "speed" ? speedGeom.value?.x : geom.value?.x;
   /* Больше подписей на широком поле — на узком они бы наехали друг на друга. */
   const count = W.value > 560 ? 5 : 3;
   const seen = new Set<number>();
@@ -259,7 +375,7 @@ const axisLabels = computed(() => {
     out.push({
       i,
       text: fmtTime(pts[i].ts),
-      x: geom.value?.x(i) ?? 0,
+      x: xf?.(i) ?? 0,
       anchor: i === 0 ? "start" : i === pts.length - 1 ? "end" : "middle",
     });
   }
@@ -318,21 +434,52 @@ function applyCustom() {
 
 <template>
   <section class="chart">
+    <!-- Скорость прямо сейчас — крупно и в обоих режимах: это первое, за чем
+         открывают карточку. Приём и передача теми же цветами, что и график
+         скорости ниже. -->
+    <div class="now" aria-label="Скорость сейчас">
+      <div class="now-cell">
+        <span class="arrow" :style="{ color: 'var(--dir-rx)' }">↓</span>
+        <span class="val">{{ rxNow }}</span>
+        <span class="cap">приём</span>
+      </div>
+      <div class="now-cell">
+        <span class="arrow" :style="{ color: 'var(--dir-tx)' }">↑</span>
+        <span class="val">{{ txNow }}</span>
+        <span class="cap">передача</span>
+      </div>
+      <!-- Что рисует поле: доли по направлениям или скорость во времени. -->
+      <div class="mode" role="group" aria-label="Что показывать">
+        <button type="button" :class="{ on: mode === 'lanes' }"
+          :aria-pressed="mode === 'lanes'" @click="mode = 'lanes'">Направления</button>
+        <button type="button" :class="{ on: mode === 'speed' }"
+          :aria-pressed="mode === 'speed'" @click="mode = 'speed'">Скорость</button>
+      </div>
+    </div>
+
     <header>
       <div>
-        <!-- Заголовка тут нет намеренно: карточка («Трафик по направлениям»)
-             уже подписана снаружи, и второй такой же строкой график только
-             отбирал высоту у себя же. -->
         <p class="sub">
-          <template v-if="geom && grandTotal > 0">
-            Всего за период {{ fmtBytes(grandTotal) }}
+          <template v-if="mode === 'speed'">
+            <template v-if="speedGeom">Скорость приёма и передачи за период</template>
+            <template v-else-if="!supported">Сборщик не установлен</template>
+            <template v-else-if="loading">Загружаю…</template>
+            <template v-else-if="points.length < 2">
+              Данные копятся — график появится через пару минут
+            </template>
+            <template v-else>За период трафика не было</template>
           </template>
-          <template v-else-if="!supported">Сборщик не установлен</template>
-          <template v-else-if="loading">Загружаю…</template>
-          <template v-else-if="points.length < 2">
-            Данные копятся — график появится через пару минут
+          <template v-else>
+            <template v-if="geom && grandTotal > 0">
+              Всего за период {{ fmtBytes(grandTotal) }}
+            </template>
+            <template v-else-if="!supported">Сборщик не установлен</template>
+            <template v-else-if="loading">Загружаю…</template>
+            <template v-else-if="points.length < 2">
+              Данные копятся — график появится через пару минут
+            </template>
+            <template v-else>За период трафика не было</template>
           </template>
-          <template v-else>За период трафика не было</template>
         </p>
       </div>
       <!-- Пресеты периода одной строкой над графиком; последний чип —
@@ -376,8 +523,9 @@ function applyCustom() {
     </div>
 
     <div ref="plot" class="plot">
+      <!-- Режим «Направления»: стековые площади долей. -->
       <svg
-        v-if="geom"
+        v-if="mode === 'lanes' && geom"
         :viewBox="`0 0 ${W} ${H}`"
         role="img"
         :aria-label="`График трафика: всего ${fmtBytes(grandTotal)}`"
@@ -420,6 +568,43 @@ function applyCustom() {
         </text>
       </svg>
 
+      <!-- Режим «Скорость»: зеркальные площади — приём вверх от оси, передача
+           вниз. Ось посередине, шкала общая, поэтому асимметрия видна как есть. -->
+      <svg
+        v-else-if="mode === 'speed' && speedGeom"
+        :viewBox="`0 0 ${W} ${H}`"
+        role="img"
+        :aria-label="`График скорости: приём ${rxNow}, передача ${txNow}`"
+        @mousemove="onMove"
+        @mouseleave="hover = null"
+      >
+        <path :d="speedGeom.rx.fill" fill="var(--dir-rx)" class="area" />
+        <path :d="speedGeom.rx.line" stroke="var(--dir-rx)" class="edge" fill="none" />
+        <path :d="speedGeom.tx.fill" fill="var(--dir-tx)" class="area" />
+        <path :d="speedGeom.tx.line" stroke="var(--dir-tx)" class="edge" fill="none" />
+        <!-- Нулевая ось: приём над ней, передача под ней. -->
+        <line class="axis-mid" :x1="PAD_L" :x2="W - PAD_R" :y1="speedGeom.axisY" :y2="speedGeom.axisY" />
+        <g v-if="hoverPoint">
+          <line
+            class="cross"
+            :x1="speedGeom.x(hoverPoint.i)"
+            :x2="speedGeom.x(hoverPoint.i)"
+            :y1="PAD_T"
+            :y2="H - PAD_B"
+          />
+        </g>
+        <text
+          v-for="l in axisLabels"
+          :key="l.i"
+          class="axis"
+          :x="l.x"
+          :y="H - 4"
+          :text-anchor="l.anchor"
+        >
+          {{ l.text }}
+        </text>
+      </svg>
+
       <!-- Заглушка живёт ВНУТРИ поля: контейнер должен существовать всегда,
            иначе мерить нечего и первый кадр с данными нарисуется по
            запасной ширине. -->
@@ -433,23 +618,42 @@ function applyCustom() {
         }}
       </p>
 
-      <div v-if="hoverPoint" class="tip">
+      <div v-if="hoverPoint && mode === 'lanes'" class="tip">
         <b>{{ fmtTip(hoverPoint.p.ts) }}</b>
         <span v-for="lane in LANES" :key="lane.key">
           <i class="sw" :style="{ background: lane.color }"></i>
           {{ lane.label }} <b>{{ fmtBytes(hoverPoint.p[lane.key]) }}</b>
         </span>
       </div>
+      <div v-else-if="hoverPoint && hoverPoint.r && mode === 'speed'" class="tip">
+        <b>{{ fmtTip(hoverPoint.p.ts) }}</b>
+        <span v-for="dir in DIRS" :key="dir.key">
+          <i class="sw" :style="{ background: dir.color }"></i>
+          {{ dir.label }} <b>{{ fmtBitrate(hoverPoint.r[dir.key]) }}</b>
+        </span>
+      </div>
     </div>
 
-    <!-- Легенда обязательна: три направления, идентичность не должна держаться на
-         одном цвете. Числа рядом — те самые видимые подписи. -->
+    <!-- Легенда обязательна: идентичность не должна держаться на одном цвете.
+         Числа рядом — те самые видимые подписи. В режиме направлений — суммы за
+         период; в режиме скорости — средняя скорость за период (общий объём,
+         делённый на длину окна). -->
     <div class="legend">
-      <div v-for="lane in LANES" :key="lane.key">
-        <i class="sw" :style="{ background: lane.color }"></i>
-        {{ lane.label }}
-        <b class="num">{{ fmtBytes(totals[lane.key]) }}</b>
-      </div>
+      <template v-if="mode === 'speed'">
+        <div v-for="dir in DIRS" :key="dir.key">
+          <i class="sw" :style="{ background: dir.color }"></i>
+          {{ dir.label }}
+          <b class="num">{{ spanSec ? fmtBitrate(dirTotals[dir.key] / spanSec) : "—" }}</b>
+          <span class="sub-num">· {{ fmtBytes(dirTotals[dir.key]) }}</span>
+        </div>
+      </template>
+      <template v-else>
+        <div v-for="lane in LANES" :key="lane.key">
+          <i class="sw" :style="{ background: lane.color }"></i>
+          {{ lane.label }}
+          <b class="num">{{ fmtBytes(totals[lane.key]) }}</b>
+        </div>
+      </template>
       <button type="button" class="tbl" @click="showTable = !showTable">
         {{ showTable ? "Скрыть таблицу" : "Таблицей" }}
       </button>
@@ -457,7 +661,22 @@ function applyCustom() {
 
     <!-- Табличный вид: и как доступная альтернатива цвету, и просто чтобы
          посмотреть числа. -->
-    <table v-if="showTable && points.length" class="data">
+    <table v-if="showTable && mode === 'speed' && rates.length" class="data">
+      <thead>
+        <tr>
+          <th>Время</th>
+          <th v-for="dir in DIRS" :key="dir.key">{{ dir.label }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="r in rates.slice(-24).reverse()" :key="r.ts">
+          <td>{{ fmtTip(r.ts) }}</td>
+          <td>{{ fmtBitrate(r.rx) }}</td>
+          <td>{{ fmtBitrate(r.tx) }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <table v-else-if="showTable && points.length" class="data">
       <thead>
         <tr>
           <th>Время</th>
@@ -482,6 +701,59 @@ function applyCustom() {
   flex-direction: column;
   gap: 10px;
 }
+
+/* Живая скорость сейчас — крупная строка над графиком. */
+.now {
+  display: flex;
+  align-items: center;
+  gap: 18px 24px;
+  flex-wrap: wrap;
+}
+.now-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.now-cell .arrow {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+.now-cell .val {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.now-cell .cap {
+  font-size: 11.5px;
+  color: var(--faint);
+}
+/* Переключатель режима прижат вправо. */
+.mode {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.mode button {
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--dim);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.mode button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-on);
+  font-weight: 600;
+}
+
 header {
   display: flex;
   align-items: flex-start;
@@ -600,6 +872,11 @@ svg {
   fill: var(--faint);
   font-size: 10px;
 }
+/* Нулевая ось зеркального графика — заметнее сетки, но не кричит. */
+.axis-mid {
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
 .tip {
   position: absolute;
   top: 0;
@@ -635,6 +912,11 @@ svg {
 }
 .num {
   color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+/* Второе число в легенде скорости — объём за период, приглушённо. */
+.sub-num {
+  color: var(--faint);
   font-variant-numeric: tabular-nums;
 }
 .tbl {

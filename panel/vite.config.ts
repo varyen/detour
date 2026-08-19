@@ -4,10 +4,12 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { VitePWA } from "vite-plugin-pwa";
 
-/* Панель ставится в /www/detour-next/ (OpenWrt) и /opt/share/www/detour-next/
-   (Keenetic). Путь можно переопределить на сборке — DETOUR_BASE=/detour/ даст
-   пакет, который заменяет старую панель на месте. */
-const BASE = process.env.DETOUR_BASE || "/detour-next/";
+/* Панель — основная, ставится в /www/detour/ (OpenWrt) и /opt/share/www/detour/
+   (Keenetic), адрес /detour/. Старая однофайловая переехала на /detour-old/.
+   base зашивается в URL ассетов и в manifest, поэтому dist, собранный с этим
+   значением, распакованный в /www/detour/, работает как есть. Переопределить
+   можно на сборке — DETOUR_BASE=… (напр. для превью на другом префиксе). */
+const BASE = process.env.DETOUR_BASE || "/detour/";
 
 /* Для `npm run dev` весь /cgi-bin проксируется на живой роутер: фронт
    разрабатывается против настоящего CGI, а не против моков. */

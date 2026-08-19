@@ -74,7 +74,7 @@ FILES_TO_BACKUP = [
     ("/etc/dropbear/dropbear_rsa_host_key", "etc/dropbear/dropbear_rsa_host_key"),
     # web panel
     ("/www/cgi-bin/detour-api", "www/cgi-bin/detour-api"),
-    ("/www/detour/index.html", "www/detour/index.html"),
+    ("/www/detour-old/index.html", "www/detour-old/index.html"),
     # auth
     ("/etc/detour.auth", "etc/detour.auth"),
     # nginx / HTTPS

@@ -13,7 +13,7 @@ What it does (idempotent):
     5. /etc/firewall.lan_mark_fallback + uci firewall include
     6. /etc/sing-box/* (config.json, settings.json, *.list, profiles/) and /etc/zapret-tpws/*
        (only if --full or files absent on target)
-    7. /www/cgi-bin/detour-api, /www/detour/index.html (from router_files/, always)
+    7. /www/cgi-bin/detour-api, /www/detour-old/index.html (from router_files/, always)
     8. /etc/detour.auth (only if absent, or --reset-panel-auth)
     9. /etc/hotplug.d/iface/99-proxy-guard
    10. Restart services
@@ -286,23 +286,33 @@ def step_zapret_configs(ssh, force=False):
 
 def step_panel(ssh):
     step("Deploying panel CGI + HTML")
-    exec_cmd(ssh, "mkdir -p /www/cgi-bin /www/detour /tmp/detour-sessions")
+    # /www/detour/ занимает НОВАЯ панель (Vue, deploy_panel_next.py), старая
+    # однофайловая живёт рядом на /detour-old/ — поэтому каталога два.
+    exec_cmd(ssh, "mkdir -p /www/cgi-bin /www/detour /www/detour-old /tmp/detour-sessions")
     # Canonical source is router_files/ (what build_release.py ships); router-backup/
     # is a stale on-router snapshot and must NOT be the deploy source for the panel.
     cgi = os.path.join(ROUTER_FILES, "detour-api")
     html = os.path.join(ROUTER_FILES, "index.html")
     sw = os.path.join(ROUTER_FILES, "sw.js")
+    icon = os.path.join(ROUTER_FILES, "favicon.svg")
     with open(cgi, "rb") as f:
         n = upload(ssh, f.read(), "/www/cgi-bin/detour-api", "0755")
     print(f"  /www/cgi-bin/detour-api: {n} bytes")
     with open(html, "rb") as f:
-        n = upload(ssh, f.read(), "/www/detour/index.html", "0644")
-    print(f"  /www/detour/index.html: {n} bytes")
-    # Web Push service worker (served same-origin at /detour/sw.js).
+        n = upload(ssh, f.read(), "/www/detour-old/index.html", "0644")
+    print(f"  /www/detour-old/index.html: {n} bytes")
+    # Web Push service worker. Он обязан лежать в том же каталоге, что и панель,
+    # которая его регистрирует: скрипт из /detour-old/ не может взять scope /detour/.
     if os.path.isfile(sw):
         with open(sw, "rb") as f:
-            n = upload(ssh, f.read(), "/www/detour/sw.js", "0644")
-        print(f"  /www/detour/sw.js: {n} bytes")
+            n = upload(ssh, f.read(), "/www/detour-old/sw.js", "0644")
+        print(f"  /www/detour-old/sw.js: {n} bytes")
+    # Иконка уведомлений (sw.js ссылается на неё явным путём — инлайн-favicon
+    # самой страницы тут не помогает).
+    if os.path.isfile(icon):
+        with open(icon, "rb") as f:
+            n = upload(ssh, f.read(), "/www/detour-old/favicon.svg", "0644")
+        print(f"  /www/detour-old/favicon.svg: {n} bytes")
 
 
 def step_hosts(ssh):

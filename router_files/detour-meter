@@ -12,7 +12,9 @@
 #                   (входящие) лежит в ipset'ах sing-box;
 #   обход DPI     — то же для ipset'а zapret;
 #   всего         — счётчики WAN-интерфейса из /proc/net/dev (точные и дешёвые);
-#   напрямую      — «всего» минус две ленты выше, но не меньше нуля.
+#   напрямую      — «всего» минус две ленты выше, но не меньше нуля;
+#   приём/передача — оттуда же (rx и tx интерфейса), в разбивке по лентам их
+#                   нет и быть не может: см. комментарий у d_rx в read_counters.
 #
 # Панель показывает ДЕЛЬТЫ между двумя чтениями, поэтому здесь же хранится
 # предыдущий снимок. Абсолютные значения бесполезны: правила пересоздаются на
@@ -165,11 +167,26 @@ chain_bytes() {
     '
 }
 
+# Принятые и отданные байты интерфейса из /proc/net/dev: «$1 == имя:» здесь не
+# годится. Ядро печатает строку по фиксированной ширине поля, и когда счётчик
+# перерастает её (а на гигабитном канале это вопрос часов), имя слипается с
+# числом: `eth0:12345678901`. Тогда $1 — не имя, $2 — уже пакеты вместо байтов,
+# и функция молча отдаёт мусор. Поэтому режем по первому двоеточию сами.
 iface_bytes() {
     _if=$1
     [ -n "$_if" ] || { echo "0 0"; return; }
-    awk -v ifc="$_if:" '$1 == ifc { print $2, $10 }' /proc/net/dev 2>/dev/null |
-        head -1 | while read -r rx tx; do echo "${rx:-0} ${tx:-0}"; done
+    awk -v ifc="$_if" '
+        {
+            line = $0
+            sub(/^[ \t]+/, "", line)
+            c = index(line, ":")
+            if (c == 0) next
+            if (substr(line, 1, c - 1) != ifc) next
+            n = split(substr(line, c + 1), f, " ")
+            # После имени идут восемь полей приёма (байты первые) и следом
+            # передача — её байты девятые.
+            if (n >= 9) { print f[1], f[9]; exit }
+        }' /proc/net/dev 2>/dev/null | while read -r rx tx; do echo "${rx:-0} ${tx:-0}"; done
 }
 
 read_counters() {
@@ -184,7 +201,7 @@ read_counters() {
     zap=$(($(chain_bytes $CHAIN_UP zp) + $(chain_bytes $CHAIN_DOWN zp)))
     wl=$(($(chain_bytes $CHAIN_UP wl) + $(chain_bytes $CHAIN_DOWN wl)))
 
-    p_ts=0 p_wan=0 p_vpn=0 p_zap=0 p_wl=0
+    p_ts=0 p_wan=0 p_vpn=0 p_zap=0 p_wl=0 p_rx=-1 p_tx=-1
     if [ -f "$STATE" ]; then
         # shellcheck disable=SC2034  # значения приходят из файла состояния
         . "$STATE" 2>/dev/null || true
@@ -193,6 +210,12 @@ read_counters() {
         p_vpn=${M_VPN:-0}
         p_zap=${M_ZAP:-0}
         p_wl=${M_WL:-0}
+        # Минус один, а не ноль: после обновления пакета в файле состояния этих
+        # ключей ещё нет, и «ноль» был бы неотличим от честного нуля счётчика —
+        # первая же дельта получилась бы равна всему, что интерфейс принял с
+        # момента загрузки, то есть гигабайтам за одну секунду.
+        p_rx=${M_RX:--1}
+        p_tx=${M_TX:--1}
     fi
 
     cat > "$STATE" <<EOF
@@ -201,6 +224,8 @@ M_WAN=$wan_total
 M_VPN=$vpn
 M_ZAP=$zap
 M_WL=$wl
+M_RX=$wan_rx
+M_TX=$wan_tx
 EOF
 
     span=$((now - p_ts))
@@ -209,12 +234,26 @@ EOF
     if [ "$p_ts" -eq 0 ] || [ "$span" -le 0 ] ||
         [ "$vpn" -lt "$p_vpn" ] || [ "$zap" -lt "$p_zap" ] ||
         [ "$wl" -lt "$p_wl" ] || [ "$wan_total" -lt "$p_wan" ]; then
-        echo '{"ok":true,"supported":true,"warming":true,"exact":true,"direct":0,"vpn":0,"bypass":0,"total":0,"bytes":{"direct":0,"vpn":0,"bypass":0,"total":0},"span":0}'
+        echo '{"ok":true,"supported":true,"warming":true,"exact":true,"direct":0,"vpn":0,"bypass":0,"total":0,"bytes":{"direct":0,"vpn":0,"bypass":0,"total":0,"rx":0,"tx":0},"span":0}'
         return
     fi
 
     d_wan=$((wan_total - p_wan))
     d_zap=$((zap - p_zap))
+
+    # Приём и передача по отдельности — из счётчиков самого интерфейса. По
+    # цепочкам ipset направления разделить НЕЛЬЗЯ: в режиме списка обратный
+    # трафик туннеля приходит с адреса VPN-сервера, которого нет ни в одном
+    # наборе, поэтому «скачано через VPN» цепочкой DOWN не измеряется вовсе.
+    # Счётчики интерфейса верны в обе стороны — на них и строим скорость.
+    if [ "$p_rx" -lt 0 ] || [ "$p_tx" -lt 0 ] ||
+        [ "$wan_rx" -lt "$p_rx" ] || [ "$wan_tx" -lt "$p_tx" ]; then
+        d_rx=0
+        d_tx=0
+    else
+        d_rx=$((wan_rx - p_rx))
+        d_tx=$((wan_tx - p_tx))
+    fi
 
     # В режиме «всё кроме» списка проксируемых доменов нет вовсе: в туннель
     # идёт всё, что не попало в белый список. Тогда измеримая лента — прямая,
@@ -251,7 +290,8 @@ EOF
 
     printf '{"ok":true,"supported":true,"warming":false,"exact":true,'
     printf '"direct":%d,"vpn":%d,"bypass":%d,"total":100,' "$s_dir" "$s_vpn" "$s_zap"
-    printf '"bytes":{"direct":%d,"vpn":%d,"bypass":%d,"total":%d},' "$d_dir" "$d_vpn" "$d_zap" "$d_wan"
+    printf '"bytes":{"direct":%d,"vpn":%d,"bypass":%d,"total":%d,"rx":%d,"tx":%d},' \
+        "$d_dir" "$d_vpn" "$d_zap" "$d_wan" "$d_rx" "$d_tx"
     printf '"span":%d,"wan":"%s"}\n' "$span" "$wan"
 }
 

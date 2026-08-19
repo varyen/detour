@@ -48,7 +48,17 @@ export const overview = {
       ok: boolean;
       supported?: boolean;
       step?: number;
-      points?: { ts: number; direct: number; vpn: number; bypass: number }[];
+      points?: {
+        ts: number;
+        direct: number;
+        vpn: number;
+        bypass: number;
+        /* Приём и передача — байты интервала из счётчиков интерфейса. Строки,
+           записанные до появления направлений, отдают их нулями (см.
+           detour-trafficlog): график скорости на них показывает разрыв. */
+        rx: number;
+        tx: number;
+      }[];
     }>("traffic_series", { params: { range } }),
 
   allvpnOn: () =>

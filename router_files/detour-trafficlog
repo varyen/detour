@@ -33,7 +33,11 @@ else
 fi
 
 STATE=/tmp/detour-trafficlog.state   # СВОЯ база, не общая с панелью
-MIN=/tmp/detour-traffic.tsv          # ts direct vpn bypass  (поминутно, сутки)
+# ts direct vpn bypass rx tx — приём и передача ДОПИСАНЫ в конец строки, а не
+# вставлены в середину: на флеше уже лежит до тридцати дней строк из четырёх
+# колонок, и читатель обязан их понимать. Отсюда же «rx/tx = 0», когда колонок
+# меньше шести, — так честнее, чем выбросить месяц истории ради графика.
+MIN=/tmp/detour-traffic.tsv          # поминутно, сутки (tmpfs)
 HOUR=$ETC/detour/traffic-hour.tsv    # то же по часам (месяц, переживает ребут)
 MIN_KEEP=1440
 HOUR_KEEP=720
@@ -52,17 +56,25 @@ tick() {
 
     ts=$(jnum "$snap" ts)
     wan=$(jnum "$snap" wan_total)
+    rx=$(jnum "$snap" wan_rx)
+    tx=$(jnum "$snap" wan_tx)
     vpn=$(jnum "$snap" vpn)
     zap=$(jnum "$snap" zap)
     wl=$(jnum "$snap" wl)
     mode=$(jstr "$snap" mode)
     [ -n "${ts:-}" ] || return 1
+    rx=${rx:-0} tx=${tx:-0}
 
     p_ts=0 p_wan=0 p_vpn=0 p_zap=0 p_wl=0 p_hour=0
+    # Минус один — «ключа в базе не было» (её писала версия до появления
+    # направлений). Ноль здесь означал бы честный ноль счётчика, и первая же
+    # дельта вышла бы равна всему, что интерфейс принял с загрузки.
+    p_rx=-1 p_tx=-1
     if [ -f "$STATE" ]; then
         . "$STATE" 2>/dev/null || true
         p_ts=${T_TS:-0} p_wan=${T_WAN:-0} p_vpn=${T_VPN:-0}
         p_zap=${T_ZAP:-0} p_wl=${T_WL:-0} p_hour=${T_HOUR:-0}
+        p_rx=${T_RX:--1} p_tx=${T_TX:--1}
     fi
 
     cur_hour=$((ts / 3600))
@@ -73,6 +85,8 @@ T_WAN=$wan
 T_VPN=$vpn
 T_ZAP=$zap
 T_WL=$wl
+T_RX=$rx
+T_TX=$tx
 T_HOUR=${1:-$p_hour}
 EOF
     }
@@ -111,7 +125,19 @@ EOF
         [ "$d_dir" -lt 0 ] && d_dir=0
     fi
 
-    printf '%s\t%s\t%s\t%s\n' "$ts" "$d_dir" "$d_vpn" "$d_zap" >> "$MIN"
+    # Направления — из счётчиков интерфейса, а не из лент: по лентам разделить
+    # приём и передачу нельзя (см. detour-meter). До первого тика с новыми
+    # ключами в базе пишем нули: график покажет разрыв, а не ложный пик.
+    if [ "$p_rx" -lt 0 ] || [ "$p_tx" -lt 0 ] ||
+        [ "$rx" -lt "$p_rx" ] || [ "$tx" -lt "$p_tx" ]; then
+        d_rx=0
+        d_tx=0
+    else
+        d_rx=$((rx - p_rx))
+        d_tx=$((tx - p_tx))
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$d_dir" "$d_vpn" "$d_zap" "$d_rx" "$d_tx" >> "$MIN"
     # BusyBox sort/tail без -i: пишем во временный файл и переносим.
     if [ "$(wc -l < "$MIN" 2>/dev/null || echo 0)" -gt "$MIN_KEEP" ]; then
         tail -n "$MIN_KEEP" "$MIN" > "$MIN.tmp" && mv "$MIN.tmp" "$MIN"
@@ -131,8 +157,12 @@ flush_hour() {
     _to=$((_from + 3600))
     mkdir -p "$(dirname "$HOUR")" 2>/dev/null
     awk -v a="$_from" -v b="$_to" -F '\t' '
-        $1 >= a && $1 < b { d += $2; v += $3; z += $4; n++ }
-        END { if (n > 0) printf "%d\t%d\t%d\t%d\n", a, d, v, z }
+        $1 >= a && $1 < b {
+            d += $2; v += $3; z += $4
+            if (NF >= 6) { r += $5; t += $6 }
+            n++
+        }
+        END { if (n > 0) printf "%d\t%d\t%d\t%d\t%d\t%d\n", a, d, v, z, r, t }
     ' "$MIN" >> "$HOUR" 2>/dev/null
     if [ "$(wc -l < "$HOUR" 2>/dev/null || echo 0)" -gt "$HOUR_KEEP" ]; then
         tail -n "$HOUR_KEEP" "$HOUR" > "$HOUR.tmp" && mv "$HOUR.tmp" "$HOUR"
@@ -150,12 +180,20 @@ series() {
         _file=$MIN
         _step=60
     fi
+    # step — НОМИНАЛЬНЫЙ шаг, а не гарантия: на Keenetic нет crond, точку снимает
+    # тик планировщика раз в 300 с, и минутный ряд там на деле пятиминутный.
+    # Скорость поэтому считается по разнице ts соседних точек, а не по step.
     printf '{"ok":true,"step":%d,"points":[' "$_step"
     if [ -f "$_file" ]; then
         awk -F '\t' 'BEGIN { first = 1 }
             NF >= 4 {
                 if (!first) printf ","
-                printf "{\"ts\":%d,\"direct\":%d,\"vpn\":%d,\"bypass\":%d}", $1, $2, $3, $4
+                # Строки из четырёх колонок писала версия до появления
+                # направлений — отдаём им нулевые приём и передачу.
+                rx = (NF >= 6 ? $5 : 0)
+                tx = (NF >= 6 ? $6 : 0)
+                printf "{\"ts\":%d,\"direct\":%d,\"vpn\":%d,\"bypass\":%d,\"rx\":%d,\"tx\":%d}", \
+                    $1, $2, $3, $4, rx, tx
                 first = 0
             }' "$_file"
     fi

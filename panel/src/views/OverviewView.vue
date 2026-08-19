@@ -387,6 +387,19 @@ const speedText = computed(() => {
   return fmtBitrate(b / span);
 });
 
+/* Живая скорость по направлениям — из той же дельты traffic_counters (rx/tx за
+   span), что уже опрашивается раз в 10 с. null — прогрев или откат счётчика:
+   карточка покажет «—», а не ложный ноль. Отдельного опроса не заводим — `read`
+   разрушающий, второй читатель украл бы интервал. */
+function dirSpeed(key: "rx" | "tx"): number | null {
+  const b = lanes.value?.bytes?.[key];
+  const span = lanes.value?.span ?? 0;
+  if (b == null || !span || lanes.value?.warming === true) return null;
+  return b / span;
+}
+const rxSpeed = computed(() => dirSpeed("rx"));
+const txSpeed = computed(() => dirSpeed("tx"));
+
 async function loadExtras() {
   const c = await overview.lanClients().catch(() => null);
   if (c) {
@@ -561,8 +574,8 @@ onBeforeUnmount(() => {
     </DashSlot>
 
     <DashSlot id="traffic">
-      <TileCard title="Трафик по направлениям">
-        <TrafficChart />
+      <TileCard title="Трафик">
+        <TrafficChart :rx-speed="rxSpeed" :tx-speed="txSpeed" />
       </TileCard>
     </DashSlot>
 

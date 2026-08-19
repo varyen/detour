@@ -164,8 +164,12 @@ PANEL_FILES = [
     (("router_files", "detour-logbridge"), "usr/sbin/detour-logbridge", 0o755),
     (("router_files", "detour-logbridge.initd"), "etc/init.d/detour-logbridge", 0o755),
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
-    (("router_files", "index.html"), "www/detour/index.html", 0o644),
-    (("router_files", "sw.js"), "www/detour/sw.js", 0o644),
+    # Старая однофайловая панель — переехала на /detour-old/ (главной стала Vue).
+    # favicon.svg раньше не паковался вообще, хотя sw.js ссылался на него в
+    # уведомлениях — иконка молча не грузилась; теперь кладём рядом.
+    (("router_files", "index.html"), "www/detour-old/index.html", 0o644),
+    (("router_files", "sw.js"), "www/detour-old/sw.js", 0o644),
+    (("router_files", "favicon.svg"), "www/detour-old/favicon.svg", 0o644),
     # NOTE: tpws-zapret is NOT bundled here anymore — first install bootstraps it
     # from the opkg feed in the background, same as sing-box.
     # Pin our public key in two places: opkg's standard keyring (so future opkg
@@ -175,13 +179,15 @@ PANEL_FILES = [
 
 # The protected-path sanity check scans the package's full file set.
 # --- новая панель (Vue + PWA) -------------------------------------------------
-# Собранная панель лежит в panel/dist и ставится РЯДОМ со старой, в
-# /www/detour-next/. Пока обе живут одновременно: если новая где-то не
-# дотягивает, управление роутером не теряется — старая на /detour/ работает.
+# Собранная панель лежит в panel/dist и теперь ставится ГЛАВНОЙ — в /www/detour/,
+# то есть открывается по привычному адресу /detour/. Старая однофайловая панель
+# сдвинута на /detour-old/ и держится там ещё один релизный цикл: если в новой
+# что-то не дотянуто, управление роутером не теряется. Промежуточного адреса
+# /detour-next/ больше нет — он не редиректится, а просто исчезает.
 # Имена файлов с хешом, поэтому кеш-бастинг решается сам собой, а opkg при
 # обновлении сам подчистит ассеты прошлой версии (их нет в новом списке).
 PANEL_NEXT_DIR = os.path.join("panel", "dist")
-PANEL_NEXT_DEST = "www/detour-next"
+PANEL_NEXT_DEST = "www/detour"
 
 
 def check_panel_build(version):
@@ -403,6 +409,11 @@ AUTO_CHECK=0
 CONF
     chmod 0600 /etc/detour/update.conf
 fi
+
+# 1e) Снести промежуточный адрес новой панели. Файлы, которые клал opkg, он
+# удалит сам (их нет в новом списке), но deploy_panel_next.py во время разработки
+# лил dist туда же напрямую — этих файлов opkg не знает и не тронет.
+rm -rf /www/detour-next
 
 # 2) Make sure shell scripts are executable (opkg honours data.tar.gz mode bits,
 # this is defence in depth).

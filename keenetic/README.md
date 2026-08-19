@@ -98,7 +98,8 @@ dnsmasq config uses the same `ipset=/domain/singbox_domains` lines we generate t
 
 ### 5. Web panel (`lighttpd/detour.conf`)
 A dedicated lighttpd instance on `:8080` (KeeneticOS web UI stays on `:80`),
-doc-root `/opt/share/www/detour`, `/cgi-bin/` → `/opt/share/www/cgi-bin` via mod_cgi.
+doc-root `/opt/share/www` (panel at `/detour/`, old single-file at `/detour-old/`),
+`/cgi-bin/` → `/opt/share/www/cgi-bin` via mod_cgi.
 The **CGI itself needs a platform shim**: a header that detects Entware
 (`[ -d /opt/etc/init.d ]`) and switches INITD path, the firewall-apply command
 (`nft …` → the netfilter.d hook + `iptables`), and all `/etc|/www|/usr/bin` paths to

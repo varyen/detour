@@ -86,8 +86,8 @@ self.addEventListener("push", function (event) {
       }
       await self.registration.showNotification(title, {
         body: body,
-        icon: "/detour/favicon.svg",
-        badge: "/detour/favicon.svg",
+        icon: "/detour-old/favicon.svg",
+        badge: "/detour-old/favicon.svg",
         tag: "detour-vpn",
         renotify: true,
       });
@@ -103,12 +103,15 @@ self.addEventListener("notificationclick", function (event) {
         type: "window",
         includeUncontrolled: true,
       });
+      /* Только СВОЯ вкладка: этот SW обслуживает старую панель на /detour-old/,
+       * а на /detour/ теперь живёт новая со своим воркером. Открытая новая панель
+       * не должна перехватывать клик по уведомлению старой. */
       for (var i = 0; i < all.length; i++) {
-        if (all[i].url.indexOf("/detour/") >= 0 && "focus" in all[i]) {
+        if (all[i].url.indexOf("/detour-old/") >= 0 && "focus" in all[i]) {
           return all[i].focus();
         }
       }
-      if (self.clients.openWindow) return self.clients.openWindow("/detour/");
+      if (self.clients.openWindow) return self.clients.openWindow("/detour-old/");
     })()
   );
 });
