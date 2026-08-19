@@ -658,36 +658,37 @@ start_service() {
 
     # Create ipset(s) — hash:net supports both IPs and CIDRs
     ipset create $IPSET_NAME hash:net -exist
-    ipset flush $IPSET_NAME 2>/dev/null
     mkdir -p /tmp/dnsmasq.d
 
     # Flattened route-map (all targets) — used only to warm DNS. Actual route-map
     # traffic goes through per-target ipsets/ports even in single mode, so strict
     # sections can fail CLOSED instead of leaking into the main final outbound.
-    rm -f /tmp/routemap-all.list
-    if [ -f "$ROUTE_MAP" ]; then
-        route_map_targets | while IFS= read -r rid; do
-            route_map_section "$rid"
-        done > /tmp/routemap-all.list 2>/dev/null
+    if [ "$FAST" != 1 ]; then
+        ipset flush $IPSET_NAME 2>/dev/null
+        rm -f /tmp/routemap-all.list
+        if [ -f "$ROUTE_MAP" ]; then
+            route_map_targets | while IFS= read -r rid; do
+                route_map_section "$rid"
+            done > /tmp/routemap-all.list 2>/dev/null
+        fi
     fi
 
     # ---- default-instance (port 12345) ipset + dnsmasq population ----
     if [ "$ROUTING_MODE" = "all-except" ]; then
         ipset create $IPSET_WL hash:net maxelem 131072 -exist
-        ipset flush $IPSET_WL 2>/dev/null
-        setup_domains_file "$WHITELIST_FILE" "$IPSET_WL" "/tmp/dnsmasq.d/singbox-whitelist.conf"
-        # Managed country block (RU subnets) + its exceptions — same ipset, own file.
-        # detour-rulist owns /etc/sing-box/ru-subnets.list and pushes the exceptions
-        # as `nomatch` members, which hash:net resolves longest-prefix-first.
-        [ -x /usr/sbin/detour-rulist ] && /usr/sbin/detour-rulist ipset-load
-        setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
-        # Keep the browser's Web Push channel OFF the VPN: push endpoints resolve into the
-        # whitelist ipset (→ RETURN/direct) so a LAN/WG client still gets the "VPN down"
-        # alert when the active VPN fails. No-op unless push is enabled; --no-reload because
-        # the dnsmasq restart below loads it. (tmpfs file, regenerated each start.)
-        [ -x /usr/sbin/detour-push ] && /usr/sbin/detour-push bypass-apply --no-reload
+        if [ "$FAST" != 1 ]; then
+            ipset flush $IPSET_WL 2>/dev/null
+            setup_domains_file "$WHITELIST_FILE" "$IPSET_WL" "/tmp/dnsmasq.d/singbox-whitelist.conf"
+            # Managed country block (RU subnets) + its exceptions — same ipset, own file.
+            # detour-rulist owns /etc/sing-box/ru-subnets.list and pushes the exceptions
+            # as `nomatch` members, which hash:net resolves longest-prefix-first.
+            [ -x /usr/sbin/detour-rulist ] && /usr/sbin/detour-rulist ipset-load
+            setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
+            # Keep resolved members alive on a fast switch: the lists didn't change.
+            [ -x /usr/sbin/detour-push ] && /usr/sbin/detour-push bypass-apply --no-reload
+        fi
     else
-        setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
+        [ "$FAST" != 1 ] && setup_domains_file "$DOMAINS_FILE" "$IPSET_NAME" "/tmp/dnsmasq.d/singbox-domains.conf"
     fi
 
     # ---- UDP-через-VPN ipset + dnsmasq (populated BEFORE the dnsmasq restart below
@@ -698,33 +699,37 @@ start_service() {
     local UDP_VPN_MODE=$(udp_vpn_mode)
     if [ "$UDP_VPN_MODE" != off ] && [ -n "$UDP_VPN_MODE" ]; then
         ipset create "$UDP_VPN_IPSET" hash:net -exist
-        ipset flush "$UDP_VPN_IPSET" 2>/dev/null
-        setup_domains_file "$UDP_VPN_LIST" "$UDP_VPN_IPSET" "/tmp/dnsmasq.d/singbox-udp-vpn.conf"
+        if [ "$FAST" != 1 ]; then
+            ipset flush "$UDP_VPN_IPSET" 2>/dev/null
+            setup_domains_file "$UDP_VPN_LIST" "$UDP_VPN_IPSET" "/tmp/dnsmasq.d/singbox-udp-vpn.conf"
+        fi
     else
         rm -f /tmp/dnsmasq.d/singbox-udp-vpn.conf
     fi
 
     # ---- Per-target route ipsets + dnsmasq (one set/port per route target) ----
-    rm -f /tmp/dnsmasq.d/singbox-singbox_t*.conf
     route_map_slots > "$INST_TMP"
-    CUR_ROUTE_IPSETS=$(awk '{print $4}' "$INST_TMP" 2>/dev/null | tr '\n' ' ')
-    for s in $(ipset list -n 2>/dev/null | grep '^singbox_t'); do
-        case " $CUR_ROUTE_IPSETS " in
-            *" $s "*) ipset flush "$s" 2>/dev/null ;;
-            *)
-                ipset flush "$s" 2>/dev/null
-                ipset destroy "$s" 2>/dev/null
-                ;;
-        esac
-    done
-    if [ -s "$INST_TMP" ]; then
-        while read -r n id port ipset; do
-            ipset create "$ipset" hash:net -exist
-            ipset flush "$ipset" 2>/dev/null
-            route_map_section "$id" > "/tmp/routemap-$ipset.list"
-            setup_domains_file "/tmp/routemap-$ipset.list" "$ipset" "/tmp/dnsmasq.d/singbox-$ipset.conf"
-            rm -f "/tmp/routemap-$ipset.list"
-        done < "$INST_TMP"
+    if [ "$FAST" != 1 ]; then
+        rm -f /tmp/dnsmasq.d/singbox-singbox_t*.conf
+        CUR_ROUTE_IPSETS=$(awk '{print $4}' "$INST_TMP" 2>/dev/null | tr '\n' ' ')
+        for s in $(ipset list -n 2>/dev/null | grep '^singbox_t'); do
+            case " $CUR_ROUTE_IPSETS " in
+                *" $s "*) ipset flush "$s" 2>/dev/null ;;
+                *)
+                    ipset flush "$s" 2>/dev/null
+                    ipset destroy "$s" 2>/dev/null
+                    ;;
+            esac
+        done
+        if [ -s "$INST_TMP" ]; then
+            while read -r n id port ipset; do
+                ipset create "$ipset" hash:net -exist
+                ipset flush "$ipset" 2>/dev/null
+                route_map_section "$id" > "/tmp/routemap-$ipset.list"
+                setup_domains_file "/tmp/routemap-$ipset.list" "$ipset" "/tmp/dnsmasq.d/singbox-$ipset.conf"
+                rm -f "/tmp/routemap-$ipset.list"
+            done < "$INST_TMP"
+        fi
     fi
 
     if [ "$FAST" != 1 ]; then
