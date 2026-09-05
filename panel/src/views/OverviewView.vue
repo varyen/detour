@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, provide, ref } from "vue";
+import { useRouter } from "vue-router";
 import FlowBoard from "@/components/FlowBoard.vue";
 import TrafficChart from "@/components/overview/TrafficChart.vue";
 import TileCard from "@/components/TileCard.vue";
 import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
-import ProfilePicker from "@/components/ProfilePicker.vue";
 import BypassTile from "@/components/overview/BypassTile.vue";
 import UplinksTile from "@/components/overview/UplinksTile.vue";
 import RoutingTile from "@/components/overview/RoutingTile.vue";
@@ -25,6 +25,7 @@ import { normalizeChannel, useUpdatesStore } from "@/stores/updates";
 import { useDashboardStore } from "@/stores/dashboard";
 import { fmtAgo, fmtBitrate, fmtSpeedKbps, isSet } from "@/lib/format";
 
+const router = useRouter();
 const status = useStatusStore();
 const profiles = useProfilesStore();
 const toast = useToastStore();
@@ -32,7 +33,13 @@ const commands = useCommandStore();
 const updates = useUpdatesStore();
 const dash = useDashboardStore();
 
-const pickerOpen = ref(false);
+/* Раньше здесь была своя шторка со списком профилей: тот же список, но без
+   фильтров, скорости и всего, что есть в разделе «Профили». Держать вторую
+   урезанную копию незачем — «Сменить VPN» просто ведёт в раздел, сразу
+   отсортированный по скорости (кого выбирать — видно по ней, а не по алфавиту). */
+function goProfiles() {
+  void router.push({ path: "/profiles", query: { sort: "speed" } });
+}
 /* Правка состава живёт прямо на поле: карточки переносят там же, где смотрят.
    Отдельной шторки-редактора больше нет — два места для одной настройки только
    путали, какое из них главное. */
@@ -449,9 +456,7 @@ onMounted(async () => {
       title: "Сменить VPN-профиль",
       group: "подключение",
       keywords: "профиль страна переключить",
-      run: () => {
-        pickerOpen.value = true;
-      },
+      run: () => goProfiles(),
     },
     {
       id: "ov:restart",
@@ -645,7 +650,7 @@ onBeforeUnmount(() => {
         "
       />
       <template #actions>
-        <UiButton variant="primary" @click="pickerOpen = true">Сменить VPN</UiButton>
+        <UiButton variant="primary" @click="goProfiles">Сменить VPN</UiButton>
         <template v-if="status.singboxRunning">
           <UiButton :busy="busy === 'restart'" @click="restart">Перезапустить</UiButton>
           <UiButton :busy="busy === 'stop'" @click="stop">Стоп</UiButton>
@@ -845,8 +850,6 @@ onBeforeUnmount(() => {
       {{ t.title }} <span aria-hidden="true">+</span>
     </button>
   </div>
-
-  <ProfilePicker :open="pickerOpen" @close="pickerOpen = false" />
 
   <DrawerSheet
     :open="clientsOpen"

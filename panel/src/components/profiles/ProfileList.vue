@@ -17,6 +17,8 @@ import SectionIcon from "@/components/SectionIcon.vue";
 import type { ProfileRow } from "@/stores/profiles";
 import { ccFromName, countryName, flagOf, fmtAgo, fmtSpeedKbps } from "@/lib/format";
 
+type SortKey = "name" | "type" | "group" | "ping" | "speed" | "state";
+
 const props = defineProps<{
   rows: ProfileRow[];
   selected: string[];
@@ -32,6 +34,12 @@ const props = defineProps<{
   flagBusy?: string;
   /** Идёт скан стран (detour-geo): кнопка глобуса заблокирована. */
   geoBusy?: boolean;
+  /**
+   * Сортировка, с которой список должен открыться (`?sort=` в адресе). Нужна,
+   * чтобы «Сменить VPN» с «Обзора» приводило сразу к самым быстрым профилям,
+   * а не к алфавиту. Дальше сортировкой рулит пользователь.
+   */
+  sort?: SortKey;
 }>();
 
 const emit = defineEmits<{
@@ -45,14 +53,23 @@ const emit = defineEmits<{
   geoscan: [];
 }>();
 
-type SortKey = "name" | "type" | "group" | "ping" | "speed" | "state";
-
 const query = ref("");
 const group = ref("");
 const country = ref("");
-const sortKey = ref<SortKey>("name");
-const sortAsc = ref(true);
+const sortKey = ref<SortKey>(props.sort ?? "name");
+const sortAsc = ref(defaultAsc(sortKey.value));
 let lastIndex = -1;
+
+/* Ссылка на список с готовой сортировкой может прийти и когда раздел уже
+   открыт (переход с «Обзора» → тот же компонент, поменялся только `?sort=`). */
+watch(
+  () => props.sort,
+  (key) => {
+    if (!key || key === sortKey.value) return;
+    sortKey.value = key;
+    sortAsc.value = defaultAsc(key);
+  },
+);
 
 const STATE_TEXT: Record<string, string> = {
   ok: "проверка проходит",
@@ -194,13 +211,17 @@ function toggle(index: number, e: MouseEvent) {
   emit("update:selected", [...set]);
 }
 
+/* У скорости «по возрастанию» бесполезно: от колонки ждут, что сверху
+   окажется самый быстрый профиль. */
+function defaultAsc(key: SortKey): boolean {
+  return key !== "speed";
+}
+
 function sortBy(key: SortKey) {
   if (sortKey.value === key) sortAsc.value = !sortAsc.value;
   else {
     sortKey.value = key;
-    /* У скорости «по возрастанию» бесполезно: от колонки ждут, что сверху
-       окажется самый быстрый профиль. */
-    sortAsc.value = key !== "speed";
+    sortAsc.value = defaultAsc(key);
   }
 }
 

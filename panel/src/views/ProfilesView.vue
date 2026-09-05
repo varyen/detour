@@ -7,6 +7,7 @@
    грузят своё состояние один раз, а по WARP ещё и решается, показывать ли
    вкладку вообще. */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { useRoute } from "vue-router";
 import TileCard from "@/components/TileCard.vue";
 import UiButton from "@/components/UiButton.vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
@@ -34,6 +35,17 @@ const store = useProfilesStore();
 const status = useStatusStore();
 const toast = useToastStore();
 const commands = useCommandStore();
+
+const route = useRoute();
+
+/* `#/profiles?sort=speed` — так «Сменить VPN» с «Обзора» приводит сразу к
+   отсортированному по скорости списку. Чужое значение молча игнорируем: адрес
+   набирают руками. */
+const SORTS = ["name", "type", "group", "ping", "speed", "state"] as const;
+const listSort = computed(() => {
+  const q = String(route.query.sort ?? "");
+  return (SORTS as readonly string[]).includes(q) ? (q as (typeof SORTS)[number]) : undefined;
+});
 
 const tab = ref<Tab>("profiles");
 const selected = ref<string[]>([]);
@@ -663,6 +675,7 @@ onBeforeUnmount(() => unregister?.());
         :targets="healthTargets"
         :flag-busy="flagBusy"
         :geo-busy="geoBusy"
+        :sort="listSort"
         @open="openRow"
         @connect="connect"
         @stop="stopActive"
