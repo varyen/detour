@@ -150,11 +150,43 @@ export interface ProfileSummary {
   autoswitch?: boolean;
   speedcheck?: boolean;
   /**
+   * Разрешены ли на профиле торренты. Дефолт — `false`: провайдеры массово
+   * запрещают P2P, поэтому разрешение включается вручную и только там, где оно
+   * точно допустимо. Соответственно `undefined` тоже читается как «нельзя».
+   */
+  torrents?: boolean;
+  /**
    * ISO-код страны эндпоинта (`NL`, `DE`, …) из кэша detour-geo. Пусто, если
    * скан ещё не прошёл или адрес не нашёлся в базе — панель в этом случае
    * просто не показывает флаг, а не рисует «неизвестно».
    */
   cc?: string;
+}
+
+/**
+ * Ответ `torrent_status`: блокировка торрентов на текущем профиле.
+ * `enforcing` — стоят ли правила прямо сейчас; `profile` — из-за какого профиля
+ * цепочки (первый без разрешения). `last_event` появляется, когда счётчики
+ * выросли: именно его панель показывает как «торрент заблокирован».
+ */
+export interface TorrentStatus {
+  enforcing?: boolean;
+  profile?: string;
+  profile_name?: string;
+  /** Суммарно отброшено пакетов с момента установки правил. */
+  hits?: number;
+  /** LAN-адреса, которых поймали (живут 30 минут). */
+  clients?: string[];
+  /** Разбивка по сигнатурам: utp-syn / dht-query / udp-tracker / bt-handshake. */
+  by_signature?: Record<string, number>;
+  last_event?: {
+    ts: number;
+    profile: string;
+    profile_name: string;
+    packets: number;
+    clients: string;
+    signatures: string;
+  } | null;
 }
 
 /** Ответ `geo_status`: состояние кэша стран (detour-geo). */

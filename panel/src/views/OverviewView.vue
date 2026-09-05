@@ -14,7 +14,7 @@ import ServicesTile from "@/components/overview/ServicesTile.vue";
 import DashSlot from "@/components/overview/DashSlot.vue";
 import { EDIT_KEY } from "@/components/overview/dash-edit";
 import { useTileDrag } from "@/composables/useTileDrag";
-import { diag, overview } from "@/api";
+import { diag, overview, profiles as profilesApi } from "@/api";
 import type { LanClient, TrafficLanes, UdpVpnMode } from "@/api";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import { useStatusStore } from "@/stores/status";
@@ -48,6 +48,7 @@ const clients = ref(0);
 const clientList = ref<LanClient[]>([]);
 const clientsOpen = ref(false);
 let trafficTimer: number | undefined;
+let torrentTimer: number | undefined;
 
 const sb = computed(() => status.data?.singbox);
 const zp = computed(() => status.data?.zapret);
@@ -410,6 +411,33 @@ async function loadExtras() {
   trafficTimer = window.setInterval(() => {
     if (document.visibilityState === "visible") void loadTraffic();
   }, 10_000);
+  await checkTorrentBlock(true);
+  torrentTimer = window.setInterval(() => {
+    if (document.visibilityState === "visible") void checkTorrentBlock(false);
+  }, 30_000);
+}
+
+/* Торренты на профиле, где они запрещены. Роутер уже отбросил трафик и, если
+   подписка на пуши включена, прислал уведомление — но объяснение нужно и тому,
+   кто сидит в открытой панели и просто видит, что закачка встала.
+   `seed` = первый заход: показывать тост о событии, случившемся до открытия
+   страницы, незачем — запоминаем метку и ждём следующего. */
+const torrentSeen = ref(0);
+async function checkTorrentBlock(seed: boolean) {
+  const st = await profilesApi.torrentStatus().catch(() => null);
+  const evt = st?.last_event;
+  if (!evt?.ts) return;
+  if (seed || evt.ts <= torrentSeen.value) {
+    torrentSeen.value = Math.max(torrentSeen.value, evt.ts);
+    return;
+  }
+  torrentSeen.value = evt.ts;
+  const who = evt.clients ? ` (${evt.clients})` : "";
+  toast.push(
+    `Торренты на профиле «${evt.profile_name}» запрещены — трафик заблокирован${who}`,
+    "error",
+    9000,
+  );
 }
 
 let unregister: (() => void) | undefined;
@@ -473,6 +501,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   unregister?.();
   if (trafficTimer) window.clearInterval(trafficTimer);
+  if (torrentTimer) window.clearInterval(torrentTimer);
 });
 </script>
 

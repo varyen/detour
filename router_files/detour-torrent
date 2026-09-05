@@ -1,0 +1,502 @@
+#!/bin/sh
+# detour-torrent — per-profile BitTorrent blocking.
+#
+# Torrents are forbidden by default and the panel opens them per profile — most
+# providers forbid P2P and kill the account over a single DMCA notice, so the
+# default has to be the safe one. While a profile WITHOUT that permission is the
+# active one, this script blocks BitTorrent traffic on the whole LAN and reports
+# the attempt, so the panel can say WHY a download died instead of leaving the
+# operator to debug a torrent client that simply stalls.
+#
+# Two enforcement layers, because neither one alone is honest:
+#
+#   1. sing-box route rule  {"protocol":["bittorrent"],"action":"reject"}
+#      Rendered by detour-api. Stream-level, offset-independent, so it catches a
+#      plaintext peer handshake anywhere in the TCP stream — but only for traffic
+#      that actually enters sing-box (TCP redirect, and UDP only when "UDP через
+#      VPN" is on). By default uTP/DHT never reach it at all.
+#
+#   2. this script — packet matchers in front of the nat REDIRECT, so they see
+#      every LAN packet regardless of whether it was destined for the tunnel.
+#
+# What layer 2 matches, and why exactly these bytes:
+#
+#   uTP SYN     the ONLY packet that opens a uTP connection; kill it and the
+#               connection never exists. MSE encrypts the payload but NOT the uTP
+#               header, so this works on "encrypted" torrents too.
+#               ⚠ Matching just the first byte (version=1, type<=4) — which is
+#               what a naive uTP matcher does — also matches a WireGuard handshake
+#               initiation (01 00 00 00) and plenty of QUIC short headers, i.e. it
+#               would silently break other VPNs. So we pin the full SYN shape,
+#               verified against BOTH implementations in the wild:
+#               libutp utp_internal.cpp UTP_Connect() and libtorrent
+#               utp_stream.cpp send_syn():
+#                 payload is exactly 20 bytes  (udp length 28)
+#                 [0]   = 0x41   type=ST_SYN(4), version=1
+#                 [1]   = 0x00   ext (no extension on a SYN)
+#                 [8:12]= 0      timestamp_difference (nothing received yet)
+#                 [18:20]=0      ack_nr (memset, never assigned on a SYN)
+#               seq_nr is deliberately NOT pinned: old libutp used 1, both current
+#               implementations randomise it.
+#   DHT         KRPC over UDP is bencode; dict keys are sorted, so a query always
+#               starts "d1:ad2:id20:" and a reply "d1:rd2:id20:". No peers from
+#               DHT means the encrypted-TCP blind spot below has nowhere to get
+#               peers from.
+#   UDP tracker BEP-15 connect carries the fixed protocol id 0x41727101980.
+#   TCP peer    the plaintext BEP-3 handshake "\x13BitTorrent protocol". nft can
+#               only match at a fixed offset, so we cover the two TCP header
+#               lengths that occur in practice (doff 5 = no options, doff 8 =
+#               timestamps). Layer 1 covers the rest for tunnelled traffic.
+#
+# KNOWN BLIND SPOT (documented, not silently ignored): MSE/PE encryption over
+# plain TCP has no plaintext marker at all and is not matched here. It is not a
+# way around the block in practice — a client still has to LEARN about peers, and
+# trackers, DHT and uTP are all cut above — but a client that already holds a peer
+# list can still exchange data with those peers over encrypted TCP.
+#
+# Platforms:
+#   OpenWrt   own nft table (no extra kernel modules needed), both directions.
+#   Keenetic  iptables mangle chain re-asserted from the ndm netfilter.d hook;
+#             byte matching via xt_string with --from/--to windows, which pins the
+#             same offsets. LAN→WAN direction only.
+#   ⚠ The Keenetic branch is implemented but NOT verified on a live device — see
+#     keenetic/README.md.
+
+# Profile ids where torrents ARE ALLOWED — an allow-list, not a deny-list, and
+# that direction is deliberate: torrents are forbidden by DEFAULT, so a profile
+# nobody has explicitly cleared (a fresh one, one that just arrived from a
+# subscription refresh, every profile that existed before this feature) is
+# protected without any migration step. An absent file therefore means "block
+# everywhere", which is the safe reading rather than the silent one.
+ALLOW_LIST=/etc/sing-box/torrent-allow.list
+SETTINGS=/etc/sing-box/settings.json
+PROFILES=/etc/sing-box/profiles
+STATE=/var/state/detour-torrent.json        # panel-facing state (tmpfs)
+TICK_STATE=/var/state/detour-torrent.tick   # last seen counters + last push ts
+PUSH_BIN=/usr/sbin/detour-push
+LOG=/var/log/detour-torrent.log
+LAN_IF=br-lan
+TABLE=detour_torrent
+IPT_CHAIN=DETOUR_TORRENT
+IPT_CHAIN_DROP=DETOUR_TORRENT_D
+PRIV_SET=detour_private
+PLATFORM=openwrt
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    ALLOW_LIST=/opt/etc/sing-box/torrent-allow.list
+    SETTINGS=/opt/etc/sing-box/settings.json
+    PROFILES=/opt/etc/sing-box/profiles
+    STATE=/opt/var/state/detour-torrent.json
+    TICK_STATE=/opt/var/state/detour-torrent.tick
+    PUSH_BIN=/opt/sbin/detour-push
+    LOG=/opt/var/log/detour-torrent.log
+    LAN_IF=br0
+    [ -f /opt/etc/detour/detour.conf ] && . /opt/etc/detour/detour.conf 2>/dev/null
+    mkdir -p /opt/var/log /opt/var/state 2>/dev/null
+fi
+
+# Push no more often than this per episode. A torrent client retries for minutes;
+# one notification per episode is information, ten are noise.
+PUSH_COOLDOWN=1800      # seconds between pushes about the same ongoing episode
+EPISODE_GAP=900         # silence longer than this starts a NEW episode
+
+log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"; }
+now_ts() { date +%s 2>/dev/null || echo 0; }
+
+# ---- state the decision is made from ---------------------------------------
+
+# Active chain as stored by the panel: "active_chain" (CSV of profile ids) with a
+# fallback to the single "active_profile" for configs written before chains.
+active_chain() {
+    _c=$(sed -n 's/.*"active_chain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -1)
+    [ -z "$_c" ] && _c=$(sed -n 's/.*"active_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -1)
+    printf '%s' "$_c"
+}
+
+# Human name of a profile id (falls back to the id).
+profile_name() {
+    _n=$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PROFILES/$1.json" 2>/dev/null | head -1)
+    [ -z "$_n" ] && _n="$1"
+    printf '%s' "$_n"
+}
+
+# Which profile of the active chain forbids torrents? Echoes its id (empty = none,
+# i.e. every hop allows them). A chain is only as permissive as its strictest hop:
+# the exit node is not the only provider that carries the traffic, so ONE member
+# without an explicit allow is enough to block.
+denying_profile() {
+    _old=$IFS; IFS=','
+    for _id in $(active_chain); do
+        _id=$(printf '%s' "$_id" | tr -d ' \t\r')
+        [ -z "$_id" ] && continue
+        if ! grep -qxF "$_id" "$ALLOW_LIST" 2>/dev/null; then
+            IFS=$_old; printf '%s' "$_id"; return 0
+        fi
+    done
+    IFS=$_old
+    return 1
+}
+
+# NOTE: there is deliberately no "is sing-box running?" gate here. `apply` runs at
+# the END of start_service, before procd has actually spawned the daemon, so a
+# pidof check would look at the gap and remove the rules it was asked to install.
+# Lifecycle is driven explicitly instead: start → apply, real stop → clear.
+
+# Extra inbound interfaces that carry LAN-like clients (WireGuard/OpenVPN server).
+lan_ifaces() {
+    _extra=$(sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$SETTINGS" 2>/dev/null | head -1 | tr ',' ' ')
+    echo "$LAN_IF $_extra"
+}
+
+# ---- OpenWrt: nft table -----------------------------------------------------
+
+nft_present() { command -v nft >/dev/null 2>&1; }
+
+nft_install() {
+    _ifs=""
+    for _i in $(lan_ifaces); do
+        [ -z "$_i" ] && continue
+        _ifs="$_ifs\"$_i\", "
+    done
+    _ifs=${_ifs%, }
+    [ -z "$_ifs" ] && _ifs="\"$LAN_IF\""
+
+    nft delete table inet "$TABLE" 2>/dev/null
+    nft -f - <<NFT 2>>"$LOG" || return 1
+table inet $TABLE {
+    set clients4 { type ipv4_addr; flags timeout; timeout 30m; }
+    set clients6 { type ipv6_addr; flags timeout; timeout 30m; }
+
+    chain verdict {
+        iifname { $_ifs } meta nfproto ipv4 add @clients4 { ip saddr timeout 30m }
+        iifname { $_ifs } meta nfproto ipv6 add @clients6 { ip6 saddr timeout 30m }
+        drop
+    }
+
+    chain prerouting {
+        type filter hook prerouting priority mangle; policy accept;
+
+        # LAN↔LAN stays untouched: local peer discovery, a NAS, Resilio and the
+        # panel itself are nobody's business here. Router-originated traffic (the
+        # tunnel itself) never reaches prerouting at all — it goes out via output.
+        meta nfproto ipv4 ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8 } ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8 } return
+        meta nfproto ipv4 ip daddr { 224.0.0.0/4, 255.255.255.255 } return
+        meta nfproto ipv6 ip6 saddr { ::1/128, fc00::/7, fe80::/10 } ip6 daddr { ::1/128, fc00::/7, fe80::/10 } return
+        meta nfproto ipv6 ip6 daddr ff00::/8 return
+
+        udp length 28 @th,64,16 0x4100 @th,128,32 0x00000000 @th,208,16 0x0000 counter jump verdict comment "utp-syn"
+        udp length >= 24 @th,64,64 0x0000041727101980 counter jump verdict comment "udp-tracker"
+        udp length >= 24 @th,64,64 0x64313a6164323a69 counter jump verdict comment "dht-query"
+        udp length >= 24 @th,64,64 0x64313a7264323a69 counter jump verdict comment "dht-reply"
+        tcp doff 5 @th,160,64 0x13426974546f7272 counter jump verdict comment "bt-handshake"
+        tcp doff 8 @th,256,64 0x13426974546f7272 counter jump verdict comment "bt-handshake"
+    }
+}
+NFT
+    return 0
+}
+
+nft_remove() {
+    nft list table inet "$TABLE" >/dev/null 2>&1 || return 0
+    nft delete table inet "$TABLE" 2>/dev/null
+}
+
+nft_active() { nft list table inet "$TABLE" >/dev/null 2>&1; }
+
+# "<name> <packets>" per matcher rule.
+nft_counters() {
+    nft list chain inet "$TABLE" prerouting 2>/dev/null | awk '
+        /comment "/ {
+            p = ""
+            n = index($0, "counter packets ")
+            if (n) { rest = substr($0, n + 16); split(rest, a, " "); p = a[1] }
+            n = index($0, "comment \"")
+            if (n) { rest = substr($0, n + 9); c = substr(rest, 1, index(rest, "\"") - 1) }
+            if (c != "" && p != "") tot[c] += p
+        }
+        END { for (k in tot) print k, tot[k] }'
+}
+
+nft_clients() {
+    for _s in clients4 clients6; do
+        nft list set inet "$TABLE" "$_s" 2>/dev/null \
+            | sed -n 's/.*elements = {\(.*\)}.*/\1/p' \
+            | tr ',' '\n' | awk '{ if ($1 != "") print $1 }'
+    done
+}
+
+# ---- Keenetic: iptables mangle chain ----------------------------------------
+#
+# Same offsets as the nft branch, expressed as xt_string search WINDOWS: --from/--to
+# are offsets from the start of the IP header, so IPv4(20) + UDP(8) = 28 is the
+# first payload byte. A 2-byte pattern with --from N --to N+2 is an exact anchor,
+# which is what makes this equivalent to nft's @th,off,len rather than a loose
+# "contains these bytes somewhere" match.
+
+ipt_add() {  # idempotent append
+    _t="$1"; _c="$2"; shift 2
+    iptables -t "$_t" -C "$_c" "$@" 2>/dev/null || iptables -t "$_t" -A "$_c" "$@"
+}
+
+ipt_install() {
+    command -v iptables >/dev/null 2>&1 || return 1
+    ipset create "$PRIV_SET" hash:net -exist 2>/dev/null
+    for _n in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 127.0.0.0/8; do
+        ipset add "$PRIV_SET" "$_n" -exist 2>/dev/null
+    done
+
+    iptables -t mangle -N "$IPT_CHAIN" 2>/dev/null
+    iptables -t mangle -F "$IPT_CHAIN" 2>/dev/null
+
+    iptables -t mangle -A "$IPT_CHAIN" -m set --match-set "$PRIV_SET" src \
+        -m set --match-set "$PRIV_SET" dst -j RETURN 2>/dev/null
+    iptables -t mangle -A "$IPT_CHAIN" -d 224.0.0.0/4 -j RETURN 2>/dev/null
+
+    # uTP SYN — length pins the 20-byte header, the three windows pin its shape.
+    iptables -t mangle -A "$IPT_CHAIN" -p udp -m length --length 48 \
+        -m string --algo bm --from 28 --to 30 --hex-string '|4100|' \
+        -m string --algo bm --from 36 --to 40 --hex-string '|00000000|' \
+        -m string --algo bm --from 46 --to 48 --hex-string '|0000|' \
+        -m comment --comment "detour-torrent:utp-syn" -j "$IPT_CHAIN_DROP" 2>/dev/null
+    # BEP-15 UDP tracker connect.
+    iptables -t mangle -A "$IPT_CHAIN" -p udp \
+        -m string --algo bm --from 28 --to 36 --hex-string '|0000041727101980|' \
+        -m comment --comment "detour-torrent:udp-tracker" -j "$IPT_CHAIN_DROP" 2>/dev/null
+    # DHT KRPC query / reply.
+    iptables -t mangle -A "$IPT_CHAIN" -p udp \
+        -m string --algo bm --from 28 --to 36 --string 'd1:ad2:i' \
+        -m comment --comment "detour-torrent:dht-query" -j "$IPT_CHAIN_DROP" 2>/dev/null
+    iptables -t mangle -A "$IPT_CHAIN" -p udp \
+        -m string --algo bm --from 28 --to 36 --string 'd1:rd2:i' \
+        -m comment --comment "detour-torrent:dht-reply" -j "$IPT_CHAIN_DROP" 2>/dev/null
+    # Plaintext BEP-3 peer handshake. Unlike nft, xt_string is offset-independent,
+    # so one rule covers every TCP header length.
+    iptables -t mangle -A "$IPT_CHAIN" -p tcp \
+        -m string --algo bm --to 100 --hex-string '|13|BitTorrent protocol' \
+        -m comment --comment "detour-torrent:bt-handshake" -j "$IPT_CHAIN_DROP" 2>/dev/null
+
+    ipt_add mangle PREROUTING -j "$IPT_CHAIN"
+    return 0
+}
+
+# Record the offender (xt_recent gives us the client list /proc-side) and drop.
+ipt_install_drop_chain() {
+    iptables -t mangle -N "$IPT_CHAIN_DROP" 2>/dev/null
+    iptables -t mangle -F "$IPT_CHAIN_DROP" 2>/dev/null
+    iptables -t mangle -A "$IPT_CHAIN_DROP" -i "$LAN_IF" \
+        -m recent --name detour_bt --set --rsource 2>/dev/null
+    iptables -t mangle -A "$IPT_CHAIN_DROP" -j DROP
+}
+
+ipt_remove() {
+    command -v iptables >/dev/null 2>&1 || return 0
+    while iptables -t mangle -C PREROUTING -j "$IPT_CHAIN" 2>/dev/null; do
+        iptables -t mangle -D PREROUTING -j "$IPT_CHAIN" 2>/dev/null
+    done
+    iptables -t mangle -F "$IPT_CHAIN" 2>/dev/null
+    iptables -t mangle -X "$IPT_CHAIN" 2>/dev/null
+    iptables -t mangle -F "$IPT_CHAIN_DROP" 2>/dev/null
+    iptables -t mangle -X "$IPT_CHAIN_DROP" 2>/dev/null
+}
+
+ipt_active() { iptables -t mangle -C PREROUTING -j "$IPT_CHAIN" 2>/dev/null; }
+
+ipt_counters() {
+    iptables -t mangle -nvxL "$IPT_CHAIN" 2>/dev/null | awk '
+        /detour-torrent:/ {
+            p = $1
+            n = index($0, "detour-torrent:")
+            rest = substr($0, n + 15); split(rest, a, " ")
+            if (a[1] != "") tot[a[1]] += p
+        }
+        END { for (k in tot) print k, tot[k] }'
+}
+
+ipt_clients() {
+    awk '{ sub(/^src=/, "", $1); if ($1 != "") print $1 }' /proc/net/xt_recent/detour_bt 2>/dev/null
+}
+
+# ---- platform-neutral wrappers ---------------------------------------------
+
+fw_install() {
+    if [ "$PLATFORM" = "keenetic" ]; then
+        ipt_install_drop_chain
+        ipt_install
+    else
+        nft_present || { log "nft missing — cannot enforce"; return 1; }
+        nft_install
+    fi
+}
+fw_remove()   { if [ "$PLATFORM" = "keenetic" ]; then ipt_remove; else nft_remove; fi; }
+fw_active()   { if [ "$PLATFORM" = "keenetic" ]; then ipt_active; else nft_active; fi; }
+fw_counters() { if [ "$PLATFORM" = "keenetic" ]; then ipt_counters; else nft_counters; fi; }
+fw_clients()  { if [ "$PLATFORM" = "keenetic" ]; then ipt_clients; else nft_clients; fi; }
+
+total_hits() { fw_counters | awk '{ s += $2 } END { print s + 0 }'; }
+
+# ---- commands ---------------------------------------------------------------
+
+# apply — install or remove the block to match the CURRENT active profile.
+# Idempotent: safe to call from the init script, the CGI and the ndm hook.
+cmd_apply() {
+    _deny=$(denying_profile)
+    if [ -n "$_deny" ]; then
+        # Only build when absent. Rebuilding zeroes the counters, and `tick` reads
+        # a counter DROP as "chain was rebuilt" → the next rise would be reported
+        # from zero and double-counted. Callers that really need fresh rules
+        # (interface list changed) run `clear` first.
+        if ! fw_active; then
+            fw_install || { echo '{"ok":false,"error":"failed to install rules"}'; return 1; }
+            log "enforcing: profile '$_deny' forbids torrents"
+        fi
+        write_state "$_deny"
+    else
+        if fw_active; then
+            fw_remove
+            log "released (active profile allows torrents)"
+        fi
+        write_state ""
+    fi
+    echo '{"ok":true}'
+}
+
+cmd_clear() {
+    fw_remove
+    write_state ""
+    echo '{"ok":true}'
+}
+
+# write_state <denying-profile-id> [event-json]
+# The state file is what the panel reads. Without an explicit event the previous
+# one is carried over: switching profiles must not erase the explanation for a
+# download that just died — that message is the whole point of the feature.
+write_state() {
+    _deny="$1"
+    _event="$2"
+    _pname=""
+    [ -n "$_deny" ] && _pname=$(profile_name "$_deny")
+    if [ -n "$_event" ]; then
+        _prev_event="$_event"
+    else
+        _prev_event=$(sed -n 's/.*"last_event":\({[^}]*}\).*/\1/p' "$STATE" 2>/dev/null | head -1)
+        [ -z "$_prev_event" ] && _prev_event="null"
+    fi
+    _enf=false; fw_active && _enf=true
+    mkdir -p "$(dirname "$STATE")" 2>/dev/null
+    {
+        printf '{"enforcing":%s,"profile":%s,"profile_name":%s,"hits":%s,"clients":[' \
+            "$_enf" "$(json_str "$_deny")" "$(json_str "$_pname")" "$(total_hits)"
+        _first=1
+        for _c in $(fw_clients); do
+            [ "$_first" = 1 ] && _first=0 || printf ','
+            json_str "$_c"
+        done
+        printf '],"by_signature":{'
+        _first=1
+        fw_counters | while read -r _n _p; do
+            [ "$_first" = 1 ] && _first=0 || printf ','
+            printf '%s:%s' "$(json_str "$_n")" "$_p"
+        done
+        printf '},"last_event":%s}' "$_prev_event"
+    } > "$STATE.tmp" 2>/dev/null
+    mv "$STATE.tmp" "$STATE" 2>/dev/null
+}
+
+cmd_status() {
+    write_state "$(denying_profile)"
+    cat "$STATE" 2>/dev/null || echo '{"enforcing":false}'
+}
+
+# tick — called once a minute from cron. Detects a RISE in the drop counters,
+# records the episode for the panel and fires one Web Push per episode.
+cmd_tick() {
+    fw_active || { rm -f "$TICK_STATE" 2>/dev/null; return 0; }
+    _deny=$(denying_profile)
+    [ -z "$_deny" ] && return 0
+
+    _now=$(now_ts)
+    _hits=$(total_hits)
+    _prev=0; _last_seen=0; _last_push=0
+    if [ -f "$TICK_STATE" ]; then
+        read -r _prev _last_seen _last_push < "$TICK_STATE" 2>/dev/null
+        [ -z "$_prev" ] && _prev=0
+        [ -z "$_last_seen" ] && _last_seen=0
+        [ -z "$_last_push" ] && _last_push=0
+    fi
+
+    # Counters only ever grow while the chain lives; a rebuild resets them to 0,
+    # which must not read as "traffic dropped by a negative amount".
+    [ "$_hits" -lt "$_prev" ] && _prev=0
+    _delta=$((_hits - _prev))
+    if [ "$_delta" -le 0 ]; then
+        echo "$_hits $_last_seen $_last_push" > "$TICK_STATE"
+        return 0
+    fi
+
+    _clients=$(fw_clients | tr '\n' ' ' | sed 's/ *$//')
+    # Только сработавшие сигнатуры: перечислять в уведомлении все шесть, включая
+    # нулевые, значит соврать про то, чем именно клиента поймали.
+    _sigs=$(fw_counters | awk '$2 > 0 { printf "%s%s", (n++ ? ", " : ""), $1 }')
+    _pname=$(profile_name "$_deny")
+
+    # Episode bookkeeping: a fresh episode (or a long-running one past the
+    # cooldown) is worth a push; a burst inside one episode is not.
+    _new_episode=0
+    [ $((_now - _last_seen)) -gt "$EPISODE_GAP" ] && _new_episode=1
+
+    _evt=$(printf '{"ts":%s,"profile":%s,"profile_name":%s,"packets":%s,"clients":%s,"signatures":%s}' \
+        "$_now" "$(json_str "$_deny")" "$(json_str "$_pname")" "$_delta" \
+        "$(json_str "$_clients")" "$(json_str "$_sigs")")
+    write_state "$_deny" "$_evt"
+
+    if [ "$_new_episode" = 1 ] || [ $((_now - _last_push)) -ge "$PUSH_COOLDOWN" ]; then
+        _who="$_clients"; [ -z "$_who" ] && _who="клиент в сети"
+        push_alert "Detour: торренты заблокированы" \
+            "На профиле «$_pname» торренты запрещены. Трафик заблокирован ($_who)."
+        _last_push=$_now
+        log "blocked $_delta pkt from ${_clients:-?} ($_sigs) on profile $_deny"
+    fi
+    echo "$_hits $_now $_last_push" > "$TICK_STATE"
+}
+
+push_alert() {
+    [ -x "$PUSH_BIN" ] || return 0
+    "$PUSH_BIN" send "$1" "$2" >/dev/null 2>&1
+}
+
+cmd_selftest() {
+    _rc=0
+    echo "platform: $PLATFORM"
+    if [ "$PLATFORM" = "keenetic" ]; then
+        command -v iptables >/dev/null 2>&1 && echo "iptables: ok" || { echo "iptables: MISSING"; _rc=1; }
+        if iptables -t mangle -m string --help >/dev/null 2>&1; then
+            echo "xt_string: ok"
+        else
+            echo "xt_string: MISSING — byte matching unavailable, only the sing-box layer will work"
+            _rc=1
+        fi
+    else
+        nft_present && echo "nft: ok" || { echo "nft: MISSING"; _rc=1; }
+    fi
+    # `grep -c .` на пустом файле печатает 0 И возвращает 1, поэтому `|| echo 0`
+    # дорисовывал вторую строку. awk считает сам и всегда выходит успешно.
+    _n=$(awk 'NF { n++ } END { print n + 0 }' "$ALLOW_LIST" 2>/dev/null); [ -z "$_n" ] && _n=0
+    echo "allow list: $ALLOW_LIST ($_n profiles may torrent)"
+    echo "active chain: $(active_chain)"
+    _d=$(denying_profile) && echo "verdict: BLOCK (profile $_d has no explicit allow)" || echo "verdict: allow"
+    fw_active && echo "rules: installed" || echo "rules: absent"
+    return $_rc
+}
+
+case "$1" in
+    apply)    cmd_apply ;;
+    clear)    cmd_clear ;;
+    status)   cmd_status ;;
+    tick)     cmd_tick ;;
+    selftest) cmd_selftest ;;
+    *) echo "usage: detour-torrent {apply|clear|status|tick|selftest}" >&2; exit 2 ;;
+esac

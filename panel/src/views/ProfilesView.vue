@@ -197,11 +197,16 @@ async function healthOne(r: ProfileRow) {
 }
 
 /** Флаг одного профиля: то же, что массовая операция, но на один id. */
-async function setFlag(r: ProfileRow, kind: "autoswitch" | "speedcheck", value: boolean) {
+async function setFlag(
+  r: ProfileRow,
+  kind: "autoswitch" | "speedcheck" | "torrents",
+  value: boolean,
+) {
   if (flagBusy.value) return;
   flagBusy.value = `${r.id}:${kind}`;
   try {
     if (kind === "autoswitch") await profilesApi.setAutoswitch([r.id], value);
+    else if (kind === "torrents") await profilesApi.setTorrents([r.id], value);
     else await profilesApi.setSpeedcheck([r.id], value);
     /* Правим строку на месте: перечитывать сотню профилей и все пинги ради
        одного флага — заметная пауза на каждое нажатие. */
@@ -300,12 +305,20 @@ async function removeRow(r: ProfileRow) {
 
 /* ---------- массовые действия ---------- */
 
-async function bulkFlag(kind: "autoswitch" | "speedcheck", eligible: boolean) {
+async function bulkFlag(kind: "autoswitch" | "speedcheck" | "torrents", eligible: boolean) {
   if (!selected.value.length) return;
   busy.value = `bulk:${kind}`;
   try {
     if (kind === "autoswitch") await profilesApi.setAutoswitch(selected.value, eligible);
+    else if (kind === "torrents") await profilesApi.setTorrents(selected.value, eligible);
     else await profilesApi.setSpeedcheck(selected.value, eligible);
+    if (kind === "torrents") {
+      toast.ok(
+        `На ${selected.value.length} профилях торренты ${eligible ? "разрешены" : "запрещены"}`,
+      );
+      await reload(true);
+      return;
+    }
     const what = kind === "autoswitch" ? "авто-переключении" : "проверке скорости";
     toast.ok(
       `${selected.value.length} профилей ${eligible ? "участвуют" : "не участвуют"} в ${what}`,
@@ -697,6 +710,12 @@ onBeforeUnmount(() => unregister?.());
       <UiButton :busy="busy === 'bulk:speedcheck'" @click="bulkFlag('speedcheck', false)">
         Запретить проверку скорости
       </UiButton>
+      <UiButton :busy="busy === 'bulk:torrents'" @click="bulkFlag('torrents', true)">
+        Разрешить торренты
+      </UiButton>
+      <UiButton :busy="busy === 'bulk:torrents'" @click="bulkFlag('torrents', false)">
+        Запретить торренты
+      </UiButton>
       <UiButton variant="danger" :busy="busy === 'bulk:del'" @click="bulkDelete">
         Удалить выбранные
       </UiButton>
@@ -750,6 +769,14 @@ onBeforeUnmount(() => unregister?.());
         label="Участвует в замерах скорости"
         :busy="flagBusy === `${rowItem.id}:speedcheck`"
         @update:model-value="setFlag(rowItem, 'speedcheck', $event)"
+      />
+      <!-- Единственный из трёх, у кого дефолт «выключено»: торренты разрешаем
+           точечно и осознанно, а не отключаем у тех, кому нельзя. -->
+      <SwitchToggle
+        :model-value="rowItem.torrents === true"
+        label="Торренты разрешены"
+        :busy="flagBusy === `${rowItem.id}:torrents`"
+        @update:model-value="setFlag(rowItem, 'torrents', $event)"
       />
     </div>
     <div v-if="rowItem" class="rowacts">

@@ -5,6 +5,7 @@ import type {
   GeoStatus,
   ProfilesListResponse,
   Subscription,
+  TorrentStatus,
   WarpStatus,
 } from "./types";
 
@@ -76,6 +77,21 @@ export const profiles = {
       params: { eligible: eligible ? 1 : 0 },
       body: ids.join("\n"),
     }),
+
+  /**
+   * Разрешить/запретить торренты на профилях.
+   * ⚠ В отличие от двух настроек выше на роутере лежит список РАЗРЕШЁННЫХ: по
+   * умолчанию торренты запрещены везде, поэтому `allowed` — это сколько профилей
+   * их сейчас разрешают, а не сколько исключено.
+   */
+  setTorrents: (ids: string[], allowed: boolean) =>
+    requestJson<{ ok: boolean; allowed: number }>("torrent_set", {
+      params: { allow: allowed ? 1 : 0 },
+      body: ids.join("\n"),
+    }),
+
+  /** Состояние блокировки торрентов: включена ли и последнее событие. */
+  torrentStatus: () => requestJsonTolerant<TorrentStatus>("torrent_status"),
 
   /* --- страна эндпоинта (detour-geo) --- */
   geoStatus: () => requestJsonTolerant<GeoStatus>("geo_status"),

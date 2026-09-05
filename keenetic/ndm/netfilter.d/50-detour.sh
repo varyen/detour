@@ -419,4 +419,16 @@ if [ -x /opt/sbin/detour-wanpin ]; then
     /opt/sbin/detour-wanpin apply >/dev/null 2>&1
 fi
 
+# Пер-профильный запрет торрентов. Цепочка живёт в mangle PREROUTING, и её сносит
+# тот же реконфиг NDM, что и остальные наши правила, поэтому ставим её здесь.
+# Гейт — маркер singbox.enabled: при выключенном прокси «активный профиль» ничего
+# не решает, и блок должен быть снят, а не переживать выключение VPN.
+if [ -x /opt/sbin/detour-torrent ]; then
+    if [ -f /opt/etc/detour/singbox.enabled ]; then
+        /opt/sbin/detour-torrent apply >/dev/null 2>&1
+    else
+        /opt/sbin/detour-torrent clear >/dev/null 2>&1
+    fi
+fi
+
 exit 0

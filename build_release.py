@@ -156,6 +156,9 @@ PANEL_FILES = [
     (("router_files", "detour-rulist"), "usr/sbin/detour-rulist", 0o755),
     (("router_files", "detour-geo"), "usr/sbin/detour-geo", 0o755),
     (("router_files", "detour-trafficlog"), "usr/sbin/detour-trafficlog", 0o755),
+    # Пер-профильный запрет торрентов: nft-матчеры uTP/DHT/трекеров перед nat
+    # REDIRECT + счётчики, по которым панель показывает, кого и чем поймали.
+    (("router_files", "detour-torrent"), "usr/sbin/detour-torrent", 0o755),
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
     (("router_files", "detour-bypass"), "usr/sbin/detour-bypass", 0o755),
     (("router_files", "detour-bypass.initd"), "etc/init.d/detour-bypass", 0o755),
@@ -361,6 +364,7 @@ $BEGIN
 /etc/sing-box/route-map.list
 /etc/sing-box/chains.json
 /etc/sing-box/autoswitch-exclude.list
+/etc/sing-box/torrent-allow.list
 /etc/sing-box/ru-subnets.list
 /etc/sing-box/ru-subnets-exclude.list
 /etc/zapret-tpws.conf
@@ -423,7 +427,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
     /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-warp /usr/sbin/detour-meter /usr/sbin/detour-offload /usr/sbin/detour-portmap /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
-    /usr/sbin/detour-rulist \\
+    /usr/sbin/detour-rulist /usr/sbin/detour-torrent \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
     /www/cgi-bin/detour-api 2>/dev/null
@@ -551,7 +555,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -573,6 +577,10 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   # Временной ряд трафика для графика: снимок раз в минуту. Стоит ~60 мс (0.1%
   # ядра), пишет в tmpfs, на флеш сбрасывает свёрнутый час раз в час.
   echo "* * * * * /usr/sbin/detour-trafficlog tick >/dev/null 2>&1"
+  # Торренты на профиле, где они запрещены: раз в минуту читаем счётчики nft-цепочки
+  # и, если они выросли, пишем событие для панели + шлём один Web Push на эпизод.
+  # Правил нет → tick выходит сразу, так что на «разрешающем» профиле это бесплатно.
+  echo "* * * * * /usr/sbin/detour-torrent tick >/dev/null 2>&1"
   # HW-offload watchdog — QCA/ipq53xx only; a safe no-op on non-QCA hardware. Detects a
   # wedged NSS/PPE accelerator (LAN<->WAN forwarding fell to the CPU → ~100 Mbit until a
   # reboot) and recovers it in place. Mode lives in /etc/detour/offload.conf (default auto).
@@ -642,6 +650,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-rulist' \\
                       | grep -v 'detour-geo' \\
                       | grep -v 'detour-trafficlog' \\
+                      | grep -v 'detour-torrent' \\
                       | crontab - 2>/dev/null
 echo "=== detour prerm end pid=$$ args:$* ==="
 exit 0

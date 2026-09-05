@@ -18,6 +18,11 @@ SETTINGS_FILE=/etc/sing-box/settings.json
 # into the matching local sing-box SOCKS inbound so a client hard-pinned to the same
 # proxy gets the panel's routing instead of a double-proxy wrap. Absent = feature off.
 INTERCEPT_MAP=/etc/sing-box/intercept.map
+# Блокировка торрентов на профилях, где провайдер их запрещает. Правила ставятся
+# ОТДЕЛЬНОЙ nft-таблицей (detour-torrent), а не здесь: они висят на prerouting
+# раньше nat REDIRECT и должны работать одинаково и для VPN-трафика, и для
+# прямого. Здесь только жизненный цикл — старт ставит, ручной стоп снимает.
+TORRENT_BIN=/usr/sbin/detour-torrent
 IPSET_NAME=singbox_domains
 IPSET_WL=singbox_whitelist
 LOG=/var/log/sing-box.log
@@ -985,6 +990,11 @@ start_service() {
         done < "$INST_TMP"
     fi
     rm -f "$INST_TMP"
+
+    # Запрет торрентов у активного профиля. Идемпотентно: если правила уже стоят
+    # (bounce на reconfigure), ничего не пересобираем — пересборка обнулила бы
+    # счётчики, по которым detour-torrent tick понимает, что кто-то попался.
+    [ -x "$TORRENT_BIN" ] && "$TORRENT_BIN" apply >/dev/null 2>&1
 }
 
 stop_service() {
@@ -1068,6 +1078,11 @@ stop_service() {
     fi
 
     close_port_lan
+
+    # Ручной «Выкл» = пользователь сознательно пустил трафик напрямую, значит и
+    # запрет торрентов с профиля больше не действует. На bounce (reconfigure /
+    # upgrade) сюда не попадаем — правила переживают перезапуск вместе с REDIRECT.
+    [ -x "$TORRENT_BIN" ] && "$TORRENT_BIN" clear >/dev/null 2>&1
 
     # Purge flows still DNATed to the (now dead) sing-box ports — otherwise
     # established connections hang on a closed socket until the entry expires.

@@ -36,6 +36,15 @@ AUTOSWITCH_EXCLUDE="/etc/sing-box/autoswitch-exclude.list"
 # Profiles EXCLUDED from BACKGROUND speed checks (one id per line; absent/empty =
 # all eligible). Kept outside profile JSON for the same reason as auto-switch.
 SPEEDCHECK_EXCLUDE="/etc/sing-box/speedcheck-exclude.list"
+# Профили, которым BitTorrent РАЗРЕШЁН (по одному id в строке). Именно allow-, а
+# не deny-список: торренты запрещены по умолчанию, поэтому новый профиль — в том
+# числе приехавший из подписки — защищён сразу, без миграций и без окна, в
+# котором он «пока ещё можно». Отсутствие файла = запрещено везде.
+# Пишет действие torrent_set; применяют detour-torrent (файрвол) и reject-правило
+# в конфиге sing-box ниже.
+TORRENT_ALLOW="/etc/sing-box/torrent-allow.list"
+TORRENT_BIN="/usr/sbin/detour-torrent"
+TORRENT_STATE="/var/state/detour-torrent.json"
 SINGBOX_WHITELIST="/etc/sing-box/whitelist-domains.list"
 ZAPRET_INITD="/etc/init.d/zapret-tpws"
 ZAPRET_CONF="/etc/zapret-tpws.conf"
@@ -131,6 +140,9 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_PROFILES_DIR="$OPT/etc/sing-box/profiles"
     AUTOSWITCH_EXCLUDE="$OPT/etc/sing-box/autoswitch-exclude.list"
     SPEEDCHECK_EXCLUDE="$OPT/etc/sing-box/speedcheck-exclude.list"
+    TORRENT_ALLOW="$OPT/etc/sing-box/torrent-allow.list"
+    TORRENT_BIN="$OPT/sbin/detour-torrent"
+    TORRENT_STATE="$OPT/var/state/detour-torrent.json"
     SINGBOX_WHITELIST="$OPT/etc/sing-box/whitelist-domains.list"
     ZAPRET_INITD="$OPT/etc/init.d/S53detour-zapret"
     ZAPRET_CONF="$OPT/etc/zapret-tpws.conf"
@@ -1361,6 +1373,31 @@ render_chain_config() {
 "
     fi
 
+    # Торренты запрещены на активном профиле → режем их прямо в туннеле, сразу
+    # после sniff (правила route применяются по порядку, так что reject должен
+    # стоять раньше любого маршрутного правила, иначе трафик уедёт в outbound).
+    # Это ВТОРОЙ слой: detour-torrent рубит uTP/DHT/трекеры ещё до nat REDIRECT,
+    # а этот ловит то, что видно только на уровне потока — плейнтекстовый
+    # BEP-3-хендшейк на произвольном смещении в TCP-стриме.
+    # Сниффер зовётся именно "bittorrent" и покрывает все три детектора sing-box
+    # (BitTorrent/UTP/UDPTracker); "utp"/"udptracker" как имена сниффера конфиг
+    # НЕ принимает — падает с "unknown sniffer".
+    #
+    # ⚠ ТОЛЬКО TCP, и это не перестраховка. UDP-детектор sing-box (sniff.UTP)
+    # проверяет всего два поля — version==1, type<=4 и пустую цепочку расширений,
+    # — а под это подходит handshake WireGuard (01 00 00 00 …). При включённом
+    # «UDP через VPN» чужой WireGuard клиента улетел бы в reject как «торрент».
+    # UDP закрывает detour-torrent: там матч прибит к полной форме uTP-SYN
+    # (длина + 4 поля), и такой промах невозможен.
+    if [ "$TORRENT_REJECT" = "1" ]; then
+        local _sniff_head='    "rules": [{"action":"sniff"}'
+        case "$route_block_rules" in
+            "$_sniff_head"*)
+                route_block_rules="$_sniff_head,{\"protocol\":[\"bittorrent\"],\"network\":[\"tcp\"],\"action\":\"reject\"}${route_block_rules#"$_sniff_head"}"
+                ;;
+        esac
+    fi
+
         if [ "$inbound_kind" = "mixed" ]; then
                 inbound_block="    {
             \"type\": \"mixed\",
@@ -1464,6 +1501,22 @@ build_config() {
 
     commit_list=""
     keep_targets=""
+
+    # Запрет торрентов — свойство ЦЕПОЧКИ, а не только выходного узла: трафик несёт
+    # каждый хоп, поэтому хватает ОДНОГО профиля без явного разрешения. Список
+    # allow-, а не deny-: по умолчанию запрещено, поэтому пустой/отсутствующий
+    # файл = reject везде.
+    # Флаг читает render_chain_config; render-mixed (свои исходящие запросы
+    # роутера) идёт мимо build_config и остаётся без reject-правила намеренно.
+    TORRENT_REJECT=0
+    local _tid _oifs
+    _oifs=$IFS; IFS=','
+    for _tid in $chain; do
+        _tid=$(printf '%s' "$_tid" | tr -d ' \t\r')
+        [ -n "$_tid" ] || continue
+        grep -qxF "$_tid" "$TORRENT_ALLOW" 2>/dev/null || TORRENT_REJECT=1
+    done
+    IFS=$_oifs
 
     if [ "$mode" = "multi" ]; then
         # Smart-intercept is single-mode only; drop any stale map so the initd
@@ -3214,10 +3267,10 @@ profiles_list)
     # которого панель вообще пустая, и терять её из-за сломанного cjson нельзя.
     PL_TMP="/tmp/detour-profiles.$$"
     lua - "$PLATFORM" "$AUTOSWITCH_EXCLUDE" "$SPEEDCHECK_EXCLUDE" \
-          "$(get_active_profile)" "$(get_active_chain)" "$GEO_DB" \
+          "$(get_active_profile)" "$(get_active_chain)" "$GEO_DB" "$TORRENT_ALLOW" \
           "$SINGBOX_PROFILES_DIR"/*.json > "$PL_TMP" 2>/dev/null <<'LUA'
-local platform, ex_as, ex_sc, active, chain_csv, geo_db =
-    arg[1], arg[2], arg[3], arg[4], arg[5], arg[6]
+local platform, ex_as, ex_sc, active, chain_csv, geo_db, allow_bt =
+    arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7]
 if platform == "keenetic" then
     package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
 end
@@ -3240,6 +3293,10 @@ local function read_set(path)
 end
 local no_autoswitch = read_set(ex_as)
 local no_speedcheck = read_set(ex_sc)
+-- В отличие от двух списков выше это НЕ список исключений, а список разрешений:
+-- профиль в файле = торренты на нём можно. По умолчанию (нет файла / нет строки)
+-- запрещено, поэтому новый профиль из подписки не оказывается «пока можно».
+local allow_torrents = read_set(allow_bt)
 
 -- Страна эндпоинта: тот же приём, что и со списками исключений — один проход по
 -- кэшу detour-geo вместо grep-а на каждый профиль. Файла может не быть вовсе
@@ -3260,7 +3317,7 @@ end
 -- таблицу cjson отдал бы как {}, и панель упала бы на `profiles.map` там, где
 -- профилей ещё нет (свежий роутер).
 local parts = {}
-local i = 7
+local i = 8
 while arg[i] do
     local path = arg[i]
     local id = path:match("([^/]+)%.json$")
@@ -3277,6 +3334,7 @@ while arg[i] do
             routing_mode = str(obj.routing_mode),
             autoswitch = not no_autoswitch[id],
             speedcheck = not no_speedcheck[id],
+            torrents = allow_torrents[id] == true,
             cc = geo[id] or "",
         })
     end
@@ -3319,14 +3377,20 @@ LUA
         else
             PSC=true
         fi
+        # torrents allowed = id IS in the allow list (absent file = forbidden).
+        if grep -qxF "$PNAME" "$TORRENT_ALLOW" 2>/dev/null; then
+            PBT=true
+        else
+            PBT=false
+        fi
         # Страна эндпоинта из кэша detour-geo (пусто, если скан не гоняли).
         PCC=$(awk -F'\t' -v id="$PNAME" '$1 == id { print $3; exit }' "$GEO_DB" 2>/dev/null)
         if [ "$FIRST" = "1" ]; then FIRST=0; else printf ','; fi
-        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s","autoswitch":%s,"speedcheck":%s,"cc":"%s"}' \
+        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s","autoswitch":%s,"speedcheck":%s,"torrents":%s,"cc":"%s"}' \
             "$PNAME" "$PTYPE" \
             "$(echo "$PDESC" | json_escape)" \
             "$(echo "$PGROUP" | json_escape)" \
-            "$PRMODE" "$PAS" "$PSC" "$PCC"
+            "$PRMODE" "$PAS" "$PSC" "$PBT" "$PCC"
     done
     printf '],"active":"%s","active_chain":' "$(get_active_profile)"
     print_csv_json_array "$(get_active_chain)"
@@ -3392,6 +3456,75 @@ speedcheck_set)
     rm -f "$SC_IDS"
     SC_CNT=$(grep -c . "$SPEEDCHECK_EXCLUDE" 2>/dev/null); [ -z "$SC_CNT" ] && SC_CNT=0
     printf '{"ok":true,"excluded":%s}' "$SC_CNT"
+    ;;
+
+torrent_set)
+    # Разрешить/запретить торренты на профилях. ?allow=1|0 + POST-тело = id через
+    # перевод строки или запятую. Хранилище — отдельный список (как у авто-
+    # переключения), чтобы обновление подписки не затирало флаг вместе с профилем.
+    # ⚠ Это allow-список: allow=1 ДОБАВЛЯЕТ id, allow=0 — убирает. Направление
+    # обратное соседним *_set-действиям именно потому, что дефолт здесь «нельзя».
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    BT_ALLOW=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]allow=\([^&]*\).*/\1/p' | head -1)
+    mkdir -p "$(dirname "$TORRENT_ALLOW")" 2>/dev/null
+    touch "$TORRENT_ALLOW" 2>/dev/null
+    BT_IDS="/tmp/detour-torrent-ids.$$"
+    printf '%s' "$POST_DATA" | tr ',\r' '\n\n' | while IFS= read -r _l || [ -n "$_l" ]; do
+        _s=$(printf '%s' "$_l" | tr -cd 'a-zA-Z0-9_-')
+        [ -n "$_s" ] && echo "$_s"
+    done | sort -u > "$BT_IDS"
+    if [ -s "$BT_IDS" ]; then
+        if [ "$BT_ALLOW" = "1" ]; then
+            awk 'NF && !seen[$0]++' "$TORRENT_ALLOW" "$BT_IDS" \
+                > "$TORRENT_ALLOW.new" 2>/dev/null
+        else
+            awk 'NR==FNR{rm[$0]=1; next} !($0 in rm)' "$BT_IDS" "$TORRENT_ALLOW" \
+                > "$TORRENT_ALLOW.new" 2>/dev/null
+        fi
+        mv "$TORRENT_ALLOW.new" "$TORRENT_ALLOW" 2>/dev/null
+    fi
+    # Слой в sing-box живёт в конфиге, поэтому смена флага у профиля из АКТИВНОЙ
+    # цепочки требует пересборки — иначе тумблер «сработает» лишь после
+    # следующего переключения профиля, и это выглядело бы как «не работает».
+    BT_TOUCHED=0
+    BT_CHAIN=$(get_active_chain)
+    BT_OIFS=$IFS; IFS=','
+    for BT_CID in $BT_CHAIN; do
+        BT_CID=$(printf '%s' "$BT_CID" | tr -d ' \t\r')
+        [ -n "$BT_CID" ] && grep -qxF "$BT_CID" "$BT_IDS" 2>/dev/null && BT_TOUCHED=1
+    done
+    IFS=$BT_OIFS
+    rm -f "$BT_IDS"
+    if [ "$BT_TOUCHED" = "1" ]; then
+        SBMODE=$(get_singbox_mode)
+        BUILD_ERR=$(build_config "$SBMODE" "$BT_CHAIN")
+        if [ $? -ne 0 ]; then
+            json_err "флаг сохранён, но конфиг не собрался: $(printf '%s' "$BUILD_ERR" | json_escape)"
+            exit 0
+        fi
+        # Домены/ipset не трогали — хватает быстрого reconfigure (fail-closed).
+        $SINGBOX_INITD reconfigure >/dev/null 2>&1
+    fi
+    # Файрвольный слой конфига не касается: clear+apply, чтобы правила отражали
+    # новый список независимо от того, попал ли активный профиль в правку.
+    if [ -x "$TORRENT_BIN" ]; then
+        "$TORRENT_BIN" clear >/dev/null 2>&1
+        "$TORRENT_BIN" apply >/dev/null 2>&1
+    fi
+    BT_CNT=$(grep -c . "$TORRENT_ALLOW" 2>/dev/null); [ -z "$BT_CNT" ] && BT_CNT=0
+    printf '{"ok":true,"allowed":%s}' "$BT_CNT"
+    ;;
+
+torrent_status)
+    # Что панель показывает в плашке: включён ли блок сейчас, на каком профиле,
+    # и последнее событие (кто и чем именно попался) для тоста/уведомления.
+    if [ -x "$TORRENT_BIN" ]; then
+        "$TORRENT_BIN" status 2>/dev/null || echo '{"enforcing":false}'
+    elif [ -f "$TORRENT_STATE" ]; then
+        cat "$TORRENT_STATE"
+    else
+        echo '{"enforcing":false}'
+    fi
     ;;
 
 profile_get)

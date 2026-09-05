@@ -28,7 +28,7 @@ const props = defineProps<{
    * `health.delays` — только по ним и можно сказать, ЧТО именно не открылось.
    */
   targets?: { label: string; url: string }[];
-  /** Какой флаг сейчас сохраняется: `<id>:autoswitch` / `<id>:speedcheck`. */
+  /** Какой флаг сейчас сохраняется: `<id>:autoswitch` / `<id>:speedcheck` / `<id>:torrents`. */
   flagBusy?: string;
   /** Идёт скан стран (detour-geo): кнопка глобуса заблокирована. */
   geoBusy?: boolean;
@@ -41,7 +41,7 @@ const emit = defineEmits<{
   stop: [ProfileRow];
   ping: [ProfileRow];
   health: [ProfileRow];
-  flag: [{ row: ProfileRow; kind: "autoswitch" | "speedcheck"; value: boolean }];
+  flag: [{ row: ProfileRow; kind: "autoswitch" | "speedcheck" | "torrents"; value: boolean }];
   geoscan: [];
 }>();
 
@@ -291,7 +291,7 @@ function healthTitle(r: ProfileRow): string {
   return [parts.join(" · ") || "нет данных", speed ? `↓ ${speed}` : "", when].filter(Boolean).join(" · ");
 }
 
-function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck"): boolean {
+function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck" | "torrents"): boolean {
   return props.flagBusy === `${r.id}:${kind}`;
 }
 
@@ -524,6 +524,9 @@ function stateTile(r: ProfileRow): string {
               {{ r.type }}<template v-if="r.group"> · {{ r.group }}</template>
               <template v-if="r.autoswitch === false"> · без авто-переключения</template>
               <template v-if="r.speedcheck === false"> · без проверки скорости</template>
+              <!-- Пишем только про разрешение: запрет — состояние по умолчанию,
+                   и подпись «торренты запрещены» висела бы на каждой строке. -->
+              <template v-if="r.torrents === true"> · торренты разрешены</template>
             </small>
             <!-- Плитки только на телефоне: на широком экране те же три числа
                  стоят своими колонками, и дублировать их под именем незачем. -->
@@ -583,6 +586,27 @@ function stateTile(r: ProfileRow): string {
             @click="emit('flag', { row: r, kind: 'speedcheck', value: r.speedcheck === false })"
           >
             <span class="glyph" aria-hidden="true">↓</span>
+          </button>
+          <!-- Торренты. В отличие от двух тумблеров слева это не «участие в
+               фоновой фиче», а разрешение, и дефолт у него ВЫКЛЮЧЕН: провайдеры
+               массово запрещают P2P, поэтому неотмеченный профиль (новый, только
+               что приехавший из подписки) обязан быть закрытым, а не открытым. -->
+          <button
+            class="ico"
+            type="button"
+            role="switch"
+            :aria-checked="r.torrents === true"
+            :class="{ on: r.torrents === true }"
+            :disabled="flagBusyFor(r, 'torrents')"
+            :title="
+              r.torrents === true
+                ? 'Торренты разрешены — нажмите, чтобы запретить их на этом профиле'
+                : 'Торренты запрещены: пока профиль активен, торрент-трафик режется и приходит уведомление'
+            "
+            aria-label="Торренты на этом профиле"
+            @click="emit('flag', { row: r, kind: 'torrents', value: r.torrents !== true })"
+          >
+            <span class="glyph" aria-hidden="true">⇅</span>
           </button>
           <button
             class="ico"

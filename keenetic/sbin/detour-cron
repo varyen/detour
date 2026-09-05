@@ -59,6 +59,13 @@ while :; do
     [ -x /opt/sbin/detour-ping ] && \
         /opt/sbin/detour-ping >"$LOGDIR/detour-ping.log" 2>&1
 
+    # Торренты на профиле, где они запрещены: читаем счётчики нашей iptables-цепочки
+    # и, если выросли, пишем событие для панели + шлём один Web Push на эпизод.
+    # ⚠ Тик тут ~5 мин против минуты на OpenWrt — уведомление придёт позже, сам
+    # блок при этом работает сразу (он в правилах, а не в этом опросе).
+    [ -x /opt/sbin/detour-torrent ] && \
+        /opt/sbin/detour-torrent tick >"$LOGDIR/detour-torrent.log" 2>&1
+
     # WAN PHY watchdog — detect a physical downgrade to 100 Mbps and send a push
     # alert with the cable/peer-port guidance. Distinct from offload issues.
     [ -x /opt/sbin/detour-wan-link ] && \

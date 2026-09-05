@@ -84,6 +84,10 @@ FILES = [
     # умеет HTTPS к GitHub по IPv6. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-geo"), "opt/sbin/detour-geo", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-trafficlog"), "opt/sbin/detour-trafficlog", 0o755, True),
+    # Пер-профильный запрет торрентов (общий источник, /opt-шим внутри). На
+    # Keenetic вместо nft — цепочка в iptables mangle, байты матчатся xt_string с
+    # окнами --from/--to. Ставится из ndm-хука 50-detour.sh, тикает из detour-cron.
+    (os.path.join(ROUTER_FILES, "detour-torrent"), "opt/sbin/detour-torrent", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-bootstrap-install"), "opt/sbin/detour-bootstrap-install", 0o755, True),
     # Self-update (shared source, /opt shim for Keenetic): pulls detour-keenetic_*.ipk.
     (os.path.join(ROUTER_FILES, "detour-update"), "opt/sbin/detour-update", 0o755, True),
