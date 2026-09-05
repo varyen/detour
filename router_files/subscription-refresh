@@ -446,7 +446,20 @@ local function transport_from_stream(stream)
         return th
     end
     if net == "quic" then return { type = "quic" } end
-    return { type = net }
+    if net == "httpupgrade" then
+        local h = stream.httpupgradeSettings or {}
+        local tu = { type = "httpupgrade" }
+        if h.path then tu.path = h.path end
+        if h.host then tu.host = h.host end
+        return tu
+    end
+    -- Anything else (xhttp/splithttp, kcp, …) is an Xray-only transport that
+    -- sing-box cannot dial. Emitting `{type=net}` used to smuggle it into the
+    -- profile, and then ONE such outbound made sing-box refuse the ENTIRE config
+    -- ("unknown transport type: xhttp") — so a single unusable subscription entry
+    -- broke every chain / route-map / health config it landed in. Report it as
+    -- unsupported so the caller drops the outbound instead.
+    return nil, net
 end
 
 local function v2ray_to_singbox(ob)
@@ -466,7 +479,9 @@ local function v2ray_to_singbox(ob)
         if user.flow then o.flow = user.flow end
         if user.encryption and user.encryption ~= "none" then o.encryption = user.encryption end
         local tls = tls_from_stream(stream); if tls then o.tls = tls end
-        local tr  = transport_from_stream(stream); if tr  then o.transport = tr end
+        local tr, bad = transport_from_stream(stream)
+        if bad then return nil end
+        if tr then o.transport = tr end
         return o
     end
     if proto == "vmess" then
@@ -476,7 +491,9 @@ local function v2ray_to_singbox(ob)
                     server_port = tonumber(vnext.port), uuid = user.id,
                     security = user.security or "auto", alter_id = user.alterId or 0 }
         local tls = tls_from_stream(stream); if tls then o.tls = tls end
-        local tr  = transport_from_stream(stream); if tr  then o.transport = tr end
+        local tr, bad = transport_from_stream(stream)
+        if bad then return nil end
+        if tr then o.transport = tr end
         return o
     end
     if proto == "trojan" then
@@ -484,7 +501,9 @@ local function v2ray_to_singbox(ob)
         local o = { type = "trojan", tag = tag, server = srv.address,
                     server_port = tonumber(srv.port), password = srv.password }
         local tls = tls_from_stream(stream); if tls then o.tls = tls end
-        local tr  = transport_from_stream(stream); if tr  then o.transport = tr end
+        local tr, bad = transport_from_stream(stream)
+        if bad then return nil end
+        if tr then o.transport = tr end
         return o
     end
     if proto == "shadowsocks" then
@@ -526,6 +545,28 @@ local function pick_proxy_outbound(doc)
         if o.protocol and not SKIP_PROTOS[o.protocol] then return o end
     end
     return nil
+end
+
+-- sing-box outbound types that are never a real server: groups and the built-in
+-- direct/block/dns stubs. Everything else is a dialable outbound we can import.
+local SKIP_SB_TYPES = { direct = true, block = true, dns = true,
+                       selector = true, urltest = true }
+
+-- A whole sing-box CONFIG document ({log,dns,inbounds,outbounds,route}) — what
+-- Remnawave-style panels serve to a `sing-box/*` User-Agent. Its outbounds carry
+-- `type` (not v2ray's `protocol`), so pick_proxy_outbound never matches and the
+-- old code skipped the entire document. Return every dialable outbound instead.
+local function singbox_config_outbounds(doc)
+    if type(doc.outbounds) ~= "table" then return nil end
+    local out = {}
+    for _, o in ipairs(doc.outbounds) do
+        if type(o) == "table" and type(o.type) == "string" and not SKIP_SB_TYPES[o.type]
+           and o.server and o.server_port then
+            out[#out + 1] = o
+        end
+    end
+    if #out == 0 then return nil end
+    return out
 end
 
 -- ===== bypass domain list (apply_routing=true) =====
@@ -621,7 +662,12 @@ local function parse_body_into_profiles(body, sub)
                     else skipped = skipped + 1 end
                 elseif doc.type then  -- sing-box-shape outbound
                     push_profile(doc, doc.tag or doc.name or "")
-                else skipped = skipped + 1 end
+                else
+                    local sb = singbox_config_outbounds(doc)
+                    if sb then
+                        for _, ob in ipairs(sb) do push_profile(ob, ob.tag or "") end
+                    else skipped = skipped + 1 end
+                end
             end
         end
     end
