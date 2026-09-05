@@ -57,6 +57,13 @@ UDP_VPN_TPROXY_PORT=12350                 # sing-box tproxy-udp inbound (config.
 # this script points the target's ipset at it. Away from 12345/12350: the old
 # 12345+N range collided with tproxy-udp on the fifth target.
 ROUTE_PORT_BASE=12400
+# Nothing ever listens here. Addresses of a route whose target has disappeared are
+# redirected into it, so the connection is refused at once instead of leaking out
+# through the WAN. The port IS opened in the LAN input chain on purpose: an accepted
+# packet to a closed port earns an immediate RST ("connection refused"), while a
+# dropped one would leave the client hanging until timeout.
+ROUTE_DEAD_PORT=12499
+ROUTE_DEAD_IPSET=singbox_tdead
 # То же для UDP-инбаундов целей маршрута (tproxy, цель N → BASE+N). Должен
 # совпадать с ROUTE_UDP_PORT_BASE в detour-api.
 ROUTE_UDP_PORT_BASE=12500
@@ -194,19 +201,67 @@ setup_domains_file() {
     fi
 }
 
-# Resolve domains from file to populate ipset via DNS
+# Resolve domains from file to populate ipset via DNS.
+# $2 = "wait" blocks until every lookup has finished. Callers that warm a big list
+# (the all-except whitelist is ~13 000 names) must NOT wait — but a caller that
+# intends to CHECK the result afterwards has to, otherwise it inspects an ipset the
+# lookups have not filled yet.
 resolve_domains() {
     local domains_file="$1"
+    local mode="${2:-}"
     if [ -f "$domains_file" ]; then
         awk '{
             sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
             sub(/^\*\./, "")
             if ($0 ~ /^[a-zA-Z0-9]([a-zA-Z0-9._-]*\.)+[a-zA-Z]{2,}$/)
                 print $0
-        }' "$domains_file" | while IFS= read -r d; do
+        }' "$domains_file" | { while IFS= read -r d; do
             nslookup "$d" 127.0.0.1 >/dev/null 2>&1 &
         done
+        [ "$mode" = wait ] && wait
+        : ; }
     fi
+}
+
+# Wait until the local resolver actually answers, instead of assuming a fixed sleep
+# was long enough. dnsmasq has just been restarted; until it is up, every warm-up
+# lookup is a silent no-op and the route sets stay EMPTY — which does not fail, it
+# LEAKS: the redirect matches by address, so an address nobody re-resolved simply
+# goes out through the WAN. Right after an opkg upgrade the box is busy enough for
+# one second not to be enough (seen on 2026-09-05).
+# "localhost" is answered from /etc/hosts, so this probes dnsmasq itself and does not
+# depend on upstream DNS being reachable.
+wait_for_resolver() {
+    local i=0
+    while [ "$i" -lt 15 ]; do
+        nslookup localhost 127.0.0.1 >/dev/null 2>&1 && return 0
+        i=$((i + 1))
+        sleep 1
+    done
+    logger -t sing-box "local resolver did not answer within 15s — route address sets may stay empty"
+    return 1
+}
+
+# After the warm-up, a route target whose address set is still empty means every
+# address in that section is currently going out DIRECT, past the VPN. Retry, then
+# say so out loud: silence here is exactly what made the 2026-09-05 leak invisible.
+verify_route_sets() {  # $1 = instance table (N id port ipset)
+    local table="$1" n id port ipset cnt tries
+    [ -s "$table" ] || return 0
+    while read -r n id port ipset; do
+        [ -f "/tmp/routemap-$ipset.list" ] || continue
+        tries=0
+        while [ "$tries" -lt 3 ]; do
+            cnt=$(ipset list "$ipset" 2>/dev/null | sed -n 's/^Number of entries: //p')
+            [ -n "$cnt" ] && [ "$cnt" -gt 0 ] 2>/dev/null && break
+            tries=$((tries + 1))
+            resolve_domains "/tmp/routemap-$ipset.list" wait
+        done
+        cnt=$(ipset list "$ipset" 2>/dev/null | sed -n 's/^Number of entries: //p')
+        if [ -z "$cnt" ] || [ "$cnt" = 0 ]; then
+            logger -t sing-box "route '$id': address set $ipset is EMPTY after warm-up — its addresses are NOT routed (DNS problem?)"
+        fi
+    done < "$table"
 }
 
 # Drop conntrack entries for every IP/CIDR in the given ipset(s). The nat
@@ -392,6 +447,21 @@ route_map_slots() {
         route_target_exists "$id" || continue
         n=$((n + 1))
         echo "$n $id $((ROUTE_PORT_BASE + n)) singbox_t$n"
+    done
+}
+
+# Route sections whose target no longer exists (profile deleted, chain renamed).
+# route_map_slots skips them — and a skipped section means its addresses quietly go
+# out DIRECT, past the VPN, which is the one outcome the operator never wants: a
+# marked address must fail rather than leak. These ids get their own address set and
+# a redirect into a dead port below.
+route_map_orphans() {
+    [ -f "$ROUTE_MAP" ] || return 0
+    local id
+    for id in $(route_map_targets); do
+        route_map_section "$id" | grep -q . || continue
+        route_target_exists "$id" && continue
+        echo "$id"
     done
 }
 
@@ -712,9 +782,15 @@ start_service() {
     if [ "$FAST" != 1 ]; then
         rm -f /tmp/dnsmasq.d/singbox-singbox_t*.conf
         CUR_ROUTE_IPSETS=$(awk '{print $4}' "$INST_TMP" 2>/dev/null | tr '\n' ' ')
+        # Sets belonging to targets that no longer exist go away. Sets still in use are
+        # deliberately NOT flushed here — see the per-target block below.
         for s in $(ipset list -n 2>/dev/null | grep '^singbox_t'); do
+            # The dead-route set is rebuilt further down; sweeping it here would just
+            # destroy a set that is about to be recreated (and drop its addresses in
+            # between, which is the very leak this whole block exists to prevent).
+            [ "$s" = "$ROUTE_DEAD_IPSET" ] && continue
             case " $CUR_ROUTE_IPSETS " in
-                *" $s "*) ipset flush "$s" 2>/dev/null ;;
+                *" $s "*) ;;
                 *)
                     ipset flush "$s" 2>/dev/null
                     ipset destroy "$s" 2>/dev/null
@@ -724,24 +800,63 @@ start_service() {
         if [ -s "$INST_TMP" ]; then
             while read -r n id port ipset; do
                 ipset create "$ipset" hash:net -exist
-                ipset flush "$ipset" 2>/dev/null
                 route_map_section "$id" > "/tmp/routemap-$ipset.list"
+                # Emptying a LIVE route set is how a route silently becomes direct
+                # traffic. The redirect matches by address, and the set is refilled only
+                # when somebody resolves the name again — a client holding the name in
+                # its DNS cache never does, so its packets keep going out through the
+                # WAN with nothing logged. Measured on 2026-09-05: an upgrade restarted
+                # sing-box, the set came back empty, and a routed site stayed direct
+                # until the config was reloaded by hand.
+                # So the set is rebuilt only when its list actually CHANGED (the operator
+                # edited it and expects the edit to apply). Otherwise the addresses
+                # learned earlier stay valid, and the worst case degrades to "sing-box
+                # refuses the connection" — fail-closed — instead of a silent leak.
+                _rsig=$(md5sum "/tmp/routemap-$ipset.list" 2>/dev/null | awk '{print $1}')
+                if [ -z "$_rsig" ] || [ "$_rsig" != "$(cat "/tmp/.routemap-sig-$ipset" 2>/dev/null)" ]; then
+                    ipset flush "$ipset" 2>/dev/null
+                fi
+                [ -n "$_rsig" ] && printf '%s' "$_rsig" > "/tmp/.routemap-sig-$ipset"
                 setup_domains_file "/tmp/routemap-$ipset.list" "$ipset" "/tmp/dnsmasq.d/singbox-$ipset.conf"
-                rm -f "/tmp/routemap-$ipset.list"
+                # The list file is kept until the warm-up below has verified the set.
             done < "$INST_TMP"
+        fi
+
+        # Addresses of routes whose target is gone: collected so they can be refused
+        # rather than silently sent out direct.
+        rm -f "/tmp/routemap-$ROUTE_DEAD_IPSET.list"
+        route_map_orphans | while IFS= read -r oid; do
+            logger -t sing-box "route '$oid': target profile/chain is missing — its addresses will be REFUSED, not sent direct"
+            route_map_section "$oid"
+        done > "/tmp/routemap-$ROUTE_DEAD_IPSET.list" 2>/dev/null
+        if [ -s "/tmp/routemap-$ROUTE_DEAD_IPSET.list" ]; then
+            ipset create "$ROUTE_DEAD_IPSET" hash:net -exist
+            ipset flush "$ROUTE_DEAD_IPSET" 2>/dev/null
+            setup_domains_file "/tmp/routemap-$ROUTE_DEAD_IPSET.list" "$ROUTE_DEAD_IPSET" \
+                "/tmp/dnsmasq.d/singbox-$ROUTE_DEAD_IPSET.conf"
+            CUR_ROUTE_IPSETS="$CUR_ROUTE_IPSETS $ROUTE_DEAD_IPSET"
+        else
+            rm -f "/tmp/dnsmasq.d/singbox-$ROUTE_DEAD_IPSET.conf" "/tmp/routemap-$ROUTE_DEAD_IPSET.list"
+            ipset destroy "$ROUTE_DEAD_IPSET" 2>/dev/null
         fi
     fi
 
     if [ "$FAST" != 1 ]; then
         /etc/init.d/dnsmasq restart
-        sleep 1
+        wait_for_resolver
         resolve_domains "$DOMAINS_FILE"
         [ "$ROUTING_MODE" = "all-except" ] && resolve_domains "$WHITELIST_FILE"
         [ "$UDP_VPN_MODE" = list ] && resolve_domains "$UDP_VPN_LIST"
-        [ -s /tmp/routemap-all.list ] && resolve_domains /tmp/routemap-all.list
+        # Route targets are warmed synchronously and then verified: these are the sets
+        # whose emptiness degrades into direct traffic rather than into an error, and
+        # they are small enough to wait for.
+        [ -s /tmp/routemap-all.list ] && resolve_domains /tmp/routemap-all.list wait
+        [ -s "/tmp/routemap-$ROUTE_DEAD_IPSET.list" ] && \
+            resolve_domains "/tmp/routemap-$ROUTE_DEAD_IPSET.list" wait
+        verify_route_sets "$INST_TMP"
         sleep 1
     fi
-    rm -f /tmp/routemap-all.list
+    rm -f /tmp/routemap-all.list /tmp/routemap-singbox_t*.list "/tmp/routemap-$ROUTE_DEAD_IPSET.list"
 
     open_port_lan 12345
 
@@ -800,6 +915,13 @@ start_service() {
             iptables -t nat -D PREROUTING -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port" 2>/dev/null
             iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
         done < "$INST_TMP"
+    fi
+    # Routes whose target vanished: send them into the dead port. The set is empty in
+    # the normal case, so this rule then matches nothing at all.
+    if ipset list -n 2>/dev/null | grep -qx "$ROUTE_DEAD_IPSET"; then
+        open_port_lan "$ROUTE_DEAD_PORT"
+        iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -p tcp \
+            -m set --match-set "$ROUTE_DEAD_IPSET" dst -j REDIRECT --to-ports "$ROUTE_DEAD_PORT"
     fi
 
     # ---- VPN inbound interfaces: mirror the br-lan redirect for VPN clients ----
@@ -968,13 +1090,13 @@ stop_service() {
     ipset destroy $IPSET_NAME 2>/dev/null
     ipset flush $IPSET_WL 2>/dev/null
     ipset destroy $IPSET_WL 2>/dev/null
-    for s in $(ipset list -n 2>/dev/null | grep '^singbox_t'); do
-        case " $(route_map_strict_slots | awk '{print $4}' | tr '\n' ' ') " in
-            *" $s "*) continue ;;
-        esac
-        ipset flush "$s" 2>/dev/null
-        ipset destroy "$s" 2>/dev/null
-    done
+    # Route address sets are KEPT, all of them — not just the strict ones. Without any
+    # referencing rule an ipset is inert, so keeping it changes nothing while the
+    # service is stopped; what it buys is that the next start (a `restart` is a stop
+    # plus a start, which is how an upgrade restarts us) finds the addresses already
+    # there instead of an empty set that quietly routes nothing. Sets whose target is
+    # gone are destroyed by start_service, which knows the current target list.
+    :
 }
 
 reload_service() {
