@@ -106,14 +106,25 @@ The **CGI itself needs a platform shim**: a header that detects Entware
 their `/opt` equivalents. (Not yet written — most device-dependent piece.)
 
 ### 5b. Проброс сервисов (`detour-portmap`) — ⚠ NOT YET VERIFIED ON DEVICE
-Publishing a LAN service to the internet from the panel. Two modes, both ported:
+Publishing a LAN service to the internet from the panel. Three modes, all ported:
 
-* **https** — TLS-terminating reverse proxy. `detour-portmap` writes one
-  `$SERVER["socket"] == ":<port>"` block with `proxy.server` per enabled mapping into
-  `/opt/etc/lighttpd/conf.d/detour-portmap.conf`, pulled in by `detour.conf` through
-  `conf.d/detour-portmap-helper.sh` (the same always-exit-0 `include_shell` shim the
-  TLS overlay uses — an inline `cat … 2>/dev/null` is fatal to lighttpd). Cert comes
-  from `detour-cert` (`combined.pem`). Guarded by `lighttpd -tt` with rollback.
+* **vhost** (v1.54.0) — publishing by NAME: every mapping shares one TLS port and is
+  told apart by `$HTTP["host"]`, so a service costs a DNS name instead of a port
+  KeenDNS may not even forward. Needs a certificate covering the name — `detour-cert
+  issue-dns` (DNS-01) gets a wildcard, and on Keenetic it is doubly useful: DNS-01
+  needs no reachable :80 at all, so the WAN :80 → panel forward that HTTP-01 demands
+  stops being a prerequisite for HTTPS.
+* **https** — TLS-terminating reverse proxy on its own port. `detour-portmap` writes
+  ONE `$SERVER["socket"] == ":<port>"` block **per port** (not per mapping) into
+  `/opt/etc/lighttpd/conf.d/detour-portmap.conf`, with the name-based mappings nested
+  inside it as `$HTTP["host"]` conditions. The grouping is load-bearing: lighttpd
+  merges contexts whose condition is identical, and `ssl.pemfile` assigned twice in
+  the merged context is a FATAL config error — a block per mapping would kill the
+  whole portmap config the moment a second name was published. The file is pulled in
+  by `detour.conf` through `conf.d/detour-portmap-helper.sh` (the same always-exit-0
+  `include_shell` shim the TLS overlay uses — an inline `cat … 2>/dev/null` is fatal
+  to lighttpd). Cert comes from `detour-cert` (`combined.pem`). Guarded by
+  `lighttpd -tt` with rollback.
 * **dnat** — `DETOUR_PORTMAP_DNAT` / `DETOUR_PORTMAP_IN` / `DETOUR_PORTMAP_FWD` chains
   in `ndm/netfilter.d/50-detour.sh`, rebuilt from `/opt/etc/detour/portmap.conf` on
   every NDM reconfig (flushed each run, so deleting a mapping removes its rule).
@@ -123,11 +134,27 @@ Publishing a LAN service to the internet from the panel. Two modes, both ported:
   arch, and does `proxy.header = ( "upgrade" => "enable" )` actually pass WebSockets
   on the bundled lighttpd version? (`detour-portmap` refuses the https mode when
   `mod_proxy.so` is absent, so the failure mode is a message, not a dead panel.)
+* Does the bundled lighttpd accept a `$HTTP["host"]` condition **nested inside**
+  `$SERVER["socket"]`, and does it know `proxy.forwarded` (needs ≥ 1.4.46; used to
+  suppress `X-Forwarded-For` for apps like Home Assistant that answer 400 to it)?
+  The generated text was checked by running the real renderer against a sample
+  config — see the harness note below — but never by lighttpd itself.
+* `detour-cert dns-status` — does the acme.sh shipped by Entware carry a `dnsapi/`
+  directory with `dns_pdns.sh` / `dns_gcore.sh`? If not, the panel reports
+  "в acme.sh нет плагина …" instead of failing an issuance, but DNS-01 is then
+  unavailable until acme.sh is updated.
 * Whether an arbitrary external port is reachable at all when the router is published
   through **KeenDNS** — KeenDNS fronts only :80/:443, so `https://<домен>:8443/` may
   need a direct public IP or a KeeneticOS port-forward instead.
 * The DNAT rules carry no `-i <wan>`; they exclude the LAN source CIDR instead
   (`! -s $LAN_CIDR`). Confirm that matches how NDM builds `nat PREROUTING`.
+
+> The lighttpd renderer can be exercised without a device:
+> `python3 keenetic/render-lighttpd-test.py` runs the REAL `render_lighttpd` (cut out
+> of `router_files/detour-portmap`, not a copy of it) against a sample `portmap.conf`
+> with the platform helpers stubbed, prints the result and fails if `ssl.pemfile`
+> appears twice in one socket context. That is how the per-port grouping bug above was
+> found — it proves the emitted TEXT, not that lighttpd accepts it.
 
 ### 6. Deploy/release tooling
 Add `platform: "keenetic"` to the router entry in `routers.local.json`;

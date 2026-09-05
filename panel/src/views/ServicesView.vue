@@ -38,7 +38,7 @@ function wide<T>(v: unknown): T {
   return v as T;
 }
 
-type PortmapMode = "https" | "dnat";
+type PortmapMode = "https" | "vhost" | "dnat";
 
 interface PortmapRow {
   id: string;
@@ -54,6 +54,9 @@ interface PortmapRow {
   auth_user?: string;
   auth?: boolean;
   listening?: boolean;
+  /** Имя, по которому сервис виден снаружи (mode=vhost). */
+  host?: string;
+  xff?: boolean;
 }
 
 interface PortmapCaps {
@@ -66,6 +69,7 @@ interface PortmapCaps {
   auth_reason?: string;
   domain?: string;
   lan_cidr?: string;
+  cert_hosts?: string[];
   mappings?: PortmapRow[];
   entries?: PortmapRow[];
 }
@@ -97,6 +101,11 @@ interface CertDetect {
   expiry?: string;
   serving_ok?: boolean;
   serving_cn?: string;
+  /** Чем подтверждался нынешний сертификат и что в него вошло сверх домена. */
+  challenge?: string;
+  alt_domains?: string;
+  dns_provider?: string;
+  dns_ready?: boolean;
 }
 
 interface OffloadState {
@@ -246,6 +255,9 @@ function rowTitle(r: PortmapRow): string {
 }
 
 function rowPath(r: PortmapRow): string {
+  /* У публикации по имени порта нет — адресом служит само имя, и показывать
+     «порт 443» значило бы прятать единственное, что человеку важно. */
+  if (r.mode === "vhost") return `${r.host || "имя не задано"} → ${r.target_ip}:${r.target_port}`;
   const via =
     r.mode === "https"
       ? `защищённо${pm.value?.domain ? ` на ${pm.value.domain}` : ""}`
@@ -258,6 +270,7 @@ function rowPath(r: PortmapRow): string {
    не быть — тогда ведём на хост, по которому открыта сама панель: этот же
    роутер и отвечает на опубликованном порту. */
 function rowUrl(r: PortmapRow): string {
+  if (r.mode === "vhost") return r.host ? `https://${r.host}/` : "";
   if (r.mode !== "https") return "";
   const host = pm.value?.domain || location.hostname;
   return `https://${host}:${r.listen_port}/`;
@@ -266,8 +279,9 @@ function rowUrl(r: PortmapRow): string {
 function rowNote(r: PortmapRow): string {
   const bits: string[] = [];
   if (r.src === "lan") bits.push("только своя сеть");
+  if (r.xff === false) bits.push("IP клиента не передаётся");
   if (r.auth) bits.push(`вход по паролю: ${r.auth_user}`);
-  if (r.mode === "https" && r.enabled && r.listening === false) {
+  if ((r.mode === "https" || r.mode === "vhost") && r.enabled && r.listening === false) {
     bits.push("порт не слушается — нажмите «Применить заново»");
   }
   return bits.join(" · ");
@@ -1191,6 +1205,7 @@ onBeforeUnmount(() => unregister?.());
     :auth-supported="authSupported"
     :auth-reason="pm?.auth_reason ?? ''"
     :domain="pm?.domain ?? ''"
+    :cert-hosts="pm?.cert_hosts ?? []"
     :clients="clients"
     @close="sheetPortmap = false"
     @saved="onPortmapSaved"
@@ -1205,6 +1220,8 @@ onBeforeUnmount(() => unregister?.());
     :acme-present="certInfo?.acme_present !== false"
     :keenetic="status.isKeenetic"
     :panel-port="status.data?.panel_port"
+    :challenge="certInfo?.challenge ?? ''"
+    :alt-domains="certInfo?.alt_domains ?? ''"
     @close="sheetCert = false"
     @done="loadCert"
   />

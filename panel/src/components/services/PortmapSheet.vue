@@ -10,7 +10,7 @@ import FormField from "@/components/services/FormField.vue";
 import { services } from "@/api";
 import type { LanClient } from "@/api";
 
-type Mode = "https" | "dnat";
+type Mode = "https" | "vhost" | "dnat";
 
 /** Строка проброса так, как её реально отдаёт роутер. */
 interface PortmapRow {
@@ -27,6 +27,8 @@ interface PortmapRow {
   auth_user?: string;
   auth?: boolean;
   listening?: boolean;
+  host?: string;
+  xff?: boolean;
 }
 
 const props = defineProps<{
@@ -43,6 +45,9 @@ const props = defineProps<{
   authReason: string;
   /** Домен сертификата панели — по нему сервис откроется снаружи. */
   domain: string;
+  /** Имена из сертификата (SAN). Публиковать по имени можно только то, что он
+      покрывает, — иначе браузер встретит чужой сертификат. */
+  certHosts: string[];
   clients: LanClient[];
 }>();
 
@@ -58,6 +63,10 @@ const scheme = ref("http");
 const src = ref("any");
 const authUser = ref("");
 const authPass = ref("");
+const host = ref("");
+const xff = ref(true);
+/* Имя, набранное руками, больше не переписываем автоподстановкой. */
+const hostTouched = ref(false);
 const busy = ref(false);
 const err = ref("");
 
@@ -67,10 +76,52 @@ const title = computed(() =>
   isNew.value ? "Новый доступ снаружи" : `Правка: ${props.entry?.name || props.entry?.id}`,
 );
 
+/* Суффикс wildcard-сертификата: «*.h.example.com» → «h.example.com». Он и есть
+   то, что делает публикацию по имени бесплатной — любое новое имя уже покрыто. */
+const wildcardSuffix = computed(() => {
+  const w = props.certHosts.find((h) => h.startsWith("*."));
+  return w ? w.slice(2) : "";
+});
+
+/* Покрывает ли сертификат это имя. Wildcard закрывает ровно одну метку, поэтому
+   «a.b.h.example.com» под «*.h.example.com» НЕ подходит — и браузер это заметит
+   раньше, чем человек успеет удивиться. */
+function covered(h: string): boolean {
+  const v = h.trim().toLowerCase();
+  if (!v) return false;
+  return props.certHosts.some((c) => {
+    if (c.toLowerCase() === v) return true;
+    if (!c.startsWith("*.")) return false;
+    const rest = v.slice(v.indexOf(".") + 1);
+    return v.includes(".") && c.slice(2).toLowerCase() === rest;
+  });
+}
+
+const vhostSupported = computed(() => props.httpsSupported && props.certHosts.length > 0);
+const vhostReason = computed(() => {
+  if (!props.httpsSupported) return props.httpsReason;
+  if (!props.certHosts.length) return "нет сертификата — выпустите его в «HTTPS-сертификат»";
+  return "";
+});
+const hostCovered = computed(() => covered(host.value));
+
 /* Режим по умолчанию — тот, который на этом роутере вообще возможен. */
 function defaultMode(): Mode {
+  if (vhostSupported.value && wildcardSuffix.value) return "vhost";
   if (props.httpsSupported) return "https";
   return "dnat";
+}
+
+/* Свободное имя вида «hass.h.example.com» из названия сервиса. Подсказка, а не
+   правило: поле остаётся обычным текстовым. */
+function suggestHost(): string {
+  if (!wildcardSuffix.value) return "";
+  const slug = name.value
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  return `${slug || "service"}.${wildcardSuffix.value}`;
 }
 
 watch(
@@ -89,13 +140,30 @@ watch(
     scheme.value = e?.scheme || "http";
     src.value = e?.src || "any";
     authUser.value = e?.auth_user ?? "";
+    host.value = e?.host ?? "";
+    xff.value = e?.xff !== false;
+    hostTouched.value = !!e?.host;
+    if (mode.value === "vhost" && !host.value) host.value = suggestHost();
   },
 );
 
+/* Пока имя не трогали руками, оно следует за названием сервиса — так «Домашний
+   сервер» сразу превращается в готовый адрес. */
+watch([name, mode], () => {
+  if (mode.value !== "vhost" || hostTouched.value) return;
+  host.value = suggestHost();
+});
+
 const modeOptions = computed(() => [
   {
+    value: "vhost" as Mode,
+    label: "По имени",
+    disabled: !vhostSupported.value,
+    hint: vhostSupported.value ? undefined : vhostReason.value,
+  },
+  {
     value: "https" as Mode,
-    label: "Через HTTPS",
+    label: "По порту",
     disabled: !props.httpsSupported,
     hint: props.httpsSupported ? undefined : props.httpsReason,
   },
@@ -107,15 +175,18 @@ const modeOptions = computed(() => [
   },
 ]);
 
-const modeHint = computed(() =>
-  mode.value === "https"
-    ? `Роутер сам принимает защищённое соединение${
-        props.domain ? ` на ${props.domain}` : ""
-      } и передаёт запрос устройству. Подходит для веб-сервисов; пароль на вход тоже возможен.`
-    : "Порт роутера отдаётся устройству как есть — для игр, SSH, удалённого рабочего стола. Шифрования роутер не добавляет.",
-);
+const modeHint = computed(() => {
+  if (mode.value === "vhost")
+    return "Сервис открывается по своему адресу на обычном 443-м порту — запросы разделяются по имени, порт запоминать не нужно. Нужна DNS-запись на этот роутер и сертификат, покрывающий имя.";
+  if (mode.value === "https")
+    return `Роутер сам принимает защищённое соединение${
+      props.domain ? ` на ${props.domain}` : ""
+    } и передаёт запрос устройству — но по отдельному порту, который придётся помнить.`;
+  return "Порт роутера отдаётся устройству как есть — для игр, SSH, удалённого рабочего стола. Шифрования роутер не добавляет.";
+});
 
-const canUseAuth = computed(() => mode.value === "https" && props.authSupported);
+const isProxied = computed(() => mode.value === "https" || mode.value === "vhost");
+const canUseAuth = computed(() => isProxied.value && props.authSupported);
 
 /* Список устройств — это подсказка, а не источник истины: адрес можно вписать
    и руками, тогда в списке просто ничего не выбрано. */
@@ -150,7 +221,16 @@ function portOk(v: string): boolean {
 
 async function save() {
   err.value = "";
-  if (!portOk(listenPort.value)) {
+  if (mode.value === "vhost") {
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(host.value.trim())) {
+      err.value = "Укажите имя целиком, например hass.h.example.com";
+      return;
+    }
+    if (!hostCovered.value) {
+      err.value = `Сертификат роутера не покрывает ${host.value.trim()} — выпустите wildcard в «HTTPS-сертификат»`;
+      return;
+    }
+  } else if (!portOk(listenPort.value)) {
     err.value = "Внешний порт должен быть числом от 1 до 65535";
     return;
   }
@@ -175,12 +255,15 @@ async function save() {
       name: name.value.trim(),
       enabled: props.entry ? props.entry.enabled : true,
       mode: mode.value,
-      listen_port: Number(listenPort.value),
-      proto: mode.value === "https" ? "tcp" : proto.value,
+      /* Публикация по имени всегда живёт на 443: порт не выбирают, его делят. */
+      listen_port: mode.value === "vhost" ? 443 : Number(listenPort.value),
+      proto: isProxied.value ? "tcp" : proto.value,
       target_ip: targetIp.value.trim(),
       target_port: Number(targetPort.value),
-      scheme: mode.value === "https" ? scheme.value : "http",
+      scheme: isProxied.value ? scheme.value : "http",
       src: src.value,
+      host: mode.value === "vhost" ? host.value.trim().toLowerCase() : "",
+      xff: isProxied.value ? xff.value : true,
     });
 
     /* Пароль хранится отдельным действием — роутер никогда не отдаёт хеш
@@ -228,7 +311,33 @@ async function save() {
         </p>
       </div>
 
-      <div class="grid">
+      <FormField
+        v-if="mode === 'vhost'"
+        label="Имя в интернете"
+        :hint="
+          wildcardSuffix
+            ? `Любое имя вида что-угодно.${wildcardSuffix} — сертификат уже его покрывает`
+            : 'Имя должно быть в сертификате роутера'
+        "
+      >
+        <input
+          v-model="host"
+          type="text"
+          placeholder="hass.h.example.com"
+          autocomplete="off"
+          spellcheck="false"
+          @input="hostTouched = true"
+        />
+      </FormField>
+      <p v-if="mode === 'vhost' && host && !hostCovered" class="hint warn">
+        Сертификат роутера не покрывает {{ host }} — браузер покажет предупреждение.
+        Покрыто сейчас: {{ certHosts.join(", ") || "ничего" }}
+      </p>
+      <p v-if="mode === 'vhost'" class="hint">
+        Проверьте, что {{ host || "это имя" }} в DNS указывает на этот роутер.
+      </p>
+
+      <div v-if="mode !== 'vhost'" class="grid">
         <FormField label="Порт снаружи" hint="По нему сервис будет виден в интернете">
           <input
             v-model="listenPort"
@@ -282,7 +391,7 @@ async function save() {
       </div>
 
       <div class="grid">
-        <FormField v-if="mode === 'https'" label="Устройство отвечает по">
+        <FormField v-if="isProxied" label="Устройство отвечает по">
           <select v-model="scheme">
             <option value="http">HTTP</option>
             <option value="https">HTTPS (самоподписанный подойдёт)</option>
@@ -296,7 +405,21 @@ async function save() {
         </FormField>
       </div>
 
-      <div v-if="mode === 'https'" class="block">
+      <div v-if="isProxied" class="block">
+        <label class="check">
+          <input v-model="xff" type="checkbox" />
+          <span>Передавать приложению IP клиента</span>
+        </label>
+        <p class="hint">
+          Обычно это нужно — иначе приложение видит вместо посетителя сам роутер и
+          так же пишет в свой журнал. Но некоторые (например Home Assistant) отвечают
+          «400 Bad Request» на такой заголовок от прокси, которого нет в их списке
+          доверенных: если сервис отдаёт 400, снимите галочку — либо добавьте роутер
+          в доверенные на стороне приложения.
+        </p>
+      </div>
+
+      <div v-if="isProxied" class="block">
         <span class="lbl">Пароль на вход</span>
         <p v-if="!authSupported" class="hint warn">
           {{ authReason || "На этом роутере пароль на вход недоступен" }}
@@ -364,6 +487,20 @@ async function save() {
 }
 .hint.warn {
   color: var(--warn);
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  min-height: 32px;
+}
+.check input {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  accent-color: var(--accent);
 }
 @media (max-width: 860px) {
   /* Палец, а не курсор: кнопки и сегменты режима — не меньше 44 px. */

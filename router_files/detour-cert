@@ -5,7 +5,18 @@
 #
 # WHY acme.sh + webroot: the device has no `socat` (BusyBox), so acme.sh standalone
 # mode is impossible — webroot (write the challenge file, let the :80 web server
-# serve it) is the only viable HTTP-01 method here. DNS-01 could be a later add.
+# serve it) is the only viable HTTP-01 method here.
+#
+# DNS-01 (`issue-dns`) is the second challenge type, and it buys three things HTTP-01
+# cannot: WILDCARD certificates (Let's Encrypt issues those over DNS-01 only), no need
+# for port 80 to be reachable at all (so it works behind CGNAT, on a moved port, and on
+# Keenetic without a WAN :80 forward), and one certificate that keeps covering every
+# future subdomain — which is what makes name-based publishing in detour-portmap
+# practical: a new service costs a DNS record, not a reissue.
+#
+# The provider list is a two-line registry (dns_plugin/dns_vars below) on top of
+# acme.sh's own dnsapi plugins, so adding one is adding a case branch — nothing else
+# in this script is provider-aware.
 #
 # UNIVERSAL install target (autodetected):
 #   nginx present  → cert into /etc/nginx/ssl/<domain>/, reload nginx. We also install
@@ -18,7 +29,9 @@
 #                    :443, restart. Panel then live at https://<domain>/detour/.
 #   else Keenetic  → lighttpd: combined pem + an ssl include, restart the panel.
 #
-# Subcommands: detect | issue <domain> <email> | renew | status | _lighttpd-pem
+# Subcommands: detect | issue <domain> <email> | issue-dns <domain> <email> [alt…]
+#              dns-set <provider> <KEY=VALUE>… | dns-status | dns-check
+#              renew | status | _lighttpd-pem
 #
 # acme.sh runs its OWN renewal (we install its cronjob on OpenWrt; Keenetic drives
 # `detour-cert renew` from detour-cron). On renewal acme.sh re-runs --install-cert,
@@ -26,6 +39,9 @@
 
 DETOUR_DIR=/etc/detour
 CERT_CONF="$DETOUR_DIR/cert.conf"          # persisted: DOMAIN/EMAIL/TARGET_MODE/CERT_DIR/RELOAD_CMD
+# DNS-01 provider credentials (0600). Separate from cert.conf because it holds an API
+# token: cert.conf is quoted in logs and shown in the panel, this file never is.
+DNS_CONF="$DETOUR_DIR/dns-api.conf"
 STATE=/var/state/detour-cert.json          # panel-facing status
 LOG=/var/log/detour-cert.log
 ACME_WEBROOT=/var/detour-acme              # HTTP-01 challenge docroot (nginx mode)
@@ -60,6 +76,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PLATFORM=keenetic
     DETOUR_DIR=/opt/etc/detour
     CERT_CONF="$DETOUR_DIR/cert.conf"
+    DNS_CONF="$DETOUR_DIR/dns-api.conf"
     STATE=/opt/var/state/detour-cert.json
     LOG=/opt/var/log/detour-cert.log
     ACME_WEBROOT=/opt/var/detour-acme
@@ -78,6 +95,10 @@ log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
 NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
 
 json_str() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"; }
+# Panel-facing failure. The CGI passes our stdout through verbatim, so an error has to
+# BE valid JSON — a bare message would blank the whole certificate card instead of
+# explaining what went wrong.
+die_json() { printf '{"ok":false,"error":%s}\n' "$(json_str "$1")"; exit 0; }
 
 # ---- acme.sh location / install -------------------------------------------------
 find_acme() {
@@ -122,6 +143,20 @@ acme_reloadcmd() {  # $1 domain
     return 0
 }
 
+# Is there already a registered ACME account? Let's Encrypt accepts an account with
+# no contact address, and acme.sh registers one on the first issuance either way — so
+# demanding an e-mail from an operator whose account already exists (the reference
+# GL-BE9300 has exactly that: a working cert, no contact) would be a made-up
+# requirement, and there is no honest value to fill it with.
+acme_account_exists() {
+    _ah=$(find_acme) || return 1
+    _ah=$(dirname "$_ah")
+    for _k in "$_ah"/ca/*/directory/account.key "$_ah"/ca/*/account.key "$_ah"/account.key; do
+        [ -s "$_k" ] && return 0
+    done
+    return 1
+}
+
 ensure_acme() {
     _a=$(find_acme) && { echo "$_a"; return 0; }
     log "acme.sh not found — installing"
@@ -137,6 +172,87 @@ ensure_acme() {
     fi
     _a=$(find_acme) && { echo "$_a"; return 0; }
     return 1
+}
+
+# ---- DNS-01 providers -----------------------------------------------------------
+# The whole provider-specific surface of this script: which acme.sh plugin to drive,
+# which environment variables it reads, which of those the operator MUST supply, and
+# how to prove a token works before an issuance burns a rate limit.
+dns_plugin() {  # $1 provider → acme.sh dnsapi plugin name
+    case "$1" in
+        pdns)  echo dns_pdns ;;
+        gcore) echo dns_gcore ;;
+        *)     echo "" ;;
+    esac
+}
+dns_vars() {  # $1 provider → every variable the plugin reads
+    case "$1" in
+        pdns)  echo "PDNS_Url PDNS_ServerId PDNS_Token PDNS_Ttl" ;;
+        gcore) echo "GCORE_Key" ;;
+    esac
+}
+dns_required() {  # $1 provider → the ones without which issuance cannot even start
+    case "$1" in
+        pdns)  echo "PDNS_Url PDNS_Token" ;;
+        gcore) echo "GCORE_Key" ;;
+    esac
+}
+dns_providers() { echo "pdns gcore"; }
+
+# Is the plugin actually present in this acme.sh install? A missing dnsapi file fails
+# deep inside acme.sh with a message the panel would never surface.
+dns_plugin_present() {  # $1 provider
+    _pl=$(dns_plugin "$1"); [ -n "$_pl" ] || return 1
+    _ah=$(find_acme) || return 1
+    [ -f "$(dirname "$_ah")/dnsapi/$_pl.sh" ]
+}
+
+load_dns_conf() { [ -f "$DNS_CONF" ] && . "$DNS_CONF" 2>/dev/null; return 0; }
+
+# Put the stored credentials into the environment acme.sh reads. acme.sh caches them
+# in its own account.conf after the first run, but exporting from our file on every
+# call is what makes a rotated token take effect (and survives a lost account.conf).
+export_dns_creds() {
+    load_dns_conf
+    [ -n "$DNS_PROVIDER" ] || return 1
+    for _v in $(dns_vars "$DNS_PROVIDER"); do
+        eval "_val=\$$_v"
+        [ -n "$_val" ] && export "$_v=$_val"
+    done
+    return 0
+}
+
+# Everything the chosen provider needs is present?
+dns_creds_ready() {
+    load_dns_conf
+    [ -n "$DNS_PROVIDER" ] || return 1
+    for _v in $(dns_required "$DNS_PROVIDER"); do
+        eval "_val=\$$_v"
+        [ -n "$_val" ] || return 1
+    done
+    return 0
+}
+
+# Prove the credentials work by listing zones — a read-only call, so a wrong key costs
+# an error message instead of a failed issuance and a rate-limit hit.
+# Echoes "<http-code> <zone-count>"; returns 1 when the call could not be made at all.
+dns_probe() {
+    load_dns_conf
+    command -v curl >/dev/null 2>&1 || return 1
+    case "$DNS_PROVIDER" in
+        pdns)
+            _sid="${PDNS_ServerId:-localhost}"
+            _u="${PDNS_Url%/}/api/v1/servers/$_sid/zones"
+            _b=$(curl -sS -m 15 -H "X-API-Key: $PDNS_Token" -w '\n%{http_code}' "$_u" 2>/dev/null) ;;
+        gcore)
+            _b=$(curl -sS -m 15 -H "Authorization: APIKey $GCORE_Key" \
+                 -w '\n%{http_code}' "https://api.gcore.com/dns/v2/zones" 2>/dev/null) ;;
+        *) return 1 ;;
+    esac
+    [ -n "$_b" ] || return 1
+    _code=$(printf '%s' "$_b" | tail -1)
+    _cnt=$(printf '%s' "$_b" | sed '$d' | grep -o '"name"' | wc -l | tr -d ' ')
+    printf '%s %s' "$_code" "$_cnt"
 }
 
 # ---- environment detection ------------------------------------------------------
@@ -258,6 +374,17 @@ serving_cn() {  # $1 domain  [$2 port=443] → served CN or ""
         | openssl x509 -noout -subject 2>/dev/null \
         | sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([^,/]*\).*/\1/p' | head -1 \
         | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# Is what :443 already serves for <name> a certificate that COVERS that name? With a
+# wildcard cert the served CN is "*.example.com" while the request was for
+# "panel.example.com" — a plain CN comparison would call that a mismatch and install a
+# second vhost on top of a perfectly working one.
+serving_covers() {  # $1 name
+    _cn=$(serving_cn "$1")
+    [ -n "$_cn" ] || return 1
+    [ "$_cn" = "$1" ] && return 0
+    wild_covers "$_cn" "$1"
 }
 
 # Local HTTP backend that serves the Detour panel (nginx-front routers run the panel on
@@ -407,7 +534,9 @@ EOF
 write_state() {  # $1 result(ok|error|issuing)  $2 error-msg
     mkdir -p "$(dirname "$STATE")" 2>/dev/null
     _dom=""; _tgt=""; _cd=""
-    [ -f "$CERT_CONF" ] && . "$CERT_CONF" 2>/dev/null && { _dom="$DOMAIN"; _tgt="$TARGET_MODE"; _cd="$CERT_DIR"; }
+    # The panel shows (and pre-fills) this as "the domain", so it must be the name the
+    # operator actually opens — never the wildcard that happens to be the cert's primary.
+    [ -f "$CERT_CONF" ] && . "$CERT_CONF" 2>/dev/null && { _dom="${PANEL_HOST:-$DOMAIN}"; _tgt="$TARGET_MODE"; _cd="$CERT_DIR"; }
     _exp=$(cert_expiry "$_cd/fullchain.pem")
     printf '{"ok":true,"domain":%s,"target":%s,"expiry":%s,"last_result":%s,"last_error":%s,"last_ts":%s}\n' \
         "$(json_str "$_dom")" "$(json_str "$_tgt")" "$(json_str "$_exp")" \
@@ -422,6 +551,34 @@ ensure_renewal() {
 }
 
 valid_domain() { printf '%s' "$1" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'; }
+# A wildcard is a valid name only for DNS-01, and only as the leftmost label.
+valid_domain_wild() {
+    case "$1" in
+        \*.*) valid_domain "${1#\*.}" ;;
+        *)    valid_domain "$1" ;;
+    esac
+}
+# "*.h.example.com" is not a directory name — and the panel vhost, the portmap
+# renderer and acme.sh's install hook all read the cert out of this path.
+cert_dirname() { printf '%s' "$1" | sed 's/^\*\./_./'; }
+
+# Does wildcard $1 cover name $2? Exactly one label, as in TLS.
+wild_covers() {  # $1 wildcard  $2 name
+    case "$1" in \*.*) ;; *) return 1 ;; esac
+    [ "${1#\*.}" = "${2#*.}" ] && [ "$2" != "${2#*.}" ]
+}
+
+# The name the PANEL itself is served under. It is normally the certificate's primary
+# name, but not when the operator asks for a zone-wide wildcard: Let's Encrypt refuses
+# a request that lists both "*.example.com" and a name that wildcard already covers
+# ("Domain name X is redundant with a wildcard domain in the same request"), so the
+# panel's own hostname cannot be in the SAN list separately — while the vhost still has
+# to answer under that exact name.
+panel_host() {
+    [ -f "$CERT_CONF" ] || return 0
+    _ph=$( . "$CERT_CONF" 2>/dev/null; printf '%s' "${PANEL_HOST:-$DOMAIN}" )
+    printf '%s' "$_ph"
+}
 valid_email()  { printf '%s' "$1" | grep -qE '^[^@ ]+@[^@ ]+\.[^@ ]+$'; }
 
 # One-shot migration for installs that already have the badly-named challenge vhost:
@@ -447,7 +604,7 @@ detect)
     _dom=""; _exp=""; _res=""; _err=""; _ctgt=""
     if [ -f "$CERT_CONF" ]; then
         . "$CERT_CONF" 2>/dev/null
-        _dom="$DOMAIN"; _ctgt="$TARGET_MODE"; _exp=$(cert_expiry "$CERT_DIR/fullchain.pem")
+        _dom="${PANEL_HOST:-$DOMAIN}"; _ctgt="$TARGET_MODE"; _exp=$(cert_expiry "$CERT_DIR/fullchain.pem")
     fi
     [ -f "$STATE" ] && { _res=$(sed -n 's/.*"last_result":"\([^"]*\)".*/\1/p' "$STATE"); _err=$(sed -n 's/.*"last_error":"\([^"]*\)".*/\1/p' "$STATE"); }
     # Live check: does the local :443 actually hand back THIS domain's cert? Catches the
@@ -457,9 +614,18 @@ detect)
     _scn=""; _sok=true
     if [ -n "$_dom" ]; then
         _scn=$(serving_cn "$_dom")
-        [ -n "$_scn" ] && [ "$_scn" != "$_dom" ] && _sok=false
+        # A wildcard CN that covers the name is a correct answer, not a mismatch.
+        [ -n "$_scn" ] && [ "$_scn" != "$_dom" ] && ! wild_covers "$_scn" "$_dom" && _sok=false
     fi
-    printf '{"ok":true,"acme_present":%s,"http80":%s,"target":%s,"wan_ip":%s,"platform":%s,"domain":%s,"expiry":%s,"last_result":%s,"last_error":%s,"serving_ok":%s,"serving_cn":%s}\n' \
+    load_dns_conf
+    _dready=false; dns_creds_ready && _dready=true
+    _dplug=false; [ -n "$DNS_PROVIDER" ] && dns_plugin_present "$DNS_PROVIDER" && _dplug=true
+    _chal=""; _alts=""
+    [ -f "$CERT_CONF" ] && { _chal=$( . "$CERT_CONF" 2>/dev/null; printf '%s' "$CHALLENGE" ); _alts=$( . "$CERT_CONF" 2>/dev/null; printf '%s' "$ALT_DOMAINS" ); }
+    printf '{"dns_provider":%s,"dns_ready":%s,"dns_plugin":%s,"challenge":%s,"alt_domains":%s,' \
+        "$(json_str "$DNS_PROVIDER")" "$_dready" "$_dplug" \
+        "$(json_str "${_chal:-http-01}")" "$(json_str "$_alts")"
+    printf '"acme_present":%s,"http80":%s,"target":%s,"wan_ip":%s,"platform":%s,"domain":%s,"expiry":%s,"last_result":%s,"last_error":%s,"serving_ok":%s,"serving_cn":%s,"ok":true}\n' \
         "$( [ "$_acme" = yes ] && echo true || echo false )" \
         "$(json_str "$(http80_server)")" "$(json_str "$(target_mode)")" \
         "$(json_str "$(wan_ip)")" "$(json_str "$PLATFORM")" \
@@ -471,56 +637,131 @@ status)
     if [ -f "$STATE" ]; then cat "$STATE"; else printf '{"ok":true,"domain":"","last_result":""}\n'; fi
     ;;
 
-issue)
+# issue     <domain> <email>            — HTTP-01, one name, needs :80 reachable
+# issue-dns <domain> <email> [alt…]      — DNS-01: extra names, wildcards allowed
+#
+# Both paths end in the same install/wiring code — only how the challenge is answered
+# differs, so the mode is a variable rather than a second copy of the command.
+issue|issue-dns)
+    CHALLENGE=http-01
+    [ "$CMD" = issue-dns ] && CHALLENGE=dns-01
     DOMAIN_IN="$2"; EMAIL_IN="$3"
-    valid_domain "$DOMAIN_IN" || { write_state error "bad domain"; echo "bad domain" >&2; exit 2; }
-    valid_email  "$EMAIL_IN"  || { write_state error "bad email";  echo "bad email"  >&2; exit 2; }
+    shift 3 2>/dev/null || shift $#
+    ALTS=""
+    for _a in "$@"; do
+        [ -n "$_a" ] || continue
+        valid_domain_wild "$_a" || { write_state error "bad alt domain: $_a"; echo "bad alt domain" >&2; exit 2; }
+        ALTS="$ALTS $_a"
+    done
+    if [ "$CHALLENGE" = dns-01 ]; then
+        valid_domain_wild "$DOMAIN_IN" || { write_state error "bad domain"; echo "bad domain" >&2; exit 2; }
+    else
+        valid_domain "$DOMAIN_IN" || { write_state error "bad domain"; echo "bad domain" >&2; exit 2; }
+        [ -n "$ALTS" ] && { write_state error "http-01 не умеет доп. имена — используйте issue-dns"; exit 2; }
+    fi
+    # The panel keeps answering under the name the operator typed, whatever ends up
+    # being the certificate's primary name below.
+    PANEL_HOST_V="$DOMAIN_IN"
+    # Let's Encrypt rejects a request carrying both a wildcard and a name that wildcard
+    # already covers. So when one of the extra names is such a wildcard, IT becomes the
+    # primary and the typed name simply drops out of the request — it stays covered, and
+    # the operator never has to know this rule exists.
+    for _a in $ALTS; do
+        if wild_covers "$_a" "$DOMAIN_IN"; then
+            log "$_a covers $DOMAIN_IN — using the wildcard as the primary name"
+            _rest=""
+            for _b in $ALTS; do [ "$_b" = "$_a" ] || _rest="$_rest $_b"; done
+            DOMAIN_IN="$_a"
+            ALTS="$_rest"
+            break
+        fi
+    done
+    if [ -n "$EMAIL_IN" ] && [ "$EMAIL_IN" != "-" ]; then
+        valid_email "$EMAIL_IN" || { write_state error "bad email"; echo "bad email" >&2; exit 2; }
+    else
+        EMAIL_IN=""
+        acme_account_exists || {
+            write_state error "укажите e-mail — Let's Encrypt требует контакт при первой регистрации"
+            echo "email required for the first registration" >&2; exit 2
+        }
+    fi
     write_state issuing ""
-    log "issue $DOMAIN_IN ($EMAIL_IN)${LE_STAGING:+ [staging]}"
+    log "$CMD $DOMAIN_IN$ALTS ($EMAIL_IN)${LE_STAGING:+ [staging]}"
 
     ACME=$(ensure_acme) || { write_state error "acme.sh unavailable (no openssl/curl/opkg?)"; log "acme.sh install failed"; exit 1; }
     mkdir -p "$DETOUR_DIR" 2>/dev/null
 
-    # Register/refresh the ACME account email (idempotent, cheap).
-    "$ACME" --register-account -m "$EMAIL_IN" >/dev/null 2>&1 || \
-        "$ACME" --update-account -m "$EMAIL_IN" >/dev/null 2>&1 || true
+    # Register/refresh the ACME account email (idempotent, cheap). With no address
+    # given we reuse the existing account untouched — re-registering with an empty
+    # contact would drop the one the operator may have set elsewhere.
+    if [ -n "$EMAIL_IN" ]; then
+        "$ACME" --register-account -m "$EMAIL_IN" >/dev/null 2>&1 || \
+            "$ACME" --update-account -m "$EMAIL_IN" >/dev/null 2>&1 || true
+    fi
 
     H80=$(http80_server)
     TGT=$(target_mode)
 
-    # --- pick a webroot the challenge server provably serves (probe-validated) ---
-    # On Keenetic the challenge is served by our lighttpd (reached via a WAN :80 →
-    # :LIGHTTPD_PORT forward), so a "no local :80 server" is fine there.
-    if [ "$H80" = none ] && [ "$PLATFORM" != keenetic ]; then
-        write_state error "no web server on :80 — open/forward port 80 to this router"
-        log "no :80 server"; exit 1
-    fi
-    WEBROOT=$(prepare_webroot "$DOMAIN_IN" "$H80") || {
-        if [ "$PLATFORM" = keenetic ]; then
-            write_state error "panel lighttpd not serving the challenge on :$LIGHTTPD_PORT — is the panel running and WAN :80 forwarded to it?"
-        else
-            write_state error "could not serve the ACME challenge on :80 for $DOMAIN_IN (is port 80 reachable / the right web server?)"
+    ACME_CHALLENGE_ARGS=""
+    if [ "$CHALLENGE" = dns-01 ]; then
+        # No web server, no port 80, no webroot — the proof is a TXT record. All this
+        # side needs is a provider that answers.
+        dns_creds_ready || {
+            write_state error "не настроен DNS-провайдер для DNS-01 (шапка → HTTPS-сертификат → DNS-API)"
+            log "dns-01 requested but credentials are incomplete"; exit 1
+        }
+        dns_plugin_present "$DNS_PROVIDER" || {
+            write_state error "в acme.sh нет плагина $(dns_plugin "$DNS_PROVIDER") — обновите acme.sh"
+            log "missing dnsapi plugin for $DNS_PROVIDER"; exit 1
+        }
+        export_dns_creds
+        ACME_CHALLENGE_ARGS="--dns $(dns_plugin "$DNS_PROVIDER")"
+        log "dns-01 via $DNS_PROVIDER ($(dns_plugin "$DNS_PROVIDER"))"
+    else
+        # --- pick a webroot the challenge server provably serves (probe-validated) ---
+        # On Keenetic the challenge is served by our lighttpd (reached via a WAN :80 →
+        # :LIGHTTPD_PORT forward), so a "no local :80 server" is fine there.
+        if [ "$H80" = none ] && [ "$PLATFORM" != keenetic ]; then
+            write_state error "no web server on :80 — open/forward port 80 to this router"
+            log "no :80 server"; exit 1
         fi
-        log "webroot prep failed (platform=$PLATFORM http80=$H80 lighttpd_port=$LIGHTTPD_PORT)"; exit 1
-    }
-    log "webroot for $DOMAIN_IN = $WEBROOT (platform=$PLATFORM http80=$H80)"
+        WEBROOT=$(prepare_webroot "$DOMAIN_IN" "$H80") || {
+            if [ "$PLATFORM" = keenetic ]; then
+                write_state error "panel lighttpd not serving the challenge on :$LIGHTTPD_PORT — is the panel running and WAN :80 forwarded to it?"
+            else
+                write_state error "could not serve the ACME challenge on :80 for $DOMAIN_IN (is port 80 reachable / the right web server?)"
+            fi
+            log "webroot prep failed (platform=$PLATFORM http80=$H80 lighttpd_port=$LIGHTTPD_PORT)"; exit 1
+        }
+        ACME_CHALLENGE_ARGS="-w $WEBROOT"
+        log "webroot for $DOMAIN_IN = $WEBROOT (platform=$PLATFORM http80=$H80)"
+    fi
 
     # --- target cert dir + reload command ---
     case "$TGT" in
         # Route the renewal hook back through THIS script so the restart-vs-reload
         # fix lives in one place — acme.sh stores the string verbatim and replays it
         # on every unattended renewal for the life of the cert.
-        nginx)    CERT_DIR_V="$NGINX_SSL/$DOMAIN_IN"; RELOAD_V="detour-cert _nginx-reload" ;;
+        nginx)    CERT_DIR_V="$NGINX_SSL/$(cert_dirname "$DOMAIN_IN")"; RELOAD_V="detour-cert _nginx-reload" ;;
         uhttpd)   CERT_DIR_V="$DETOUR_SSL"; RELOAD_V="/etc/init.d/uhttpd restart" ;;
         lighttpd) CERT_DIR_V="$DETOUR_SSL"; RELOAD_V="detour-cert _lighttpd-pem" ;;
     esac
     mkdir -p "$CERT_DIR_V" 2>/dev/null
 
     # --- issue (EC-256, Let's Encrypt) ---
-    if ! "$ACME" --issue $LE_STAGING --server letsencrypt -d "$DOMAIN_IN" -w "$WEBROOT" \
+    # Every name goes on ONE certificate: the panel keeps its own vhost and cert path,
+    # while the wildcard rides along as a SAN — which is what lets detour-portmap
+    # publish a new name without touching the certificate again.
+    ACME_D="-d $DOMAIN_IN"
+    for _a in $ALTS; do ACME_D="$ACME_D -d $_a"; done
+    if ! "$ACME" --issue $LE_STAGING --server letsencrypt $ACME_D $ACME_CHALLENGE_ARGS \
             --keylength ec-256 >>"$LOG" 2>&1; then
-        write_state error "ACME issuance failed — check $LOG (port 80 reachable for $DOMAIN_IN?)"
-        log "issue FAILED for $DOMAIN_IN"; exit 1
+        if [ "$CHALLENGE" = dns-01 ]; then
+            write_state error "выпуск по DNS-01 не удался — проверьте ключ DNS-API и что зона обслуживает $DOMAIN_IN (подробности в $LOG)"
+        else
+            write_state error "ACME issuance failed — check $LOG (port 80 reachable for $DOMAIN_IN?)"
+        fi
+        log "issue FAILED for $DOMAIN_IN$ALTS ($CHALLENGE)"; exit 1
     fi
 
     # --- persist config BEFORE install-cert (reloadcmd may read it, e.g. lighttpd) ---
@@ -530,6 +771,9 @@ EMAIL='$EMAIL_IN'
 TARGET_MODE='$TGT'
 CERT_DIR='$CERT_DIR_V'
 RELOAD_CMD='$RELOAD_V'
+CHALLENGE='$CHALLENGE'
+ALT_DOMAINS='${ALTS# }'
+PANEL_HOST='$PANEL_HOST_V'
 EOF
     chmod 0600 "$CERT_CONF" 2>/dev/null
 
@@ -545,14 +789,24 @@ EOF
         lighttpd) configure_lighttpd "$CERT_DIR_V" ;;
         nginx)
             nginx_reload
-            # Ensure SNI=<domain> on :443 actually serves this cert. A default :443
-            # server (e.g. GL.iNet's) otherwise answers <domain> with its own cert and
-            # the panel is unreachable over HTTPS. Add a managed routing vhost unless
-            # the domain already serves its own cert (sleep: let workers finish reload).
+            # Ensure SNI=<panel host> on :443 actually serves this cert. A default :443
+            # server (e.g. GL.iNet's) otherwise answers it with its own cert and the
+            # panel is unreachable over HTTPS even though the LE cert is valid.
+            # (sleep: let workers finish reload).
             sleep 1
-            if [ "$(serving_cn "$DOMAIN_IN")" != "$DOMAIN_IN" ]; then
-                nginx_add_panel_vhost "$DOMAIN_IN" "$CERT_DIR_V" || \
-                    log "could not install managed panel vhost for $DOMAIN_IN"
+            # A vhost we already manage must be re-pointed whenever the certificate
+            # moved to a new directory — which is exactly what a switch to a wildcard
+            # primary does. Left alone it would keep serving the PREVIOUS certificate:
+            # still valid, so nothing looks wrong, until it silently stops renewing.
+            if [ -f "$NGINX_PANEL_VHOST" ] && \
+               ! grep -q "ssl_certificate[[:space:]]\+$CERT_DIR_V/fullchain.pem;" "$NGINX_PANEL_VHOST"; then
+                log "panel vhost points at a stale cert dir — re-pointing to $CERT_DIR_V"
+                nginx_add_panel_vhost "$PANEL_HOST_V" "$CERT_DIR_V" || \
+                    log "could not re-point managed panel vhost for $PANEL_HOST_V"
+            elif [ "$(serving_cn "$PANEL_HOST_V")" != "$PANEL_HOST_V" ] && \
+                 ! serving_covers "$PANEL_HOST_V"; then
+                nginx_add_panel_vhost "$PANEL_HOST_V" "$CERT_DIR_V" || \
+                    log "could not install managed panel vhost for $PANEL_HOST_V"
             fi
             ;;
     esac
@@ -572,6 +826,17 @@ renew)
     [ -f "$CERT_CONF" ] && . "$CERT_CONF" 2>/dev/null
     RENEW_RC=0
     WEBROOT=""
+    # A DNS-01 cert has no webroot to re-assert — and must not be pushed through the
+    # HTTP-01 path, which would fail for a wildcard no matter what port 80 does.
+    if [ "$CHALLENGE" = dns-01 ] && [ -n "$DOMAIN" ]; then
+        if export_dns_creds; then
+            "$ACME" --renew --ecc -d "$DOMAIN" >>"$LOG" 2>&1 || RENEW_RC=$?
+        else
+            log "renew: dns-01 cert but no provider credentials — cannot renew $DOMAIN"
+            write_state error "нет ключа DNS-API — продлить сертификат нечем"
+            exit 1
+        fi
+    else
     [ -n "$DOMAIN" ] && WEBROOT=$(prepare_webroot "$DOMAIN" "$(http80_server)" 2>/dev/null)
     if [ -n "$WEBROOT" ]; then
         # prepare_webroot has guaranteed the live :80 serves the directory acme will
@@ -581,6 +846,7 @@ renew)
     else
         [ -n "$DOMAIN" ] && log "renew: no usable ACME webroot for $DOMAIN — falling back to acme cron"
         "$ACME" --cron >>"$LOG" 2>&1 || RENEW_RC=$?
+    fi
     fi
     # acme.sh exits 2 for "skipped, not due yet" — a healthy no-op, not a failure.
     if [ "$RENEW_RC" = 0 ] || [ "$RENEW_RC" = 2 ]; then
@@ -611,6 +877,100 @@ renew)
     fi
     ;;
 
+# dns-set <provider> <KEY=VALUE>… — store DNS-01 credentials.
+# Values already stored are kept unless the same key is passed again, so the panel can
+# update just the token without asking the operator to retype the URL.
+dns-set)
+    PROV="$2"
+    case " $(dns_providers) " in *" $PROV "*) ;; *) die_json "неизвестный DNS-провайдер: $PROV" ;; esac
+    shift 2 2>/dev/null || shift $#
+    load_dns_conf
+    for _kv in "$@"; do
+        _k=${_kv%%=*}; _v=${_kv#*=}
+        [ "$_k" = "$_kv" ] && die_json "ожидается КЛЮЧ=значение, получено: $_kv"
+        case " $(dns_vars "$PROV") " in
+            *" $_k "*) ;;
+            *) die_json "параметр $_k не относится к провайдеру $PROV" ;;
+        esac
+        eval "$_k=\$_v"
+    done
+    mkdir -p "$DETOUR_DIR" 2>/dev/null
+    umask 077
+    {
+        echo "# Managed by detour-cert — DNS-01 provider credentials. Do not commit."
+        echo "DNS_PROVIDER='$PROV'"
+        for _v2 in $(dns_vars "$PROV"); do
+            eval "_val=\$$_v2"
+            # A single quote in a token would end the quoted string and turn the rest
+            # of the value into shell code when this file is sourced.
+            _val=$(printf '%s' "$_val" | sed "s/'/'\\\\''/g")
+            [ -n "$_val" ] && echo "$_v2='$_val'"
+        done
+    } > "$DNS_CONF"
+    chmod 0600 "$DNS_CONF" 2>/dev/null
+    log "dns-set provider=$PROV"
+    _ready=false; dns_creds_ready && _ready=true
+    printf '{"ok":true,"provider":%s,"ready":%s}\n' "$(json_str "$PROV")" "$_ready"
+    ;;
+
+dns-status)
+    load_dns_conf
+    _ready=false; dns_creds_ready && _ready=true
+    _plug=false; [ -n "$DNS_PROVIDER" ] && dns_plugin_present "$DNS_PROVIDER" && _plug=true
+    printf '{"ok":true,"provider":%s,"providers":[' "$(json_str "$DNS_PROVIDER")"
+    _f=1; for _pv in $(dns_providers); do [ "$_f" = 1 ] || printf ','; _f=0; printf '%s' "$(json_str "$_pv")"; done
+    # The field list of EVERY provider, not just the selected one: the panel has to
+    # redraw the form the moment the operator switches providers, and a round trip per
+    # switch would show the previous provider's fields in the meantime.
+    printf '],"schema":{'
+    _f=1
+    for _pv in $(dns_providers); do
+        [ "$_f" = 1 ] || printf ','
+        _f=0
+        printf '%s:[' "$(json_str "$_pv")"
+        _g=1
+        for _vn in $(dns_vars "$_pv"); do
+            [ "$_g" = 1 ] || printf ','
+            _g=0
+            _rq=false
+            case " $(dns_required "$_pv") " in *" $_vn "*) _rq=true ;; esac
+            printf '{"name":%s,"required":%s}' "$(json_str "$_vn")" "$_rq"
+        done
+        printf ']'
+    done
+    printf '},"plugin":%s,"plugin_present":%s,"ready":%s,"vars":[' \
+        "$(json_str "$(dns_plugin "$DNS_PROVIDER")")" "$_plug" "$_ready"
+    _f=1
+    for _v in $(dns_vars "$DNS_PROVIDER"); do
+        eval "_val=\$$_v"
+        _req=false
+        case " $(dns_required "$DNS_PROVIDER") " in *" $_v "*) _req=true ;; esac
+        # A token never leaves the router — the panel only needs to know it is there.
+        case "$_v" in
+            *Token*|*Key*|*Secret*|*Password*) [ -n "$_val" ] && _val="********" ;;
+        esac
+        [ "$_f" = 1 ] || printf ','
+        _f=0
+        printf '{"name":%s,"value":%s,"required":%s}' "$(json_str "$_v")" "$(json_str "$_val")" "$_req"
+    done
+    printf ']}\n'
+    ;;
+
+# dns-check — prove the stored credentials work, without spending an issuance.
+dns-check)
+    load_dns_conf
+    [ -n "$DNS_PROVIDER" ] || die_json "DNS-провайдер не выбран"
+    dns_creds_ready || die_json "заполнены не все обязательные поля: $(dns_required "$DNS_PROVIDER")"
+    _pr=$(dns_probe) || die_json "не удалось обратиться к API провайдера (нет curl или сеть недоступна)"
+    _code=${_pr%% *}; _zones=${_pr##* }
+    case "$_code" in
+        200|201) printf '{"ok":true,"http":%s,"zones":%s}\n' "$_code" "${_zones:-0}" ;;
+        401|403) die_json "провайдер отклонил ключ (HTTP $_code)" ;;
+        000|'')  die_json "API провайдера недоступен с роутера" ;;
+        *)       die_json "API провайдера ответил HTTP $_code" ;;
+    esac
+    ;;
+
 _nginx-reload)
     nginx_reload ;;
 
@@ -618,7 +978,7 @@ _lighttpd-pem)
     lighttpd_pem ;;
 
 *)
-    echo "usage: detour-cert {detect | issue <domain> <email> | renew | status}" >&2
+    echo "usage: detour-cert {detect | issue <domain> <email> | issue-dns <domain> <email> [alt…] | dns-set <provider> <KEY=VALUE>… | dns-status | dns-check | renew | status}" >&2
     # _nginx-reload / _lighttpd-pem are internal hooks replayed by acme.sh — not
     # advertised here on purpose.
     exit 2 ;;

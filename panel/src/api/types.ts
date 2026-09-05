@@ -323,7 +323,8 @@ export interface PortmapEntry {
   id: string;
   name?: string;
   enabled: boolean;
-  mode: "https" | "dnat";
+  /** vhost — публикация по имени: делит :443 с панелью, различается по SNI. */
+  mode: "https" | "vhost" | "dnat";
   listen_port: number;
   proto: string;
   target_ip: string;
@@ -331,6 +332,10 @@ export interface PortmapEntry {
   scheme?: string;
   src?: string;
   user?: string;
+  /** Имя в интернете; только для mode=vhost. */
+  host?: string;
+  /** Передавать ли приложению IP клиента (X-Forwarded-For). По умолчанию да. */
+  xff?: boolean;
 }
 
 export interface PortmapStatus {
@@ -342,6 +347,28 @@ export interface PortmapStatus {
   dnat_supported?: boolean;
   dnat_reason?: string;
   entries?: PortmapEntry[];
+  /** SAN установленного сертификата: по нему видно, какие имена уже покрыты. */
+  cert_hosts?: string[];
+}
+
+/** Одно поле провайдера DNS-01; секреты приходят замаскированными. */
+export interface CertDnsVar {
+  name: string;
+  value?: string;
+  required?: boolean;
+}
+
+export interface CertDnsStatus {
+  ok?: boolean;
+  provider?: string;
+  providers?: string[];
+  plugin?: string;
+  plugin_present?: boolean;
+  ready?: boolean;
+  /** Значения ТЕКУЩЕГО провайдера (секреты замаскированы). */
+  vars?: CertDnsVar[];
+  /** Поля каждого провайдера — форма перерисовывается без похода на роутер. */
+  schema?: Record<string, CertDnsVar[]>;
 }
 
 export interface CertStatus {

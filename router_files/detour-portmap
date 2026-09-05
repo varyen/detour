@@ -12,13 +12,23 @@
 #            lighttpd+mod_proxy (Keenetic). uhttpd cannot reverse-proxy at all, so
 #            on a uhttpd-only router this mode reports unsupported (see caps()).
 #
+#   vhost  — the same TLS reverse proxy, but selected by NAME instead of by port:
+#            every mapping shares :443 and is told apart by SNI/Host, so publishing
+#            a service costs a DNS name rather than a port the operator must
+#            remember (and that a hotel/office network may block). Needs a
+#            certificate that covers the name — a wildcard from `detour-cert
+#            issue-dns` makes every future name work with no reissue.
+#
 #   dnat   — plain L4 port forward, WAN:<listen_port> → <target_ip>:<target_port>,
 #            any protocol (SSH, RDP, game servers), no TLS. Engine: uci firewall
 #            `redirect` (works on both fw4/nftables and fw3/iptables) or, on
 #            Keenetic, iptables rules re-asserted from the ndm netfilter.d hook.
 #
 # Config: $DETOUR_DIR/portmap.conf — one mapping per line, '|'-separated:
-#   id|enabled|mode|listen_port|proto|target_ip|target_port|scheme|src|user|sha|name
+#   id|enabled|mode|listen_port|proto|target_ip|target_port|scheme|src|user|sha|name|host|xff
+# `host` (field 13) is only meaningful for mode=vhost, `xff` (14) only for the
+# proxied modes; both were appended at the end so configs written by older
+# versions keep parsing unchanged (an absent field reads as empty → default).
 # '|' is stripped from every free-text field on write, so the format can't be
 # broken by a name. Lives under /etc/detour → already covered by the sysupgrade
 # keeplist and by the panel's config export.
@@ -77,6 +87,9 @@ die_json() { printf '{"ok":false,"error":%s}\n' "$(json_str "$1")"; exit 0; }
 # ---- validation -------------------------------------------------------------
 valid_id()   { printf '%s' "$1" | grep -qE '^[a-z0-9][a-z0-9_-]{0,23}$'; }
 valid_port() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+# A hostname for a name-based mapping. Deliberately NOT a wildcard: the cert may be a
+# wildcard, but a server_name has to be one concrete name to route by.
+valid_host() { printf '%s' "$1" | grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'; }
 valid_ipv4() {
     printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
     # reject 999.x — the regex above only bounds the shape
@@ -105,13 +118,88 @@ del_line() {  # $1 = id
 }
 
 # Is <port> already claimed by a DIFFERENT enabled mapping?
-port_taken_by_other() {  # $1 port  $2 id-to-ignore
+port_taken_by_other() {  # $1 port  $2 id-to-ignore  $3 mode being saved
     while IFS= read -r ln; do
         [ -n "$ln" ] || continue
         case "$ln" in \#*) continue ;; esac
         [ "$(fld 1 "$ln")" = "$2" ] && continue
+        # Name-based mappings share one TLS port on purpose — they are told apart by
+        # Host/SNI, so two of them on :443 is the design, not a collision.
+        [ "$3" = vhost ] && [ "$(fld 3 "$ln")" = vhost ] && continue
         [ "$(fld 4 "$ln")" = "$1" ] && return 0
     done < "$CONF"
+    return 1
+}
+
+# Is <host> already published by a DIFFERENT vhost mapping?
+host_taken_by_other() {  # $1 host  $2 id-to-ignore
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        case "$ln" in \#*) continue ;; esac
+        [ "$(fld 1 "$ln")" = "$2" ] && continue
+        [ "$(fld 3 "$ln")" = vhost ] || continue
+        [ "$(fld 13 "$ln")" = "$1" ] && return 0
+    done < "$CONF"
+    return 1
+}
+
+# Who ELSE is already listening on <port>? Echoes the program name, nothing if free.
+#
+# This is the check that keeps one mapping from taking the whole web server down.
+# `nginx -t` validates SYNTAX only: a `listen` on a port another process already holds
+# passes the test and fails at RUNTIME, after which procd respawns the master every
+# 10 s forever. On 2026-09-05 a mapping published on :8443 — the port uhttpd serves
+# LuCI's HTTPS on — killed nginx, and with it the panel, the router's own admin UI and
+# every other published service; the only trace was "bind() ... (98: Address in use)"
+# in a log nobody was watching.
+#
+# $2 = "share": for a name-based mapping the reverse-proxy engine itself holding the
+# port is fine — another server{} block on an already-bound socket costs nothing.
+port_owner() {  # $1 port  $2 share?
+    # Column 7, not $NF: busybox prints the program as "<pid>/<cmdline>", so the last
+    # field of nginx's row is "-g" (from "-c /etc/nginx/nginx.conf -g daemon off;")
+    # and the port would look like it belonged to a process called "-g".
+    _o=$(netstat -ltnp 2>/dev/null | awk -v p="[:.]$1\$" '$4 ~ p {print $7; exit}')
+    if [ -z "$_o" ]; then
+        # busybox netstat without -p (or without permission) prints no program name —
+        # "something is listening" is still enough to refuse.
+        port_listening "$1" || return 0
+        _o="неизвестный процесс"
+    fi
+    _o=${_o#*/}
+    case "$_o" in
+        nginx*|lighttpd*)
+            # A port WE published is not a conflict: re-saving an existing mapping
+            # must not trip over the very socket it opened.
+            grep -qE "^[[:space:]]*listen[[:space:]]+(\[::\]:)?$1[[:space:]]" "$NGINX_CONF" 2>/dev/null && return 0
+            grep -q "\":$1\"" "$LIGHTTPD_CONF" 2>/dev/null && return 0
+            [ "$2" = share ] && return 0 ;;
+    esac
+    printf '%s' "$_o"
+}
+
+# Names the installed certificate is valid for (SAN list, one per line).
+cert_hosts() {
+    _cd=$(cert_dir)
+    [ -n "$_cd" ] && [ -f "$_cd/fullchain.pem" ] || return 0
+    command -v openssl >/dev/null 2>&1 || return 0
+    openssl x509 -in "$_cd/fullchain.pem" -noout -text 2>/dev/null |         grep -o 'DNS:[^,]*' | sed 's/^DNS://' | tr -d ' '
+}
+
+# Does the installed cert cover <host>? A wildcard SAN matches exactly one label, so
+# *.h.example.com covers hass.h.example.com but not a.b.h.example.com.
+#
+# No openssl (or no cert yet) means "cannot tell" — return success, because refusing
+# on an inability to check would block the operator for no reason; nginx would still
+# serve the mapping, just with a name the browser complains about.
+cert_covers() {  # $1 host
+    _hh=$(cert_hosts)
+    [ -n "$_hh" ] || return 0
+    _rest="${1#*.}"
+    for _h in $_hh; do
+        [ "$_h" = "$1" ] && return 0
+        case "$_h" in \*.*) [ "${_h#\*.}" = "$_rest" ] && return 0 ;; esac
+    done
     return 1
 }
 
@@ -132,7 +220,10 @@ cert_dir() {
 }
 cert_domain() {
     if [ -f "$CERT_CONF" ]; then
-        _dm=$( . "$CERT_CONF" 2>/dev/null; printf '%s' "$DOMAIN" )
+        # PANEL_HOST first: when the certificate's primary name is a zone-wide wildcard
+        # (Let's Encrypt forbids listing a covered name alongside it), DOMAIN holds
+        # "*.example.com" — useless as the address a port-based service is opened at.
+        _dm=$( . "$CERT_CONF" 2>/dev/null; printf '%s' "${PANEL_HOST:-$DOMAIN}" )
         [ -n "$_dm" ] && { printf '%s' "$_dm"; return 0; }
     fi
     [ -f "$NGINX_PANEL_VHOST" ] || return 0
@@ -258,6 +349,7 @@ render_nginx() {
     have_nginx || return 0
     _cd=$(cert_dir)
     _any=0
+    _ports=""
     _tmp="$NGINX_CONF.tmp.$$"
     {
         echo "# Managed by detour-portmap — DO NOT EDIT (regenerated on every apply)."
@@ -270,16 +362,27 @@ render_nginx() {
         _id=$(fld 1 "$ln");   _en=$(fld 2 "$ln");  _mode=$(fld 3 "$ln")
         _lp=$(fld 4 "$ln");   _tip=$(fld 6 "$ln"); _tp=$(fld 7 "$ln")
         _sch=$(fld 8 "$ln");  _src=$(fld 9 "$ln"); _usr=$(fld 10 "$ln")
-        [ "$_mode" = https ] || continue
+        _host=$(fld 13 "$ln"); _xff=$(fld 14 "$ln")
+        case "$_mode" in https|vhost) ;; *) continue ;; esac
         [ "$_en" = 1 ] || continue
+        [ "$_mode" = vhost ] && [ -z "$_host" ] && continue
         [ -n "$_cd" ] && [ -f "$_cd/fullchain.pem" ] || continue
         _any=1
+        _ports="$_ports $_lp"
         {
             echo ""
             echo "server {"
             echo "    listen $_lp ssl;"
             echo "    listen [::]:$_lp ssl;"
-            echo "    server_name _;"
+            # A vhost mapping shares its TLS port with the panel and with every other
+            # vhost — the request is routed by SNI/Host, so the block MUST be
+            # name-based. A port-based mapping owns its port alone and keeps the
+            # catch-all name.
+            if [ "$_mode" = vhost ]; then
+                echo "    server_name $_host;"
+            else
+                echo "    server_name _;"
+            fi
             echo "    ssl_certificate     $_cd/fullchain.pem;"
             echo "    ssl_certificate_key $_cd/privkey.pem;"
             echo "    ssl_protocols TLSv1.2 TLSv1.3;"
@@ -299,8 +402,19 @@ render_nginx() {
             [ "$_sch" = https ] && echo "        proxy_ssl_verify off;"
             echo "        proxy_http_version 1.1;"
             echo "        proxy_set_header Host \$host;"
-            echo "        proxy_set_header X-Real-IP \$remote_addr;"
-            echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+            # Telling the application who the client is only helps if the application
+            # is willing to believe us. Home Assistant, for one, answers a flat
+            # "400: Bad Request" to any request carrying X-Forwarded-For from a proxy
+            # missing from its own trusted_proxies list — measured on a live HA: the
+            # very same request without the header returns 200. So this is a per-service
+            # switch, not a constant. Off → the app sees the router as the client.
+            if [ "$_xff" = 0 ]; then
+                echo "        proxy_set_header X-Real-IP \"\";"
+                echo "        proxy_set_header X-Forwarded-For \"\";"
+            else
+                echo "        proxy_set_header X-Real-IP \$remote_addr;"
+                echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+            fi
             echo "        proxy_set_header X-Forwarded-Proto https;"
             # WebSocket upgrade WITHOUT a `map` block: GL.iNet's nginx is built
             # without ngx_http_map_module, and a `map` directive there is a fatal
@@ -353,15 +467,37 @@ render_nginx() {
     mv "$_tmp" "$NGINX_CONF"
     if nginx -t >/dev/null 2>&1; then
         nginx_reload
-        rm -f "$_bak"
-        log "nginx portmap conf applied"
-        return 0
-    fi
+        # `nginx -t` cannot see a port conflict — that failure only exists at runtime
+        # (see port_owner). So insist that every port we asked for is actually
+        # listening: if it is not, nginx is dead or respawning, and the panel, the
+        # router's own admin UI and every other mapping are down with it.
+        if ports_listening "$_ports"; then
+            rm -f "$_bak"
+            log "nginx portmap conf applied"
+            return 0
+        fi
+        log "nginx did not come up after the portmap render (port conflict?) — reverting"
+    else
     # Log WHAT nginx objected to — "config rejected" alone makes a stripped-module
     # build (unknown directive) indistinguishable from a bad value.
     log "nginx -t failed after portmap render — reverting: $(nginx -t 2>&1 | head -2 | tr '\n' ' ')"
+    fi
     if [ -n "$_bak" ]; then mv "$_bak" "$NGINX_CONF"; else rm -f "$NGINX_CONF"; fi
     nginx -t >/dev/null 2>&1 && nginx_reload
+    return 1
+}
+
+# Did the web server actually take the sockets we asked for? Gives a restart a few
+# seconds to settle before calling it a failure.
+ports_listening() {  # $1 = space-separated ports
+    _t=0
+    while [ "$_t" -lt 8 ]; do
+        _miss=""
+        for _p in $1; do port_listening "$_p" || _miss=1; done
+        [ -z "$_miss" ] && return 0
+        _t=$((_t + 1))
+        sleep 1
+    done
     return 1
 }
 
@@ -393,34 +529,68 @@ render_lighttpd() {
         echo "# Managed by detour-portmap — DO NOT EDIT (regenerated on every apply)."
         echo "server.modules += ( \"mod_proxy\", \"mod_openssl\" )"
     } > "$_tmp"
-    while IFS= read -r ln; do
-        [ -n "$ln" ] || continue
-        case "$ln" in \#*) continue ;; esac
-        _id=$(fld 1 "$ln");  _en=$(fld 2 "$ln");  _mode=$(fld 3 "$ln")
-        _lp=$(fld 4 "$ln");  _tip=$(fld 6 "$ln"); _tp=$(fld 7 "$ln")
-        _usr=$(fld 10 "$ln")
-        [ "$_mode" = https ] || continue
-        [ "$_en" = 1 ] || continue
-        [ -n "$_cd" ] && [ -f "$_cd/combined.pem" ] || continue
-        lighttpd_has_proxy || continue
-        _any=1
-        {
-            echo ""
-            echo "\$SERVER[\"socket\"] == \":$_lp\" {"
-            echo "    ssl.engine  = \"enable\""
-            echo "    ssl.pemfile = \"$_cd/combined.pem\""
-            echo "    proxy.server = ( \"\" => (( \"host\" => \"$_tip\", \"port\" => $_tp )) )"
-            # lighttpd >= 1.4.46: forward the Upgrade handshake so WebSockets work.
-            echo "    proxy.header = ( \"upgrade\" => \"enable\" )"
-            if [ -n "$_usr" ] && [ -f "$AUTH_DIR/$_id.htpasswd" ]; then
-                echo "    server.modules += ( \"mod_auth\", \"mod_authn_file\" )"
-                echo "    auth.backend = \"htpasswd\""
-                echo "    auth.backend.htpasswd.userfile = \"$AUTH_DIR/$_id.htpasswd\""
-                echo "    auth.require = ( \"\" => ( \"method\" => \"basic\", \"realm\" => \"Detour\", \"require\" => \"valid-user\" ) )"
+
+    if [ -n "$_cd" ] && [ -f "$_cd/combined.pem" ] && lighttpd_has_proxy; then
+    # ONE socket block per port, not one per mapping. lighttpd merges contexts whose
+    # condition is identical, and a variable assigned twice inside the merged context
+    # (ssl.pemfile, in our case) is a FATAL config error — so emitting a
+    # $SERVER["socket"] == ":443" block per name-based mapping would take the whole
+    # portmap config down as soon as a second name was published, leaving Keenetic
+    # with no published services at all.
+    for _port in $(awk -F'|' '$2 == 1 && ($3 == "https" || $3 == "vhost") { print $4 }' \
+                   "$CONF" 2>/dev/null | sort -un); do
+        _pany=0
+        _body=""
+        while IFS= read -r ln; do
+            [ -n "$ln" ] || continue
+            case "$ln" in \#*) continue ;; esac
+            _id=$(fld 1 "$ln");   _en=$(fld 2 "$ln");   _mode=$(fld 3 "$ln")
+            _lp=$(fld 4 "$ln");   _tip=$(fld 6 "$ln");  _tp=$(fld 7 "$ln")
+            _usr=$(fld 10 "$ln"); _host=$(fld 13 "$ln"); _xff=$(fld 14 "$ln")
+            case "$_mode" in https|vhost) ;; *) continue ;; esac
+            [ "$_en" = 1 ] || continue
+            [ "$_lp" = "$_port" ] || continue
+            [ "$_mode" = vhost ] && [ -z "$_host" ] && continue
+
+            if [ "$_pany" = 0 ]; then
+                {
+                    echo ""
+                    echo "\$SERVER[\"socket\"] == \":$_port\" {"
+                    echo "    ssl.engine  = \"enable\""
+                    echo "    ssl.pemfile = \"$_cd/combined.pem\""
+                } >> "$_tmp"
+                _pany=1
+                _any=1
             fi
-            echo "}"
-        } >> "$_tmp"
-    done < "$CONF"
+
+            # A name-based mapping shares the socket with every other name, so its
+            # proxy lives one level deeper, inside a Host condition. A port-based one
+            # owns the socket and needs no condition at all.
+            _ind=""
+            if [ "$_mode" = vhost ]; then
+                echo "    \$HTTP[\"host\"] == \"$_host\" {" >> "$_tmp"
+                _ind="    "
+            fi
+            {
+                echo "$_ind    proxy.server = ( \"\" => (( \"host\" => \"$_tip\", \"port\" => $_tp )) )"
+                # lighttpd >= 1.4.46: forward the Upgrade handshake so WebSockets work.
+                echo "$_ind    proxy.header = ( \"upgrade\" => \"enable\" )"
+                # Same reasoning as the nginx branch: some applications refuse a request
+                # that carries a forwarded-for header from an untrusted proxy outright.
+                [ "$_xff" = 0 ] && \
+                    echo "$_ind    proxy.forwarded = ( \"for\" => \"disable\", \"proto\" => \"enable\" )"
+                if [ -n "$_usr" ] && [ -f "$AUTH_DIR/$_id.htpasswd" ]; then
+                    echo "$_ind    server.modules += ( \"mod_auth\", \"mod_authn_file\" )"
+                    echo "$_ind    auth.backend = \"htpasswd\""
+                    echo "$_ind    auth.backend.htpasswd.userfile = \"$AUTH_DIR/$_id.htpasswd\""
+                    echo "$_ind    auth.require = ( \"\" => ( \"method\" => \"basic\", \"realm\" => \"Detour\", \"require\" => \"valid-user\" ) )"
+                fi
+                [ -n "$_ind" ] && echo "    }"
+            } >> "$_tmp"
+        done < "$CONF"
+        [ "$_pany" = 1 ] && echo "}" >> "$_tmp"
+    done
+    fi
 
     if [ "$_any" = 0 ]; then
         rm -f "$_tmp"
@@ -470,7 +640,7 @@ sync_firewall_openwrt() {
         _tp=$(fld 7 "$ln");  _src=$(fld 9 "$ln")
         [ "$_en" = 1 ] || continue
         case "$_mode" in
-            https)
+            https|vhost)
                 # Reverse proxy runs ON the router → this is an INPUT accept.
                 # src=lan means "don't open it on the WAN at all".
                 _zone=wan; [ "$_src" = lan ] && _zone=lan
@@ -663,7 +833,16 @@ status|list)
     printf '"dnat_supported":%s,"dnat_reason":%s,' "$CAP_DNAT" "$(json_str "$CAP_DNAT_WHY")"
     auth_caps
     printf '"auth_supported":%s,"auth_reason":%s,' "$CAP_AUTH" "$(json_str "$CAP_AUTH_WHY")"
-    printf '"domain":%s,"lan_cidr":%s,"mappings":[' "$(json_str "$_dom")" "$(json_str "$(lan_cidr)")"
+    # The SAN list drives the panel's name field: it can offer the wildcard suffix
+    # and refuse a name the browser would reject before anything is written.
+    printf '"domain":%s,"lan_cidr":%s,"cert_hosts":[' "$(json_str "$_dom")" "$(json_str "$(lan_cidr)")"
+    _cfirst=1
+    for _ch in $(cert_hosts); do
+        [ "$_cfirst" = 1 ] || printf ','
+        _cfirst=0
+        printf '%s' "$(json_str "$_ch")"
+    done
+    printf '],"mappings":[' 
     _first=1
     while IFS= read -r ln; do
         [ -n "$ln" ] || continue
@@ -671,13 +850,15 @@ status|list)
         _id=$(fld 1 "$ln");  _en=$(fld 2 "$ln");  _mode=$(fld 3 "$ln")
         _lp=$(fld 4 "$ln");  _pr=$(fld 5 "$ln");  _tip=$(fld 6 "$ln")
         _tp=$(fld 7 "$ln");  _sch=$(fld 8 "$ln"); _src=$(fld 9 "$ln")
-        _usr=$(fld 10 "$ln"); _name=$(fld 12 "$ln")
+        _usr=$(fld 10 "$ln"); _name=$(fld 12 "$ln"); _host=$(fld 13 "$ln"); _xff=$(fld 14 "$ln")
         # Ports go out as JSON NUMBERS — a hand-edited config with a non-numeric
         # port would otherwise emit invalid JSON and blank the whole panel section.
         case "$_lp" in ''|*[!0-9]*) _lp=0 ;; esac
         case "$_tp" in ''|*[!0-9]*) _tp=0 ;; esac
         _lst=false
-        [ "$_mode" = https ] && [ "$_en" = 1 ] && port_listening "$_lp" && _lst=true
+        case "$_mode" in
+            https|vhost) [ "$_en" = 1 ] && port_listening "$_lp" && _lst=true ;;
+        esac
         [ "$_first" = 1 ] || printf ','
         _first=0
         printf '{"id":%s,"enabled":%s,"mode":%s,"listen_port":%s,"proto":%s,' \
@@ -685,25 +866,32 @@ status|list)
             "$(json_str "$_mode")" "$_lp" "$(json_str "$_pr")"
         printf '"target_ip":%s,"target_port":%s,"scheme":%s,"src":%s,' \
             "$(json_str "$_tip")" "$_tp" "$(json_str "$_sch")" "$(json_str "$_src")"
-        printf '"auth_user":%s,"auth":%s,"name":%s,"listening":%s}' \
+        printf '"auth_user":%s,"auth":%s,"name":%s,"host":%s,"xff":%s,"listening":%s}' \
             "$(json_str "$_usr")" "$([ -n "$_usr" ] && echo true || echo false)" \
-            "$(json_str "$_name")" "$_lst"
+            "$(json_str "$_name")" "$(json_str "$_host")" \
+            "$([ "$_xff" = 0 ] && echo false || echo true)" "$_lst"
     done < "$CONF"
     printf ']}\n'
     ;;
 
-# set <id> <enabled> <mode> <listen_port> <proto> <target_ip> <target_port> <scheme> <src> <name…>
+# set <id> <enabled> <mode> <listen_port> <proto> <target_ip> <target_port> <scheme> <src> <host> <xff> <name…>
+# <host> is "-" (or empty) for the port-based modes, <xff> is 0|1 (default 1); both
+# are passed BEFORE the name, because the name is the greedy rest of the line.
 set)
     shift
-    # `shift 9` is a hard error in ash when fewer args are present — check first.
-    [ $# -ge 9 ] || die_json "мало аргументов для set"
+    # `shift 10` is a hard error in ash when fewer args are present — check first.
+    [ $# -ge 11 ] || die_json "мало аргументов для set"
     ID="$1"; EN="$2"; MODE="$3"; LP="$4"; PR="$5"; TIP="$6"; TP="$7"; SCH="$8"; SRC="$9"
     shift 9
+    HOST="$1"; shift
+    [ "$HOST" = "-" ] && HOST=""
+    XFF="$1"; shift
+    case "$XFF" in 0) ;; *) XFF=1 ;; esac
     NAME=$(sanitize_text "$*")
 
     valid_id "$ID"      || die_json "некорректный id (a-z, 0-9, -, _)"
     case "$EN" in 0|1) ;; *) EN=1 ;; esac
-    case "$MODE" in https|dnat) ;; *) die_json "неизвестный режим: $MODE" ;; esac
+    case "$MODE" in https|dnat|vhost) ;; *) die_json "неизвестный режим: $MODE" ;; esac
     # «TCP + UDP» приходит из панели как одно поле "tcp udp" — храним его так же
     # (пробел, не запятая): и uci add_list, и iptables-хук раскладывают его по
     # словам. Прочие написания нормализуем, мусор — молча в tcp.
@@ -717,8 +905,24 @@ set)
     valid_port "$LP"    || die_json "некорректный внешний порт"
     valid_port "$TP"    || die_json "некорректный порт устройства"
     valid_ipv4 "$TIP"   || die_json "некорректный IP устройства"
-    is_reserved_port "$LP" && die_json "порт $LP занят самим роутером/панелью — выберите другой"
-    port_taken_by_other "$LP" "$ID" && die_json "порт $LP уже используется другим пробросом"
+    if [ "$MODE" = vhost ]; then
+        # Name-based publishing: the name IS the address, and :443 is exactly the port
+        # we want to share, so the reserved-port list must not veto it.
+        [ -n "$HOST" ] || die_json "укажите имя хоста, например hass.example.com"
+        valid_host "$HOST" || die_json "некорректное имя хоста: $HOST"
+        host_taken_by_other "$HOST" "$ID" && die_json "имя $HOST уже занято другим пробросом"
+        cert_covers "$HOST" || die_json "сертификат роутера не покрывает $HOST — выпустите wildcard-сертификат (шапка → HTTPS-сертификат → DNS-01)"
+    else
+        HOST=""
+        is_reserved_port "$LP" && die_json "порт $LP занят самим роутером/панелью — выберите другой"
+    fi
+    port_taken_by_other "$LP" "$ID" "$MODE" && die_json "порт $LP уже используется другим пробросом"
+    # And the one the config store cannot know about: a port some OTHER daemon on the
+    # router already holds. nginx would pass `nginx -t` and then fail to bind at
+    # runtime, taking every published service and the panel down with it.
+    [ "$MODE" = vhost ] && _shr=share || _shr=""
+    _busy=$(port_owner "$LP" "$_shr")
+    [ -n "$_busy" ] && die_json "порт $LP уже слушает другой процесс на роутере ($_busy) — выберите другой"
     [ "$MODE" = dnat ] && [ "$PR" = udp ] && [ "$SCH" = https ] && SCH=http
 
     caps
@@ -732,9 +936,9 @@ set)
     if [ -n "$OLD" ]; then USR=$(fld 10 "$OLD"); SHA=$(fld 11 "$OLD"); fi
 
     del_line "$ID"
-    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-        "$ID" "$EN" "$MODE" "$LP" "$PR" "$TIP" "$TP" "$SCH" "$SRC" "$USR" "$SHA" "$NAME" >> "$CONF"
-    log "set $ID mode=$MODE $LP -> $TIP:$TP src=$SRC enabled=$EN"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$ID" "$EN" "$MODE" "$LP" "$PR" "$TIP" "$TP" "$SCH" "$SRC" "$USR" "$SHA" "$NAME" "$HOST" "$XFF" >> "$CONF"
+    log "set $ID mode=$MODE ${HOST:-:$LP} -> $TIP:$TP src=$SRC enabled=$EN"
     if apply_all; then
         printf '{"ok":true,"id":%s}\n' "$(json_str "$ID")"
     else
@@ -872,6 +1076,6 @@ check-external)
     ;;
 
 *)
-    echo "usage: detour-portmap {status|list|set <id> <0|1> <https|dnat> <lport> <tcp|udp|'tcp udp'> <ip> <tport> <http|https> <any|lan> <name>|set-auth <id> <user> <pass>|toggle <id> <0|1>|delete <id>|apply|check <id>|check-external <id>}" >&2
+    echo "usage: detour-portmap {status|list|set <id> <0|1> <https|vhost|dnat> <lport> <tcp|udp|'tcp udp'> <ip> <tport> <http|https> <any|lan> <host|-> <0|1 xff> <name>|set-auth <id> <user> <pass>|toggle <id> <0|1>|delete <id>|apply|check <id>|check-external <id>}" >&2
     exit 2 ;;
 esac

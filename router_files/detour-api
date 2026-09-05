@@ -4333,6 +4333,61 @@ cert_issue)
     printf '{"ok":true,"started":true}'
     ;;
 
+# --- DNS-01: provider credentials, a read-only key test, wildcard issuance ---
+# DNS-01 is what makes name-based publishing (portmap mode=vhost) work: one wildcard
+# cert covers every future service name, so adding one costs a DNS record instead of
+# a reissue. It also needs no reachable port 80 at all.
+cert_dns_status)
+    if [ -x "$CERT_BIN" ]; then "$CERT_BIN" dns-status
+    else printf '{"ok":true,"provider":"","providers":[],"ready":false,"vars":[]}'; fi
+    ;;
+
+cert_dns_check)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$CERT_BIN" ] || { json_err "detour-cert not installed"; exit 0; }
+    "$CERT_BIN" dns-check
+    ;;
+
+cert_dns_set)
+    # Body = {"provider":"pdns","values":{"PDNS_Url":"…","PDNS_Token":"…"}}
+    # Values reach the helper as argv, never through `sh -c`, so a token may contain
+    # anything at all; only the provider and the key names are charset-checked.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$CERT_BIN" ] || { json_err "detour-cert not installed"; exit 0; }
+    DPROV=$(printf '%s' "$POST_DATA" | sed -n 's/.*"provider"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    case "$DPROV" in ''|*[!a-z0-9_-]*) json_err "bad provider"; exit 0 ;; esac
+    # NUL-separated so a value with spaces or newlines survives the round trip.
+    DKV=$(printf '%s' "$POST_DATA" | lua -e 'local c=require("cjson.safe"); local o=c.decode(io.read("*a")) or {}; local v=o.values; if type(v)~="table" then return end; for k,val in pairs(v) do if type(k)=="string" and type(val)=="string" and k:match("^[A-Za-z0-9_]+$") then io.write(k.."="..val.."\0") end end' 2>/dev/null)
+    [ -n "$DKV" ] || { json_err "нет значений для сохранения"; exit 0; }
+    # xargs -0 keeps each KEY=VALUE one argv entry; the helper validates the keys.
+    printf '%s' "$DKV" | xargs -0 "$CERT_BIN" dns-set "$DPROV"
+    ;;
+
+cert_issue_dns)
+    # Body = {"domain":"…","email":"…","alts":["*.h.example.com", …]}
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$CERT_BIN" ] || { json_err "detour-cert not installed"; exit 0; }
+    CINFO=$(printf '%s' "$POST_DATA" | lua -e 'local c=require("cjson.safe"); local o=c.decode(io.read("*a")) or {}; local a={}; if type(o.alts)=="table" then for _,v in ipairs(o.alts) do if type(v)=="string" and v~="" then a[#a+1]=v end end end; io.write((type(o.domain)=="string" and o.domain or "").."\t"..(type(o.email)=="string" and o.email or "").."\t"..table.concat(a," "))' 2>/dev/null)
+    CDOM=$(printf '%s' "$CINFO" | cut -f1)
+    CEML=$(printf '%s' "$CINFO" | cut -f2)
+    CALT=$(printf '%s' "$CINFO" | cut -f3)
+    case "$CDOM" in ''|*[!a-zA-Z0-9.-]*) json_err "bad domain"; exit 0 ;; esac
+    case "$CEML" in ''|*[!a-zA-Z0-9.@_+-]*) json_err "bad email"; exit 0 ;; esac
+    # Each alt is interpolated into detach_bg's `sh -c` string, so it is both charset
+    # checked AND single-quoted below — a wildcard is a glob to the shell otherwise.
+    CALT_Q=""
+    for _a in $CALT; do
+        case "$_a" in
+            \*.*) _rest=${_a#\*.} ;;
+            *)    _rest=$_a ;;
+        esac
+        case "$_rest" in ''|*[!a-zA-Z0-9.-]*) json_err "bad alt domain"; exit 0 ;; esac
+        CALT_Q="$CALT_Q '$_a'"
+    done
+    detach_bg "/tmp/detour-cert-bg.log" "$CERT_BIN" issue-dns "$CDOM" "$CEML" $CALT_Q
+    printf '{"ok":true,"started":true}'
+    ;;
+
 # ==================== CLOUDFLARE WARP ====================
 # Тонкая обёртка над /usr/sbin/detour-warp. WARP — обычный wireguard-профиль
 # (панель их уже умеет), поэтому здесь только ДОБЫЧА учётки бесплатного устройства
@@ -4528,15 +4583,24 @@ portmap_save)
     PM_TIP=$(printf '%s' "$POST_DATA"   | sed -n 's/.*"target_ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     PM_SCH=$(printf '%s' "$POST_DATA"   | sed -n 's/.*"scheme"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     PM_SRC=$(printf '%s' "$POST_DATA"   | sed -n 's/.*"src"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PM_HOST=$(printf '%s' "$POST_DATA"  | sed -n 's/.*"host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    # Passing the client's IP on to the application is the default; some apps (Home
+    # Assistant) reject a request carrying it from a proxy they don't trust.
+    PM_XFF=1
+    printf '%s' "$POST_DATA" | grep -q '"xff"[[:space:]]*:[[:space:]]*false' && PM_XFF=0
     PM_LP=$(printf '%s' "$POST_DATA"    | sed -n 's/.*"listen_port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     PM_TP=$(printf '%s' "$POST_DATA"    | sed -n 's/.*"target_port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
     PM_EN=1
     printf '%s' "$POST_DATA" | grep -q '"enabled"[[:space:]]*:[[:space:]]*false' && PM_EN=0
     case "$PM_ID" in ''|*[!a-z0-9_-]*) json_err "bad id"; exit 0 ;; esac
+    case "$PM_HOST" in *[!a-zA-Z0-9.-]*) json_err "bad host"; exit 0 ;; esac
+    # A name-based mapping shares the panel's TLS port — the operator picks a name,
+    # not a port, so the panel may leave listen_port out entirely.
+    [ "$PM_MODE" = vhost ] && [ -z "$PM_LP" ] && PM_LP=443
     [ -n "$PM_LP" ] || { json_err "не указан внешний порт"; exit 0; }
     [ -n "$PM_TP" ] || { json_err "не указан порт устройства"; exit 0; }
     "$PORTMAP_BIN" set "$PM_ID" "$PM_EN" "$PM_MODE" "$PM_LP" "$PM_PROTO" \
-        "$PM_TIP" "$PM_TP" "$PM_SCH" "$PM_SRC" "$PM_NAME"
+        "$PM_TIP" "$PM_TP" "$PM_SCH" "$PM_SRC" "${PM_HOST:--}" "$PM_XFF" "$PM_NAME"
     ;;
 
 portmap_auth)

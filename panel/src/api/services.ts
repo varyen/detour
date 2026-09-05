@@ -1,5 +1,6 @@
 import { requestJson, requestJsonTolerant } from "./client";
 import type {
+  CertDnsStatus,
   CertStatus,
   OffloadStatus,
   PortmapEntry,
@@ -39,6 +40,25 @@ export const services = {
   certIssue: (domain: string, email: string) =>
     requestJson<{ ok: boolean; started: boolean }>("cert_issue", {
       body: { domain, email },
+    }),
+
+  /* --- DNS-01: подтверждение владения через API DNS-провайдера ---
+     Даёт wildcard (Let's Encrypt выдаёт его только так) и не требует, чтобы
+     снаружи был доступен 80-й порт. */
+  certDnsStatus: () => requestJsonTolerant<CertDnsStatus>("cert_dns_status"),
+  certDnsSet: (provider: string, values: Record<string, string>) =>
+    requestJson<{ ok: boolean; ready?: boolean }>("cert_dns_set", {
+      body: { provider, values },
+    }),
+  /** Проверка ключа чтением списка зон — выпуск не тратится. */
+  certDnsCheck: () =>
+    requestJson<{ ok: boolean; http?: number; zones?: number }>("cert_dns_check", {
+      method: "POST",
+      timeoutMs: 30_000,
+    }),
+  certIssueDns: (domain: string, email: string, alts: string[]) =>
+    requestJson<{ ok: boolean; started: boolean }>("cert_issue_dns", {
+      body: { domain, email, alts },
     }),
 
   /* --- уведомления в браузер --- */
