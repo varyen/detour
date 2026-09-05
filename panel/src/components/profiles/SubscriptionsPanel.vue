@@ -24,6 +24,8 @@ type SubRecord = Subscription & {
   apply_routing?: boolean;
   last_status?: string;
   last_saved?: number;
+  /** Каким маршрутом дошёл последний фид: "vpn" | "direct". */
+  last_via?: string;
 };
 
 const store = useProfilesStore();
@@ -324,6 +326,10 @@ defineExpose({ openNew, refreshAll, reload: load });
             <!-- Настройка меняет маршрутизацию всего роутера, а не только эту
                  подписку, — про включённую стоит знать из списка. -->
             <span v-if="s.apply_routing">применяет routing поставщика</span>
+            <!-- Адрес подписки берётся сначала через активный VPN и только потом
+                 напрямую. Отмечаем лишь первый случай: он означает, что напрямую
+                 панель поставщика, скорее всего, недоступна. -->
+            <span v-if="s.last_via === 'vpn'">пришла через VPN</span>
           </p>
           <p v-if="s.last_error" class="err">Последняя ошибка: {{ s.last_error }}</p>
         </div>

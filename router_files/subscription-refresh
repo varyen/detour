@@ -16,6 +16,12 @@
 --                                          autoupdate=false unless --force).
 --   subscription-refresh --force        — ignore both interval AND autoupdate.
 --   subscription-refresh --id=<sub-id>  — process just one (always forced).
+--   subscription-refresh --no-vpn       — skip the VPN leg, fetch directly only.
+--
+-- Every URL is fetched through the ACTIVE VPN chain first (a throwaway sing-box
+-- with a mixed inbound, same trick as detour-warp) and over the bare WAN second,
+-- because subscription panels are themselves often blocked and router-local
+-- traffic never passes through the transparent proxy.
 --
 -- Per-subscription supported body formats:
 --   1. JSON: v2ray-core config array OR sing-box outbound JSON.
@@ -44,10 +50,11 @@ local STATE_DIR  = OPT .. "/var/state"
 local STATE_FILE = STATE_DIR .. "/subscription-refresh.json"
 
 -- ===== CLI argument parsing =====
-local CLI = { force = false, all = false, id = nil }
+local CLI = { force = false, all = false, id = nil, no_vpn = false }
 for _, a in ipairs(arg or {}) do
     if a == "--force" then CLI.force = true
     elseif a == "--all" then CLI.all = true
+    elseif a == "--no-vpn" then CLI.no_vpn = true
     else
         local id = a:match("^%-%-id=(.+)$")
         if id then CLI.id = id; CLI.force = true end
@@ -113,6 +120,140 @@ local function shell_quote(s) return "'" .. string.gsub(s or "", "'", [['\'']]) 
 
 local function log(msg) io.stdout:write("subscription-refresh: " .. msg .. "\n") end
 local function warn(msg) io.stderr:write("subscription-refresh: " .. msg .. "\n") end
+
+-- Run a command for its exit status only. `os.execute`'s return value differs
+-- between Lua 5.1 and 5.3 (raw wait status vs. true/false + reason), and both
+-- platforms have to agree here, so read `$?` back through the pipe instead.
+local function sh_ok(cmd)
+    local h = io.popen(cmd .. " >/dev/null 2>&1; echo $?", "r")
+    if not h then return false end
+    local rc = h:read("*a"); h:close()
+    return tonumber((rc or ""):match("%d+") or "1") == 0
+end
+
+local function file_exists(path)
+    local f = io.open(path, "r")
+    if f then f:close(); return true end
+    return false
+end
+
+-- ===== fetching through the active VPN =====
+-- Subscription panels are themselves routinely blocked, and router-LOCAL traffic
+-- never touches sing-box: the REDIRECT rules live in nat PREROUTING, which only
+-- sees traffic FORWARDED from the LAN. nat OUTPUT is deliberately empty —
+-- redirecting the router's own sockets would loop sing-box into itself — so a
+-- plain curl from this script always leaves over the bare WAN.
+--
+-- To reach a blocked panel we do exactly what detour-warp does for the Cloudflare
+-- API: render the ACTIVE chain with a mixed inbound and run a throwaway sing-box
+-- alongside the daemon, then point curl at it. Started lazily (only when some
+-- subscription actually needs fetching) and shared by every subscription in the run.
+local API_BIN, SINGBOX_BIN
+if OPT == "" then
+    API_BIN     = "/www/cgi-bin/detour-api"
+    SINGBOX_BIN = "/usr/bin/sing-box"
+else
+    API_BIN     = "/opt/share/www/cgi-bin/detour-api"
+    SINGBOX_BIN = "/opt/bin/sing-box"
+end
+local VPN_PORT = 19484            -- 19480 = egress-ip probe, 19482 = detour-warp
+local VPN_CONF = "/tmp/detour-subfetch.conf"
+local VPN_DATA = "/tmp/detour-subfetch.data"
+local VPN_PID  = "/tmp/detour-subfetch.pid"
+local VPN_LOG  = "/tmp/detour-subfetch.log"
+
+local VPN = { started = false, ok = false, owner = false }
+
+-- pid of a live instance from the pidfile, or nil (dead / no file).
+local function vpn_live_pid()
+    local pid = (read_all(VPN_PID) or ""):match("%d+")
+    if pid and sh_ok("kill -0 " .. pid) then return pid end
+    return nil
+end
+
+-- Tears down ONLY the instance this run started. Cron and a manual «Обновить»
+-- from the panel can overlap, and killing the other run's proxy mid-fetch would
+-- knock it onto the direct route for no reason.
+local function vpn_proxy_down()
+    VPN.ok = false
+    if not VPN.owner then return end
+    local pid = (read_all(VPN_PID) or ""):match("%d+")
+    if pid then
+        os.execute("kill " .. pid .. " 2>/dev/null")
+        os.execute("sleep 1; kill -9 " .. pid .. " 2>/dev/null")
+    end
+    os.execute("rm -rf " .. VPN_CONF .. " " .. VPN_DATA .. " " .. VPN_PID .. " 2>/dev/null")
+    VPN.owner = false
+end
+
+-- Returns a curl proxy URL, or nil when no VPN route is available: no active
+-- chain, sing-box or the CGI missing, a broken profile in the chain. Never fatal
+-- — the caller just falls back to a direct fetch.
+local function vpn_proxy_url()
+    if VPN.started then
+        return VPN.ok and ("socks5h://127.0.0.1:" .. VPN_PORT) or nil
+    end
+    VPN.started = true
+    if CLI.no_vpn then return nil end
+    if not file_exists(API_BIN) or not file_exists(SINGBOX_BIN) then return nil end
+    -- Another run already holds the port: don't fight over it, just go direct.
+    if vpn_live_pid() then return nil end
+    -- Leftovers from a run that was killed mid-flight (the pid above is dead).
+    os.execute("rm -rf " .. VPN_CONF .. " " .. VPN_DATA .. " " .. VPN_PID .. " 2>/dev/null")
+    VPN.owner = true
+    os.execute(string.format("%s render-mixed '' %d > %s 2>/dev/null",
+        shell_quote(API_BIN), VPN_PORT, shell_quote(VPN_CONF)))
+    local conf = read_all(VPN_CONF)
+    if not conf or conf == "" then vpn_proxy_down(); return nil end
+    if not sh_ok(shell_quote(SINGBOX_BIN) .. " check -c " .. shell_quote(VPN_CONF)) then
+        vpn_proxy_down(); return nil
+    end
+    os.execute(string.format("%s run -c %s -D %s > %s 2>&1 & echo $! > %s",
+        shell_quote(SINGBOX_BIN), shell_quote(VPN_CONF), shell_quote(VPN_DATA),
+        shell_quote(VPN_LOG), shell_quote(VPN_PID)))
+    os.execute("sleep 2")
+    local pid = (read_all(VPN_PID) or ""):match("%d+")
+    if not pid or not sh_ok("kill -0 " .. pid) then vpn_proxy_down(); return nil end
+    VPN.ok = true
+    log("fetching through the active VPN (127.0.0.1:" .. VPN_PORT .. ")")
+    return "socks5h://127.0.0.1:" .. VPN_PORT
+end
+
+-- One HTTP fetch. `proxy` = nil for a direct fetch, else a curl -x URL.
+-- Returns body, or nil + a human-readable reason.
+local function fetch_body(url, ua, proxy, timeout)
+    -- Capture the HTTP status via -w so a 502/HTML error page is reported clearly
+    -- ("server returned HTTP 502…") instead of the opaque "no profiles parsed
+    -- (skipped=N)". -L follows redirects, so %{http_code} is the FINAL response's
+    -- code. The marker rides on its own trailing line (leading \n separates it from
+    -- the body); we split it off before parsing.
+    local px = proxy and (" -x " .. shell_quote(proxy)) or ""
+    local cmd = string.format(
+        "curl -sS -L --max-time %d%s -A %s -H 'Accept: */*' -w '\\nDETOUR_HTTP:%%{http_code}' %s 2>/dev/null",
+        timeout, px, shell_quote(ua), shell_quote(url))
+    local h = io.popen(cmd, "r")
+    if not h then return nil, "popen failed" end
+    local out = h:read("*a"); h:close()
+    if not out or out == "" then return nil, "empty response (network error?)" end
+
+    -- Split the "DETOUR_HTTP:NNN" status marker off the tail (greedy %s match grabs
+    -- the LAST occurrence). If -w didn't fire (very old curl), fall back to raw out.
+    local body, http_code = out:match("^(.*)\nDETOUR_HTTP:(%d+)%s*$")
+    if not http_code then body = out end
+    if http_code == "000" then
+        return nil, "network error — curl could not complete the request"
+    end
+    if http_code and tonumber(http_code) >= 400 then
+        return nil, "server returned HTTP " .. http_code .. ", not a subscription feed"
+    end
+    if not body or body == "" then return nil, "empty response" end
+    -- An HTML body (e.g. an nginx 5xx page, or a 200 captive/landing page) is never
+    -- a subscription feed — say so instead of letting the parser reject every line.
+    if body:lower():match("<html") then
+        return nil, "server returned an HTML page, not a subscription feed"
+    end
+    return body
+end
 
 -- ===== transliteration + makeProfileId (mirror of index.html) =====
 local TRANSLIT = {
@@ -707,40 +848,38 @@ local function refresh_subscription(sub)
     local ua = sub.user_agent
     if not ua or ua == "" then ua = "sing-box/1.13.2" end
 
-    -- Capture the HTTP status via -w so a 502/HTML error page is reported clearly
-    -- ("server returned HTTP 502…") instead of the opaque "no profiles parsed
-    -- (skipped=N)". -L follows redirects, so %{http_code} is the FINAL response's
-    -- code. The marker rides on its own trailing line (leading \n separates it from
-    -- the body); we split it off before parsing.
-    local cmd = string.format(
-        "curl -sS -L --max-time 30 -A %s -H 'Accept: */*' -w '\\nDETOUR_HTTP:%%{http_code}' %s 2>/dev/null",
-        shell_quote(ua), shell_quote(sub.url))
-    local h = io.popen(cmd, "r")
-    if not h then return false, "popen failed" end
-    local out = h:read("*a"); h:close()
-    if not out or out == "" then return false, "empty response (network error?)" end
+    -- Try the active VPN first, the bare WAN second. An attempt only counts as a
+    -- success once the body actually PARSES into ≥1 profile — an ISP that answers a
+    -- blocked panel with its own 200-OK stub would otherwise look like a win and we
+    -- would never fall back. Errors from both legs are kept so `last_error` says
+    -- which route failed how.
+    local attempts = {}
+    local px = vpn_proxy_url()
+    if px then attempts[#attempts + 1] = { via = "vpn", proxy = px, timeout = 25 } end
+    attempts[#attempts + 1] = { via = "direct", proxy = nil, timeout = 30 }
 
-    -- Split the "DETOUR_HTTP:NNN" status marker off the tail (greedy %s match grabs
-    -- the LAST occurrence). If -w didn't fire (very old curl), fall back to raw out.
-    local body, http_code = out:match("^(.*)\nDETOUR_HTTP:(%d+)%s*$")
-    if not http_code then body = out end
-    if http_code == "000" then
-        return false, "network error — curl could not complete the request"
+    local body, profiles, bypass_domains, skipped, source_kind, via
+    local errs = {}
+    for _, a in ipairs(attempts) do
+        local b, err = fetch_body(sub.url, ua, a.proxy, a.timeout)
+        if not b then
+            errs[#errs + 1] = a.via .. ": " .. tostring(err)
+            -- A dead VPN would cost every remaining subscription a full timeout;
+            -- one network-level failure through it is enough to drop that leg for
+            -- the rest of the run. A body that merely parsed to nothing is the
+            -- panel's business, not the tunnel's, so that keeps the VPN in play.
+            if a.via == "vpn" then vpn_proxy_down() end
+        else
+            local p, bd, sk, kind = parse_body_into_profiles(b, sub)
+            if #p > 0 then
+                body, profiles, bypass_domains, skipped, source_kind, via = b, p, bd, sk, kind, a.via
+                break
+            end
+            errs[#errs + 1] = a.via .. ": no profiles parsed (skipped=" ..
+                tostring(sk) .. ", kind=" .. tostring(kind) .. ")"
+        end
     end
-    if http_code and tonumber(http_code) >= 400 then
-        return false, "server returned HTTP " .. http_code .. ", not a subscription feed"
-    end
-    if not body or body == "" then return false, "empty response" end
-    -- An HTML body (e.g. an nginx 5xx page, or a 200 captive/landing page) is never
-    -- a subscription feed — say so instead of letting the parser reject every line.
-    if body:lower():match("<html") then
-        return false, "server returned an HTML page, not a subscription feed"
-    end
-
-    local profiles, bypass_domains, skipped, source_kind = parse_body_into_profiles(body, sub)
-    if #profiles == 0 then
-        return false, "no profiles parsed (skipped=" .. tostring(skipped) .. ", kind=" .. tostring(source_kind) .. ")"
-    end
+    if not profiles then return false, table.concat(errs, "; ") end
 
     -- Apply bypass list if requested
     local bypass_written = 0
@@ -792,7 +931,7 @@ local function refresh_subscription(sub)
         saved = saved, removed = removed, skipped = skipped,
         kept_stale = kept_stale,
         bypass_written = bypass_written, source_kind = source_kind,
-        fetched_bytes = #body,
+        fetched_bytes = #body, via = via,
     }
 end
 
@@ -809,6 +948,8 @@ local function persist_outcome(sub, ok, payload)
         sub.last_bypass_written = payload.bypass_written or 0
         sub.last_source_kind = payload.source_kind or ""
         sub.last_fetched_bytes = payload.fetched_bytes or 0
+        -- "vpn" | "direct" — which route actually delivered the feed.
+        sub.last_via = payload.via or "direct"
     else
         sub.last_status = "error"
         sub.last_error = tostring(payload or "")
@@ -899,15 +1040,22 @@ for _, sub in ipairs(subs) do
             warn(string.format("FAIL %s: %s", sub.id, tostring(payload)))
             last_state.runs[#last_state.runs + 1] = { id = sub.id, ok = false, error = tostring(payload) }
         else
-            log(string.format("OK %s: saved=%d removed=%d skipped=%d kind=%s bypass=%d",
+            log(string.format("OK %s: saved=%d removed=%d skipped=%d kind=%s bypass=%d via=%s",
                 sub.id, payload.saved, payload.removed, payload.skipped,
-                payload.source_kind or "?", payload.bypass_written or 0))
+                payload.source_kind or "?", payload.bypass_written or 0,
+                payload.via or "direct"))
             last_state.runs[#last_state.runs + 1] = { id = sub.id, ok = true,
                 saved = payload.saved, removed = payload.removed,
-                skipped = payload.skipped, source_kind = payload.source_kind }
+                skipped = payload.skipped, source_kind = payload.source_kind,
+                via = payload.via }
         end
     end
 end
+
+-- The throwaway sing-box must not outlive the run: it holds VPN_PORT, and the
+-- next run's vpn_proxy_url() would find the port taken and silently lose the VPN
+-- leg for good.
+vpn_proxy_down()
 
 last_state.processed = processed
 last_state.errored = errored
