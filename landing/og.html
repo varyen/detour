@@ -1,0 +1,100 @@
+<!doctype html>
+<!--
+  Исходник картинки для og:image. Рендерится в img/og.png ровно 1200×630
+  скриптом landing/shoot/og.cjs — открывать в браузере как страницу не нужно.
+-->
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+        background: #070a12;
+        color: #e7ecf8;
+        font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        position: relative;
+      }
+      .glow {
+        position: absolute;
+        inset: -240px -100px auto -160px;
+        height: 620px;
+        background:
+          radial-gradient(52% 100% at 24% 0%, rgba(53, 214, 196, 0.24), transparent 62%),
+          radial-gradient(46% 100% at 74% 6%, rgba(91, 140, 255, 0.22), transparent 60%);
+      }
+      .grid {
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+        background-size: 46px 46px;
+        mask-image: linear-gradient(160deg, #000, transparent 72%);
+      }
+      .in { position: relative; padding: 62px 0 0 64px; width: 620px; }
+      .brand { display: flex; align-items: center; gap: 12px; font-size: 26px; font-weight: 700; }
+      .brand svg { width: 34px; height: 34px; }
+      h1 {
+        margin: 30px 0 18px;
+        font-size: 54px;
+        line-height: 1.05;
+        letter-spacing: -0.03em;
+        font-weight: 780;
+      }
+      .grad {
+        background: linear-gradient(96deg, #35d6c4, #5b8cff);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      p { margin: 0; color: #9fabc8; font-size: 21px; max-width: 520px; }
+      .chips { display: flex; gap: 8px; margin-top: 26px; flex-wrap: wrap; }
+      .chip {
+        border: 1px solid #1b2440;
+        background: #0e1424;
+        border-radius: 999px;
+        padding: 5px 14px;
+        font-size: 15px;
+        color: #9fabc8;
+      }
+      .shot {
+        position: absolute;
+        left: 616px;
+        top: 92px;
+        width: 760px;
+        border: 1px solid #1b2440;
+        border-radius: 14px;
+        overflow: hidden;
+        box-shadow: -30px 40px 90px -40px #000;
+      }
+      .shot img { display: block; width: 100%; height: auto; }
+    </style>
+  </head>
+  <body>
+    <div class="glow"></div>
+    <div class="grid"></div>
+
+    <div class="in">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" fill="none">
+          <circle cx="16" cy="16" r="13" stroke="#35d6c4" stroke-width="2" />
+          <path d="M6 20h7l6-9h7" stroke="#5b8cff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        Detour
+      </div>
+      <h1>Обход блокировок<br /><span class="grad">на роутере</span></h1>
+      <p>sing-box и zapret под одной панелью: профили, маршруты по сайтам, цепочки и WARP — для всей домашней сети сразу.</p>
+      <div class="chips">
+        <span class="chip">OpenWrt / GL.iNet</span>
+        <span class="chip">Keenetic</span>
+        <span class="chip">MIT</span>
+      </div>
+    </div>
+
+    <div class="shot"><img src="img/hero.webp" alt="" /></div>
+  </body>
+</html>

@@ -6,36 +6,39 @@
     <title>Detour — панель обхода блокировок для роутера</title>
     <meta
       name="description"
-      content="Detour — веб-панель для роутеров GL.iNet / OpenWrt и Keenetic: sing-box (VLESS/Trojan/WireGuard), DPI-обход zapret, цепочки VPN, Cloudflare WARP, маршрутизация по доменам, автопроверка и переключение профилей."
+      content="Detour — веб-панель для роутеров GL.iNet / OpenWrt и Keenetic: sing-box (VLESS, Trojan, WireGuard, Hysteria2), DPI-обход zapret, маршруты по сайтам, цепочки и Cloudflare WARP, проверка профилей и автопереключение, публикация домашних сервисов наружу."
     />
-    <meta name="theme-color" content="#0b1020" />
+    <meta name="theme-color" content="#070a12" />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 
     <meta property="og:type" content="website" />
     <meta property="og:title" content="Detour — панель обхода блокировок для роутера" />
     <meta
       property="og:description"
-      content="Два движка обхода под одним интерфейсом прямо на роутере: sing-box и zapret. Профили, цепочки, WARP, маршрутизация по доменам, автопереключение на живой сервер."
+      content="Два движка обхода под одним интерфейсом прямо на роутере: sing-box и zapret. Профили и подписки, маршруты по сайтам, цепочки, WARP, автопереключение на живой сервер — для всей домашней сети сразу."
     />
     <meta property="og:url" content="https://detour.varyen.net/" />
     <meta property="og:image" content="https://detour.varyen.net/img/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
 
     <style>
       :root {
-        --bg: #080b16;
-        --bg-2: #0d1224;
-        --panel: #121834;
-        --line: #1e2748;
-        --line-2: #2a3560;
-        --fg: #e8ecf8;
-        --fg-dim: #a3adcc;
-        --fg-mute: #6f7ba3;
-        --accent: #4f7cff;
-        --accent-2: #35d6c4;
-        --warn: #ffb020;
-        --ok: #35c77a;
-        --radius: 14px;
-        --wrap: 1140px;
+        --bg: #070a12;
+        --bg-soft: #0a0f1c;
+        --card: #0e1424;
+        --card-2: #111a2e;
+        --line: #1b2440;
+        --line-2: #27345c;
+        --fg: #e7ecf8;
+        --fg-dim: #9fabc8;
+        --fg-mute: #6b779b;
+        --cyan: #35d6c4;
+        --blue: #5b8cff;
+        --amber: #ffb020;
+        --red: #ff6b6b;
+        --green: #35c77a;
+        --r: 16px;
+        --wrap: 1180px;
         --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
           "Liberation Mono", monospace;
         --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -43,512 +46,557 @@
       }
 
       * { box-sizing: border-box; }
-
       html { scroll-behavior: smooth; }
 
       body {
         margin: 0;
         background: var(--bg);
         color: var(--fg);
-        font-family: var(--sans);
-        font-size: 16px;
-        line-height: 1.65;
+        font: 16px/1.65 var(--sans);
         -webkit-font-smoothing: antialiased;
         overflow-x: hidden;
       }
 
-      a { color: var(--accent); text-decoration: none; }
+      a { color: var(--cyan); text-decoration: none; }
       a:hover { text-decoration: underline; }
-
       code, kbd, pre { font-family: var(--mono); }
 
       code:not(pre code) {
-        background: #17203f;
+        background: #131c33;
         border: 1px solid var(--line);
         border-radius: 6px;
         padding: 1px 6px;
-        font-size: 0.88em;
-        color: #cfe0ff;
+        font-size: 0.86em;
+        color: #cfe3ff;
       }
 
-      .wrap {
-        max-width: var(--wrap);
-        margin: 0 auto;
-        padding: 0 24px;
+      kbd {
+        background: #131c33;
+        border: 1px solid var(--line-2);
+        border-bottom-width: 2px;
+        border-radius: 6px;
+        padding: 1px 6px;
+        font-size: 0.82em;
       }
 
-      /* ===== nav ===== */
-      .nav {
+      .wrap { max-width: var(--wrap); margin: 0 auto; padding: 0 22px; }
+
+      /* ============================ шапка ============================ */
+
+      nav {
         position: sticky;
         top: 0;
         z-index: 50;
-        background: rgba(8, 11, 22, 0.82);
+        background: rgba(7, 10, 18, 0.82);
         backdrop-filter: blur(12px);
-        border-bottom: 1px solid var(--line);
+        border-bottom: 1px solid transparent;
+        transition: border-color 0.2s;
       }
+      nav.stuck { border-bottom-color: var(--line); }
+
       .nav-in {
         display: flex;
         align-items: center;
-        gap: 24px;
-        height: 60px;
+        gap: 18px;
+        height: 62px;
       }
+
       .brand {
         display: flex;
         align-items: center;
         gap: 10px;
         font-weight: 700;
-        font-size: 17px;
-        color: var(--fg);
         letter-spacing: -0.01em;
+        color: var(--fg);
+        font-size: 18px;
       }
       .brand:hover { text-decoration: none; }
-      .brand svg { flex-shrink: 0; }
-      .nav-links {
-        display: flex;
-        gap: 22px;
-        margin-left: auto;
+      .brand svg { width: 26px; height: 26px; }
+
+      .nav-links { display: flex; gap: 22px; margin-left: auto; }
+      .nav-links a {
+        color: var(--fg-dim);
         font-size: 14.5px;
       }
-      .nav-links a { color: var(--fg-dim); }
       .nav-links a:hover { color: var(--fg); text-decoration: none; }
-      .nav-gh {
-        display: inline-flex;
-        align-items: center;
-        gap: 7px;
-        border: 1px solid var(--line-2);
-        border-radius: 9px;
-        padding: 6px 12px;
-        color: var(--fg) !important;
-        font-size: 14px;
-      }
-      .nav-gh:hover { background: var(--panel); }
-      @media (max-width: 860px) {
-        .nav-links a:not(.nav-gh) { display: none; }
-      }
 
-      /* ===== hero ===== */
-      .hero {
-        position: relative;
-        padding: 84px 0 56px;
-        overflow: hidden;
-      }
-      .hero::before {
-        content: "";
-        position: absolute;
-        inset: -40% 0 auto -10%;
-        height: 720px;
-        background:
-          radial-gradient(60% 50% at 20% 30%, rgba(79, 124, 255, 0.22), transparent 70%),
-          radial-gradient(50% 50% at 80% 10%, rgba(53, 214, 196, 0.14), transparent 70%);
-        pointer-events: none;
-      }
-      .hero-in { position: relative; }
-      .tag {
+      .nav-gh {
         display: inline-flex;
         align-items: center;
         gap: 8px;
         border: 1px solid var(--line-2);
-        background: var(--bg-2);
-        border-radius: 999px;
-        padding: 5px 14px;
-        font-size: 13px;
+        border-radius: 10px;
+        padding: 7px 13px;
+        color: var(--fg);
+        font-size: 14px;
+      }
+      .nav-gh:hover { background: var(--card-2); text-decoration: none; }
+      .nav-gh svg { width: 16px; height: 16px; fill: currentColor; }
+
+      @media (max-width: 860px) {
+        .nav-links { display: none; }
+        .nav-gh { margin-left: auto; }
+      }
+
+      /* ============================ герой ============================ */
+
+      header.hero {
+        position: relative;
+        padding: 76px 0 40px;
+        overflow: hidden;
+      }
+      header.hero::before {
+        content: "";
+        position: absolute;
+        inset: -220px 0 auto;
+        height: 620px;
+        background:
+          radial-gradient(60% 100% at 22% 0%, rgba(53, 214, 196, 0.16), transparent 62%),
+          radial-gradient(48% 100% at 78% 8%, rgba(91, 140, 255, 0.16), transparent 60%);
+        pointer-events: none;
+      }
+      header.hero::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+        background-size: 46px 46px;
+        mask-image: linear-gradient(180deg, #000 0%, transparent 78%);
+        pointer-events: none;
+      }
+      .hero-in { position: relative; }
+
+      .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+      .chip {
+        font-size: 12.5px;
+        letter-spacing: 0.02em;
         color: var(--fg-dim);
-        margin-bottom: 22px;
+        border: 1px solid var(--line);
+        background: var(--card);
+        border-radius: 999px;
+        padding: 4px 12px;
       }
-      .tag b { color: var(--accent-2); font-weight: 600; }
+      .chip b { color: var(--cyan); font-weight: 600; }
+
       h1 {
-        margin: 0 0 20px;
-        font-size: clamp(34px, 5.4vw, 56px);
-        line-height: 1.1;
-        letter-spacing: -0.025em;
-        font-weight: 800;
-        max-width: 24ch;
+        margin: 0 0 18px;
+        font-size: clamp(34px, 6vw, 60px);
+        line-height: 1.06;
+        letter-spacing: -0.028em;
+        font-weight: 780;
       }
-      h1 .grad {
-        white-space: nowrap;
-        background: linear-gradient(100deg, #6f9bff, #35d6c4);
+      .grad {
+        background: linear-gradient(96deg, var(--cyan), var(--blue));
         -webkit-background-clip: text;
         background-clip: text;
         color: transparent;
       }
+
       .lead {
-        font-size: clamp(17px, 2.1vw, 20px);
+        max-width: 760px;
+        font-size: clamp(16.5px, 2.1vw, 19px);
         color: var(--fg-dim);
-        max-width: 62ch;
-        margin: 0 0 32px;
+        margin: 0 0 26px;
       }
-      .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+      .lead b { color: var(--fg); font-weight: 600; }
+
+      .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
       .btn {
         display: inline-flex;
         align-items: center;
         gap: 9px;
-        border-radius: 11px;
-        padding: 12px 22px;
-        font-size: 15px;
+        border-radius: 12px;
+        padding: 12px 20px;
         font-weight: 600;
+        font-size: 15px;
         border: 1px solid transparent;
-        cursor: pointer;
       }
       .btn:hover { text-decoration: none; }
       .btn-primary {
-        background: linear-gradient(180deg, #5b85ff, #3f68ee);
-        color: #fff;
-        box-shadow: 0 8px 24px -8px rgba(79, 124, 255, 0.7);
+        background: linear-gradient(180deg, #3ee2cf, #22b7a7);
+        color: #04231f;
+        box-shadow: 0 8px 26px -12px rgba(53, 214, 196, 0.9);
       }
-      .btn-primary:hover { filter: brightness(1.08); }
-      .btn-ghost {
-        border-color: var(--line-2);
-        color: var(--fg);
-        background: var(--bg-2);
-      }
-      .btn-ghost:hover { background: var(--panel); }
-      .hero-note { font-size: 14px; color: var(--fg-mute); }
+      .btn-primary:hover { filter: brightness(1.06); }
+      .btn-ghost { border-color: var(--line-2); color: var(--fg); }
+      .btn-ghost:hover { background: var(--card-2); }
 
-      .hero-shot {
-        margin-top: 46px;
-        position: relative;
-      }
+      .hero-note { color: var(--fg-mute); font-size: 14px; margin: 18px 0 0; }
 
-      /* ===== shots ===== */
+      /* ====================== рамки скриншотов ====================== */
+
       .shot {
-        border: 1px solid var(--line-2);
-        border-radius: var(--radius);
+        border: 1px solid var(--line);
+        border-radius: 14px;
         overflow: hidden;
-        background: var(--bg-2);
-        box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.85);
+        background: var(--card);
+        box-shadow: 0 40px 80px -50px rgba(0, 0, 0, 0.95),
+          0 0 0 1px rgba(255, 255, 255, 0.02) inset;
       }
       .shot img { display: block; width: 100%; height: auto; }
+
       .shot-bar {
         display: flex;
         align-items: center;
         gap: 7px;
         padding: 9px 13px;
-        background: #0f1530;
+        background: #0b1120;
         border-bottom: 1px solid var(--line);
       }
       .shot-bar i {
-        width: 10px;
-        height: 10px;
+        width: 9px;
+        height: 9px;
         border-radius: 50%;
-        background: #2a3560;
+        background: #2b3550;
       }
       .shot-bar span {
-        margin-left: 8px;
-        font: 12px/1 var(--mono);
-        color: var(--fg-mute);
-      }
-      figure { margin: 0; }
-      figcaption {
-        margin-top: 10px;
-        font-size: 13.5px;
+        margin-left: 10px;
+        font: 12px var(--mono);
         color: var(--fg-mute);
       }
 
-      /* ===== sections ===== */
-      section { padding: 76px 0; border-top: 1px solid var(--line); }
+      .hero-shot { margin-top: 44px; }
+      figure { margin: 0; }
+      figcaption {
+        margin-top: 12px;
+        color: var(--fg-mute);
+        font-size: 13.5px;
+        line-height: 1.5;
+      }
+
+      .phone {
+        border: 1px solid var(--line-2);
+        border-radius: 26px;
+        padding: 8px;
+        background: linear-gradient(180deg, #121a2e, #0b1120);
+        box-shadow: 0 40px 70px -46px #000;
+      }
+      /* height:auto обязателен: у картинок проставлены атрибуты width/height,
+         и без него телефон растягивается на все 1342 пикселя исходника. */
+      .phone img { display: block; width: 100%; height: auto; border-radius: 18px; }
+
+      /* ============================ секции ============================ */
+
+      section { padding: 84px 0; position: relative; }
+      section + section { border-top: 1px solid var(--line); }
+
       .sec-tag {
-        font: 600 12.5px/1 var(--mono);
-        letter-spacing: 0.14em;
+        font: 600 12px/1 var(--mono);
+        letter-spacing: 0.16em;
         text-transform: uppercase;
-        color: var(--accent-2);
+        color: var(--cyan);
         margin-bottom: 14px;
       }
       h2 {
-        margin: 0 0 16px;
-        font-size: clamp(26px, 3.6vw, 36px);
-        letter-spacing: -0.02em;
-        line-height: 1.2;
-        font-weight: 750;
+        margin: 0 0 14px;
+        font-size: clamp(26px, 3.6vw, 38px);
+        line-height: 1.15;
+        letter-spacing: -0.022em;
       }
-      .sec-lead {
-        color: var(--fg-dim);
-        max-width: 72ch;
-        margin: 0 0 40px;
-        font-size: 17px;
-      }
-      h3 { font-size: 19px; margin: 0 0 8px; letter-spacing: -0.01em; }
+      .sec-lead { max-width: 720px; color: var(--fg-dim); margin: 0 0 34px; }
 
-      /* ===== grid cards ===== */
       .grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(285px, 1fr));
-        gap: 18px;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(272px, 1fr));
       }
       .card {
-        background: linear-gradient(180deg, var(--panel), var(--bg-2));
+        background: linear-gradient(180deg, var(--card), #0b1120);
         border: 1px solid var(--line);
-        border-radius: var(--radius);
-        padding: 24px;
+        border-radius: var(--r);
+        padding: 22px;
       }
+      .card h3 { margin: 0 0 8px; font-size: 17.5px; letter-spacing: -0.01em; }
       .card p { margin: 0; color: var(--fg-dim); font-size: 15px; }
-      .card .ico {
-        width: 38px;
-        height: 38px;
+      .ico {
+        width: 34px;
+        height: 34px;
         display: grid;
         place-items: center;
         border-radius: 10px;
-        background: #1a2450;
+        background: #132038;
         border: 1px solid var(--line-2);
         margin-bottom: 14px;
-        font-size: 18px;
+        font-size: 17px;
       }
 
-      /* ===== flow diagram ===== */
+      /* блок «текст + кадр» */
+      .feat {
+        display: grid;
+        grid-template-columns: minmax(0, 0.86fr) minmax(0, 1.14fr);
+        gap: 44px;
+        align-items: center;
+        padding: 46px 0;
+      }
+      .feat + .feat { border-top: 1px dashed var(--line); }
+      .feat.rev .feat-txt { order: 2; }
+      .feat h3 {
+        margin: 0 0 12px;
+        font-size: clamp(21px, 2.6vw, 26px);
+        letter-spacing: -0.018em;
+      }
+      .feat p { color: var(--fg-dim); margin: 0 0 14px; }
+      .feat ul { margin: 0; padding-left: 18px; color: var(--fg-dim); }
+      .feat li { margin: 7px 0; font-size: 15px; }
+      .feat li b { color: var(--fg); font-weight: 600; }
+      .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+      @media (max-width: 940px) {
+        .feat { grid-template-columns: 1fr; gap: 26px; padding: 34px 0; }
+        .feat.rev .feat-txt { order: 0; }
+        section { padding: 60px 0; }
+      }
+
+      /* ============================ схема ============================ */
+
       .flow {
-        background: var(--bg-2);
         border: 1px solid var(--line);
-        border-radius: var(--radius);
-        padding: 28px;
+        border-radius: var(--r);
+        background:
+          radial-gradient(120% 120% at 0% 0%, rgba(53, 214, 196, 0.06), transparent 60%),
+          var(--card);
+        padding: 26px;
         overflow-x: auto;
       }
       .flow-row {
         display: flex;
         align-items: center;
-        gap: 12px;
-        padding: 12px 0;
-        min-width: 640px;
+        gap: 10px;
+        flex-wrap: wrap;
+        padding: 9px 0;
       }
       .flow-row + .flow-row { border-top: 1px dashed var(--line); }
       .node {
         border: 1px solid var(--line-2);
         border-radius: 10px;
-        padding: 9px 14px;
-        font: 13.5px/1.3 var(--mono);
-        background: var(--panel);
+        padding: 6px 12px;
+        font-size: 14px;
+        background: #0d1526;
         white-space: nowrap;
       }
-      .node.hit { border-color: #3f68ee; background: #17224c; color: #cfe0ff; }
-      .node.hit2 { border-color: #2f8f74; background: #10281f; color: #b7f0dc; }
+      .node.hit { border-color: rgba(53, 214, 196, 0.5); color: #b8f4ec; }
+      .node.hit2 { border-color: rgba(255, 176, 32, 0.45); color: #ffe0a8; }
       .node.direct { border-color: var(--line); color: var(--fg-mute); }
-      .arrow { color: var(--fg-mute); font-family: var(--mono); }
-      .flow-note { margin: 18px 0 0; font-size: 14.5px; color: var(--fg-mute); }
+      .node.stop { border-color: rgba(255, 107, 107, 0.5); color: #ffc9c9; }
+      .arrow { color: var(--fg-mute); }
+      .flow-note { color: var(--fg-mute); font-size: 14px; margin: 16px 0 0; }
 
-      /* ===== feature blocks ===== */
-      .feat {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
-        gap: 44px;
-        align-items: center;
-        padding: 46px 0;
-      }
-      .feat + .feat { border-top: 1px solid var(--line); }
-      .feat.rev .feat-txt { order: 2; }
-      .feat h3 {
-        font-size: clamp(21px, 2.6vw, 26px);
-        margin-bottom: 12px;
-        letter-spacing: -0.02em;
-      }
-      .feat p { color: var(--fg-dim); margin: 0 0 14px; }
-      .feat ul {
-        margin: 0;
-        padding: 0;
-        list-style: none;
-        color: var(--fg-dim);
-        font-size: 15px;
-      }
-      .feat li {
-        position: relative;
-        padding-left: 22px;
-        margin-bottom: 7px;
-      }
-      .feat li::before {
-        content: "";
-        position: absolute;
-        left: 4px;
-        top: 10px;
-        width: 6px;
-        height: 6px;
-        border-radius: 2px;
-        background: var(--accent-2);
-      }
-      .feat li b { color: var(--fg); font-weight: 600; }
-      @media (max-width: 900px) {
-        .feat { grid-template-columns: 1fr; gap: 26px; padding: 34px 0; }
-        .feat.rev .feat-txt { order: 0; }
-      }
+      /* ============================ таблица ============================ */
 
-      /* ===== two-up shots ===== */
-      .duo {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-        gap: 22px;
-        align-items: start;
+      .tbl-wrap {
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        overflow: auto;
+        background: var(--card);
       }
-      /* вертикальный скриншот телефона не должен растягиваться на всю колонку */
-      .shot-phone { max-width: 300px; margin: 0 auto; }
-
-      /* ===== platform table ===== */
-      .tbl-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
-      table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 15px; }
-      th, td { text-align: left; padding: 13px 18px; border-bottom: 1px solid var(--line); }
-      th { background: var(--bg-2); color: var(--fg-dim); font-weight: 600; font-size: 13.5px; }
+      table { border-collapse: collapse; width: 100%; min-width: 660px; }
+      th, td {
+        text-align: left;
+        padding: 13px 16px;
+        border-bottom: 1px solid var(--line);
+        font-size: 14.6px;
+        vertical-align: top;
+      }
+      th { color: var(--fg-mute); font-weight: 600; font-size: 13px; letter-spacing: 0.03em; text-transform: uppercase; }
       tr:last-child td { border-bottom: 0; }
-      td b { color: var(--fg); }
-      .yes { color: var(--ok); }
-      .no { color: var(--fg-mute); }
+      td.yes { color: #86e7d5; }
+      td.no { color: #ff9d9d; }
 
-      /* ===== install ===== */
-      .steps { display: grid; gap: 18px; }
+      /* ============================ шаги ============================ */
+
+      .steps { display: grid; gap: 16px; }
       .step {
         display: grid;
-        grid-template-columns: 34px minmax(0, 1fr);
-        gap: 16px;
-        align-items: start;
+        grid-template-columns: 44px 1fr;
+        gap: 18px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        padding: 22px;
       }
+      /* Без min-width:0 колонка grid не даёт <pre> сжаться, и на телефоне вся
+         страница уезжает вбок вслед за командой установки. */
+      .step > *, .feat > *, .grid > * { min-width: 0; }
+
       .step-n {
         width: 34px;
         height: 34px;
-        border-radius: 50%;
+        border-radius: 10px;
         display: grid;
         place-items: center;
-        background: #1a2450;
-        border: 1px solid var(--line-2);
-        font: 600 14px var(--mono);
-        color: #9fb8ff;
+        font-weight: 700;
+        color: #04231f;
+        background: linear-gradient(180deg, #3ee2cf, #22b7a7);
       }
-      .step h3 { margin-bottom: 6px; font-size: 17px; }
-      .step p { margin: 0 0 10px; color: var(--fg-dim); font-size: 15px; }
+      .step h3 { margin: 0 0 8px; font-size: 17.5px; }
+      .step p { margin: 0; color: var(--fg-dim); font-size: 15px; }
+
       pre {
-        margin: 0;
-        background: #0b1128;
+        margin: 12px 0 0;
+        background: #080d18;
         border: 1px solid var(--line);
-        border-radius: 11px;
-        padding: 15px 17px;
+        border-radius: 12px;
+        padding: 14px 16px;
         overflow-x: auto;
-        font-size: 13.5px;
-        line-height: 1.6;
-        color: #cfe0ff;
+        font-size: 13.2px;
+        line-height: 1.65;
+        color: #d6e4ff;
       }
       pre .c { color: var(--fg-mute); }
 
       .callout {
-        border: 1px solid var(--line-2);
-        border-left: 3px solid var(--warn);
-        background: var(--bg-2);
-        border-radius: 11px;
-        padding: 18px 22px;
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--cyan);
+        border-radius: 12px;
+        background: var(--card);
+        padding: 16px 18px;
         color: var(--fg-dim);
-        font-size: 15px;
+        font-size: 14.6px;
       }
+      .callout + .callout { margin-top: 12px; }
       .callout b { color: var(--fg); }
-      .callout + .callout { margin-top: 14px; }
 
-      /* ===== footer ===== */
+      /* ============================ подвал ============================ */
+
       footer {
         border-top: 1px solid var(--line);
-        padding: 44px 0 60px;
+        padding: 34px 0 46px;
         color: var(--fg-mute);
-        font-size: 14.5px;
+        font-size: 14px;
       }
-      .foot-in { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
-      .foot-in .sp { margin-left: auto; }
+      .foot-in { display: flex; flex-wrap: wrap; gap: 14px; justify-content: space-between; }
+      .foot-in a { color: var(--fg-dim); }
 
+      /* появление блоков */
+      .rise { opacity: 0; transform: translateY(14px); transition: opacity 0.6s, transform 0.6s; }
+      .rise.in { opacity: 1; transform: none; }
       @media (prefers-reduced-motion: reduce) {
+        .rise { opacity: 1; transform: none; transition: none; }
         html { scroll-behavior: auto; }
       }
     </style>
   </head>
+
   <body>
-    <nav class="nav">
+    <!-- ===================== шапка ===================== -->
+    <nav id="nav">
       <div class="wrap nav-in">
         <a class="brand" href="#top">
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#5b85ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="11" width="18" height="11" rx="2" />
-            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          <svg viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <circle cx="16" cy="16" r="13" stroke="#35d6c4" stroke-width="2" />
+            <path d="M6 20h7l6-9h7" stroke="#5b8cff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
           Detour
         </a>
         <div class="nav-links">
           <a href="#why">Зачем</a>
-          <a href="#how">Как работает</a>
+          <a href="#how">Как устроено</a>
           <a href="#features">Возможности</a>
+          <a href="#mobile">С телефона</a>
           <a href="#platforms">Платформы</a>
           <a href="#install">Установка</a>
-          <a class="nav-gh" href="https://github.com/varyen/detour" rel="noopener">
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
-            </svg>
-            GitHub
-          </a>
         </div>
+        <a class="nav-gh" href="https://github.com/varyen/detour" rel="noopener">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+          </svg>
+          GitHub
+        </a>
       </div>
     </nav>
 
-    <!-- ===================== HERO ===================== -->
+    <!-- ===================== герой ===================== -->
     <header class="hero" id="top">
       <div class="wrap hero-in">
-        <div class="tag">
-          <b>v1.41.0</b> · open source · MIT
+        <div class="chips">
+          <span class="chip"><b>v1.56.0</b></span>
+          <span class="chip">открытый код · MIT</span>
+          <span class="chip">OpenWrt / GL.iNet · Keenetic</span>
+          <span class="chip">пакет панели ~130 КБ</span>
         </div>
+
         <h1>
-          Обход блокировок,<br />
-          который живёт <span class="grad" style="white-space: nowrap">на роутере</span>
+          Обход блокировок живёт<br />
+          <span class="grad">на роутере</span>, а не на каждом устройстве
         </h1>
+
         <p class="lead">
-          Detour — веб-панель для роутера, которая объединяет два независимых
-          движка обхода: прозрачный прокси <b>sing-box</b> (VLESS, Trojan,
-          WireGuard, Shadowsocks, Hysteria2, TUIC, SOCKS/HTTP) и <b>DPI-обход
-          zapret</b>, работающий вообще без внешнего сервера. Настраивается
-          мышкой, работает для всей домашней сети сразу — на телефонах,
-          телевизорах и приставках, где никакой клиент не поставишь.
-        </p>
-        <div class="cta">
-          <a class="btn btn-primary" href="#install">Установить за 3 шага</a>
-          <a class="btn btn-ghost" href="https://github.com/varyen/detour" rel="noopener">Исходники на GitHub</a>
-        </div>
-        <p class="hero-note">
-          Ничего не уходит в облако: панель, конфиги и профили лежат только на
-          вашем роутере.
+          Detour — веб-панель, которая объединяет два независимых движка обхода:
+          прозрачный прокси <b>sing-box</b> (VLESS, Trojan, VMess, WireGuard,
+          Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS/HTTP) и <b>DPI-обход
+          zapret</b>, работающий вообще без внешнего сервера. Настраивается мышкой,
+          работает сразу для всей домашней сети — включая телевизоры, консоли и
+          колонки, куда никакой клиент не поставишь.
         </p>
 
-        <div class="hero-shot">
+        <div class="cta">
+          <a class="btn btn-primary" href="#install">Установить за три шага</a>
+          <a class="btn btn-ghost" href="https://github.com/varyen/detour" rel="noopener">Исходники на GitHub</a>
+        </div>
+
+        <p class="hero-note">
+          Ничего не уходит в облако: панель, конфиги, ключи и профили лежат
+          только на вашем роутере.
+        </p>
+
+        <div class="hero-shot rise">
           <figure>
             <div class="shot">
               <div class="shot-bar"><i></i><i></i><i></i><span>http://192.168.8.1:8080/detour/</span></div>
-              <img src="img/25-dark.webp" alt="Главный экран панели Detour: статус sing-box, выбор профиля, цепочки, DPI-обход" loading="eager" />
+              <img
+                src="img/hero.webp"
+                width="1560"
+                height="975"
+                alt="Главный экран Detour: поток трафика, график, активное подключение, обход DPI и каналы в интернет"
+                loading="eager"
+              />
             </div>
             <figcaption>
-              Главный экран: состояние движков, активный профиль, цепочка
-              подключения и переключатели режимов. Тёмная и светлая темы.
+              «Обзор»: куда прямо сейчас уходит трафик, что с активным
+              подключением, сколько профилей проходят проверку и живы ли каналы
+              в интернет. Набор и порядок карточек настраиваются.
             </figcaption>
           </figure>
         </div>
       </div>
     </header>
 
-    <!-- ===================== WHY ===================== -->
+    <!-- ===================== зачем ===================== -->
     <section id="why">
       <div class="wrap">
         <div class="sec-tag">Зачем это нужно</div>
         <h2>Один раз на роутере — вместо клиента на каждом устройстве</h2>
         <p class="sec-lead">
           VPN-клиент на ноутбуке решает задачу только для ноутбука. Detour
-          переносит обход на уровень домашней сети: маршрутизация происходит
-          прозрачно, устройствам ничего не нужно знать и ставить.
+          переносит обход на уровень домашней сети: трафик разводится прозрачно,
+          устройствам не нужно ничего знать и ставить.
         </p>
-        <div class="grid">
+
+        <div class="grid rise">
           <div class="card">
             <div class="ico">🌐</div>
             <h3>Для всей сети сразу</h3>
             <p>
               Телевизор, консоль, колонка, рабочий ноутбук гостя — трафик
-              заворачивается на роутере, клиент не требуется нигде.
+              заворачивается на роутере, клиент не нужен нигде.
             </p>
           </div>
           <div class="card">
             <div class="ico">🎯</div>
             <h3>Только то, что нужно</h3>
             <p>
-              Через туннель идут выбранные домены и подсети, остальное — напрямую
-              и на полной скорости. Или наоборот: «всё, кроме списка исключений».
+              В туннель уходят выбранные домены и подсети, остальное — напрямую и
+              на полной скорости. Или наоборот: «всё, кроме списка исключений».
             </p>
           </div>
           <div class="card">
             <div class="ico">🧰</div>
             <h3>Два движка вместо одного</h3>
             <p>
-              sing-box — когда нужен зарубежный выход. zapret — когда сайт
-              блокируется DPI и хватает трюков с пакетами, без всякого сервера.
+              sing-box — когда нужен зарубежный выход. zapret — когда сайт душит
+              DPI и хватает трюков с пакетами, без всякого сервера.
             </p>
           </div>
           <div class="card">
@@ -556,323 +604,373 @@
             <h3>Ваша инфраструктура</h3>
             <p>
               Никаких чужих аккаунтов и телеметрии. Профили и ключи хранятся на
-              роутере, панель закрыта логином и паролем.
+              роутере, панель закрыта логином и паролем, вход — с защитой от
+              перебора.
             </p>
           </div>
           <div class="card">
             <div class="ico">📦</div>
             <h3>Обновления подписаны</h3>
             <p>
-              Панель ставится как <code>.ipk</code>, подписанный usign-ключом,
-              и умеет обновлять себя и бинарники из собственного opkg-фида.
+              Панель ставится пакетом <code>.ipk</code> с usign-подписью и умеет
+              обновлять себя и бинарники из собственного opkg-фида — с откатом на
+              предыдущую версию.
             </p>
           </div>
           <div class="card">
             <div class="ico">🪶</div>
             <h3>Ничего лишнего на роутере</h3>
             <p>
-              Бэкенд — чистый BusyBox ash + Lua, без Python, Node и PHP. Пакет
-              панели — около 130 КБ.
+              Бэкенд — чистый BusyBox ash и немного Lua: ни Python, ни Node, ни
+              PHP. Пакет панели — около 130 КБ.
             </p>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- ===================== HOW ===================== -->
+    <!-- ===================== как устроено ===================== -->
     <section id="how">
       <div class="wrap">
         <div class="sec-tag">Как это работает</div>
         <h2>DNS подсказывает, файрвол разводит трафик</h2>
         <p class="sec-lead">
-          Когда устройство резолвит домен из списка, dnsmasq складывает
-          полученный IP в соответствующий ipset. Дальше правила nat
-          PREROUTING решают, куда отправить соединение — и делают это без
-          разбора содержимого пакетов, поэтому накладные расходы минимальны.
+          Когда устройство резолвит домен из списка, dnsmasq кладёт полученный
+          адрес в соответствующий набор (ipset). Дальше правила
+          <code>nat PREROUTING</code> решают, куда отправить соединение — не
+          разбирая содержимое пакетов, поэтому накладные расходы минимальны.
         </p>
 
-        <div class="flow">
+        <div class="flow rise">
           <div class="flow-row">
-            <span class="node">Клиент</span><span class="arrow">→</span>
-            <span class="node">dnsmasq + ipset</span><span class="arrow">→</span>
+            <span class="node">клиент в сети</span><span class="arrow">→</span>
+            <span class="node">dnsmasq + наборы адресов</span><span class="arrow">→</span>
             <span class="node">nat PREROUTING</span>
           </div>
           <div class="flow-row">
-            <span class="node hit2">IP в ipset zapret</span><span class="arrow">→</span>
-            <span class="node hit2">REDIRECT :1081</span><span class="arrow">→</span>
-            <span class="node hit2">DPI-обход, прямое соединение</span>
+            <span class="node hit2">адрес в наборе zapret</span><span class="arrow">→</span>
+            <span class="node hit2">на порт 1081</span><span class="arrow">→</span>
+            <span class="node hit2">DPI-обход, соединение остаётся прямым</span>
           </div>
           <div class="flow-row">
-            <span class="node hit">попал под режим sing-box</span><span class="arrow">→</span>
-            <span class="node hit">REDIRECT :12345</span><span class="arrow">→</span>
-            <span class="node hit">ваш VPN → (WARP) → сайт</span>
+            <span class="node hit">адрес попал под маршрут по сайту</span><span class="arrow">→</span>
+            <span class="node hit">свой порт этой цели</span><span class="arrow">→</span>
+            <span class="node hit">назначенный профиль или цепочка</span>
+          </div>
+          <div class="flow-row">
+            <span class="node hit">подошло правило основного туннеля</span><span class="arrow">→</span>
+            <span class="node hit">на порт 12345</span><span class="arrow">→</span>
+            <span class="node hit">активный VPN → (WARP) → сайт</span>
+          </div>
+          <div class="flow-row">
+            <span class="node stop">торрент с профиля, где он не разрешён</span><span class="arrow">→</span>
+            <span class="node stop">отбой на подлёте</span>
           </div>
           <div class="flow-row">
             <span class="node direct">всё остальное</span><span class="arrow">→</span>
-            <span class="node direct">напрямую, без потерь скорости</span>
+            <span class="node direct">напрямую, без потери скорости</span>
           </div>
         </div>
+
         <p class="flow-note">
-          UDP при необходимости заворачивается отдельно через TPROXY — для игр,
-          голосовых чатов и QUIC.
+          UDP при необходимости заворачивается отдельно, через TPROXY — это нужно
+          играм, голосовым чатам и QUIC. Обещание «размеченный адрес скорее не
+          работает, чем идёт мимо VPN» держится и в поломанных состояниях:
+          перезапуск сервиса не открывает трафику прямой путь, а маршрут на
+          исчезнувший профиль отклоняет соединение вместо тихой утечки.
         </p>
       </div>
     </section>
 
-    <!-- ===================== FEATURES ===================== -->
+    <!-- ===================== возможности ===================== -->
     <section id="features">
       <div class="wrap">
         <div class="sec-tag">Возможности</div>
         <h2>Что умеет панель</h2>
         <p class="sec-lead">
-          Ниже — основные разделы интерфейса и то, какую задачу каждый из них
-          закрывает.
+          Ниже — разделы интерфейса и задачи, которые каждый из них закрывает.
+          Все кадры сняты с живого роутера; данные на них обезличены.
         </p>
 
-        <!-- profiles -->
-        <div class="feat">
+        <!-- профили -->
+        <div class="feat rise">
           <div class="feat-txt">
-            <h3>Профили VPN и подписки</h3>
+            <h3>Профили и подписки</h3>
             <p>
               Профиль добавляется вставкой ссылки <code>vless://</code>,
               <code>trojan://</code>, <code>vmess://</code>, <code>ss://</code>,
-              <code>socks5://</code> либо заполнением полей вручную; отдельная
-              вкладка — для WireGuard. Поддерживаются VLESS, Trojan, VMess,
-              Shadowsocks, WireGuard, Hysteria/Hysteria2, TUIC, AnyTLS и
-              HTTP/SOCKS-прокси.
+              <code>socks5://</code> либо руками по полям; для WireGuard — своя
+              вкладка. Подписка провайдера обновляется по расписанию и сама
+              раскладывает серверы по группе.
             </p>
             <ul>
-              <li><b>Подписки</b> — URL провайдера обновляется по расписанию, новые серверы подтягиваются сами.</li>
-              <li><b>Папки и группы</b> — сотни профилей не превращаются в кашу.</li>
-              <li><b>Массовые операции</b> — выделить, перенести в группу, удалить.</li>
-              <li><b>Экспорт и импорт</b> — JSON целиком или отдельные ссылки для переноса на другой роутер.</li>
+              <li><b>Сортировка по скорости, пингу и состоянию</b> — видно, через что реально быстро, а не только что первое по алфавиту.</li>
+              <li><b>Фильтры по группе и стране</b> — сотня профилей перестаёт быть кашей.</li>
+              <li><b>Массовые операции</b> — выделить, перенести в папку, удалить, выгрузить в файл.</li>
+              <li><b>Подписка тянется через активный VPN</b>, и только если не вышло — напрямую: адрес панели провайдера часто блокируют как раз там, где вы находитесь.</li>
             </ul>
           </div>
           <figure>
-            <div class="shot"><img src="img/11-profiles.webp" alt="Страница «Все профили»: список профилей с группами и массовыми операциями" loading="lazy" /></div>
-            <figcaption>Страница «Все профили» — фильтр по группам, поиск, перенос в папку.</figcaption>
+            <div class="shot">
+              <img src="img/profiles.webp" width="1560" height="975" loading="lazy"
+                alt="Список профилей: колонки протокола, группы, сервера, пинга, скорости и проверки, сортировка по скорости" />
+            </div>
+            <div class="shot" style="margin-top: 14px">
+              <img src="img/subs.webp" width="1560" height="975" loading="lazy"
+                alt="Вкладка подписок: адрес, группа, число профилей и время последнего обновления" />
+            </div>
+            <figcaption>
+              Список профилей, отсортированный по измеренной скорости, и вкладка
+              подписок: видно, когда каждая обновлялась и каким путём пришла.
+            </figcaption>
           </figure>
         </div>
 
-        <!-- health -->
-        <div class="feat rev">
+        <!-- проверка -->
+        <div class="feat rev rise">
           <div class="feat-txt">
-            <h3>Проверка и автопереключение</h3>
+            <h3>Проверка, скорость и автопереключение</h3>
             <p>
-              Панель постоянно пингует все профили в фоне и раз в час проверяет
-              их «по-настоящему»: поднимает временный sing-box и ходит через него
-              на реальные адреса. Мёртвый сервер видно до того, как об этом
-              узнает пользователь.
+              Пинг говорит только о том, что жив входной узел. Панель проверяет
+              профили <b>по-настоящему</b>: поднимает временный sing-box и ходит
+              через него на реальные адреса, замеряя и скорость загрузки. Мёртвый
+              сервер виден до того, как о нём узнает человек.
             </p>
             <ul>
-              <li><b>Автопереключение</b> на живой профиль, когда активный перестал отвечать.</li>
-              <li><b>Замер скорости</b> — реальная загрузка, а не только пинг.</li>
-              <li><b>Keep-alive</b> активного VPN с отдельным индикатором в шапке.</li>
-              <li><b>Свои цели проверки</b> и блок-лист egress-IP, если нужен конкретный выходной адрес.</li>
+              <li><b>Автопереключение</b> на живой профиль, когда активный перестал отвечать, — с уведомлением о том, что и почему сменилось.</li>
+              <li><b>Участие в проверках настраивается на профиле</b>: какие можно включать автоматически, а какие трогать нельзя.</li>
+              <li><b>Торренты — по разрешению</b>. По умолчанию запрещены везде: большинство провайдеров VPN закрывают аккаунт после первой жалобы, поэтому разрешение выдаётся вручную и только там, где оно допустимо.</li>
+              <li><b>Свои цели проверки</b> и блок-лист выходных адресов, если нужен конкретный IP на выходе.</li>
             </ul>
           </div>
           <figure>
-            <div class="shot"><img src="img/13-vpn-status.webp" alt="Раздел «Статусы VPN»: таблица профилей с пингом, работоспособностью и скоростью" loading="lazy" /></div>
-            <figcaption>«Статусы VPN»: пинг, факт работоспособности, скорость и активация в один клик.</figcaption>
+            <div class="shot">
+              <img src="img/profile.webp" width="1560" height="975" loading="lazy"
+                alt="Шторка профиля: пинг, результаты проверки по целям, скорость, узел подключения и переключатели" />
+            </div>
+            <figcaption>Карточка профиля: результаты проверки по каждой цели, скорость, страна узла и переключатели поведения.</figcaption>
           </figure>
         </div>
 
-        <!-- route map -->
-        <div class="feat">
+        <!-- маршруты -->
+        <div class="feat rise">
           <div class="feat-txt">
-            <h3>Маршрутизация по профилям</h3>
+            <h3>Маршруты по сайтам</h3>
             <p>
-              Разные сайты — через разные выходы одновременно. Каждый маршрут
-              описывает, какой профиль забирает указанные домены,
-              <code>*.поддомены</code>, IP или CIDR.
+              Разные сайты — через разные выходы одновременно. Маршрут описывает,
+              какой профиль (или целая цепочка) забирает указанные домены,
+              <code>*.поддомены</code>, адреса и подсети.
             </p>
             <ul>
-              <li><b>Строгий режим</b> — такой трафик уходит только назначенным маршрутом либо блокируется, но никогда не утекает напрямую.</li>
+              <li><b>Строгий режим</b> — «только этим путём»: если назначенное подключение не работает, трафик не пойдёт ни в основной VPN, ни напрямую, а просто оборвётся.</li>
               <li><b>Через активную цепочку</b> — путь «текущий VPN → маршрутный VPN» вместо прямого выхода.</li>
-              <li><b>Умный перехват прокси</b> — если устройство жёстко прибито к SOCKS/HTTP-прокси, роутер прозрачно применит к нему правила панели.</li>
-              <li><b>Несколько инстансов</b> sing-box, когда одного мало.</li>
+              <li><b>Перехват трафика к прокси</b> — если устройство жёстко прибито к чужому SOCKS/HTTP-прокси, роутер прозрачно применит к нему правила панели.</li>
+              <li><b>UDP через VPN</b> — отдельным списком или целиком, для игр и голоса.</li>
             </ul>
           </div>
           <figure>
-            <div class="shot"><img src="img/05-route-map.webp" alt="Вкладка «Маршрутизация»: маршруты доменов по разным профилям" loading="lazy" /></div>
-            <figcaption>Вкладка «Маршрутизация» — маршруты, строгий режим и keep-alive активного VPN.</figcaption>
+            <div class="shot">
+              <img src="img/routes.webp" width="1560" height="975" loading="lazy"
+                alt="Редактор отдельных маршрутов: выбор профиля, строгий режим и список доменов" />
+            </div>
+            <figcaption>Маршруты: профиль или цепочка на блок доменов, строгий режим и путь через активное подключение.</figcaption>
           </figure>
         </div>
 
-        <!-- warp / chains -->
-        <div class="feat rev">
+        <!-- режимы и списки -->
+        <div class="feat rev rise">
+          <div class="feat-txt">
+            <h3>Режимы туннеля и списки</h3>
+            <p>
+              Два режима на выбор: <b>«только выбранные сайты»</b> (в туннель
+              уходит список) и <b>«всё, кроме исключений»</b> (в туннель уходит
+              всё, что не попало в белый список). Списки принимают домены,
+              <code>*.поддомены</code>, адреса и подсети — с комментариями.
+            </p>
+            <ul>
+              <li><b>Российские адреса — напрямую</b>: список подсетей обновляется сам (MaxMind GeoLite2 или данные RIR).</li>
+              <li><b>Исключения из исключений</b> — адрес, который числится российским, но должен идти через VPN.</li>
+              <li><b>Один процесс или по процессу на профиль</b> — на выбор: экономить память роутера или разнести нагрузку.</li>
+              <li><b>Ссылку можно вставить целиком</b> — панель сама достанет из неё хост.</li>
+            </ul>
+          </div>
+          <figure>
+            <div class="duo">
+              <div class="shot"><img src="img/modes.webp" width="1560" height="813" loading="lazy" alt="Раздел «Что уходит в туннель»: выбор режима и способа запуска" /></div>
+              <div class="shot"><img src="img/lists.webp" width="1560" height="975" loading="lazy" alt="Редактор списка доменов для обхода DPI" /></div>
+            </div>
+            <figcaption>Режим туннеля и редактор списков: домены, подсети и комментарии в обычном текстовом поле.</figcaption>
+          </figure>
+        </div>
+
+        <!-- цепочки и WARP -->
+        <div class="feat rise">
           <div class="feat-txt">
             <h3>Цепочки и Cloudflare WARP</h3>
             <p>
               Профили выстраиваются в цепочку: клиент → VPN&nbsp;1 → VPN&nbsp;2 →
               интернет. Отдельный сценарий — бесплатный WARP последним хопом:
-              выходной адрес перестаёт выглядеть как «сервер в дата-центре»,
-              и сервисы, которые блокируют хостинги, снова начинают работать.
+              выходной адрес перестаёт выглядеть адресом дата-центра, и сервисы,
+              которые отказывают хостингам, снова начинают работать.
             </p>
             <ul>
-              <li><b>Регистрация WARP из панели</b> — устройство регистрируется через выбранный VPN, не трогая активный трафик.</li>
-              <li><b>Именованные цепочки</b> — сохранённые связки включаются одним кликом с главного экрана.</li>
+              <li><b>Регистрация WARP прямо из панели</b> — через выбранный VPN, потому что на прямые запросы из России API Cloudflare не отвечает.</li>
+              <li><b>Именованные цепочки</b> включаются одним нажатием с «Обзора».</li>
               <li><b>Цепочка как цель маршрута</b> — например, увести в «VPN → WARP» только один домен.</li>
             </ul>
           </div>
           <figure>
-            <div class="shot"><img src="img/14-warp.webp" alt="Диалог регистрации Cloudflare WARP через выбранный VPN" loading="lazy" /></div>
-            <figcaption>Регистрация WARP: выбираем VPN-окружение, получаем готовую цепочку «VPN → WARP».</figcaption>
+            <div class="duo">
+              <div class="shot"><img src="img/chain.webp" width="1560" height="975" loading="lazy" alt="Конструктор цепочки: хопы по порядку и поиск профиля для добавления" /></div>
+              <div class="shot"><img src="img/warp.webp" width="1560" height="704" loading="lazy" alt="Вкладка Cloudflare WARP: выбор VPN, через который регистрировать устройство" /></div>
+            </div>
+            <figcaption>Конструктор цепочки и регистрация WARP через выбранное подключение.</figcaption>
           </figure>
         </div>
 
-        <!-- dpi -->
-        <div class="feat">
+        <!-- публикация наружу -->
+        <div class="feat rev rise">
           <div class="feat-txt">
-            <h3>DPI-обход без внешнего сервера</h3>
+            <h3>Пустить в дом: публикация сервисов наружу</h3>
             <p>
-              Второй движок вообще не нуждается в зарубежном сервере: соединение
-              остаётся прямым, а блокировка обходится манипуляциями с пакетами.
-              Часто этого достаточно — и скорость остаётся домашней.
+              Обратная задача — не выйти из дома, а зайти в него. Панель выпускает
+              сертификат Let's Encrypt для вашего домена и публикует нужный сервис
+              наружу.
             </p>
             <ul>
-              <li><b>zapret (tpws)</b> — прозрачный прокси на порту 1081.</li>
-              <li><b>zapret2 (nfqws2)</b> — работа через NFQUEUE с настраиваемой строкой стратегии.</li>
-              <li><b>Общий список доменов</b> для обоих движков и счётчик обработанных пакетов.</li>
-              <li>Движок переключается на лету, без перезагрузки роутера.</li>
-            </ul>
-          </div>
-          <figure>
-            <div class="shot"><img src="img/02-dpi.webp" alt="Карточка DPI-обхода: переключение zapret и zapret2, строка стратегии" loading="lazy" /></div>
-            <figcaption>Карточка DPI-обхода: выбор движка, строка стратегии, статистика.</figcaption>
-          </figure>
-        </div>
-
-        <!-- domains -->
-        <div class="feat rev">
-          <div class="feat-txt">
-            <h3>Списки доменов и режимы</h3>
-            <p>
-              Два режима на выбор: <b>«только указанные»</b> (в туннель уходит
-              лишь список) и <b>«всё, кроме указанных»</b> (в туннель уходит всё,
-              кроме исключений). Списки принимают домены,
-              <code>*.поддомены</code>, IP и CIDR с комментариями.
-            </p>
-            <ul>
-              <li><b>Список подсетей РФ</b> обновляется автоматически (MaxMind GeoLite2 или RIPE/RIR) — российские адреса идут напрямую.</li>
-              <li><b>Исключения из исключений</b> — адрес, который числится российским, но должен идти через VPN.</li>
-              <li><b>UDP через VPN</b> — отдельный список для игр и голосовых чатов.</li>
-            </ul>
-          </div>
-          <figure>
-            <div class="shot"><img src="img/04-domains.webp" alt="Вкладка списков доменов sing-box с режимами и списком подсетей РФ" loading="lazy" /></div>
-            <figcaption>Списки sing-box: режимы, исключения и автообновляемые подсети РФ.</figcaption>
-          </figure>
-        </div>
-
-        <!-- dns -->
-        <div class="feat">
-          <div class="feat-txt">
-            <h3>DNS: шифрование и hosts-обход</h3>
-            <p>
-              Провайдер видит DNS-запросы всей сети — если их не зашифровать.
-              Панель включает DoH/DoT для роутера целиком и умеет подключать
-              внешний <code>hosts</code>-файл приоритетом над upstream-DNS.
-            </p>
-            <ul>
-              <li><b>Secure DNS</b> — свой список серверов DoH/DoT.</li>
-              <li><b>Приоритетный hosts</b> — параллельный способ обхода: домен резолвится в рабочий адрес без туннеля.</li>
-              <li>Обновление списка по расписанию и по кнопке.</li>
-            </ul>
-          </div>
-          <figure>
-            <div class="shot"><img src="img/07-hosts-dns.webp" alt="Вкладка Hosts-DNS: шифрованный DNS и приоритетный hosts-файл" loading="lazy" /></div>
-            <figcaption>Hosts-DNS: DoH/DoT для всей сети и внешний hosts-файл.</figcaption>
-          </figure>
-        </div>
-
-        <!-- portmap + cert -->
-        <div class="feat rev">
-          <div class="feat-txt">
-            <h3>Публикация домашних сервисов наружу</h3>
-            <p>
-              Обратная задача: не выйти из дома, а пустить в него. Панель
-              выпускает Let's Encrypt-сертификат для вашего домена и публикует
-              нужный сервис — либо HTTPS-реверс-прокси на этом сертификате,
-              либо обычный проброс порта.
-            </p>
-            <ul>
-              <li><b>HTTPS-режим</b> — <code>https://домен:порт/</code> → устройство в LAN, с WebSocket и опциональной Basic-авторизацией.</li>
-              <li><b>DNAT-режим</b> — проброс порта для любого протокола.</li>
-              <li><b>Проверка снаружи</b> — панель сама выясняет, доходит ли порт до роутера из интернета, и отличает свой ответ от подмены провайдером.</li>
+              <li><b>По имени</b> — <code>hass.h.example.com</code> на обычном 443-м: не нужно ни выбирать порт, ни надеяться, что чужой Wi-Fi в кафе его пропустит. Все имена делят один уже открытый порт.</li>
+              <li><b>По порту</b> — HTTPS-реверс-прокси на том же сертификате, с WebSocket и опциональной Basic-авторизацией.</li>
+              <li><b>Проброс порта</b> — для всего, что не HTTP.</li>
+              <li><b>Проверка снаружи</b> — доходит ли порт до роутера из интернета; ответ сверяется со счётчиком своего же правила файрвола, поэтому видно и подмену провайдером.</li>
+              <li><b>Сертификат</b> — HTTP-01 или DNS-01 через API DNS-провайдера; второй способ даёт wildcard и не требует открытого 80-го порта.</li>
             </ul>
           </div>
           <figure>
             <div class="duo">
-              <div class="shot"><img src="img/15-portmap.webp" alt="Диалог «Проброс сервисов»" loading="lazy" /></div>
-              <div class="shot"><img src="img/16-cert.webp" alt="Диалог выпуска HTTPS-сертификата Let's Encrypt" loading="lazy" /></div>
+              <div class="shot"><img src="img/portmap.webp" width="1560" height="1598" loading="lazy" alt="Список опубликованных сервисов: по имени и по порту, с проверкой снаружи" /></div>
+              <div class="shot"><img src="img/cert.webp" width="1560" height="975" loading="lazy" alt="Выпуск сертификата Let's Encrypt из панели" /></div>
             </div>
-            <figcaption>Проброс сервисов и выпуск сертификата Let's Encrypt — из панели, без SSH.</figcaption>
+            <figcaption>Публикация сервисов и выпуск сертификата — из панели, без SSH.</figcaption>
           </figure>
         </div>
 
-        <!-- push -->
-        <div class="feat">
+        <!-- обзор и палитра -->
+        <div class="feat rise">
           <div class="feat-txt">
-            <h3>Push-уведомления и мобильный вид</h3>
+            <h3>Главная под себя и поиск по всему</h3>
             <p>
-              Когда активный VPN отвалился, узнать об этом лучше от роутера, а не
-              от зависшей страницы. Панель отправляет Web Push в браузер — в том
-              числе на телефон, и делает это по каналу в обход упавшего туннеля.
+              «Обзор» собирается из карточек: набор, порядок и ширина —
+              перетаскиванием, прямо на месте. График трафика показывает
+              направления или скорость приёма и передачи за час, сутки, неделю
+              или месяц.
             </p>
             <ul>
-              <li><b>Уведомления</b> о недоступности активного VPN и об автопереключении.</li>
-              <li><b>Адаптивный интерфейс</b> — с телефона доступно всё то же самое.</li>
+              <li><b>Палитра команд</b> по <kbd>Ctrl</kbd>+<kbd>K</kbd>: переключить VPN, открыть раздел, запустить проверку — не отрывая рук от клавиатуры.</li>
+              <li><b>Светлая и тёмная темы</b>, PWA — панель ставится на телефон как приложение.</li>
+              <li><b>Каналы в интернет</b> — если провайдеров два, видно оба и то, какой сейчас несёт трафик.</li>
             </ul>
           </div>
           <figure>
             <div class="duo">
-              <div class="shot"><img src="img/17-push.webp" alt="Настройки Web Push-уведомлений" loading="lazy" /></div>
-              <div class="shot shot-phone"><img src="img/24-mobile.webp" alt="Панель Detour на экране телефона" loading="lazy" /></div>
+              <div class="shot"><img src="img/dash.webp" width="1560" height="1300" loading="lazy" alt="Режим настройки главной: карточки переставляются перетаскиванием" /></div>
+              <div class="shot"><img src="img/palette.webp" width="1560" height="975" loading="lazy" alt="Палитра команд, открытая по Ctrl+K" /></div>
             </div>
-            <figcaption>Push-уведомления о падении VPN и мобильный вид панели.</figcaption>
+            <figcaption>Настройка «Обзора» перетаскиванием и палитра команд по <kbd>Ctrl</kbd>+<kbd>K</kbd>.</figcaption>
           </figure>
         </div>
 
-        <!-- diagnostics -->
-        <div class="feat rev">
+        <!-- диагностика -->
+        <div class="feat rev rise">
           <div class="feat-txt">
-            <h3>Диагностика и обслуживание</h3>
+            <h3>Диагностика и обновления</h3>
             <p>
-              Всё, за чем обычно лезут по SSH, доступно во вкладках: логи
-              sing-box, итоговый JSON-конфиг, действующие правила файрвола и
-              таблица conntrack.
+              Всё, за чем обычно лезут по SSH, лежит в «Журнале»: логи sing-box и
+              zapret, журналы проверки и установки, итоговый
+              <code>config.json</code> целиком, действующие правила файрвола и
+              живые соединения.
             </p>
             <ul>
-              <li><b>Логи и конфиг</b> — видно, что именно сгенерировала панель.</li>
-              <li><b>Файрвол</b> — <code>nat PREROUTING</code>, <code>nftables input_lan</code>, conntrack.</li>
-              <li><b>Ускорение (offload)</b> — авто-восстановление аппаратного ускорения при просадке скорости.</li>
-              <li><b>SWAP-файл</b> — создаётся на флешке прямо из панели.</li>
-              <li><b>Самообновление</b> — проверка GitHub Releases раз в 6 часов и установка в один клик, с откатом на предыдущую версию.</li>
+              <li><b>Логи и конфиг</b> — видно ровно то, что панель сгенерировала и запустила.</li>
+              <li><b>Файрвол</b> — дампы <code>nat</code>, <code>nft</code> и conntrack: куда на самом деле уходит трафик.</li>
+              <li><b>Самообновление</b> — проверка GitHub Releases раз в шесть часов, установка одной кнопкой, откат к предыдущей версии.</li>
+              <li><b>Ускорение и SWAP</b> — аппаратное ускорение под присмотром (панель умеет чинить его сама), файл подкачки на флешке создаётся из интерфейса.</li>
             </ul>
           </div>
           <figure>
-            <div class="duo">
-              <div class="shot"><img src="img/10-firewall.webp" alt="Вкладка «Файрвол» с действующими правилами" loading="lazy" /></div>
-              <div class="shot"><img src="img/23-update.webp" alt="Диалог обновления панели" loading="lazy" /></div>
+            <div class="shot">
+              <img src="img/journal.webp" width="1560" height="921" loading="lazy"
+                alt="Журнал: логи sing-box, конфигурация, управление сервисами, файрвол и обновления" />
             </div>
-            <figcaption>Правила файрвола без SSH и самообновление панели из GitHub Releases.</figcaption>
+            <figcaption>«Журнал»: логи, конфигурация, файрвол и обновления — без единой команды в терминале.</figcaption>
           </figure>
         </div>
       </div>
     </section>
 
-    <!-- ===================== PLATFORMS ===================== -->
+    <!-- ===================== телефон ===================== -->
+    <section id="mobile">
+      <div class="wrap">
+        <div class="sec-tag">С телефона</div>
+        <h2>Та же панель, а не урезанная версия</h2>
+        <p class="sec-lead">
+          Панель — PWA: ставится на домашний экран и открывается как приложение.
+          С телефона доступно всё то же самое, включая списки, маршруты и
+          диагностику. А когда активный VPN отваливается, роутер присылает Web
+          Push — по каналу в обход упавшего туннеля, иначе уведомление не дошло
+          бы именно тогда, когда оно нужно.
+        </p>
+
+        <div class="grid rise" style="grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 22px">
+          <figure>
+            <div class="phone"><img src="img/m-overview.webp" width="620" height="1342" loading="lazy" alt="Обзор на экране телефона" /></div>
+            <figcaption>Обзор: поток трафика и скорость.</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="img/m-profiles.webp" width="620" height="1342" loading="lazy" alt="Список профилей на телефоне карточками" /></div>
+            <figcaption>Профили — карточками, с плитками метрик.</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="img/m-profile.webp" width="620" height="1342" loading="lazy" alt="Карточка профиля на телефоне" /></div>
+            <figcaption>Профиль: проверка, скорость, переключатели.</figcaption>
+          </figure>
+          <figure>
+            <div class="phone"><img src="img/m-rules.webp" width="620" height="1342" loading="lazy" alt="Правила маршрутизации на телефоне" /></div>
+            <figcaption>Правила — те же, что на большом экране.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== светлая тема ===================== -->
+    <section id="light">
+      <div class="wrap">
+        <div class="sec-tag">Тема</div>
+        <h2>Тёмная по умолчанию, светлая — одним нажатием</h2>
+        <p class="sec-lead">
+          Тема переключается в шапке и запоминается на устройстве. Всё остальное
+          остаётся на месте: те же карточки, те же цифры.
+        </p>
+        <figure class="rise">
+          <div class="shot">
+            <img src="img/overview-light.webp" width="1560" height="1029" loading="lazy"
+              alt="Тот же «Обзор» в светлой теме" />
+          </div>
+        </figure>
+      </div>
+    </section>
+
+    <!-- ===================== платформы ===================== -->
     <section id="platforms">
       <div class="wrap">
         <div class="sec-tag">Платформы</div>
         <h2>Две прошивки, один интерфейс</h2>
         <p class="sec-lead">
-          Основная платформа — OpenWrt / GL.iNet. Вторая — Keenetic с Entware:
-          там нет nftables и NFQUEUE, поэтому часть механик реализована иначе, а
-          движок zapret2 недоступен физически.
+          Основная платформа — OpenWrt / GL.iNet. Вторая — Keenetic с Entware: там
+          нет nftables и NFQUEUE, поэтому часть механик сделана иначе, а движок
+          zapret2 недоступен физически.
         </p>
-        <div class="tbl-wrap">
+
+        <div class="tbl-wrap rise">
           <table>
             <thead>
               <tr>
@@ -882,35 +980,40 @@
               </tr>
             </thead>
             <tbody>
-              <tr><td><b>sing-box</b> (VLESS, Trojan, WireGuard, …)</td><td class="yes">✓ из своего opkg-фида</td><td class="yes">✓ mipsel-сборка из фида</td></tr>
+              <tr><td><b>sing-box</b> (VLESS, Trojan, WireGuard, Hysteria2, …)</td><td class="yes">✓ из своего opkg-фида</td><td class="yes">✓ сборка mipsel из фида</td></tr>
               <tr><td><b>zapret (tpws)</b></td><td class="yes">✓</td><td class="yes">✓</td></tr>
-              <tr><td><b>zapret2 (nfqws2)</b></td><td class="yes">✓</td><td class="no">— нет NFQUEUE в ядре</td></tr>
-              <tr><td><b>Цепочки, WARP, маршрутизация</b></td><td class="yes">✓</td><td class="yes">✓</td></tr>
-              <tr><td><b>Проброс сервисов</b></td><td class="yes">✓ nginx / uci firewall</td><td class="yes">✓ lighttpd / ndm-хуки</td></tr>
+              <tr><td><b>zapret2 (nfqws2)</b></td><td class="yes">✓</td><td class="no">— в ядре нет NFQUEUE</td></tr>
+              <tr><td><b>Маршруты, цепочки, WARP, подписки</b></td><td class="yes">✓</td><td class="yes">✓</td></tr>
+              <tr><td><b>Публикация сервисов наружу</b></td><td class="yes">✓ nginx / uci firewall</td><td class="yes">✓ lighttpd / хуки ndm</td></tr>
+              <tr><td><b>UDP через VPN (TPROXY)</b></td><td class="yes">✓</td><td class="no">— выключено: не проверено на железе</td></tr>
               <tr><td><b>Файрвол</b></td><td>nftables <code>fw4</code> + iptables nat</td><td>только iptables через <code>netfilter.d</code></td></tr>
               <tr><td><b>Самообновление подписанным .ipk</b></td><td class="yes">✓</td><td class="yes">✓</td></tr>
             </tbody>
           </table>
         </div>
+
         <p class="flow-note">
           Референсное устройство — GL.iNet GL-BE9300 (Flint 3) на OpenWrt 23.05,
-          <code>aarch64</code>, musl. Проверялось также на GL-MT6000 (Flint 2).
+          <code>aarch64</code>, musl; проверялось также на GL-MT6000 (Flint 2).
+          Keenetic-ветка собирается из того же исходника, но часть её возможностей
+          на живом устройстве ещё не проверена — это честно отмечено в
+          <a href="https://github.com/varyen/detour/blob/main/CHANGELOG.md" rel="noopener">CHANGELOG</a>.
         </p>
       </div>
     </section>
 
-    <!-- ===================== INSTALL ===================== -->
+    <!-- ===================== установка ===================== -->
     <section id="install">
       <div class="wrap">
         <div class="sec-tag">Установка</div>
         <h2>Один пакет, дальше всё само</h2>
         <p class="sec-lead">
-          Панель — это slim-пакет <code>.ipk</code> без бинарников. После
-          установки она сама прописывает opkg-фид проекта и подтягивает
+          Панель — slim-пакет <code>.ipk</code> без бинарников. После установки
+          она сама прописывает opkg-фид проекта и подтягивает
           <code>sing-box</code> и <code>tpws-zapret</code> в фоне.
         </p>
 
-        <div class="steps">
+        <div class="steps rise">
           <div class="step">
             <div class="step-n">1</div>
             <div>
@@ -938,29 +1041,30 @@ opkg install /tmp/detour-keenetic_X.Y.Z_all.ipk</pre>
           <div class="step">
             <div class="step-n">3</div>
             <div>
-              <h3>Подождать 30–90 секунд и открыть панель</h3>
+              <h3>Подождать полминуты и открыть панель</h3>
               <p>
                 За это время подтянутся бинарники. Панель откроется по адресу
-                <code>http://&lt;IP-роутера&gt;:8080/detour/</code>. Ход установки
-                виден в <code>/var/log/detour-bootstrap.log</code>.
+                <code>http://&lt;IP-роутера&gt;:8080/detour/</code>; ход установки
+                виден в <code>/var/log/detour-bootstrap.log</code>. Логин и пароль
+                задаются при первом входе.
               </p>
             </div>
           </div>
         </div>
 
-        <div style="margin-top: 34px">
+        <div style="margin-top: 28px">
           <div class="callout">
             <b>Почему свой opkg-фид.</b> Дистрибутивный фид GL.iNet застрял на
             sing-box 1.8.10, который не понимает схему конфига 1.13.x, а
-            <code>tpws</code> из zapret вообще не пакуется ни одним фидом.
-            Поэтому проект держит собственный подписанный фид на обе
-            архитектуры.
+            <code>tpws</code> из zapret не пакует вообще никто. Поэтому проект
+            держит собственный подписанный фид на обе архитектуры и обновляет его
+            автоматически, сверяясь с релизами upstream.
           </div>
           <div class="callout">
-            <b>Требования к железу.</b> Роутер на OpenWrt с <code>musl</code>
-            (бинарники собраны под неё) либо Keenetic с установленным Entware.
-            Нужен root по SSH и немного места; для стабильной работы панели
-            желательна флешка со SWAP — его тоже можно создать из интерфейса.
+            <b>Требования к железу.</b> Роутер на OpenWrt с <code>musl</code> либо
+            Keenetic с установленным Entware. Нужен root по SSH и немного места;
+            для стабильной работы желательна флешка со SWAP — его тоже можно
+            создать из интерфейса.
           </div>
         </div>
       </div>
@@ -968,17 +1072,39 @@ opkg install /tmp/detour-keenetic_X.Y.Z_all.ipk</pre>
 
     <footer>
       <div class="wrap foot-in">
+        <div><b style="color: var(--fg)">Detour</b> — MIT, © 2026 varyen.</div>
         <div>
-          <b style="color: var(--fg)">Detour</b> — MIT, © 2026 varyen.
-        </div>
-        <div class="sp">
           <a href="https://github.com/varyen/detour" rel="noopener">GitHub</a>
           &nbsp;·&nbsp;
           <a href="https://github.com/varyen/detour/releases" rel="noopener">Релизы</a>
           &nbsp;·&nbsp;
           <a href="https://github.com/varyen/detour/blob/main/CHANGELOG.md" rel="noopener">Changelog</a>
+          &nbsp;·&nbsp;
+          <span>Страны узлов — <a href="https://db-ip.com" rel="noopener">IP Geolocation by DB-IP</a></span>
         </div>
       </div>
     </footer>
+
+    <script>
+      /* Тень у шапки — только когда страницу прокрутили. */
+      const nav = document.getElementById("nav");
+      const onScroll = () => nav.classList.toggle("stuck", window.scrollY > 4);
+      onScroll();
+      addEventListener("scroll", onScroll, { passive: true });
+
+      /* Мягкое появление блоков; при prefers-reduced-motion CSS уже показал их. */
+      const io = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            if (e.isIntersecting) {
+              e.target.classList.add("in");
+              io.unobserve(e.target);
+            }
+          }
+        },
+        { rootMargin: "0px 0px -8% 0px" },
+      );
+      document.querySelectorAll(".rise").forEach((el) => io.observe(el));
+    </script>
   </body>
 </html>

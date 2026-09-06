@@ -1,0 +1,11 @@
+{
+  "name": "detour-landing-shoot",
+  "private": true,
+  "description": "Съёмка обезличенных кадров панели для лендинга",
+  "scripts": {
+    "shots": "node shots.cjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.63.0"
+  }
+}
