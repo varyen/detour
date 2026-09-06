@@ -25,7 +25,13 @@ import { useProfilesStore } from "@/stores/profiles";
 import { useStatusStore } from "@/stores/status";
 import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
-import { draftFromProfile, profileFromDraft } from "@/components/profiles/uri";
+import {
+  buildShareLink,
+  draftFromProfile,
+  profileFromDraft,
+  wireguardConfFromOutbound,
+} from "@/components/profiles/uri";
+import { copyText } from "@/lib/clipboard";
 import type { ProfileDraft } from "@/components/profiles/uri";
 import { ccFromName, countryName, fmtAgo, fmtSpeedKbps } from "@/lib/format";
 
@@ -62,6 +68,11 @@ const healthTargets = computed(() => store.healthTargets);
 const sheetOpen = ref(false);
 const sheetDraft = ref<ProfileDraft | null>(null);
 const rowOpen = ref(false);
+/** Ссылка/конфиг профиля из шторки — показывается после «Скопировать». */
+const rowShare = ref("");
+const rowShareNote = ref("");
+/** Конфиг wireguard многострочный, ссылка — одна строка. */
+const rowShareRows = computed(() => (rowShare.value.includes("\n") ? 8 : 2));
 const rowItem = ref<ProfileRow | null>(null);
 
 const chainsRef = ref<InstanceType<typeof ChainsPanel> | null>(null);
@@ -133,7 +144,45 @@ async function reload(force = true) {
 
 function openRow(r: ProfileRow) {
   rowItem.value = r;
+  rowShare.value = "";
+  rowShareNote.value = "";
   rowOpen.value = true;
+}
+
+/* Ссылка для стороннего клиента. Собирается из самого профиля, а строка списка
+   его не содержит — поэтому сначала читаем профиль с роутера. Текст оставляем
+   на экране: без HTTPS буфер обмена браузеру недоступен, и выделить руками —
+   единственный оставшийся способ. */
+async function copyRowLink(r: ProfileRow) {
+  busy.value = "copy";
+  rowShare.value = "";
+  rowShareNote.value = "";
+  try {
+    const raw = await profilesApi.get(r.id);
+    const draft = draftFromProfile(raw);
+    const wg = draft.type === "wireguard";
+    /* Для wireguard читаем сам outbound: WARP-профили лежат в формате
+       sing-box 1.13 (peers[]), а форма таких полей не знает. */
+    const outbound = (raw.outbound ?? {}) as Record<string, unknown>;
+    const text = (wg ? wireguardConfFromOutbound(outbound) : buildShareLink(draft)) || "";
+    if (!text) {
+      rowShareNote.value = "Из этого профиля ссылку собрать не получилось — не хватает данных";
+      return;
+    }
+    rowShare.value = text;
+    if (await copyText(text)) {
+      toast.ok(wg ? "Конфиг скопирован" : "Ссылка скопирована");
+      rowShareNote.value = wg
+        ? "Вставьте конфиг в клиент WireGuard"
+        : "Вставьте ссылку в сторонний клиент";
+    } else {
+      rowShareNote.value = "Буфер обмена недоступен (панель открыта без HTTPS) — выделите текст и скопируйте вручную";
+    }
+  } catch (e) {
+    toast.fromError(e, "Не удалось прочитать профиль");
+  } finally {
+    busy.value = "";
+  }
 }
 
 async function connect(r: ProfileRow) {
@@ -805,10 +854,24 @@ onBeforeUnmount(() => unregister?.());
         Проверить работу и скорость
       </UiButton>
       <UiButton :busy="busy === 'open'" @click="editRow(rowItem)">Править</UiButton>
+      <UiButton :busy="busy === 'copy'" @click="copyRowLink(rowItem)">
+        {{ rowItem.type === "wireguard" ? "Скопировать конфиг" : "Скопировать ссылку" }}
+      </UiButton>
       <UiButton variant="danger" :busy="busy === 'del'" @click="removeRow(rowItem)">
         Удалить
       </UiButton>
     </div>
+    <p v-if="rowShareNote" class="sharenote">{{ rowShareNote }}</p>
+    <textarea
+      v-if="rowShare"
+      class="share"
+      :rows="rowShareRows"
+      :value="rowShare"
+      readonly
+      spellcheck="false"
+      aria-label="Ссылка для стороннего клиента"
+      @focus="($event.target as HTMLTextAreaElement).select()"
+    ></textarea>
   </DrawerSheet>
 
   <!-- Перенос выбранных профилей в папку: та же операция, что и правка поля
@@ -972,6 +1035,26 @@ onBeforeUnmount(() => unregister?.());
 .rowacts :deep(.btn) {
   justify-content: center;
   min-height: 46px;
+}
+.sharenote {
+  font-size: 12px;
+  color: var(--dim);
+  margin-top: 12px;
+  overflow-wrap: anywhere;
+}
+.share {
+  width: 100%;
+  margin-top: 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
 }
 .mgrid {
   display: grid;

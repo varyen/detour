@@ -2,8 +2,13 @@
 /* Форма профиля: создание и правка. Поля общие для всех протоколов сверху,
    дальше — то, что нужно конкретному типу. Ссылку (vless://, trojan://, ss://,
    hysteria2://…) можно вставить целиком: её разбирает parseShareLink, и дальше
-   человек правит обычные поля, а не URI. */
-import { computed, ref, watch } from "vue";
+   человек правит обычные поля, а не URI.
+
+   Обратный путь тоже есть: кнопка рядом собирает из полей ссылку для
+   стороннего клиента (у wireguard — .conf, ссылок для него не бывает) и кладёт
+   её в буфер. Текст показываем всегда: без HTTPS буфер обмена браузеру
+   недоступен, и выделить руками — единственный оставшийся способ. */
+import { computed, nextTick, ref, watch } from "vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import UiButton from "@/components/UiButton.vue";
 import PField from "@/components/profiles/PField.vue";
@@ -11,11 +16,14 @@ import {
   NO_UTLS,
   PROTO_TYPES,
   SS_METHODS,
+  buildShareLink,
+  buildWireguardConf,
   emptyDraft,
   parseShareLink,
   slugify,
 } from "@/components/profiles/uri";
 import type { ProfileDraft } from "@/components/profiles/uri";
+import { copyText } from "@/lib/clipboard";
 
 const props = defineProps<{
   open: boolean;
@@ -35,6 +43,9 @@ const link = ref("");
 const linkNote = ref("");
 const activateNow = ref(false);
 const isNew = ref(true);
+/** Собранная ссылка/конфиг — показываем после нажатия «Скопировать». */
+const shareShown = ref(false);
+const shareEl = ref<HTMLTextAreaElement | null>(null);
 /** Идентификатор правили руками — больше не подставляем его из имени. */
 const idTouched = ref(false);
 
@@ -46,6 +57,7 @@ watch(
     isNew.value = !props.draft;
     link.value = "";
     linkNote.value = "";
+    shareShown.value = false;
     activateNow.value = false;
     idTouched.value = false;
   },
@@ -107,6 +119,32 @@ function submit() {
   if (!canSave.value) return;
   emit("save", { draft: d.value, activate: activateNow.value });
 }
+
+/* Ссылку собираем из полей формы, а не отдаём сохранённый d.uri: профиль могли
+   править после импорта, и старая ссылка увела бы человека на другой сервер. */
+const shareText = computed(() =>
+  (isWg.value ? buildWireguardConf(d.value) : buildShareLink(d.value)) || "",
+);
+const shareLabel = computed(() => (isWg.value ? "Скопировать конфиг" : "Скопировать ссылку"));
+
+async function copyShare() {
+  const text = shareText.value;
+  if (!text) {
+    linkNote.value = isWg.value
+      ? "Не хватает ключей: конфиг wireguard собрать не из чего"
+      : "Не хватает данных для ссылки: заполните адрес сервера и UUID/пароль";
+    return;
+  }
+  shareShown.value = true;
+  const ok = await copyText(text);
+  linkNote.value = ok
+    ? isWg.value
+      ? "Конфиг скопирован — вставьте его в клиент WireGuard"
+      : "Ссылка скопирована — вставьте её в сторонний клиент"
+    : "Буфер обмена недоступен (панель открыта без HTTPS) — выделите текст ниже и скопируйте вручную";
+  await nextTick();
+  if (!ok) shareEl.value?.select();
+}
 </script>
 
 <template>
@@ -122,8 +160,22 @@ function submit() {
           @keydown.enter.prevent="applyLink"
         />
         <UiButton :disabled="!link.trim()" @click="applyLink">Разобрать</UiButton>
+        <UiButton :disabled="!shareText" :title="`${shareLabel} для стороннего клиента`" @click="copyShare">
+          {{ shareLabel }}
+        </UiButton>
       </div>
       <p v-if="linkNote" class="note">{{ linkNote }}</p>
+      <textarea
+        v-if="shareShown && shareText"
+        ref="shareEl"
+        class="share"
+        :rows="isWg ? 8 : 2"
+        :value="shareText"
+        readonly
+        spellcheck="false"
+        aria-label="Ссылка для стороннего клиента"
+        @focus="($event.target as HTMLTextAreaElement).select()"
+      ></textarea>
     </template>
 
     <div class="grid">
@@ -340,6 +392,7 @@ function submit() {
 <style scoped>
 .linkrow {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
@@ -363,6 +416,20 @@ function submit() {
   color: var(--dim);
   margin-top: 6px;
   overflow-wrap: anywhere;
+}
+.share {
+  width: 100%;
+  margin-top: 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--ink);
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
 }
 .grid {
   display: grid;

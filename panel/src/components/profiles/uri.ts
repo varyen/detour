@@ -426,8 +426,9 @@ function splitUri(rest: string): UriParts {
   let host = hostPort;
   let port = "";
   if (hostPort.startsWith("[")) {
+    /* IPv6 в ссылке всегда в скобках, а sing-box ждёт голый адрес. */
     const close = hostPort.indexOf("]");
-    host = hostPort.slice(0, close + 1);
+    host = hostPort.slice(1, close);
     hostPort = hostPort.slice(close + 1);
     if (hostPort.startsWith(":")) port = hostPort.slice(1);
   } else {
@@ -589,6 +590,9 @@ export function parseShareLink(raw: string): ProfileDraft | null {
       d.password = safeDecode(parts.userinfo);
       d.tls = true;
       d.sni = p.sni || p.peer || "";
+      /* alpn у hysteria2 задают так же, как у остальных; без него профиль,
+         привезённый ссылкой, молча расходится с тем, что даёт сервер. */
+      d.alpn = (p.alpn || "").split(",").filter(Boolean).join(", ");
       d.insecure = p.insecure === "1";
       d.obfsPassword = p["obfs-password"] || "";
       break;
@@ -632,4 +636,199 @@ export function parseShareLink(raw: string): ProfileDraft | null {
   if (!d.port) d.port = "443";
   d.id = slugify(d.name || d.server);
   return d;
+}
+
+/* ======================= сборка ссылки =======================
+
+   Обратная операция к parseShareLink: из профиля собираем ту самую ссылку,
+   которую понимают сторонние клиенты (v2rayNG, Streisand, Hiddify, NekoBox).
+   Собираем из ПОЛЕЙ, а не отдаём сохранённый d.uri: профиль могли править
+   руками после импорта, и старая ссылка увела бы человека на другой сервер.
+
+   У wireguard общепринятой ссылки нет — для него отдаём обычный .conf. */
+
+function b64encode(s: string): string {
+  const bytes = new TextEncoder().encode(s);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+/** base64url без «=» — так ss:// записывает SIP002. */
+function b64url(s: string): string {
+  return b64encode(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function qs(params: Record<string, string | undefined>): string {
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (!v) continue;
+    parts.push(`${k}=${encodeURIComponent(v)}`);
+  }
+  return parts.length ? `?${parts.join("&")}` : "";
+}
+
+/** IPv6 в ссылке обязан быть в скобках, иначе двоеточия съест разбор порта. */
+function hostPort(d: ProfileDraft): string {
+  const h = d.server.trim();
+  const host = h.includes(":") && !h.startsWith("[") ? `[${h}]` : h;
+  return `${host}:${d.port.trim() || "443"}`;
+}
+
+function frag(name: string): string {
+  return name.trim() ? `#${encodeURIComponent(name.trim())}` : "";
+}
+
+function alpnCsv(alpn: string): string {
+  return list(alpn).join(",");
+}
+
+function tlsParams(d: ProfileDraft): Record<string, string | undefined> {
+  const reality = !!d.realityKey.trim();
+  if (!d.tls && !reality) return { security: "none" };
+  return {
+    security: reality ? "reality" : "tls",
+    sni: d.sni.trim(),
+    alpn: alpnCsv(d.alpn),
+    fp: NO_UTLS.includes(d.type) ? "" : d.fingerprint.trim(),
+    pbk: reality ? d.realityKey.trim() : "",
+    sid: reality ? d.realityShortId.trim() : "",
+    allowInsecure: d.insecure ? "1" : "",
+  };
+}
+
+function transportParams(d: ProfileDraft): Record<string, string | undefined> {
+  if (d.transport === "ws") return { type: "ws", path: d.path.trim(), host: d.host.trim() };
+  if (d.transport === "grpc") return { type: "grpc", serviceName: d.serviceName.trim() };
+  if (d.transport === "http") return { type: "http", path: d.path.trim(), host: d.host.trim() };
+  return { type: "tcp" };
+}
+
+/**
+ * Конфиг wireguard в формате wg-quick — то, что жуют официальные клиенты.
+ * Читает outbound, а не форму, потому что форматов на роутере два: плоский
+ * (его пишет форма) и sing-box 1.13 с `peers[]` — так лежат профили WARP,
+ * которые заводит detour-warp.
+ */
+export function wireguardConfFromOutbound(o: Record<string, unknown>): string | null {
+  const peer = obj(Array.isArray(o.peers) ? (o.peers as unknown[])[0] : {});
+  const priv = str(o.private_key).trim();
+  const pub = (str(o.peer_public_key) || str(peer.public_key)).trim();
+  if (!priv || !pub) return null;
+
+  const addrs = list(o.local_address).length ? list(o.local_address) : list(o.address);
+  const allowed = list(o.allowed_ips).length ? list(o.allowed_ips) : list(peer.allowed_ips);
+  const psk = (str(o.pre_shared_key) || str(peer.pre_shared_key)).trim();
+  const host = (str(o.server) || str(peer.address)).trim();
+  const port = str(o.server_port) || str(peer.port);
+  const keep = num(o.persistent_keepalive_interval) || num(peer.persistent_keepalive_interval);
+  const reserved = list(o.reserved).length ? list(o.reserved) : list(peer.reserved);
+
+  const lines = ["[Interface]", `PrivateKey = ${priv}`];
+  if (addrs.length) lines.push(`Address = ${addrs.join(", ")}`);
+  if (num(o.mtu)) lines.push(`MTU = ${str(o.mtu)}`);
+  lines.push("", "[Peer]", `PublicKey = ${pub}`);
+  if (psk) lines.push(`PresharedKey = ${psk}`);
+  lines.push(`AllowedIPs = ${allowed.length ? allowed.join(", ") : "0.0.0.0/0"}`);
+  if (host) {
+    const ep = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+    lines.push(`Endpoint = ${ep}:${port || "51820"}`);
+  }
+  if (keep) lines.push(`PersistentKeepalive = ${keep}`);
+  /* В wg-quick такого поля нет — оставляем подсказкой: без reserved клиент к
+     Cloudflare WARP не подключится, его вводят в настройках самого клиента. */
+  if (reserved.length === 3) {
+    lines.push(`# Reserved (только для Cloudflare WARP): ${reserved.join(",")}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** То же, но из формы: удобно там, где сырого профиля под рукой нет. */
+export function buildWireguardConf(d: ProfileDraft): string | null {
+  return wireguardConfFromOutbound(outboundFromDraft(d));
+}
+
+/**
+ * Собирает ссылку для стороннего клиента. null — если из профиля ссылку не
+ * сделать: не хватает обязательного поля или у типа ссылок не бывает
+ * (wireguard — для него buildWireguardConf).
+ */
+export function buildShareLink(d: ProfileDraft): string | null {
+  if (d.type === "wireguard") return null;
+  if (!d.server.trim()) return null;
+  const hp = hostPort(d);
+  const label = frag(d.name);
+
+  switch (d.type) {
+    case "vless": {
+      if (!d.uuid.trim()) return null;
+      const p = { ...transportParams(d), ...tlsParams(d), flow: d.flow.trim() };
+      return `vless://${encodeURIComponent(d.uuid.trim())}@${hp}${qs(p)}${label}`;
+    }
+    case "trojan": {
+      if (!d.password) return null;
+      const p = { ...transportParams(d), ...tlsParams(d) };
+      return `trojan://${encodeURIComponent(d.password)}@${hp}${qs(p)}${label}`;
+    }
+    case "vmess": {
+      if (!d.uuid.trim()) return null;
+      /* vmess живёт не параметрами, а base64 от JSON — формат v2rayN. */
+      const net =
+        d.transport === "ws" ? "ws" : d.transport === "grpc" ? "grpc" : d.transport === "http" ? "h2" : "tcp";
+      const j: Record<string, string> = {
+        v: "2",
+        ps: d.name.trim(),
+        add: d.server.trim(),
+        port: d.port.trim() || "443",
+        id: d.uuid.trim(),
+        aid: d.alterId.trim() || "0",
+        scy: "auto",
+        net,
+        type: "none",
+        host: d.host.trim(),
+        path: d.transport === "grpc" ? d.serviceName.trim() : d.path.trim(),
+        tls: d.tls ? "tls" : "",
+        sni: d.sni.trim(),
+        alpn: alpnCsv(d.alpn),
+        fp: d.fingerprint.trim(),
+      };
+      return `vmess://${b64encode(JSON.stringify(j))}`;
+    }
+    case "shadowsocks": {
+      if (!d.password) return null;
+      return `ss://${b64url(`${d.method}:${d.password}`)}@${hp}${label}`;
+    }
+    case "hysteria2": {
+      if (!d.password) return null;
+      const p = {
+        sni: d.sni.trim(),
+        alpn: alpnCsv(d.alpn),
+        insecure: d.insecure ? "1" : "",
+        obfs: d.obfsPassword.trim() ? "salamander" : "",
+        "obfs-password": d.obfsPassword.trim(),
+      };
+      return `hysteria2://${encodeURIComponent(d.password)}@${hp}${qs(p)}${label}`;
+    }
+    case "tuic": {
+      if (!d.uuid.trim()) return null;
+      const p = {
+        sni: d.sni.trim(),
+        alpn: alpnCsv(d.alpn),
+        congestion_control: d.congestion.trim(),
+        allow_insecure: d.insecure ? "1" : "",
+      };
+      const auth = `${encodeURIComponent(d.uuid.trim())}:${encodeURIComponent(d.password)}`;
+      return `tuic://${auth}@${hp}${qs(p)}${label}`;
+    }
+    case "socks":
+    case "http": {
+      const scheme = d.type === "socks" ? "socks5" : d.tls ? "https" : "http";
+      const user = d.username.trim();
+      const auth = user
+        ? `${encodeURIComponent(user)}:${encodeURIComponent(d.password)}@`
+        : "";
+      return `${scheme}://${auth}${hp}${label}`;
+    }
+  }
+  return null;
 }
