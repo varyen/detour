@@ -43,6 +43,9 @@ from datetime import datetime, timezone
 # `usign -V`. Cross-validated end-to-end on the home BE9300.
 from usign_compat import sign_file
 
+# Сборщик APKv2 — второй формат пакета для OpenWrt 25.12+ (apk-tools 3).
+import apk_pkg
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 KEY_PUB_USIGN = os.path.join(HERE, "keys", "release.usign.pub")
 KEY_SEC_USIGN = os.path.join(HERE, "keys", "release.usign.sec")
@@ -252,6 +255,30 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+def check_shebang_eol(file_entries):
+    """Отказать, если в пакет попал скрипт с CRLF.
+
+    Ядро Linux берёт интерпретатор из шебанга ДОСЛОВНО до перевода строки и не
+    отбрасывает `\\r`: файл с `#!/bin/sh\\r` не запускается вовсе («not found»),
+    а если его всё же скормить ash — тот спотыкается на каждой строке. Ровно так
+    молча не работал detour-bootstrap-install: postинст звал его в фоне с
+    выводом в /dev/null, поэтому первичная установка sing-box/tpws просто не
+    происходила и никто этого не видел. Проверка дешёвая — делаем её на каждой
+    сборке, чтобы редактор на Windows больше не мог этого повторить.
+    """
+    bad = []
+    for parts, dest, _mode in file_entries:
+        src = resolve_source(parts)
+        with open(src, "rb") as f:
+            head = f.read(4096)
+        if head.startswith(b"#!") and b"\r\n" in head:
+            bad.append(dest)
+    if bad:
+        die("в пакет попали скрипты с CRLF (шебанг `#!...\\r` не запустится на роутере):\n  "
+            + "\n  ".join(bad)
+            + "\n  Почини переводы строк: python -c \"...\" или dos2unix, и коммить с LF")
+
+
 def resolve_source(parts):
     p = os.path.join(HERE, *parts)
     if not os.path.isfile(p):
@@ -289,22 +316,13 @@ def _add_file_to_tar(tar, src, archive_path, mode):
         tar.addfile(info, f)
 
 
-def build_control_tar_gz(version, installed_size):
-    """Return bytes of the control.tar.gz inner archive."""
-    control = (
-        f"Package: {PACKAGE_NAME}\n"
-        f"Version: {version}\n"
-        f"Depends: {DEPENDS}\n"
-        f"Source: https://github.com/varyen/detour\n"
-        f"License: MIT\n"
-        f"Section: net\n"
-        f"Priority: optional\n"
-        f"Maintainer: {MAINTAINER}\n"
-        f"Architecture: {PACKAGE_ARCH}\n"
-        f"Installed-Size: {installed_size}\n"
-        f"Description: {DESCRIPTION}\n"
-    )
+def maintainer_scripts(version):
+    """Maintainer-скрипты пакета — ОДИН источник на оба формата.
 
+    Их дословно переиспользует и `.ipk` (postinst/prerm/postrm), и `.apk`
+    (.post-install/.post-upgrade/.pre-upgrade/.pre-deinstall/.post-deinstall).
+    Поэтому внутри нельзя звать `opkg` без проверки: на OpenWrt 25.12+ его нет.
+    """
     # postinst runs after files are placed. It seeds first-install state without
     # ever overwriting state that already exists, so upgrades preserve the user's
     # panel auth, GH token, subscription config, etc.
@@ -375,23 +393,35 @@ mv "$SYSUP.new" "$SYSUP"
 
 # 1c) uci-defaults restore script. Runs at first boot after a sysupgrade
 # (OpenWrt processes /etc/uci-defaults/* once on boot then deletes them).
-# If sysupgrade preserved /etc/detour/installed.ipk but the package
-# database doesn't list us (new firmware == fresh /usr/lib/opkg/status),
-# re-install the stashed .ipk in place.
+# If sysupgrade preserved the stashed package but the package database
+# doesn't list us (new firmware == fresh package db), re-install it in place.
+# Package-manager-agnostic: OpenWrt 25.12+ ships apk-tools instead of opkg,
+# and the stash there is an .apk.
 mkdir -p /etc/uci-defaults
 cat > /etc/uci-defaults/99-detour-restore <<'UCID'
 #!/bin/sh
 # Auto-re-install detour after a router firmware sysupgrade. A fresh firmware
-# wipes /etc/opkg/customfeeds.conf and the opkg status db, so we re-add the
-# sing-box feed, refresh the index, then install the stashed panel .ipk - its
-# Depends:sing-box then pulls sing-box from the feed automatically.
-STASH=/etc/detour/installed.ipk
+# wipes the package db (and, on opkg, /etc/opkg/customfeeds.conf), so we re-add
+# the sing-box feed where one is needed, refresh the index, then install the
+# stashed panel package.
+STASH=/etc/detour/installed.pkg
+[ -f "$STASH" ] || STASH=/etc/detour/installed.apk
+[ -f "$STASH" ] || STASH=/etc/detour/installed.ipk
 [ -f "$STASH" ] || exit 0
+LOG=/var/log/detour-restore.log
+if [ -d /etc/apk ] && command -v apk >/dev/null 2>&1; then
+    # apk-based OpenWrt (25.12+). sing-box lives in the DISTRO feed here, so
+    # there is no custom feed line to restore — the panel's Depends pulls it.
+    apk info -e detour >/dev/null 2>&1 && exit 0
+    logger -t detour "post-sysupgrade restore: apk add stashed panel"
+    apk update >"$LOG" 2>&1
+    apk add --allow-untrusted "$STASH" >>"$LOG" 2>&1
+    exit 0
+fi
 if opkg list-installed detour 2>/dev/null | grep -q '^detour '; then
     exit 0   # already installed (regular boot, not a sysupgrade restore)
 fi
 logger -t detour "post-sysupgrade restore: re-add feed + opkg install panel"
-LOG=/var/log/detour-restore.log
 grep -qs '^src/gz {FEED_NAME} ' /etc/opkg/customfeeds.conf 2>/dev/null \\
     || echo "{FEED_LINE}" >> /etc/opkg/customfeeds.conf
 opkg update >"$LOG" 2>&1
@@ -600,10 +630,14 @@ if [ ! -s /etc/detour/geo.db ] && [ -x /usr/sbin/detour-geo ]; then
 fi
 
 # 5) Drop our usign public key into opkg's standard keyring directory so the
-# OpenWrt opkg ecosystem also trusts it (the file is shipped by data.tar.gz,
-# we just make sure the dir mode is correct).
-mkdir -p /etc/opkg/keys
-chmod 0755 /etc/opkg/keys
+# OpenWrt opkg ecosystem also trusts it (the file is shipped by the payload,
+# we just make sure the dir mode is correct). Skipped on apk-based OpenWrt —
+# there is no /etc/opkg there, and detour-update falls back to the key it
+# always ships at /etc/detour/release.usign.pub.
+if [ -d /etc/opkg ]; then
+    mkdir -p /etc/opkg/keys
+    chmod 0755 /etc/opkg/keys
+fi
 
 echo "detour $VERSION installed."
 echo "=== detour postinst end version=$VERSION pid=$$ ==="
@@ -670,13 +704,33 @@ esac
 exit 0
 """
 
+    return {"postinst": postinst, "prerm": prerm, "postrm": postrm}
+
+
+def build_control_tar_gz(version, installed_size):
+    """Return bytes of the control.tar.gz inner archive."""
+    control = (
+        f"Package: {PACKAGE_NAME}\n"
+        f"Version: {version}\n"
+        f"Depends: {DEPENDS}\n"
+        f"Source: https://github.com/varyen/detour\n"
+        f"License: MIT\n"
+        f"Section: net\n"
+        f"Priority: optional\n"
+        f"Maintainer: {MAINTAINER}\n"
+        f"Architecture: {PACKAGE_ARCH}\n"
+        f"Installed-Size: {installed_size}\n"
+        f"Description: {DESCRIPTION}\n"
+    )
+    scripts = maintainer_scripts(version)
+
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.USTAR_FORMAT) as tar:
         # opkg looks for these names at the root of control.tar.gz with `./` prefix.
         _add_bytes_to_tar(tar, "./control", control.encode("utf-8"), 0o644)
-        _add_bytes_to_tar(tar, "./postinst", postinst.encode("utf-8"), 0o755)
-        _add_bytes_to_tar(tar, "./prerm", prerm.encode("utf-8"), 0o755)
-        _add_bytes_to_tar(tar, "./postrm", postrm.encode("utf-8"), 0o755)
+        _add_bytes_to_tar(tar, "./postinst", scripts["postinst"].encode("utf-8"), 0o755)
+        _add_bytes_to_tar(tar, "./prerm", scripts["prerm"].encode("utf-8"), 0o755)
+        _add_bytes_to_tar(tar, "./postrm", scripts["postrm"].encode("utf-8"), 0o755)
         # conffiles is intentionally empty: we never ship files that should be
         # preserved across upgrades (user state lives in PROTECTED_PATHS which we
         # never ship; postinst seeds /etc/detour.auth on first install only).
@@ -723,6 +777,8 @@ def build_ipk(pkg_name, version, file_entries, out_dir, *, inject_keyring):
         die(f"{pkg_name}: package contains protected paths (user state):\n  "
             + "\n  ".join(bad))
 
+    check_shebang_eol(file_entries)
+
     # 1. Optionally inject the opkg keyring file (path depends on key
     #    fingerprint) — only the panel ships the verification key.
     file_entries = list(file_entries)
@@ -748,8 +804,74 @@ def build_ipk(pkg_name, version, file_entries, out_dir, *, inject_keyring):
     return ipk_path, installed_size
 
 
+# ============ apk assembly (OpenWrt 25.12+ / apk-tools 3) ============
+#
+# OpenWrt 25.12 сменил opkg на apk-tools 3, и наш `.ipk` там не ставится вовсе:
+# `apk add` отвечает «v2 package format error». Поэтому релиз несёт ВТОРОЙ файл
+# того же содержимого в формате APKv2 — см. apk_pkg.py. Источник файлов, версия
+# и maintainer-скрипты у обоих пакетов общие, расходятся только упаковка,
+# имена скриптов и строка архитектуры (`all` у opkg ⇄ `noarch` у apk).
+
+# Ревизия внутри одной версии: apk сравнивает «1.57.0-r0». Бампать нужно, только
+# если пришлось перевыпустить пакет БЕЗ смены версии панели.
+APK_RELEASE = int(os.environ.get("DETOUR_APK_RELEASE", "0"))
+APK_ARCH = os.environ.get("DETOUR_APK_ARCH", apk_pkg.NOARCH)
+
+
+def build_apk(pkg_name, version, file_entries, out_dir):
+    """Собрать панель в формате APKv2. Возвращает (путь, installed_size)."""
+    bad = [d for _, d, _ in file_entries if _is_protected(d)]
+    if bad:
+        die(f"{pkg_name}: package contains protected paths (user state):\n  "
+            + "\n  ".join(bad))
+
+    check_shebang_eol(file_entries)
+
+    # Ключ opkg-кольца (/etc/opkg/keys/<keyid>) здесь НЕ кладём: на apk-роутере
+    # каталога /etc/opkg нет, а detour-update и так проверяет подпись ключом из
+    # /etc/detour/release.usign.pub, который пакет несёт всегда.
+    scripts = maintainer_scripts(version)
+    postrm_lines = scripts["postrm"].split("\n")
+    # apk передаёт в скрипт версию, а не opkg-действие. `.post-deinstall`
+    # вызывается ТОЛЬКО при удалении (на обновление apk зовёт `.post-upgrade`),
+    # поэтому подставляем действие, которое ждёт тело скрипта.
+    apk_postrm = "\n".join(
+        [postrm_lines[0], "set -- remove   # apk: .post-deinstall = только удаление"]
+        + postrm_lines[1:]
+    )
+
+    apk_path = os.path.join(out_dir, f"{pkg_name}_{version}_{APK_ARCH}.apk")
+    return apk_pkg.build_apk(
+        apk_path,
+        pkgname=pkg_name,
+        version=version,
+        release=APK_RELEASE,
+        arch=APK_ARCH,
+        description=DESCRIPTION,
+        url="https://github.com/varyen/detour",
+        license_="MIT",
+        maintainer=MAINTAINER,
+        depends=apk_pkg.parse_depends(DEPENDS),
+        file_entries=[(resolve_source(p), dest, mode)
+                      for p, dest, mode in file_entries],
+        scripts={
+            "post-install": scripts["postinst"],
+            # apk на обновлении зовёт post-upgrade и НЕ зовёт post-install —
+            # значит тот же самый скрипт нужен под обоими именами.
+            "post-upgrade": scripts["postinst"],
+            # Аналог opkg prerm: остановить службы до того, как файлы заменят.
+            "pre-upgrade": scripts["prerm"],
+            "pre-deinstall": scripts["prerm"],
+            "post-deinstall": apk_postrm,
+        },
+    )
+
+
 def sign_ipk(ipk_path):
-    """Produce <ipk>.sig as a usign(1)-compatible detached signature."""
+    """Produce <ipk>.sig as a usign(1)-compatible detached signature.
+
+    Одинаково применимо к `.ipk` и `.apk` — подпись открепленная, формат
+    пакета для неё безразличен."""
     if not os.path.isfile(KEY_SEC_USIGN):
         die(f"usign secret key missing at {KEY_SEC_USIGN} — generate it with "
             f"`usign -G -s {KEY_SEC_USIGN} -p {KEY_PUB_USIGN}`")
@@ -952,14 +1074,15 @@ def publish_to_github(version, out_dir):
     upload_url = release["upload_url"].split("{", 1)[0]
     existing = {a["name"]: a["id"] for a in (release.get("assets") or [])}
 
-    # Upload every .ipk (+ .sig) in out_dir: the panel and the Keenetic package.
+    # Upload every package (+ .sig) in out_dir: the panel .ipk (opkg OpenWrt),
+    # the same panel as .apk (OpenWrt 25.12+ / apk-tools 3) and the Keenetic .ipk.
     # sing-box ships via the opkg feed (build_feed.py), not as a release asset.
     assets_to_upload = sorted(
         os.path.join(out_dir, n) for n in os.listdir(out_dir)
-        if n.endswith(".ipk") or n.endswith(".ipk.sig")
+        if n.endswith((".ipk", ".ipk.sig", ".apk", ".apk.sig"))
     )
     if not assets_to_upload:
-        die(f"no .ipk artefacts in {out_dir} — build first")
+        die(f"no package artefacts in {out_dir} — build first")
     upload_names = {os.path.basename(p) for p in assets_to_upload}
     # Wipe legacy artefacts left over from earlier release schemes (tarball+manifest
     # and the detour-bins / detour-full split).
@@ -1064,6 +1187,15 @@ def main():
     print(f"  signed: {panel_sig}")
     built.append(("panel", panel_ipk, panel_sig))
 
+    # --- тот же пакет в формате APKv2 (OpenWrt 25.12+ ушёл с opkg на apk) ---
+    print("\n[panel] Assembling .apk (apk-tools 3 / OpenWrt 25.12+) ...")
+    panel_apk, panel_apk_size = build_apk(PACKAGE_NAME, version, panel_files, out_dir)
+    print(f"  {panel_apk}  ({os.path.getsize(panel_apk):,} B on disk, "
+          f"installed {panel_apk_size:,} B, sha256 {sha256_file(panel_apk)[:16]}...)")
+    panel_apk_sig = sign_ipk(panel_apk)
+    print(f"  signed: {panel_apk_sig}")
+    built.append(("panel/apk", panel_apk, panel_apk_sig))
+
     # --- Keenetic/Entware .ipk (same release, same source: router_files/) ---
     keenetic_ipk = None
     if not args.no_keenetic:
@@ -1086,8 +1218,10 @@ def main():
         f.write(f"# detour v{version}\n\n")
         f.write(notes or "(no notes)")
         f.write("\n\n## Packages\n\n")
-        f.write(f"- `{os.path.basename(panel_ipk)}` — panel for OpenWrt/GL.iNet "
-                "(scripts/UI). On first install it bootstraps the detour feed and then pulls sing-box + tpws-zapret automatically.\n")
+        f.write(f"- `{os.path.basename(panel_ipk)}` — panel for **opkg-based** OpenWrt/GL.iNet "
+                "(≤ 24.10). On first install it bootstraps the detour feed and then pulls sing-box + tpws-zapret automatically.\n")
+        f.write(f"- `{os.path.basename(panel_apk)}` — the SAME panel for **apk-based** OpenWrt "
+                "(25.12+, apk-tools 3). Identical contents; sing-box comes from the distro feed there.\n")
         if keenetic_ipk:
             f.write(f"- `{os.path.basename(keenetic_ipk)}` — Keenetic/Entware (mipsel) package "
                     "(on first install it bootstraps our mipsel feed and then pulls sing-box + tpws-zapret automatically; nothing bundled).\n")
@@ -1100,7 +1234,8 @@ def main():
         f.write("\n## Install\n\n")
         f.write(
             "### Fresh (SSH)\n\n"
-            f"```\nopkg install /tmp/{os.path.basename(panel_ipk)}\n```\n\n"
+            f"```\n# OpenWrt/GL.iNet с opkg (≤ 24.10)\nopkg install /tmp/{os.path.basename(panel_ipk)}\n\n"
+            f"# OpenWrt 25.12+ (apk-tools 3)\napk add --allow-untrusted /tmp/{os.path.basename(panel_apk)}\n```\n\n"
             "The panel then bootstraps the feed and pulls sing-box + tpws-zapret itself.\n\n"
             "### Panel update (existing install)\n\n"
             f"LuCI → Software → Upload `{os.path.basename(panel_ipk)}`, or the panel's "

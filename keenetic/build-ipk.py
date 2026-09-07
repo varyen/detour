@@ -252,6 +252,13 @@ def build_data():
                 sys.exit(f"missing source: {src}" + (
                     "  (run keenetic/fetch-bins.py)" if "/bins/" in src.replace("\\", "/") else ""))
             data = open(src, "rb").read()
+            # Скрипт с CRLF на роутере не запускается вовсе: ядро берёт из
+            # шебанга путь ДОСЛОВНО до перевода строки, и `#!/opt/bin/sh\r` не
+            # резолвится. Ловим на сборке — так однажды уехал detour-cron
+            # (правился на Windows) и молча не стартовал.
+            if data.startswith(b"#!") and b"\r\n" in data:
+                sys.exit(f"CRLF в скрипте пакета: {src}\n"
+                         "  шебанг `#!...\\r` не запустится на Keenetic — приведи файл к LF")
             if fix:
                 data = fix_shebang(data)
             add_bytes(tar, "./" + dest, data, mode)

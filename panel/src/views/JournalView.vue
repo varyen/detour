@@ -652,7 +652,7 @@ function pickIpk(e: Event) {
 async function installLocal() {
   const f = ipkFile.value;
   if (!f) {
-    toast.error("Сначала выберите файл .ipk");
+    toast.error("Сначала выберите файл пакета (.ipk или .apk)");
     return;
   }
   if (!ask(`Установить ${f.name}? Панель перезапустится.`)) return;
@@ -661,8 +661,9 @@ async function installLocal() {
   applyNote.value = "";
   applyRunning.value = true;
   try {
-    /* Подпись кладётся отдельным шагом: установщик ищет её рядом с .ipk.
-       Без подписи ставится обычным opkg — это осознанный выбор оператора. */
+    /* Подпись кладётся отдельным шагом: установщик ищет её рядом с пакетом.
+       Без подписи ставится обычным менеджером пакетов — это осознанный выбор
+       оператора. Формат (.ipk / .apk) роутер определяет по содержимому. */
     if (sigText.value.trim()) await diag.panelUpdateSig(sigText.value.trim());
     await diag.panelUpdateLocal(f);
     localOpen.value = false;
@@ -939,7 +940,7 @@ onMounted(async () => {
     },
     {
       id: "jr:upd-local",
-      title: "Установить панель из файла .ipk",
+      title: "Установить панель из файла (.ipk / .apk)",
       group: "журнал",
       keywords: "загрузить пакет подпись",
       run: () => {
@@ -1463,19 +1464,21 @@ onBeforeUnmount(() => {
   >
     <div class="sheetc">
       <p class="hint">
-        Файл .ipk и, если он есть, текст подписи .ipk.sig. Без подписи пакет поставится
-        обычным opkg — так тоже можно, но проверить происхождение файла будет нечем.
+        Файл пакета и, если он есть, текст подписи. На OpenWrt до 24.10 и на Keenetic это
+        <code>.ipk</code>, на OpenWrt 25.12+ — <code>.apk</code> (там вместо opkg apk-tools).
+        Без подписи пакет поставится обычным менеджером пакетов — так тоже можно, но
+        проверить происхождение файла будет нечем.
       </p>
       <label class="field">
-        <span class="lbl">Пакет .ipk</span>
-        <input type="file" accept=".ipk" @change="pickIpk" />
+        <span class="lbl">Пакет .ipk / .apk</span>
+        <input type="file" accept=".ipk,.apk" @change="pickIpk" />
       </label>
       <p v-if="ipkFile" class="hint mono">
         {{ ipkFile.name }} · {{ Math.round(ipkFile.size / 1024) }} КБ
       </p>
       <label class="field">
-        <span class="lbl">Подпись .ipk.sig (необязательно)</span>
-        <CodeArea v-model="sigText" label="Подпись .ipk.sig" :rows="4" />
+        <span class="lbl">Подпись .sig (необязательно)</span>
+        <CodeArea v-model="sigText" label="Подпись пакета (.sig)" :rows="4" />
       </label>
     </div>
     <template #footer>

@@ -1,21 +1,32 @@
 #!/bin/sh
-# detour-update — fetch + verify + install signed .ipk releases.
+# detour-update — fetch + verify + install signed package releases.
 #
-# Each release on GitHub is a usign-signed .ipk file plus its detached
+# Each release on GitHub carries a usign-signed package plus its detached
 # signature. The flow is:
 #   1. Query GH API for the latest tag and asset URLs.
-#   2. Download .ipk + .ipk.sig into /tmp.
-#   3. usign -V the .ipk against the pinned public key.
-#   4. opkg install /tmp/<file>.ipk.
-# opkg owns the file install, version registry, and dependency check;
-# postinst in the package handles service restart and first-install seeding.
+#   2. Download the package + its .sig into /tmp.
+#   3. usign -V the package against the pinned public key.
+#   4. Hand it to the platform package manager.
+# The package manager owns the file install, version registry, and dependency
+# check; postinst in the package handles service restart and first-install
+# seeding.
 #
-# The panel release is ONE .ipk asset (detour_<ver>_all.ipk). sing-box is NOT a
-# release asset — it is pulled from our self-hosted opkg feed (build_feed.py →
-# varyen/detour@feed). The panel `Depends: sing-box`, so `apply` ensures the feed
-# is configured + sing-box is installed before installing the panel. The `bins-*`
-# subcommands now drive sing-box THROUGH opkg (`opkg upgrade sing-box`), not a
-# detour-bins package.
+# ДВА ФОРМАТА ПАКЕТА. OpenWrt 25.12 сменил opkg на apk-tools 3, и `.ipk` там не
+# ставится вовсе («v2 package format error»). Поэтому каждый релиз несёт ОБА
+# файла одного и того же содержимого:
+#   detour_<ver>_all.ipk     — opkg (OpenWrt <= 24.10, GL.iNet)
+#   detour_<ver>_noarch.apk  — apk-tools 3 (OpenWrt 25.12+)
+#   detour-keenetic_<ver>_all.ipk — Keenetic/Entware (opkg)
+# Скрипт сам определяет менеджер (PKGM ниже) и берёт нужный ассет; все операции
+# идут через обёртки pkg_* и одинаковы для обеих веток.
+#
+# sing-box НЕ является ассетом релиза. На opkg-прошивках он приходит из нашего
+# самодельного фида (build_feed.py → varyen/detour@feed), потому что штатный фид
+# GL.iNet застрял на 1.8.10. На apk-прошивках (OpenWrt 25.12+) он берётся из
+# РОДНОГО фида дистрибутива — там уже 1.13.x, своего фида не нужно.
+# Панель `Depends: sing-box`, поэтому `apply` сначала убеждается, что фид
+# настроен и sing-box стоит. Подкоманды `bins-*` гоняют sing-box ЧЕРЕЗ пакетный
+# менеджер (`opkg upgrade` / `apk upgrade`), а не через пакет detour-bins.
 #
 # Subcommands:
 #   check                  — query GH for latest PANEL tag; write state file; on a
@@ -79,6 +90,8 @@ FEED_CONF=/etc/opkg/customfeeds.conf
 # The panel .ipk is published as `Architecture: all`; this is only the local
 # temp-download filename — opkg reads the real arch from the package control.
 ARCH=all
+PKG_EXT=ipk           # расширение пакета этой платформы (apk-ветка ниже меняет)
+FEED_CPU=""           # CPU-семейство для apk-фида движков (заполняет apk-ветка)
 
 # Default to the canonical public repo so self-update works even when
 # update.conf is absent (the repo is public → no token required). update.conf,
@@ -130,6 +143,46 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     FEED_LINE="src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/mipsel"
     # GH_OWNER/GH_REPO inherit the varyen/detour defaults set above.
 fi
+
+# --- Пакетный менеджер: opkg |> apk ------------------------------------------
+# OpenWrt 25.12 сменил opkg на apk-tools 3. Наш `.ipk` там не ставится ВООБЩЕ
+# («v2 package format error»), поэтому релиз несёт второй файл того же
+# содержимого — `detour_<ver>_noarch.apk`.
+# Детект: каталог /etc/opkg на таких прошивках ВСЁ ЕЩЁ существует (пустой), а
+# бинарника opkg нет — значит опираемся на /etc/apk/world (его заводит только
+# apk) плюс наличие самого apk. Keenetic/Entware сюда не попадает никогда.
+PKGM=opkg
+if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; then
+    PKGM=apk
+    PKG_EXT=apk
+    ARCH=noarch
+    ASSET_RE='^detour_.*[.]apk$'
+    ASSET_SIG_RE='^detour_.*[.]apk[.]sig$'
+    STASH_IPK=/etc/detour/installed.apk
+    # sing-box берём из РОДНОГО фида OpenWrt 25.12 (там 1.13.x — ровно та схема
+    # конфига, что нужна панели), поэтому opkg-строку фида прописывать некуда:
+    # FEED_CONF пустой и ensure_feed становится no-op.
+    FEED_CONF=""
+    # А вот tpws и nfqws2 в природе apk-фидов не существует — ни у дистрибутива,
+    # ни у кого-либо ещё. Их мы публикуем сами, разложив по CPU-семействам
+    # (build_feed.py --arch apk-all). Пакеты объявлены `noarch`, потому что точную
+    # строку архитектуры apk на OpenWrt («aarch64_cortex-a53», «arm_cortex-a7_…»)
+    # угадать невозможно — нужный файл выбираем МЫ, вот прямо здесь, по префиксу.
+    FEED_CPU=""
+    _apkarch=$(apk --print-arch 2>/dev/null || cat /etc/apk/arch 2>/dev/null)
+    case "$_apkarch" in
+        x86_64*)                    FEED_CPU=x86_64 ;;
+        i386*|i486*|i586*|i686*|x86*) FEED_CPU=x86 ;;
+        aarch64*)                   FEED_CPU=aarch64 ;;
+        arm*)                       FEED_CPU=arm ;;
+        mipsel*|mips*el*)           FEED_CPU=mipsel ;;
+        mips*)                      FEED_CPU=mips ;;
+    esac
+    # FEED_LINE тут не для opkg (его нет) — только чтобы feed_base() отдал нужный
+    # каталог: скачиванием и установкой занимается feed_curl_install.
+    [ -n "$FEED_CPU" ] && \
+        FEED_LINE="src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/apk-$FEED_CPU"
+fi
 [ -f "$CONFIG" ] && . "$CONFIG"
 # A stale/placeholder update.conf may carry empty GH_OWNER=/GH_REPO= (an older
 # OpenWrt postinst seeded exactly that) and would clobber the public-repo defaults
@@ -151,19 +204,85 @@ CHECK_CRON_MATCH="detour-update check"
 log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null; echo "[$LOG_TAG] $*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
-# Version opkg's own package database reports ("" if the package is unknown to
-# opkg). Deliberately separate from current_version(), which prefers the version
-# FILE the postinst writes — the two can disagree, and that disagreement is
-# exactly the failure verify_and_install checks for.
-opkg_db_version() {
-    opkg list-installed "$PACKAGE_NAME" 2>/dev/null | awk '{print $3; exit}'
+# --- Обёртки над пакетным менеджером ------------------------------------------
+# Один и тот же код обслуживает opkg (OpenWrt <=24.10, Keenetic/Entware) и
+# apk-tools 3 (OpenWrt 25.12+).
+#
+# Разбор вывода apk. `apk list -I detour` печатает строку вида
+#   detour-1.57.0-r0 noarch {detour} (MIT) [installed]
+# то есть имя и версия склеены дефисом, а хвост «-rN» — apk-ревизия пакета,
+# наружу её показывать не надо (панель сравнивает семвер X.Y.Z). Префикс
+# «<имя>-» отрезаем ПО ДЛИНЕ ИМЕНИ, а не по первому дефису: имена вроде
+# `sing-box` и `tpws-zapret` сами содержат дефисы.
+_apk_pkg_version() {   # <pkg>; строки `apk list` читает со stdin
+    awk -v p="$1" '
+        { n = $1
+          if (substr(n, 1, length(p) + 1) != p "-") next
+          v = substr(n, length(p) + 2)
+          sub(/-r[0-9]+$/, "", v)
+          print v; exit }'
+}
+
+pkg_installed_version() {   # <pkg> -> установленная версия ("" если не стоит)
+    if [ "$PKGM" = apk ]; then
+        apk list -I "$1" 2>/dev/null | _apk_pkg_version "$1"
+    else
+        opkg list-installed "$1" 2>/dev/null | awk '{print $3; exit}'
+    fi
+}
+
+pkg_is_installed() { [ -n "$(pkg_installed_version "$1")" ]; }
+
+pkg_upgrade_version() {   # <pkg> -> версия, до которой обновит менеджер ("" — нечего)
+    if [ "$PKGM" = apk ]; then
+        apk list -u "$1" 2>/dev/null | _apk_pkg_version "$1"
+    else
+        opkg list-upgradable 2>/dev/null | awk -v p="$1" '$1==p {print $NF; exit}'
+    fi
+}
+
+pkg_index_update() {   # обновить индексы фидов
+    if [ "$PKGM" = apk ]; then apk update; else opkg update; fi
+}
+
+pkg_install() {   # <pkg> — поставить из фида, отобрав файлы у прежнего владельца
+    if [ "$PKGM" = apk ]; then apk add --force-overwrite "$1"
+    else opkg install --force-overwrite "$1"; fi
+}
+
+pkg_upgrade() {   # <pkg> — обновить уже установленный пакет
+    if [ "$PKGM" = apk ]; then apk upgrade --force-overwrite "$1"
+    else opkg upgrade "$1"; fi
+}
+
+pkg_remove() {   # <pkg>
+    if [ "$PKGM" = apk ]; then apk del "$1"; else opkg remove "$1"; fi
+}
+
+pkg_install_file() {   # <файл> [доп. флаги] — поставить локальный пакет
+    local f="$1"; shift
+    if [ "$PKGM" = apk ]; then
+        # Подписи ВНУТРИ пакета у нас нет (доверие строится на открепленной
+        # usign-.sig рядом, её проверяет verify_and_install) -> --allow-untrusted.
+        apk add --allow-untrusted "$@" "$f"
+    else
+        opkg install "$@" "$f"
+    fi
+}
+
+# Version the package manager's own database reports ("" if the package is
+# unknown to it). Deliberately separate from current_version(), which prefers the
+# version FILE the postinst writes — the two can disagree, and that disagreement
+# is exactly the failure verify_and_install checks for.
+pkgdb_version() {
+    pkg_installed_version "$PACKAGE_NAME"
 }
 
 current_version() {
-    if [ -f "$VERSION_FILE" ]; then cat "$VERSION_FILE"
-    else opkg list-installed "$PACKAGE_NAME" 2>/dev/null | awk '{print $3}' | head -1
-         [ -z "$(opkg list-installed "$PACKAGE_NAME" 2>/dev/null)" ] && echo "0.0.0"
-    fi
+    local v
+    if [ -f "$VERSION_FILE" ]; then cat "$VERSION_FILE"; return 0; fi
+    v=$(pkgdb_version)
+    if [ -n "$v" ]; then echo "$v"; else echo "0.0.0"; fi
 }
 
 # version_gt A B → exit 0 if A > B (semver X.Y.Z numeric)
@@ -416,6 +535,10 @@ ensure_ipv4_wget() {
 # BOTH platforms now: the Keenetic shim above points FEED_CONF/FEED_LINE at
 # /opt/etc/opkg + feed/mipsel, so Keenetic gets its own mipsel feed (it used to skip).
 ensure_feed() {
+    # apk-прошивки (OpenWrt 25.12+): своего фида нет — sing-box берётся из
+    # родного фида дистрибутива, а tpws/nfqws2 туда пока не собраны (см.
+    # cmd_tpws_check / cmd_nfqws2_check — они честно рапортуют «n/a»).
+    [ "$PKGM" = apk ] && return 0
     ensure_ipv4_wget   # Keenetic-only no-op elsewhere; runs before any opkg/wget op
     mkdir -p "$(dirname "$FEED_CONF")" 2>/dev/null   # /opt/etc/opkg may not exist yet on Keenetic
     touch "$FEED_CONF" 2>/dev/null
@@ -426,6 +549,21 @@ ensure_feed() {
 # Base URL of our feed (the last whitespace-token of FEED_LINE, e.g.
 # https://raw.githubusercontent.com/varyen/detour/feed/mipsel).
 feed_base() { printf '%s' "${FEED_LINE##* }"; }
+
+# Ставить ли из нашего фида «вручную» — скачать файл curl'ом и отдать менеджеру
+# локально, вместо того чтобы прописывать фид в его конфиг.
+#   * Keenetic: собственный загрузчик opkg наш HTTPS-фид не тянет (wget-nossl /
+#     зависание на IPv6 к раздавленному raw.githubusercontent.com);
+#   * apk (OpenWrt 25.12+): фид у нас не в формате apk-репозитория, да и
+#     прописывать нечего — мы просто кладём готовые .apk по URL.
+use_curl_feed() { [ "$KEENETIC" = 1 ] || [ "$PKGM" = apk ]; }
+
+# Есть ли у нас сборка движков DPI-обхода под эту машину. На apk всё упирается в
+# CPU-семейство: если оно неизвестное, честно говорим «нет», а не пытаемся ставить.
+bypass_feed_available() {
+    [ "$PKGM" != apk ] && return 0
+    [ -n "$FEED_CPU" ]
+}
 
 # On Keenetic force curl onto IPv4: wget/curl to the RU-throttled
 # raw.githubusercontent.com routinely HANGS on IPv6 (the owner saw exactly this).
@@ -460,8 +598,8 @@ feed_curl_install() {
     log "feed: downloading $file via curl${v4:+ (IPv4)} ..."
     gh_curl_retry $v4 -fsSL --max-time 300 -o "$tmp" "$base/$file" \
         || { log "feed: download of $file failed"; rm -f "$tmp"; return 1; }
-    if ! opkg install --force-overwrite "$tmp" 2>&1; then
-        log "feed: opkg install $file failed"; rm -f "$tmp"; return 1
+    if ! pkg_install_file "$tmp" --force-overwrite 2>&1; then
+        log "feed: install of $file failed"; rm -f "$tmp"; return 1
     fi
     rm -f "$tmp"
     log "feed: installed $pkg from $file"
@@ -473,7 +611,7 @@ feed_curl_install() {
 # tolerates a missing binary (traffic routes directly until sing-box arrives).
 ensure_singbox() {
     ensure_feed
-    if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG "; then
+    if pkg_is_installed "$SINGBOX_PKG"; then
         return 0
     fi
     log "sing-box not installed — pulling from the feed"
@@ -483,9 +621,9 @@ ensure_singbox() {
         feed_curl_install "$SINGBOX_PKG" \
             || log "WARNING: feed install of $SINGBOX_PKG failed (feed unreachable?)"
     else
-        opkg update >/dev/null 2>&1
-        opkg install --force-overwrite "$SINGBOX_PKG" >/dev/null 2>&1 \
-            || log "WARNING: opkg install $SINGBOX_PKG failed (feed unreachable?)"
+        pkg_index_update >/dev/null 2>&1
+        pkg_install "$SINGBOX_PKG" >/dev/null 2>&1 \
+            || log "WARNING: install of $SINGBOX_PKG failed (feed unreachable?)"
     fi
     # Keenetic: once OUR feed sing-box owns /opt/bin/sing-box, retire Entware's
     # sing-box-go so the two can't fight over the binary/opkg registry. Guarded on
@@ -494,23 +632,23 @@ ensure_singbox() {
     # Best-effort; --force-overwrite already reassigned the shared binary to us, so
     # removing sing-box-go won't delete /opt/bin/sing-box.
     if [ "$KEENETIC" = 1 ] \
-       && opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG " \
-       && opkg list-installed sing-box-go 2>/dev/null | grep -q '^sing-box-go '; then
-        opkg remove sing-box-go >/dev/null 2>&1 \
+       && pkg_is_installed "$SINGBOX_PKG" \
+       && pkg_is_installed sing-box-go; then
+        pkg_remove sing-box-go >/dev/null 2>&1 \
             && log "removed Entware sing-box-go (superseded by feed sing-box)"
     fi
 }
 
-# Installed sing-box version per opkg ("" if not opkg-owned).
+# Installed sing-box version per the package manager ("" if not package-owned).
 sb_installed_version() {
-    opkg list-installed "$SINGBOX_PKG" 2>/dev/null | awk '{print $3}' | head -1
+    pkg_installed_version "$SINGBOX_PKG"
 }
 
-# Version opkg would upgrade sing-box TO ("" = nothing newer than installed).
-# Let opkg do the version math (`list-upgradable` lines: "<pkg> - <cur> - <new>")
-# instead of sorting versions ourselves — busybox `sort` mis-ranks 1.13 vs 1.8.
+# Version the package manager would upgrade sing-box TO ("" = nothing newer).
+# Let it do the version math instead of sorting versions ourselves — busybox
+# `sort` mis-ranks 1.13 vs 1.8.
 sb_upgrade_version() {
-    opkg list-upgradable 2>/dev/null | awk -v p="$SINGBOX_PKG" '$1==p {print $NF; exit}'
+    pkg_upgrade_version "$SINGBOX_PKG"
 }
 
 # Fire a Web Push when a NEW panel version becomes available. Deduped via a marker
@@ -554,38 +692,64 @@ cmd_check() {
     fi
 }
 
-# verify_and_install <ipk> <sig> <backup_basename> <stash_path> <opkg_flags>
+# verify_and_install <pkg> <sig> <backup_basename> <stash_path> <extra_flags>
 #   backup_basename — filename under $BACKUP_DIR for the rollback copy ("" skips)
-#   stash_path      — where to stash the installed .ipk (+.sig) for sysupgrade
+#   stash_path      — where to stash the installed package (+.sig) for sysupgrade
 #                     restore ("" skips)
-#   opkg_flags      — extra opkg flags (bins uses --force-overwrite to take the
-#                     binary files over from the old monolithic package)
+#   extra_flags     — extra flags for the package manager (bins uses
+#                     --force-overwrite to take the binary files over from the old
+#                     monolithic package). Понимают обе ветки: opkg и apk.
 verify_and_install() {
     local ipk="$1" sig="$2" backup_base="$3" stash="$4" opkg_flags="$5"
     [ -f "$ipk" ] || die "ipk missing: $ipk"
     [ -f "$sig" ] || die "ipk.sig missing: $sig"
-    # Verify against pinned key. -P scans the keyring dir for any matching keynum.
+    # Verify against our pinned key ПЕРВЫМ, и только потом против кольца opkg
+    # (-P сканирует каталог и ищет ключ с подходящим keynum).
+    #
+    # Порядок важен именно на apk-прошивках (OpenWrt 25.12+): каталог
+    # /etc/opkg/keys там остаётся и НЕ пустой — в нём лежит ключ самого OpenWrt,
+    # а нашего нет и не будет (пакет .apk его туда не кладёт: у apk своё RSA-
+    # кольцо в /etc/apk/keys, наш usign-ключ ему чужой). Со старым порядком
+    # «кольцо → пиннингованный ключ» проверка уходила в кольцо, не находила там
+    # нашего keynum и убивала самообновление ложным «usign verification failed».
+    # Пиннингованный /etc/detour/release.usign.pub пакет несёт ВСЕГДА и на всех
+    # платформах, поэтому он и есть основной путь; кольцо — запасной.
     if [ "$KEENETIC" = 1 ] && ! command -v usign >/dev/null 2>&1; then
         # Entware usually has no `usign`. The asset still comes directly from the
         # project's GitHub release over HTTPS — skip the offline signature check.
         log "usign not available (Entware) — skipping signature check"
+    elif [ -f "$PUBLIC_KEY" ] && usign -V -m "$ipk" -p "$PUBLIC_KEY" -x "$sig" 2>/dev/null; then
+        : # подпись сошлась с пиннингованным ключом
     elif [ -d "$OPKG_KEYRING" ] && ls "$OPKG_KEYRING"/* >/dev/null 2>&1; then
         usign -V -m "$ipk" -P "$OPKG_KEYRING" -x "$sig" \
-            || die "usign verification failed (keyring=$OPKG_KEYRING)"
+            || die "usign verification failed (пробовали $PUBLIC_KEY, затем кольцо $OPKG_KEYRING)"
     elif [ -f "$PUBLIC_KEY" ]; then
-        usign -V -m "$ipk" -p "$PUBLIC_KEY" -x "$sig" \
-            || die "usign verification failed (key=$PUBLIC_KEY)"
+        die "usign verification failed (key=$PUBLIC_KEY)"
     else
         die "no public key on this router — refusing to install unsigned"
     fi
-    # Keep a copy of this exact .ipk before installing — used by rollback.
+    # Копия для отката — это пакет, который стоит СЕЙЧАС, то есть сташ прошлой
+    # установки, а НЕ тот файл, что мы собираемся поставить.
+    #
+    # Раньше сюда клали как раз устанавливаемый файл, но под именем ТЕКУЩЕЙ
+    # версии: в /var/detour-backup/detour_1.57.0.ipk лежал пакет 1.58.0. Откат
+    # брал этот файл (по имени он «старый») и переустанавливал ровно ту же
+    # версию, из которой откатывались — то есть не работал вообще, молча и на
+    # обеих платформах. Вскрылось на apk: тот отказывается понижать версию без
+    # явного ограничения, а ограничение читается из пакета — и разошлось с
+    # именем файла.
+    #
+    # Сташ появляется в конце УСПЕШНОЙ установки, поэтому на самой первой
+    # установке его нет: кандидата для отката тогда честно не существует.
     mkdir -p "$BACKUP_DIR"
-    [ -n "$backup_base" ] && cp -a "$ipk" "$BACKUP_DIR/$backup_base" 2>/dev/null
+    if [ -n "$backup_base" ] && [ -n "$stash" ] && [ -f "$stash" ]; then
+        cp -a "$stash" "$BACKUP_DIR/$backup_base" 2>/dev/null
+    fi
     # Cap the panel's backup count at 3.
-    ls -1t "$BACKUP_DIR"/${PACKAGE_NAME}_*.ipk 2>/dev/null | tail -n +4 | xargs -r rm -f
-    # opkg handles file replacement, dep resolution, postinst, etc.
+    ls -1t "$BACKUP_DIR"/${PACKAGE_NAME}_*.${PKG_EXT} 2>/dev/null | tail -n +4 | xargs -r rm -f
+    # The package manager handles file replacement, dep resolution, postinst, etc.
     # shellcheck disable=SC2086
-    opkg install $opkg_flags "$ipk" || die "opkg install failed"
+    pkg_install_file "$ipk" $opkg_flags || die "$PKGM install failed"
     # …and then CHECK THE PACKAGE DATABASE. Two independent traps here:
     #   * opkg (Entware especially) can exit 0 while the package silently stays old;
     #   * /etc/detour/version is written by the .ipk's own postinst, so the panel's
@@ -595,10 +759,10 @@ verify_and_install() {
     #     1.30.2). current_version() prefers that file, so it cannot catch this.
     # Ask the DB itself; a mismatch is a failed install, not a success.
     local _want _got
-    _want=$(ipk_version "$ipk")
-    _got=$(opkg_db_version)
+    _want=$(pkg_file_version "$ipk")
+    _got=$(pkgdb_version)
     if [ -n "$_want" ] && [ -n "$_got" ] && [ "$_want" != "$_got" ]; then
-        die "opkg вернул успех, но в базе opkg остался $PACKAGE_NAME $_got (в пакете $_want) — установка НЕ применилась"
+        die "$PKGM вернул успех, но в его базе остался $PACKAGE_NAME $_got (в пакете $_want) — установка НЕ применилась"
     fi
     # Stash the just-installed package + its signature so the uci-defaults
     # restore script can re-install it after a router firmware sysupgrade
@@ -612,7 +776,7 @@ verify_and_install() {
 
 # Back-compat wrapper for the single-package (panel) callers.
 verify_and_install_ipk() {
-    verify_and_install "$1" "$2" "${PACKAGE_NAME}_$(current_version).ipk" \
+    verify_and_install "$1" "$2" "${PACKAGE_NAME}_$(current_version).${PKG_EXT}" \
         "$STASH_IPK" ""
 }
 
@@ -629,7 +793,7 @@ EOF
 }
 
 cmd_bins_check() {
-    log "checking the opkg feed for a newer sing-box..."
+    log "checking the feed for a newer sing-box..."
     ensure_feed
     local cur avail upstream upnew
     cur=$(sb_installed_version)
@@ -642,7 +806,7 @@ cmd_bins_check() {
         [ -n "$cur" ] || cur="0.0.0"
         [ -n "$avail" ] || avail="$cur"
     else
-        opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
+        pkg_index_update >/dev/null 2>&1 || log "WARNING: $PKGM update failed (feed unreachable?)"
         [ -n "$cur" ] || cur="0.0.0"
         avail=$(sb_upgrade_version); [ -n "$avail" ] || avail="$cur"
     fi
@@ -687,10 +851,10 @@ opkg_update_retry() {
     local n=0
     while :; do
         n=$((n + 1))
-        log "opkg update (попытка $n/4)..."
-        opkg update && return 0
+        log "$PKGM update (попытка $n/4)..."
+        pkg_index_update && return 0
         [ "$n" -ge 4 ] && return 1
-        log "opkg update не удался — повтор через 3с..."
+        log "$PKGM update не удался — повтор через 3с..."
         sleep 3
     done
 }
@@ -720,26 +884,25 @@ cmd_bins_apply() {
         # sing-box-go, which we then retire.
         log "downloading + installing sing-box from the feed (curl)..."
         feed_curl_install "$SINGBOX_PKG" || die "feed install of sing-box failed (feed unreachable?)"
-        if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG " \
-           && opkg list-installed sing-box-go 2>/dev/null | grep -q '^sing-box-go '; then
-            opkg remove sing-box-go >/dev/null 2>&1 \
+        if pkg_is_installed "$SINGBOX_PKG" && pkg_is_installed sing-box-go; then
+            pkg_remove sing-box-go >/dev/null 2>&1 \
                 && log "removed Entware sing-box-go (superseded by feed sing-box)"
         fi
     else
-        log "opkg update + upgrade sing-box from the feed..."
-        opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
+        log "$PKGM update + upgrade sing-box from the feed..."
+        opkg_update_retry || log "WARNING: $PKGM update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
         # Set the flag NOW — right before the upgrade, AFTER the (possibly slow, flaky-
         # network) opkg update — so it is still fresh (< the 2-min staleness window) when
         # the prerm's `stop` runs. postinst's `restart` re-touches and then clears it.
         [ -n "$SB_KEEPFW" ] && : > "$SB_KEEPFW"
-        if opkg list-installed "$SINGBOX_PKG" 2>/dev/null | grep -q "^$SINGBOX_PKG "; then
-            # `opkg upgrade` no-ops if already newest; fall back to a forced install.
-            opkg upgrade "$SINGBOX_PKG" 2>&1 \
-                || opkg install --force-overwrite "$SINGBOX_PKG" 2>&1 \
-                || die "opkg upgrade sing-box failed"
+        if pkg_is_installed "$SINGBOX_PKG"; then
+            # `upgrade` no-ops if already newest; fall back to a forced install.
+            pkg_upgrade "$SINGBOX_PKG" 2>&1 \
+                || pkg_install "$SINGBOX_PKG" 2>&1 \
+                || die "upgrade of sing-box failed"
         else
-            opkg install --force-overwrite "$SINGBOX_PKG" 2>&1 \
-                || die "opkg install sing-box failed"
+            pkg_install "$SINGBOX_PKG" 2>&1 \
+                || die "install of sing-box failed"
         fi
     fi
     cmd_bins_check >/dev/null 2>&1 || true
@@ -754,12 +917,12 @@ cmd_bins_apply() {
 # Installed tpws-zapret version per opkg ("" if not opkg-owned — e.g. when it is
 # still the binary bundled by an older `detour` panel).
 tpws_installed_version() {
-    opkg list-installed "$TPWS_PKG" 2>/dev/null | awk '{print $3}' | head -1
+    pkg_installed_version "$TPWS_PKG"
 }
 
 # Version opkg would upgrade tpws-zapret TO ("" = nothing newer than installed).
 tpws_upgrade_version() {
-    opkg list-upgradable 2>/dev/null | awk -v p="$TPWS_PKG" '$1==p {print $NF; exit}'
+    pkg_upgrade_version "$TPWS_PKG"
 }
 
 # Ensure tpws-zapret is installed (from the feed). --force-overwrite takes over the
@@ -769,17 +932,24 @@ tpws_upgrade_version() {
 # until tpws arrives).
 ensure_tpws() {
     ensure_feed
-    if opkg list-installed "$TPWS_PKG" 2>/dev/null | grep -q "^$TPWS_PKG "; then
+    if pkg_is_installed "$TPWS_PKG"; then
+        return 0
+    fi
+    # Неизвестная архитектура на apk — сборки нет. Это не ошибка установки:
+    # init.d терпит отсутствие бинарника, DPI-обход просто выключен, VPN через
+    # sing-box работает полностью.
+    if ! bypass_feed_available; then
+        log "tpws-zapret: нет сборки под архитектуру этого роутера — DPI-обход отключён"
         return 0
     fi
     log "tpws-zapret not installed — pulling from the feed"
-    if [ "$KEENETIC" = 1 ]; then
+    if use_curl_feed; then
         feed_curl_install "$TPWS_PKG" \
             || log "WARNING: feed install of $TPWS_PKG failed (feed unreachable?)"
     else
-        opkg update >/dev/null 2>&1
-        opkg install --force-overwrite "$TPWS_PKG" >/dev/null 2>&1 \
-            || log "WARNING: opkg install $TPWS_PKG failed (feed unreachable?)"
+        pkg_index_update >/dev/null 2>&1
+        pkg_install "$TPWS_PKG" >/dev/null 2>&1 \
+            || log "WARNING: install of $TPWS_PKG failed (feed unreachable?)"
     fi
 }
 
@@ -794,17 +964,24 @@ EOF
 }
 
 cmd_tpws_check() {
-    log "checking the opkg feed for a newer tpws-zapret..."
+    if ! bypass_feed_available; then
+        write_tpws_state "n/a" "n/a"
+        log "tpws-zapret: нет сборки под архитектуру этого роутера — проверка пропущена"
+        return 0
+    fi
+    log "checking the feed for a newer tpws-zapret..."
     ensure_feed
     local cur avail upstream upnew
     cur=$(tpws_installed_version)
-    if [ "$KEENETIC" = 1 ]; then
-        # Keenetic: read the feed version over curl (opkg can't fetch our HTTPS feed).
+    if use_curl_feed; then
+        # Версию читаем прямо из индекса нашего фида по curl: на Keenetic это
+        # обход сломанного загрузчика opkg, на apk — единственный путь (фид у нас
+        # не в формате apk-репозитория).
         avail=$(feed_available_version "$TPWS_PKG")
         [ -n "$cur" ] || cur="0.0.0"
         [ -n "$avail" ] || avail="$cur"
     else
-        opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
+        pkg_index_update >/dev/null 2>&1 || log "WARNING: $PKGM update failed (feed unreachable?)"
         [ -n "$cur" ] || cur="0.0.0"
         avail=$(tpws_upgrade_version); [ -n "$avail" ] || avail="$cur"
     fi
@@ -830,25 +1007,28 @@ cmd_tpws_check() {
 }
 
 cmd_tpws_apply() {
+    bypass_feed_available \
+        || die "tpws-zapret: под архитектуру этого роутера сборки нет (apk-фид разложен по CPU-семействам)"
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
     ensure_feed
-    if [ "$KEENETIC" = 1 ]; then
-        # Keenetic: bypass opkg's broken HTTPS downloader — curl the feed tpws + install.
+    if use_curl_feed; then
+        # Качаем пакет из нашего фида curl'ом и ставим локально (Keenetic — в обход
+        # сломанного загрузчика opkg, apk — потому что фид не apk-репозиторий).
         log "downloading + installing tpws-zapret from the feed (curl)..."
         feed_curl_install "$TPWS_PKG" || die "feed install of tpws-zapret failed (feed unreachable?)"
     else
-        log "opkg update + upgrade tpws-zapret from the feed..."
-        opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
-        if opkg list-installed "$TPWS_PKG" 2>/dev/null | grep -q "^$TPWS_PKG "; then
-            # `opkg upgrade` no-ops if already newest; fall back to a forced install.
-            opkg upgrade "$TPWS_PKG" 2>&1 \
-                || opkg install --force-overwrite "$TPWS_PKG" 2>&1 \
-                || die "opkg upgrade tpws-zapret failed"
+        log "$PKGM update + upgrade tpws-zapret from the feed..."
+        opkg_update_retry || log "WARNING: $PKGM update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
+        if pkg_is_installed "$TPWS_PKG"; then
+            # `upgrade` no-ops if already newest; fall back to a forced install.
+            pkg_upgrade "$TPWS_PKG" 2>&1 \
+                || pkg_install "$TPWS_PKG" 2>&1 \
+                || die "upgrade of tpws-zapret failed"
         else
-            opkg install --force-overwrite "$TPWS_PKG" 2>&1 \
-                || die "opkg install tpws-zapret failed"
+            pkg_install "$TPWS_PKG" 2>&1 \
+                || die "install of tpws-zapret failed"
         fi
     fi
     cmd_tpws_check >/dev/null 2>&1 || true
@@ -863,12 +1043,12 @@ cmd_tpws_apply() {
 
 # Installed nfqws2 version per opkg ("" if not opkg-owned / not installed).
 nfqws2_installed_version() {
-    opkg list-installed "$NFQWS2_PKG" 2>/dev/null | awk '{print $3}' | head -1
+    pkg_installed_version "$NFQWS2_PKG"
 }
 
 # Version opkg would upgrade nfqws2 TO ("" = nothing newer than installed).
 nfqws2_upgrade_version() {
-    opkg list-upgradable 2>/dev/null | awk -v p="$NFQWS2_PKG" '$1==p {print $NF; exit}'
+    pkg_upgrade_version "$NFQWS2_PKG"
 }
 
 # Write the nfqws2 update-state file the panel reads (same shape as bins/tpws).
@@ -887,12 +1067,22 @@ cmd_nfqws2_check() {
         log "zapret2 (nfqws2) not supported on Keenetic (no NFQUEUE) — no feed check"
         return 0
     fi
-    log "checking the opkg feed for a newer nfqws2 (zapret2)..."
+    if ! bypass_feed_available; then
+        write_nfqws2_state "n/a" "n/a"
+        log "nfqws2: нет сборки под архитектуру этого роутера — проверка пропущена"
+        return 0
+    fi
+    log "checking the feed for a newer nfqws2 (zapret2)..."
     ensure_feed
-    opkg update >/dev/null 2>&1 || log "WARNING: opkg update failed (feed unreachable?)"
     local cur avail upstream upnew tag_output name changelog
     cur=$(nfqws2_installed_version); [ -n "$cur" ] || cur="0.0.0"
-    avail=$(nfqws2_upgrade_version); [ -n "$avail" ] || avail="$cur"
+    if use_curl_feed; then
+        avail=$(feed_available_version "$NFQWS2_PKG")
+    else
+        pkg_index_update >/dev/null 2>&1 || log "WARNING: $PKGM update failed (feed unreachable?)"
+        avail=$(nfqws2_upgrade_version)
+    fi
+    [ -n "$avail" ] || avail="$cur"
     tag_output=$(gh_latest_tag "$NFQWS2_UPSTREAM_REPO") && {
         name=$(printf '%s\n' "$tag_output" | sed -n 1p)
         changelog=$(printf '%s\n' "$tag_output" | sed -n 2p)
@@ -915,20 +1105,27 @@ cmd_nfqws2_check() {
 
 cmd_nfqws2_apply() {
     [ "$KEENETIC" = 1 ] && die "zapret2 (nfqws2) is not supported on Keenetic (no NFQUEUE)"
+    bypass_feed_available \
+        || die "nfqws2: под архитектуру этого роутера сборки нет (apk-фид разложен по CPU-семействам)"
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
     ensure_feed
-    log "opkg update + upgrade nfqws2 from the feed..."
-    opkg_update_retry || log "WARNING: opkg update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
-    if opkg list-installed "$NFQWS2_PKG" 2>/dev/null | grep -q "^$NFQWS2_PKG "; then
-        # `opkg upgrade` no-ops if already newest; fall back to a forced install.
-        opkg upgrade "$NFQWS2_PKG" 2>&1 \
-            || opkg install --force-overwrite "$NFQWS2_PKG" 2>&1 \
-            || die "opkg upgrade nfqws2 failed"
+    if use_curl_feed; then
+        log "downloading + installing nfqws2 from the feed (curl)..."
+        feed_curl_install "$NFQWS2_PKG" || die "feed install of nfqws2 failed (feed unreachable?)"
     else
-        opkg install --force-overwrite "$NFQWS2_PKG" 2>&1 \
-            || die "opkg install nfqws2 failed"
+        log "$PKGM update + upgrade nfqws2 from the feed..."
+        opkg_update_retry || log "WARNING: $PKGM update не удался после 4 попыток — ставлю из кэша индекса (новая версия может быть уже скачана)"
+        if pkg_is_installed "$NFQWS2_PKG"; then
+            # `upgrade` no-ops if already newest; fall back to a forced install.
+            pkg_upgrade "$NFQWS2_PKG" 2>&1 \
+                || pkg_install "$NFQWS2_PKG" 2>&1 \
+                || die "upgrade of nfqws2 failed"
+        else
+            pkg_install "$NFQWS2_PKG" 2>&1 \
+                || die "install of nfqws2 failed"
+        fi
     fi
     cmd_nfqws2_check >/dev/null 2>&1 || true
     log "nfqws2 now at $(nfqws2_installed_version)"
@@ -957,8 +1154,8 @@ cmd_apply() {
     tag=$(printf '%s\n' "$assets" | sed -n 1p)
     ipk_url=$(select_url "$assets" "$ASSET_RE")
     sig_url=$(select_url "$assets" "$ASSET_SIG_RE")
-    [ -n "$ipk_url" ] || { rm -f "$LOCKFILE"; die "no panel .ipk asset on $tag"; }
-    [ -n "$sig_url" ] || { rm -f "$LOCKFILE"; die "no panel .ipk.sig asset on $tag"; }
+    [ -n "$ipk_url" ] || { rm -f "$LOCKFILE"; die "no panel .$PKG_EXT asset on $tag"; }
+    [ -n "$sig_url" ] || { rm -f "$LOCKFILE"; die "no panel .$PKG_EXT.sig asset on $tag"; }
     newver="${tag#v}"
     cur=$(current_version)
     log "current=$cur target=$newver"
@@ -976,22 +1173,23 @@ cmd_apply() {
 
     local tmp ipk sig
     tmp=$(mktemp -d)
-    ipk="$tmp/${PACKAGE_NAME}_${newver}_${ARCH}.ipk"
+    ipk="$tmp/${PACKAGE_NAME}_${newver}_${ARCH}.${PKG_EXT}"
     sig="$ipk.sig"
     log "downloading $ipk_url ..."
     gh_curl_retry -fsSL --max-time 600 \
         -H "Accept: application/octet-stream" \
-        -o "$ipk" "$ipk_url" || { rm -rf "$tmp"; die "ipk download failed"; }
+        -o "$ipk" "$ipk_url" || { rm -rf "$tmp"; die "package download failed"; }
     gh_curl_retry -fsSL --max-time 60 \
         -H "Accept: application/octet-stream" \
         -o "$sig" "$sig_url" || { rm -rf "$tmp"; die "sig download failed"; }
 
     # The panel `Depends: sing-box, tpws-zapret` — make sure the feed is
-    # configured and both are present so opkg resolves the deps at install time.
+    # configured and both are present so the package manager resolves the deps at
+    # install time.
     ensure_singbox
     ensure_tpws
 
-    # Subshell: an inner `die` (usign/opkg failure) exits only the subshell, so the
+    # Subshell: an inner `die` (usign / package-manager failure) exits only the subshell, so the
     # `if !` catches it and we publish an "error" state for the poller — otherwise
     # die's `exit 1` would kill the worker mid-install and leave a stale state.
     if ! ( verify_and_install_ipk "$ipk" "$sig" ); then
@@ -1007,11 +1205,11 @@ cmd_apply() {
     # confirm the version actually advanced before reporting success.
     local got_ver; got_ver=$(current_version)
     if [ "$got_ver" != "$newver" ]; then
-        log "ERROR: opkg returned success but version is $got_ver, expected $newver (unmet dependency / feed unreachable?)"
-        write_state "error" "opkg сообщил успех, но версия осталась $got_ver (ожидалась $newver) — вероятно не разрешилась зависимость (фид недоступен?)" "$newver"
+        log "ERROR: $PKGM returned success but version is $got_ver, expected $newver (unmet dependency / feed unreachable?)"
+        write_state "error" "$PKGM сообщил успех, но версия осталась $got_ver (ожидалась $newver) — вероятно не разрешилась зависимость (фид недоступен?)" "$newver"
         exit 1
     fi
-    write_state "applied" "installed v$newver via opkg" "$newver"
+    write_state "applied" "installed v$newver via $PKGM" "$newver"
     log "installed v$newver successfully"
     # Keenetic only: refresh the sing-box chip state with THIS (just-installed) updater
     # so a fixed detour-bins.json replaces the stale one an older buggy bins-check left
@@ -1023,24 +1221,50 @@ cmd_apply() {
     return 0   # never let the trailing refresh flip cmd_apply's success status
 }
 
-# Print the Version field from a detour .ipk ("" on failure). Our packages are a
-# gzip-tar of debian-binary + control.tar.gz + data.tar.gz (NOT the classic ar
-# format), so a plain `tar` reads them on busybox.
-ipk_version() {
+# Print the version recorded INSIDE a package file ("" on failure).
+#   .ipk — gzip-tar of debian-binary + control.tar.gz + data.tar.gz (NOT the
+#          classic ar format), so a plain `tar` reads it on busybox.
+#   .apk — APKv2: склейка gzip-потоков, первый из них — control-сегмент с
+#          `.PKGINFO`. busybox gunzip читает многочленный gzip, поэтому обычный
+#          `tar -xzf` достаёт оттуда нужный файл. Хвост «-rN» в pkgver — это
+#          apk-ревизия, панель сравнивает чистый семвер, поэтому отрезаем.
+# Полная apk-версия из файла пакета, ВМЕСТЕ с ревизией «-rN». pkg_file_version
+# её срезает (панель сравнивает чистый семвер X.Y.Z), а откату нужна именно
+# полная — см. cmd_rollback.
+apk_pkgver_raw() {
+    local d v
+    d=$(mktemp -d 2>/dev/null) || return 1
+    tar -xzf "$1" -C "$d" .PKGINFO 2>/dev/null
+    v=$(sed -n 's/^pkgver = //p' "$d/.PKGINFO" 2>/dev/null | head -1)
+    rm -rf "$d"
+    printf '%s' "$v"
+}
+
+
+pkg_file_version() {
     local f="$1" d v
     d=$(mktemp -d 2>/dev/null) || return 1
-    tar -xzf "$f" -C "$d" 2>/dev/null
-    [ -f "$d/control.tar.gz" ] && tar -xzf "$d/control.tar.gz" -C "$d" 2>/dev/null
-    v=$(awk -F': ' '/^Version:/{print $2; exit}' "$d/control" 2>/dev/null)
+    case "$f" in
+        *.apk)
+            tar -xzf "$f" -C "$d" .PKGINFO 2>/dev/null
+            v=$(sed -n 's/^pkgver = //p' "$d/.PKGINFO" 2>/dev/null | head -1)
+            v="${v%-r*}"
+            ;;
+        *)
+            tar -xzf "$f" -C "$d" 2>/dev/null
+            [ -f "$d/control.tar.gz" ] && tar -xzf "$d/control.tar.gz" -C "$d" 2>/dev/null
+            v=$(awk -F': ' '/^Version:/{print $2; exit}' "$d/control" 2>/dev/null)
+            ;;
+    esac
     rm -rf "$d"
     printf '%s' "$v"
 }
 
 cmd_apply_local() {
     local ipk="$1"
-    [ -n "$ipk" ] || die "usage: apply-local <ipk-file>"
+    [ -n "$ipk" ] || die "usage: apply-local <package-file (.ipk | .apk)>"
     local sig="$ipk.sig"
-    local want; want=$(ipk_version "$ipk")   # expected version (for the success check)
+    local want; want=$(pkg_file_version "$ipk")   # expected version (for the success check)
     # Local panel install still needs sing-box + tpws-zapret present for the Depends.
     ensure_singbox
     ensure_tpws
@@ -1052,14 +1276,14 @@ cmd_apply_local() {
     fi
     local cur
     cur=$(current_version)
-    # Same opkg-exit-0-on-unmet-dep guard as cmd_apply: if we parsed the .ipk's
+    # Same exit-0-on-unmet-dep guard as cmd_apply: if we parsed the package's
     # version, confirm the install actually took (the package didn't silently stay old).
     if [ -n "$want" ] && [ "$cur" != "$want" ]; then
-        log "ERROR: opkg returned success but version is $cur, expected $want (unmet dependency?)"
-        write_state "error" "opkg сообщил успех, но версия осталась $cur (в пакете $want) — вероятно не разрешилась зависимость (фид недоступен?)" "$cur"
+        log "ERROR: $PKGM returned success but version is $cur, expected $want (unmet dependency?)"
+        write_state "error" "$PKGM сообщил успех, но версия осталась $cur (в пакете $want) — вероятно не разрешилась зависимость (фид недоступен?)" "$cur"
         exit 1
     fi
-    write_state "applied" "installed v$cur via local ipk" "$cur"
+    write_state "applied" "installed v$cur via local package" "$cur"
     # Keenetic only: refresh the sing-box chip state (see cmd_apply for the rationale).
     if [ "$KEENETIC" = 1 ]; then cmd_bins_check >/dev/null 2>&1 || true; fi
     return 0   # never let the trailing refresh flip cmd_apply_local's success status
@@ -1070,15 +1294,27 @@ cmd_rollback() {
     # Pick the most recent backup that is NOT the currently-installed version.
     local cur best
     cur=$(current_version)
-    best=$(ls -1t "$BACKUP_DIR"/${PACKAGE_NAME}_*.ipk 2>/dev/null \
-        | grep -v "_${cur}\.ipk$" | head -1)
+    best=$(ls -1t "$BACKUP_DIR"/${PACKAGE_NAME}_*.${PKG_EXT} 2>/dev/null \
+        | grep -v "_${cur}[.]${PKG_EXT}$" | head -1)
     [ -n "$best" ] || die "no rollback candidate (only $cur is backed up)"
     log "rolling back to: $best"
     # Backups don't have sig files alongside — TOFU the install (we already
     # verified them at the time they were stored).
-    opkg install --force-reinstall "$best" || die "opkg install failed"
+    if [ "$PKGM" = apk ]; then
+        # apk сам НЕ понижает версию. Отдать ему один только файл со старым
+        # пакетом мало: установленная новая версия удовлетворяет ограничение
+        # `detour` в world, поэтому apk оставляет её, печатает «OK» и выходит с
+        # нулём — откат молча не происходит (проверено). Нужно явно попросить
+        # ИМЕННО эту версию, тогда он выполняет понижение.
+        local _pv; _pv=$(apk_pkgver_raw "$best")
+        [ -n "$_pv" ] || die "не удалось прочитать pkgver из $best — откат отменён"
+        apk add --allow-untrusted --force-overwrite "$best" "$PACKAGE_NAME=$_pv" \
+            || die "apk add failed"
+    else
+        pkg_install_file "$best" --force-reinstall || die "$PKGM install failed"
+    fi
     local newver
-    newver=$(echo "$best" | sed -n "s|.*${PACKAGE_NAME}_\(.*\)\.ipk|\1|p")
+    newver=$(echo "$best" | sed -n "s|.*${PACKAGE_NAME}_\(.*\)[.]${PKG_EXT}|\1|p")
     log "rolled back to $newver"
     write_state "rolled_back" "rolled back to v$newver" "$newver"
 }
@@ -1092,33 +1328,36 @@ cmd_status() {
 cmd_selftest() {
     local ok=1
     if ! command -v usign >/dev/null 2>&1; then echo "MISSING: usign"; ok=0; fi
-    if ! command -v opkg >/dev/null 2>&1; then echo "MISSING: opkg"; ok=0; fi
+    if ! command -v "$PKGM" >/dev/null 2>&1; then echo "MISSING: $PKGM"; ok=0; fi
     if ! command -v curl >/dev/null 2>&1; then echo "MISSING: curl"; ok=0; fi
     if ! command -v lua  >/dev/null 2>&1; then echo "MISSING: lua";  ok=0; fi
     if ! lua -e 'require("cjson.safe")' 2>/dev/null; then
         echo "MISSING: lua-cjson"; ok=0
     fi
-    if [ -d "$OPKG_KEYRING" ] && ls -1 "$OPKG_KEYRING" 2>/dev/null | head -1 >/dev/null; then
-        echo "OK: keyring $OPKG_KEYRING populated"
-    elif [ -f "$PUBLIC_KEY" ]; then
+    # Тот же порядок, что в verify_and_install: пиннингованный ключ основной,
+    # кольцо opkg — запасное (на apk-прошивках оно непустое, но чужое).
+    if [ -f "$PUBLIC_KEY" ]; then
         echo "OK: pinned key at $PUBLIC_KEY"
+    elif [ -d "$OPKG_KEYRING" ] && ls -1 "$OPKG_KEYRING" 2>/dev/null | head -1 >/dev/null; then
+        echo "OK: keyring $OPKG_KEYRING populated"
     else
         echo "MISSING: no public key for verification"; ok=0
     fi
     [ -f "$CONFIG" ] || { echo "MISSING: $CONFIG"; ok=0; }
-    # The version file (written by postinst) vs what opkg's DB actually records.
-    # A split here means an install did not take: the panel would report the new
-    # version while the old files keep running. See verify_and_install.
+    # The version file (written by postinst) vs what the package DB actually
+    # records. A split here means an install did not take: the panel would report
+    # the new version while the old files keep running. See verify_and_install.
     local _db _file
-    _db=$(opkg_db_version)
+    _db=$(pkgdb_version)
     _file=$(current_version)
     if [ -n "$_db" ] && [ -n "$_file" ] && [ "$_db" != "$_file" ]; then
-        echo "MISMATCH: $VERSION_FILE says $_file, opkg DB says $PACKAGE_NAME $_db"
-        echo "  → переустановите пакет: detour-update apply-local <ipk>  (или apply)"
+        echo "MISMATCH: $VERSION_FILE says $_file, $PKGM DB says $PACKAGE_NAME $_db"
+        echo "  → переустановите пакет: detour-update apply-local <файл>  (или apply)"
         ok=0
     elif [ -n "$_db" ]; then
-        echo "OK: opkg DB and $VERSION_FILE agree ($_db)"
+        echo "OK: $PKGM DB and $VERSION_FILE agree ($_db)"
     fi
+    echo "OK: package manager = $PKGM (пакет .$PKG_EXT, arch $ARCH)"
     [ "$ok" = "1" ] && { echo "selftest: OK"; return 0; }
     echo "selftest: FAILED"
     return 1

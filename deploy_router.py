@@ -145,7 +145,37 @@ def step_uhttpd(ssh):
     time.sleep(1)
 
 
+_PKGM_CACHE = {}
+
+
+def detect_pkgm(ssh):
+    """`opkg` или `apk` — какой менеджер пакетов на этом роутере.
+
+    OpenWrt 25.12 переехал на apk-tools 3. Каталог /etc/opkg там ВСЁ ЕЩЁ есть
+    (пустой), а бинарника opkg нет — поэтому детектим по /etc/apk/world, файлу,
+    который заводит только apk. Тот же детект в detour-update, detour-api и
+    detour-bootstrap-install; менять надо во всех сразу.
+    """
+    key = id(ssh)
+    if key not in _PKGM_CACHE:
+        out, _, _ = exec_cmd(
+            ssh,
+            "if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; "
+            "then echo apk; else echo opkg; fi",
+        )
+        _PKGM_CACHE[key] = "apk" if "apk" in (out or "") else "opkg"
+    return _PKGM_CACHE[key]
+
+
 def step_feed(ssh):
+    if detect_pkgm(ssh) == "apk":
+        # На apk-прошивках свой фид не нужен и не подходит: он собран в формате
+        # opkg и под aarch64, а sing-box в родном фиде OpenWrt 25.12 уже 1.13.x —
+        # ровно та схема конфига, которую ждёт панель.
+        step("Package index (apk; свой фид не нужен — sing-box есть в родном)")
+        out, _, _ = exec_cmd(ssh, "apk update 2>&1 | tail -4", timeout=120)
+        print("  apk update:\n    " + "\n    ".join(l for l in out.splitlines() if l.strip()))
+        return
     step("Configuring opkg feed (sing-box + tpws-zapret)")
     # Add our feed line idempotently, then refresh the package index so
     # `opkg install sing-box` resolves to our 1.13.x (the distro feed's 1.8.10
@@ -162,6 +192,23 @@ def step_feed(ssh):
 
 
 def step_binaries(ssh, force=False):
+    if detect_pkgm(ssh) == "apk":
+        step("Installing sing-box (родной фид apk)")
+        out, _, _ = exec_cmd(ssh, "apk add --force-overwrite sing-box 2>&1 | tail -5", timeout=240)
+        print("  apk add sing-box:\n    " + "\n    ".join(l for l in out.splitlines() if l.strip()))
+        ver, _, _ = exec_cmd(
+            ssh,
+            "apk list -I sing-box 2>/dev/null | awk '{ n=$1; "
+            "if (substr(n,1,9) != \"sing-box-\") next; v=substr(n,10); "
+            "sub(/-r[0-9]+$/,\"\",v); print v; exit }'",
+        )
+        print(f"  sing-box: {(ver or '').strip() or '(не установлен)'}")
+        # tpws-zapret на apk-прошивках взять неоткуда: в родном фиде OpenWrt его
+        # нет вообще, а наш фид — opkg-формата. DPI-обход там пока недоступен;
+        # detour-update tpws-apply откажет с тем же объяснением.
+        print("  tpws-zapret: пропущен — пакета нет ни в родном фиде apk, ни в нашем "
+              "(DPI-обход на этой прошивке пока недоступен)")
+        return
     step("Installing sing-box + tpws-zapret (opkg feed; direct-upload fallback)")
     # Both binaries now come from our opkg feed (build_feed.py). --force-overwrite
     # takes over any pre-existing UNOWNED binary from older direct deploys / a
@@ -441,12 +488,18 @@ def step_updater(ssh, cfg, global_cfg, enable_autocheck=True):
         # with build_release.py (it pins the same path inside the .ipk).
         from usign_compat import load_public_key
         keynum, _ = load_public_key(pub_key_path)
-        keyring_path = f"/etc/opkg/keys/{keynum.hex()}"
-        exec_cmd(ssh, "mkdir -p /etc/opkg/keys")
         upload(ssh, pub_bytes, "/etc/detour/release.usign.pub", "0644")
-        upload(ssh, pub_bytes, keyring_path, "0644")
         print(f"  /etc/detour/release.usign.pub: {len(pub_bytes)} bytes")
-        print(f"  {keyring_path}: {len(pub_bytes)} bytes (opkg keyring)")
+        # Кольцо opkg — только там, где opkg вообще есть. На apk-прошивках
+        # (OpenWrt 25.12+) каталог /etc/opkg остаётся пустым рудиментом, класть
+        # туда ключ бессмысленно: detour-update проверит подпись пиннингованным
+        # /etc/detour/release.usign.pub (apk наш usign-ключ не понимает — у него
+        # своё RSA-кольцо в /etc/apk/keys).
+        if detect_pkgm(ssh) == "opkg":
+            keyring_path = f"/etc/opkg/keys/{keynum.hex()}"
+            exec_cmd(ssh, "mkdir -p /etc/opkg/keys")
+            upload(ssh, pub_bytes, keyring_path, "0644")
+            print(f"  {keyring_path}: {len(pub_bytes)} bytes (opkg keyring)")
         # Sweep legacy ECDSA key if it's still lying around — detour-update
         # no longer reads it and leaving it would just confuse debugging.
         exec_cmd(ssh, "rm -f /etc/detour/release.pub")

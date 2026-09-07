@@ -8,6 +8,8 @@ and — if anything is newer — rebuilds + republishes the WHOLE feed via
 from its upstream release, so no router-backup checkout is needed).
 
 Safety:
+  * apk-фиды (OpenWrt 25.12+, feed/apk-<cpu>) держат tpws + nfqws2 на тех же
+    версиях; sing-box там не наш — он берётся из родного фида дистрибутива.
   * sing-box is PINNED to the major.minor the feed currently serves (e.g. 1.13.x).
     A new patch (1.13.14) auto-publishes; a new minor (1.14.x) does NOT — it only
     logs a note, because a sing-box minor can break the 1.13.x config schema and
@@ -41,6 +43,9 @@ def feed_packages_url(arch):
     return f"https://raw.githubusercontent.com/{OWNER}/{REPO}/feed/{arch}/Packages"
 
 SINGBOX_REPO = "SagerNet/sing-box"
+# Опорный каталог apk-фида: по нему решаем, отстали ли все шесть (они всегда
+# публикуются вместе, поэтому одного достаточно).
+APK_REF_ARCH = "apk-x86_64"
 ZAPRET_REPO = "bol-van/zapret"
 ZAPRET2_REPO = "bol-van/zapret2"
 
@@ -153,6 +158,16 @@ def main():
         print(f"NOTE: mipsel feed Packages unreadable ({e}) — treating as empty (will seed).")
         mips = {}
 
+    # apk-фиды (OpenWrt 25.12+). Их шесть — по одному на CPU-семейство — но
+    # собираются и публикуются они всегда вместе одной командой, поэтому за
+    # опорный берём любой: если он отстал, пересобираем все. sing-box там нет
+    # намеренно (в родном фиде 25.12 уже 1.13.x), только движки DPI-обхода.
+    try:
+        apkfeed = feed_versions(APK_REF_ARCH)
+    except Exception as e:  # noqa: BLE001
+        print(f"NOTE: {APK_REF_ARCH} feed Packages unreadable ({e}) — treating as empty (will seed).")
+        apkfeed = {}
+
     cur_sb, cur_tpws, cur_nfq = feed["sing-box"], feed["tpws-zapret"], feed["nfqws2"]
     sb_pin = ".".join(cur_sb.split(".")[:2])
 
@@ -169,19 +184,22 @@ def main():
         print(f"  NOTE: sing-box {sb_any} is out upstream but crosses the {sb_pin} "
               f"pin — bump the feed by hand once to move the pin (config schema risk).")
     print(f"tpws     : feed {cur_tpws} | latest {tpws_latest} -> {tpws_t}")
-    print(f"nfqws2   : feed {cur_nfq} | latest {nfq_latest} -> {nfq_t}  (aarch64 only)")
+    print(f"nfqws2   : feed {cur_nfq} | latest {nfq_latest} -> {nfq_t}  (opkg: aarch64 only)")
 
     # aarch64 republishes if any of its three packages move; mipsel republishes if its
     # sing-box/tpws lag the targets (covers both an upstream bump AND seeding a fresh
     # or drifted mipsel feed). Targets are shared so the two arches stay in lockstep.
     aarch64_changed = (sb_t != cur_sb or tpws_t != cur_tpws or nfq_t != cur_nfq)
     mips_changed = (sb_t != mips.get("sing-box") or tpws_t != mips.get("tpws-zapret"))
+    apk_changed = (tpws_t != apkfeed.get("tpws-zapret") or nfq_t != apkfeed.get("nfqws2"))
     cur_mips_sb, cur_mips_tpws = mips.get("sing-box", "-"), mips.get("tpws-zapret", "-")
     print(f"mipsel   : feed sing-box {cur_mips_sb} / tpws {cur_mips_tpws} "
           f"-> {sb_t} / {tpws_t}  (changed={mips_changed})")
+    print(f"apk      : feed tpws {apkfeed.get('tpws-zapret', '-')} / nfqws2 "
+          f"{apkfeed.get('nfqws2', '-')} -> {tpws_t} / {nfq_t}  (changed={apk_changed})")
 
-    if not aarch64_changed and not mips_changed:
-        print("both feeds up to date — nothing to publish.")
+    if not aarch64_changed and not mips_changed and not apk_changed:
+        print("all feeds up to date — nothing to publish.")
         return
 
     # Build the per-arch build_feed.py invocations. aarch64 carries nfqws2; mipsel
@@ -194,6 +212,12 @@ def main():
     if mips_changed:
         runs.append(["--arch", "mipsel", "--fetch-upstream",
                      "--version", sb_t, "--tpws-version", tpws_t])
+    if apk_changed:
+        # Все шесть CPU-семейств одной командой: build_feed сам скачает бинарники
+        # каждой платформы из релизного тарбола zapret/zapret2 и опубликует их
+        # каталоги за один force-push (сиблинги на ветке при этом сохраняются).
+        runs.append(["--arch", "apk-all",
+                     "--tpws-version", tpws_t, "--nfqws2-version", nfq_t])
 
     for extra in runs:
         cmd = [sys.executable, os.path.join(HERE, "build_feed.py"), *extra]

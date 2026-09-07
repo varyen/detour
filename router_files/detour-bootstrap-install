@@ -5,6 +5,12 @@
 # opkg feed. After the panel lands, this helper uses the just-installed
 # detour-update logic to add the correct feed and install/upgrade sing-box and
 # tpws-zapret in the background.
+#
+# ⚠ ФАЙЛ ОБЯЗАН ЛЕЖАТЬ С LF. Он уже один раз уехал в релиз с CRLF: ядро берёт
+# путь интерпретатора из шебанга дословно до перевода строки, `#!/bin/sh\r` не
+# резолвится, а зовут отсюда в фоне с выводом в /dev/null — поэтому первичная
+# установка sing-box/tpws просто не происходила и никто этого не видел. Теперь
+# это ловят .gitattributes и проверка в build_release.py.
 
 set +e
 
@@ -25,6 +31,16 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_BIN=/opt/bin/sing-box
     TPWS_BIN=/opt/sbin/tpws-zapret
     mkdir -p /opt/etc/opkg /opt/var/log /opt/var/state 2>/dev/null
+fi
+
+# Пакетный менеджер. OpenWrt 25.12+ идёт с apk-tools 3 вместо opkg; детект тот
+# же, что в detour-update (каталог /etc/opkg там остаётся, opkg — нет).
+PKGM=opkg
+if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; then
+    PKGM=apk
+    PLATFORM=openwrt-apk
+    # Своего фида на apk нет: sing-box берём из родного фида дистрибутива.
+    FEED_CONF=""
 fi
 
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
@@ -57,23 +73,33 @@ dump_file() {
 }
 
 dump_runtime_state() {
-    run_cmd opkg list-installed
+    if [ "$PKGM" = apk ]; then run_cmd apk list -I; else run_cmd opkg list-installed; fi
     [ -n "$SINGBOX_BIN" ] && run_cmd ls -l "$SINGBOX_BIN"
     [ -n "$TPWS_BIN" ] && run_cmd ls -l "$TPWS_BIN"
 }
 
 pkg_installed() {
-    opkg list-installed "$1" 2>/dev/null | grep -q "^$1 "
+    if [ "$PKGM" = apk ]; then
+        apk info -e "$1" 2>/dev/null | grep -q "^$1$"
+    else
+        opkg list-installed "$1" 2>/dev/null | grep -q "^$1 "
+    fi
 }
 
 feed_present() {
+    # На apk своего фида нет — считаем условие выполненным, иначе бутстрап
+    # крутился бы вхолостую на каждой установке.
+    [ -z "$FEED_CONF" ] && return 0
     grep -qs "^src/gz $FEED_NAME " "$FEED_CONF" 2>/dev/null
 }
 
 need_bootstrap=0
 feed_present || need_bootstrap=1
 pkg_installed sing-box || need_bootstrap=1
-pkg_installed tpws-zapret || need_bootstrap=1
+# tpws-zapret на apk-прошивках недоступен (пакета нет ни в родном фиде OpenWrt,
+# ни в нашем — наш собран под opkg). Не гоняем бутстрап ради заведомо неудачной
+# установки: detour-update tpws-apply там честно откажет с объяснением.
+[ "$PKGM" = apk ] || pkg_installed tpws-zapret || need_bootstrap=1
 
 if [ "$need_bootstrap" != "1" ]; then
     log "bootstrap decision: feed_present=$(feed_present && echo yes || echo no) sing-box=$(pkg_installed sing-box && echo yes || echo no) tpws=$(pkg_installed tpws-zapret && echo yes || echo no)"
@@ -90,18 +116,27 @@ log "==== bootstrap start pid=$$ platform=$PLATFORM ===="
 log "PATH=$PATH"
 log "UPDATE_BIN=$UPDATE_BIN FEED_CONF=$FEED_CONF SINGBOX_BIN=$SINGBOX_BIN TPWS_BIN=$TPWS_BIN"
 run_cmd uname -a
-run_cmd opkg --version
-run_cmd opkg print-architecture
+if [ "$PKGM" = apk ]; then
+    run_cmd apk --version
+    run_cmd cat /etc/apk/arch
+else
+    run_cmd opkg --version
+    run_cmd opkg print-architecture
+fi
 dump_file "$FEED_CONF"
 dump_runtime_state
 
 log "starting runtime bootstrap on $PLATFORM"
 run_cmd "$UPDATE_BIN" bins-apply || log "WARNING: bins-apply failed"
 dump_file "$FEED_CONF"
-run_cmd "$UPDATE_BIN" tpws-apply || log "WARNING: tpws-apply failed"
+if [ "$PKGM" = apk ]; then
+    log "skip tpws-apply: пакета tpws-zapret нет в фидах apk-прошивки (DPI-обход недоступен)"
+else
+    run_cmd "$UPDATE_BIN" tpws-apply || log "WARNING: tpws-apply failed"
+fi
 dump_runtime_state
 
-if pkg_installed sing-box && pkg_installed tpws-zapret; then
+if pkg_installed sing-box && { [ "$PKGM" = apk ] || pkg_installed tpws-zapret; }; then
     log "runtime bootstrap complete"
 else
     log "runtime bootstrap incomplete — check feed reachability and rerun detour-update bins-apply / tpws-apply"

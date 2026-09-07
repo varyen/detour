@@ -117,6 +117,34 @@ FW_BLOCK_END="# DETOUR_EGRESS_BLOCK_END"
 # starts use `force-start` to start regardless (overridden in the shim below).
 SVC_START="start"
 # =================================================
+# ============ ПАКЕТНЫЙ МЕНЕДЖЕР (opkg | apk) ============
+# OpenWrt 25.12 сменил opkg на apk-tools 3. Каталог /etc/opkg там ВСЁ ЕЩЁ есть
+# (пустой), а бинарника opkg нет — поэтому детект по /etc/apk/world (его заводит
+# только apk) плюс наличие самого apk. Тот же детект в detour-update и
+# detour-bootstrap-install; менять надо во всех трёх сразу.
+PKGM="opkg"
+[ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1 && PKGM="apk"
+
+# pkg_ver <имя> [<имя2>…] → версия первого установленного пакета из списка ("").
+# Читает базу менеджера, а не запускает бинарник: status дёргается часто, а
+# sing-box весит ~60 МБ и его запуск ради версии заметен.
+pkg_ver() {
+    if [ "$PKGM" = apk ]; then
+        for _p in "$@"; do
+            _v=$(apk list -I "$_p" 2>/dev/null | awk -v p="$_p" '
+                { n = $1
+                  if (substr(n, 1, length(p) + 1) != p "-") next
+                  v = substr(n, length(p) + 2); sub(/-r[0-9]+$/, "", v)
+                  print v; exit }')
+            [ -n "$_v" ] && { printf '%s' "$_v"; return 0; }
+        done
+    else
+        opkg list-installed 2>/dev/null | awk -v names="$*" '
+            BEGIN { n = split(names, want, " ") }
+            { for (i = 1; i <= n; i++) if ($1 == want[i]) { print $3; exit } }'
+    fi
+}
+
 # ============ PLATFORM SHIM (OpenWrt | Keenetic/Entware) ============
 # On KeeneticOS the whole stack lives under /opt (Entware) and the firewall is
 # iptables re-applied via /opt/etc/ndm/netfilter.d/. Detect Entware and remap.
@@ -2154,19 +2182,20 @@ status)
     PA_VERSION=$(cat "$VERSION_FILE" 2>/dev/null | head -1)
     [ -z "$PA_VERSION" ] && PA_VERSION="?"
 
-    # sing-box now comes from opkg (our feed on OpenWrt; Entware sing-box-go on
-    # Keenetic). Read the version from the opkg status db — cheap (a file read),
-    # so status never spawns the 60 MB binary. Fall back to `sing-box version`.
-    SB_BIN_VER=$(opkg list-installed 2>/dev/null | awk '$1=="sing-box"||$1=="sing-box-go"{print $3; exit}')
+    # sing-box now comes from the package manager (наш фид на opkg-OpenWrt,
+    # родной фид дистрибутива на apk-OpenWrt 25.12+, Entware sing-box-go на
+    # Keenetic). Читаем версию из базы менеджера — это чтение файла, поэтому
+    # status никогда не запускает 60-мегабайтный бинарник. Фолбэк — `sing-box version`.
+    SB_BIN_VER=$(pkg_ver sing-box sing-box-go)
     [ -z "$SB_BIN_VER" ] && SB_BIN_VER=$("$SINGBOX_BIN" version 2>/dev/null | awk 'NR==1{print $NF}')
     [ -z "$SB_BIN_VER" ] && SB_BIN_VER="?"
     BINS_VERSION="$SB_BIN_VER"   # legacy field name kept for the panel UI
     SB_BIN_PRESENT=false; [ -x $SINGBOX_BIN ] && SB_BIN_PRESENT=true
     TPWS_BIN_PRESENT=false; [ -x $TPWS_BIN ] && TPWS_BIN_PRESENT=true
-    # tpws-zapret version: prefer the opkg-owned package (feed), fall back to the
+    # tpws-zapret version: prefer the package-owned one (feed), fall back to the
     # binary's own `--version` ("github version v72.12 (...)") for the bundled /
-    # transitional case where it's not yet an opkg package.
-    TPWS_BIN_VER=$(opkg list-installed 2>/dev/null | awk '$1=="tpws-zapret"{print $3; exit}')
+    # transitional case where it isn't a package yet.
+    TPWS_BIN_VER=$(pkg_ver tpws-zapret)
     [ -z "$TPWS_BIN_VER" ] && TPWS_BIN_VER=$("$TPWS_BIN" --version 2>/dev/null | awk 'NR==1{print $3}')
     [ -z "$TPWS_BIN_VER" ] && TPWS_BIN_VER="?"
     # nfqws2 (zapret2) version — from the binary's --version ("github version v1.0.1 ...").
@@ -2749,11 +2778,25 @@ panel_update_local)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     IPK=/tmp/detour-upload.ipk
     SIG=/tmp/detour-upload.ipk.sig
-    if [ ! -s "$IPK" ]; then json_err "no .ipk uploaded"; exit 0; fi
+    if [ ! -s "$IPK" ]; then json_err "no package uploaded"; exit 0; fi
+    # Формат определяем ПО СОДЕРЖИМОМУ, а не по имени: браузер шлёт голое тело,
+    # имя файла до нас не доходит, а панель прошлых версий и подавно ничего о
+    # формате не сообщает. Внутри `.ipk` первым лежит `./debian-binary`, внутри
+    # APKv2 — `.PKGINFO`. Расширение важно: detour-update apply-local выбирает по
+    # нему и парсер версии, и команду установки.
+    if tar -tzf "$IPK" 2>/dev/null | head -5 | grep -q '^\.PKGINFO$'; then
+        mv "$IPK" /tmp/detour-upload.apk 2>/dev/null
+        [ -s "$SIG" ] && mv "$SIG" /tmp/detour-upload.apk.sig 2>/dev/null
+        IPK=/tmp/detour-upload.apk
+        SIG=/tmp/detour-upload.apk.sig
+    fi
     # Pick the install command: signed via the updater (usign-verify + rollback),
-    # else a plain opkg install (operator opted out of the signature, e.g. Keenetic).
+    # else a plain package-manager install (operator opted out of the signature,
+    # e.g. Keenetic).
     if [ -x "$UPDATE_BIN" ] && [ -s "$SIG" ]; then
         INSTALL_CMD="\"$UPDATE_BIN\" apply-local \"$IPK\""
+    elif [ "$PKGM" = apk ]; then
+        INSTALL_CMD="apk add --allow-untrusted --force-overwrite \"$IPK\""
     else
         INSTALL_CMD="opkg install --force-reinstall \"$IPK\""
     fi

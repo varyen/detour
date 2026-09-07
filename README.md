@@ -2,7 +2,8 @@
 
 > Веб-панель управления обходом блокировок для роутеров GL.iNet / OpenWrt.
 > Два движка под одним SPA-интерфейсом — **sing-box** (Trojan/VLESS-прокси) и
-> **zapret-tpws** (DPI-bypass) — с самообновлением по подписанным `.ipk`-релизам.
+> **zapret-tpws** (DPI-bypass) — с самообновлением по подписанным релизам
+> (`.ipk` для opkg, `.apk` для OpenWrt 25.12+).
 
 **Версия:** [`1.57.0`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
 
@@ -11,21 +12,43 @@
 ## Установка
 
 Если вы просто хотите поставить Detour на роутер, а не разрабатывать его,
-используйте готовый `.ipk` из [GitHub Releases](https://github.com/varyen/detour/releases).
+используйте готовый пакет из [GitHub Releases](https://github.com/varyen/detour/releases).
 
 1. Скачайте нужный пакет из последнего релиза:
-  `detour_X.Y.Z_all.ipk` для OpenWrt / GL.iNet или
-  `detour-keenetic_X.Y.Z_all.ipk` для Keenetic / Entware.
+  `detour_X.Y.Z_all.ipk` — OpenWrt / GL.iNet **до 24.10** (там пакетный менеджер `opkg`),
+  `detour_X.Y.Z_noarch.apk` — OpenWrt **25.12 и новее** (там вместо opkg `apk-tools 3`),
+  `detour-keenetic_X.Y.Z_all.ipk` — Keenetic / Entware.
 2. Скопируйте файл на роутер в `/tmp/`.
 3. Установите пакет одной командой для своей платформы.
 4. Подождите 30-90 секунд: панель сама пропишет нужный `detour`-фид и
    подтянет `sing-box` + `tpws-zapret` в фоне.
 
-### OpenWrt / GL.iNet
+Какой пакет ваш — видно по наличию команды: если на роутере есть `opkg`, нужен
+`.ipk`; если `apk` — нужен `.apk`. Перепутать не страшно, но сообщение будет
+неочевидным: `apk` на `.ipk` отвечает `v2 package format error`.
+
+### OpenWrt / GL.iNet (opkg, до 24.10)
 
 ```sh
 opkg install /tmp/detour_X.Y.Z_all.ipk
 ```
+
+### OpenWrt 25.12+ (apk-tools 3)
+
+```sh
+apk add --allow-untrusted /tmp/detour_X.Y.Z_noarch.apk
+```
+
+`--allow-untrusted` обязателен: подпись у нас лежит **рядом** с пакетом
+(`.apk.sig`, формат usign — им же подписаны `.ipk`), а не внутри пакета в
+RSA-формате apk. Проверить её можно до установки:
+`usign -V -m /tmp/detour_X.Y.Z_noarch.apk -x /tmp/detour_X.Y.Z_noarch.apk.sig -p /etc/detour/release.usign.pub`.
+
+`sing-box` на этой платформе берётся из **родного фида OpenWrt** (там уже 1.13.x),
+свой фид не прописывается. Движки DPI-обхода (`tpws-zapret`, `nfqws2`) мы
+публикуем сами — по CPU-семействам в `feed/apk-<семейство>`; панель определяет
+семейство роутера и ставит нужный пакет сама, вручную ничего прописывать не
+надо.
 
 Логи установки:
 
@@ -102,7 +125,8 @@ Detour — самохостируемая система обхода блоки
   провайдера** — тот даёт **wildcard** (`*.h.example.com`, а значит любое новое
   имя без перевыпуска) и не требует открытого 80-го вовсе. Провайдеры: свой
   PowerDNS и Gcore DNS.
-- **Самообновление** — подписанные usign `.ipk`, ставятся через opkg. Роутер
+- **Самообновление** — подписанные usign пакеты: `.ipk` там, где opkg, и
+  `.apk` на OpenWrt 25.12+, где вместо opkg apk-tools 3. Роутер
   раз в 6 ч проверяет GitHub Releases и показывает плашку в шапке панели.
 
 ## Архитектура маршрутизации
@@ -147,7 +171,8 @@ busybox-апплетов и т.п.) и подстраивает деплой.
 | `router_files/`        | Скрипты, деплоящиеся на роутер: init.d, CGI, updater, shim'ы.                             |
 | `panel/`               | Основная панель на Vue 3 + PWA (ставится в `/detour/`; старая однофайловая — на `/detour-old/`). Сборка `npm run build` → `panel/dist`. |
 | `router-backup/`       | Зеркало живого состояния роутера (gitignored). Источник конфигов и бинарников при сборке. |
-| `build_release.py`     | Сборка подписанных `.ipk` панели (`detour` + `detour-keenetic`).                          |
+| `build_release.py`     | Сборка подписанных пакетов панели: `.ipk` + `.apk` (`detour`) и `.ipk` (`detour-keenetic`). |
+| `apk_pkg.py`           | Сборщик пакетов формата APKv2 на чистом Python (для OpenWrt 25.12+).                      |
 | `build_feed.py`        | Сборка/публикация opkg-фида с `sing-box` (ветка `feed`).                                  |
 | `deploy_router.py`     | Унифицированный деплой / синхронизация на роутер по SSH.                                  |
 | `deploy_lan_proxy.py`  | Деплой отдельного LAN-прокси-сценария.                                                    |

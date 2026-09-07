@@ -160,7 +160,12 @@ acme_account_exists() {
 ensure_acme() {
     _a=$(find_acme) && { echo "$_a"; return 0; }
     log "acme.sh not found — installing"
-    if [ "$PLATFORM" = keenetic ]; then
+    if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; then
+        # OpenWrt 25.12+ (apk-tools 3). Пакет там переименован в `acme-acmesh`
+        # (старых `acme` / `acme.sh` в фиде уже нет), поэтому пробуем оба имени.
+        apk update >/dev/null 2>&1
+        apk add acme-acmesh >/dev/null 2>&1 || apk add acme >/dev/null 2>&1
+    elif [ "$PLATFORM" = keenetic ]; then
         opkg update >/dev/null 2>&1; opkg install acme.sh >/dev/null 2>&1
     else
         opkg update >/dev/null 2>&1; opkg install acme >/dev/null 2>&1

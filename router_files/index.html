@@ -3793,10 +3793,12 @@
           <div class="editor-section">
             <h4 style="margin: 0 0 8px">Из файла (.ipk)</h4>
             <p class="helper-text-block">
-              Загрузите пакет <code>.ipk</code>. Подпись <code>.ipk.sig</code>
+              Загрузите пакет: <code>.ipk</code> (OpenWrt до 24.10, Keenetic) либо
+              <code>.apk</code> (OpenWrt 25.12+, там вместо opkg apk-tools). Формат
+              роутер определяет по содержимому. Подпись <code>.sig</code>
               <strong>опциональна</strong>: если приложить — пакет проверяется и
-              ставится с бэкапом; без неё — ставится напрямую через opkg, без
-              проверки.
+              ставится с бэкапом; без неё — ставится напрямую менеджером пакетов,
+              без проверки.
             </p>
             <!-- Нативные file-инпуты скрыты, выбор идёт кнопкой (как у импорта
                  профилей и hosts-источников). Причина: с accept=".ipk"/".sig"
@@ -3806,7 +3808,7 @@
                  accept тут не ставим намеренно. -->
             <div class="form-grid">
               <div class="full">
-                <label>Пакет .ipk</label>
+                <label>Пакет .ipk / .apk</label>
                 <div class="flex-gap" style="align-items: center">
                   <button
                     class="btn"
