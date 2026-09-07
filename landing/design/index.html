@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Detour — выбор дизайна лендинга</title>
+<style>
+:root{--bg:#101318;--bar:#171b22;--fg:#e8ecf2;--fg2:#9aa4b5;--line:#2a313d;--acc:#35d6c4}
+*{box-sizing:border-box}
+body{margin:0;height:100vh;display:grid;grid-template-rows:auto 1fr;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,"Segoe UI",Roboto,sans-serif}
+.bar{display:flex;align-items:stretch;gap:0;background:var(--bar);border-bottom:1px solid var(--line);overflow-x:auto}
+.bar .t{padding:12px 16px;font-weight:600;white-space:nowrap;border-right:1px solid var(--line);display:flex;align-items:center}
+.v{flex:1;min-width:220px;padding:10px 16px;border:0;border-right:1px solid var(--line);background:transparent;color:var(--fg2);text-align:left;cursor:pointer;font:inherit}
+.v b{display:block;color:var(--fg);font-size:14px}
+.v small{display:block;font-size:12px;margin-top:2px}
+.v[aria-pressed="true"]{background:#1e2430;color:var(--fg);box-shadow:inset 0 -2px 0 var(--acc)}
+.tools{display:flex;align-items:center;gap:8px;padding:0 12px}
+.tools button{padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--fg2);cursor:pointer;font:inherit;font-size:12.5px}
+.tools button[aria-pressed="true"]{color:var(--fg);border-color:var(--acc)}
+.stage{position:relative;overflow:hidden;display:grid;grid-template-columns:1fr auto}
+.frame{display:grid;place-items:center;background:#0a0c10;overflow:hidden}
+iframe{border:0;width:100%;height:100%;background:#fff;transition:width .2s}
+.frame.phone iframe{width:390px;height:calc(100% - 40px);border-radius:24px;border:8px solid #2a2f3a}
+aside{width:340px;border-left:1px solid var(--line);background:var(--bar);padding:18px 20px;overflow:auto;color:var(--fg2)}
+aside h2{margin:0 0 6px;font-size:16px;color:var(--fg)}
+aside h3{margin:16px 0 4px;font-size:12.5px;color:var(--fg);text-transform:none}
+aside p,aside li{margin:0;font-size:13px}
+aside ul{margin:0;padding-left:18px}
+.sw{display:flex;gap:6px;margin:6px 0 2px}
+.sw i{width:26px;height:26px;border-radius:6px;border:1px solid rgba(255,255,255,.12)}
+aside.hidden{display:none}
+.pick{margin-top:22px;padding-top:14px;border-top:1px solid var(--line)}
+.pick button{width:100%;padding:10px;border:0;border-radius:8px;background:var(--acc);color:#04302c;font:600 14px system-ui;cursor:pointer}
+.pick .done{margin-top:8px;font-size:12.5px}
+@media(max-width:900px){aside{display:none}}
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="t">Detour · лендинг</div>
+  <button class="v" data-v="v1-night.html" data-k="1"><b>1 · Ночной маршрут</b><small>тёмный, кинематографичный, дорога-объезд</small></button>
+  <button class="v" data-v="v2-blueprint.html" data-k="2"><b>2 · Схема</b><small>светлый, чертёжный, всё на линейках</small></button>
+  <button class="v" data-v="v3-home.html" data-k="3"><b>3 · Дом</b><small>тёплый вечер, серифный заголовок, всё по центру</small></button>
+  <div class="tools">
+    <button id="desk" aria-pressed="true">десктоп</button>
+    <button id="phone" aria-pressed="false">телефон 390</button>
+    <button id="notes" aria-pressed="true">заметки</button>
+  </div>
+</div>
+<div class="stage">
+  <div class="frame" id="frame"><iframe id="if" title="прототип" src="v1-night.html"></iframe></div>
+  <aside id="aside">
+    <div data-n="1">
+      <h2>1 · Ночной маршрут</h2>
+      <p>Продолжение палитры самой панели: чернильный фон, бирюза, немного янтаря. Название проекта — буквально: дорога уходит в объезд.</p>
+      <h3>Палитра</h3><div class="sw"><i style="background:#06090f"></i><i style="background:#111828"></i><i style="background:#35d6c4"></i><i style="background:#ffb85c"></i><i style="background:#e9eef8"></i></div>
+      <h3>Шрифты</h3><p>Unbounded (заголовки, широкий геометрический) + Golos Text (текст). Оба с полноценной кириллицей.</p>
+      <h3>Что движется</h3><ul><li>фон и дымка первого экрана — 14 % и 20 % от прокрутки</li><li>размытая дорога за блоком «С телефона» — 12 %</li><li>в схеме потока бегут три импульса по проводам</li></ul>
+      <h3>Как показаны кадры</h3><p>Каждая возможность — текст прилипает слева, кадры прокручиваются справа (и наоборот через один). На телефоне — лента с прокруткой по кадрам.</p>
+      <h3>Где встанут ролики</h3><p>Четыре слота помечены пунктиром: вставка ссылки, «Сменить VPN», перетаскивание карточек главной, и один в шапке «С телефона» (тап по профилю, снимаем с Pixel).</p>
+    </div>
+    <div data-n="2" hidden>
+      <h2>2 · Схема</h2>
+      <p>Единственный светлый вариант. Страница — комплект чертёжных листов на миллиметровке: скриншоты панели на светлом фоне читаются контрастнее всего.</p>
+      <h3>Палитра</h3><div class="sw"><i style="background:#eef2f7"></i><i style="background:#14213d"></i><i style="background:#0e7c7b"></i><i style="background:#e8730c"></i><i style="background:#f7f9fc"></i></div>
+      <h3>Шрифты</h3><p>Commissioner (всё, тяжёлый 800 в заголовках) + JetBrains Mono (подписи к кадрам, спецификация, код).</p>
+      <h3>Что движется</h3><ul><li>миллиметровка позади всего — 8 %</li><li>чертёж на первом экране — 12 %</li><li>по схеме принципа бежит один бирюзовый импульс</li></ul>
+      <h3>Как показаны кадры</h3><p>Ряды текст/кадр с чередованием сторон, тонкая чернильная рамка и жёсткая тень; подпись — как выноска на чертеже. Телефон — четыре кадра в ряд.</p>
+      <h3>Замечание</h3><p>На сгенерированном чертеже рукописные пометки — псевдотекст. Для финала перегенерирую с «без надписей» или заретуширую.</p>
+    </div>
+    <div data-n="3" hidden>
+      <h2>3 · Дом</h2>
+      <p>Про кого продукт, а не про то, как он устроен: гостиная вечером, роутер на полке с бирюзовыми огоньками. Тёплый уголь вместо чёрного, латунь как акцент.</p>
+      <h3>Палитра</h3><div class="sw"><i style="background:#1b1916"></i><i style="background:#2c2823"></i><i style="background:#d9a64a"></i><i style="background:#3fb8ab"></i><i style="background:#f3ede3"></i></div>
+      <h3>Шрифты</h3><p>Piazzolla (серифный заголовочный с оптическим размером) + Onest (текст). Оба русского происхождения, кириллица родная.</p>
+      <h3>Что движется</h3><ul><li>гостиная на первом экране — 12 %</li><li>тёплый размытый разделитель с цитатой — 18 %</li><li>больше ничего: анимаций в контенте нет</li></ul>
+      <h3>Как показаны кадры</h3><p>Один большой кадр (или пара) во всю ширину, текст под ним по центру. Телефон — четыре кадра веером.</p>
+      <h3>Где встанут ролики</h3><p>Те же четыре слота, отмечены латунным пунктиром.</p>
+    </div>
+    <div class="pick">
+      <button id="choose">Выбрать этот вариант</button>
+      <p class="done" id="chosen"></p>
+    </div>
+  </aside>
+</div>
+<script>
+(function(){
+  var ifr=document.getElementById('if'),btns=[].slice.call(document.querySelectorAll('.v')),notes=[].slice.call(document.querySelectorAll('aside [data-n]'));
+  var cur='1';
+  function show(k){cur=k;btns.forEach(function(b){b.setAttribute('aria-pressed',b.dataset.k===k)});
+    notes.forEach(function(n){n.hidden=n.dataset.n!==k});
+    var b=btns.find(function(b){return b.dataset.k===k});ifr.src=b.dataset.v;
+    try{localStorage.setItem('detour-design',k)}catch(e){}
+    render();}
+  btns.forEach(function(b){b.addEventListener('click',function(){show(b.dataset.k)})});
+  var fr=document.getElementById('frame'),d=document.getElementById('desk'),p=document.getElementById('phone');
+  d.onclick=function(){fr.classList.remove('phone');d.setAttribute('aria-pressed',true);p.setAttribute('aria-pressed',false)};
+  p.onclick=function(){fr.classList.add('phone');p.setAttribute('aria-pressed',true);d.setAttribute('aria-pressed',false)};
+  var n=document.getElementById('notes'),a=document.getElementById('aside');
+  n.onclick=function(){a.classList.toggle('hidden');n.setAttribute('aria-pressed',!a.classList.contains('hidden'))};
+  var ch=document.getElementById('chosen');
+  function render(){var c=null;try{c=localStorage.getItem('detour-design-choice')}catch(e){}
+    ch.textContent=c?('Выбран вариант '+c+'. Скажите мне «вариант '+c+'», и я доведу его до релиза.'):''}
+  document.getElementById('choose').onclick=function(){try{localStorage.setItem('detour-design-choice',cur)}catch(e){}render()};
+  var s='1';try{s=localStorage.getItem('detour-design')||'1'}catch(e){}
+  show(s);
+})();
+</script>
+</body>
+</html>
