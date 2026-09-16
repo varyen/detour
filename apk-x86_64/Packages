@@ -1,0 +1,20 @@
+Package: nfqws2
+Version: 1.0.5.2
+Architecture: noarch
+Installed-Size: 487732
+Description: zapret2 nfqws2 NFQUEUE DPI-bypass engine + LuaJIT desync scripts (bol-van/zapret2). Optional — used by zapret2 mode.
+Filename: nfqws2_1.0.5.2_noarch.apk
+Size: 360411
+MD5Sum: 4714b093b46be45af4e5bf7c46f998ce
+SHA256sum: af16ca2b85b8e9bca35b2e2b2e4f4d128b5be6859d19d62e39d1fb0c04887fd4
+
+Package: tpws-zapret
+Version: 72.13
+Architecture: noarch
+Installed-Size: 110944
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build — zapret is in no opkg feed.
+Filename: tpws-zapret_72.13_noarch.apk
+Size: 110612
+MD5Sum: baedf349fb14fe0d44ea15bdd9921b05
+SHA256sum: 38bdc2e742cae20892da2a5de0d5d7bad9c53b541b4de36c12608254d9cfe064
+
