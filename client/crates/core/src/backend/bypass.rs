@@ -1,6 +1,7 @@
 //! Пульт обхода DPI. Контракт action тот же, что у роутера (`bypass_*` и
-//! `zapret_*`), только движок один — winws2: tpws под Windows нет, поэтому
-//! режим `zapret` отклоняется, а панель его в клиенте не показывает.
+//! `zapret_*`), но движок на каждой платформе один: Windows — winws2 (режим
+//! `zapret2`), macOS — tpws (режим `zapret`). Чужое имя режима отклоняется,
+//! и панель его в клиенте не показывает.
 
 use anyhow::Result;
 use serde_json::json;
@@ -9,10 +10,14 @@ use super::{Backend, Start};
 use crate::ipc::{Request, Response};
 use crate::store;
 
-/// Режим из настроек: `off` или `zapret2`.
+/// Имя единственного движка платформы в терминах панели: на Windows это
+/// nfqws2-совместимый winws2, на macOS — tpws.
+pub(super) const MODE: &str = if cfg!(windows) { "zapret2" } else { "zapret" };
+
+/// Режим из настроек: `off` или движок платформы.
 pub(super) fn mode_of(s: &crate::settings::Settings) -> String {
     match s.get("bypass_mode").as_deref() {
-        Some("zapret2") => "zapret2".to_owned(),
+        Some(m) if m == MODE => MODE.to_owned(),
         _ => "off".to_owned(),
     }
 }
@@ -20,7 +25,7 @@ pub(super) fn mode_of(s: &crate::settings::Settings) -> String {
 impl Backend {
     pub(super) async fn bypass_status(&self) -> Response {
         let settings = crate::settings::Settings::load(&self.store);
-        let running = if self.dpi.pid().await.is_some() { "zapret2" } else { "none" };
+        let running = if self.dpi.pid().await.is_some() { MODE } else { "none" };
         Response::json(&json!({
             "mode": mode_of(&settings),
             "autostart": i32::from(self.store.flag(store::AUTOSTART_DPI)),
@@ -34,24 +39,22 @@ impl Backend {
     }
 
     /// Включение/выключение движка. Конфиг sing-box пересобирается: при
-    /// работающем winws2 домены DPI идут напрямую, иначе — обычным маршрутом.
+    /// работающем движке домены DPI уходят мимо VPN (на Windows — напрямую,
+    /// на macOS — в локальный tpws), иначе идут обычным маршрутом.
     pub(super) async fn bypass_set(&self, req: &Request) -> Result<Response> {
         let mode = req.param("mode").unwrap_or("").to_owned();
-        if mode == "zapret" {
-            return Ok(Response::error("tpws на этой платформе нет, используйте zapret2"));
-        }
-        if mode != "off" && mode != "zapret2" {
-            return Ok(Response::error("режим должен быть off или zapret2"));
+        if mode != "off" && mode != MODE {
+            return Ok(Response::error(&format!("на этой платформе движок один: off или {MODE}")));
         }
         self.dpi.stop().await;
-        if mode == "zapret2" {
+        if mode == MODE {
             if let Err(e) = self.dpi.start(&self.store, self.tun_enabled()).await {
                 self.set_dpi_on(false);
                 self.sync_dpi_routing().await;
                 return Ok(Response::error(&format!("{e:#}")));
             }
         }
-        self.set_dpi_on(mode == "zapret2");
+        self.set_dpi_on(mode == MODE);
         let mut settings = crate::settings::Settings::load(&self.store);
         settings.set("bypass_mode", mode.clone());
         settings.save(&self.store)?;
@@ -113,7 +116,7 @@ impl Backend {
                     }
                 }
                 let mut settings = crate::settings::Settings::load(&self.store);
-                settings.set("bypass_mode", "zapret2");
+                settings.set("bypass_mode", MODE);
                 settings.save(&self.store)?;
                 self.sync_dpi_routing().await;
             }
@@ -163,15 +166,15 @@ impl Backend {
         if !self.store.flag(store::AUTOSTART_DPI) {
             return;
         }
-        if mode_of(&crate::settings::Settings::load(&self.store)) != "zapret2" {
+        if mode_of(&crate::settings::Settings::load(&self.store)) != MODE {
             return;
         }
         match self.dpi.start(&self.store, self.tun_enabled()).await {
             Ok(pid) => {
                 self.set_dpi_on(true);
-                tracing::info!(pid, "winws2 запущен по автозапуску");
+                tracing::info!(pid, mode = MODE, "движок обхода запущен по автозапуску");
             }
-            Err(e) => tracing::warn!(error = %format!("{e:#}"), "winws2 не запустился"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "движок обхода не запустился"),
         }
     }
 }

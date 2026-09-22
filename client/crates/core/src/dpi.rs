@@ -1,11 +1,15 @@
-//! Обход DPI на Windows: winws2 из zapret2 (перехват через WinDivert).
-//! Замена роутерной пары tpws/nfqws2 — стратегия и lua-скрипты те же, что в
-//! `detour-bypass`, поэтому строки стратегий переносятся с роутера как есть.
+//! Обход DPI. Движок зависит от платформы, как и на роутере:
 //!
-//! Поверх TUN есть тонкость: sing-box переоткрывает прямые соединения со
-//! своего сокета на физическом интерфейсе, там winws2 и видит ClientHello.
-//! Но тот же пакет виден и на стыке с туннелем, поэтому адрес TUN исключается
-//! фильтром WinDivert — иначе один пакет обрабатывается дважды.
+//! * Windows — winws2 из zapret2: перехват пакетов через WinDivert, домены
+//!   обхода идут напрямую, а winws2 правит их на проводе. Тонкость поверх TUN:
+//!   sing-box переоткрывает прямые соединения со своего сокета на физическом
+//!   интерфейсе, там winws2 и видит ClientHello; тот же пакет виден и на стыке
+//!   с туннелем, поэтому адрес TUN исключается фильтром WinDivert — иначе один
+//!   пакет обрабатывается дважды.
+//! * macOS — tpws в режиме SOCKS: перехватывать пакеты в системе нельзя без
+//!   своего kext, поэтому домены обхода маршрутизируются в локальный прокси,
+//!   который и ломает распознавание. Стратегия — те же аргументы, что в
+//!   `zapret-tpws.conf` на роутере.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -21,14 +25,30 @@ use crate::store::{self, Store};
 #[cfg(windows)]
 pub const EXE: &str = "winws2.exe";
 #[cfg(not(windows))]
-pub const EXE: &str = "winws2";
+pub const EXE: &str = "tpws";
 
-/// Лежат рядом с бинарником; без них стратегии не работают.
+/// Лежат рядом с бинарником winws2; без них стратегии не работают.
 pub const LUA: [&str; 3] = ["zapret-lib.lua", "zapret-antidpi.lua", "zapret-auto.lua"];
 
-/// Та же строка, что `NFQWS_STRATEGY_DEFAULT` на роутере.
+/// Локальный SOCKS tpws: домены обхода sing-box отправляет в него.
+pub const SOCKS_PORT: u16 = 19487;
+
+/// Те же строки, что `NFQWS_STRATEGY_DEFAULT` и `zapret-tpws.conf` на роутере.
+#[cfg(windows)]
 pub const DEFAULT_STRATEGY: &str =
     "--filter-tcp=443 --filter-l7=tls --payload=tls_client_hello --lua-desync=tcpseg:pos=0,midsld:ip_id=rnd:repeats=2";
+#[cfg(not(windows))]
+pub const DEFAULT_STRATEGY: &str =
+    "--filter-tcp=80 --methodeol --new --filter-tcp=443 --split-pos=1,midsld --disorder";
+
+/// Куда отправлять домены обхода при работающем движке.
+pub fn route() -> crate::render::DpiRoute {
+    if cfg!(windows) {
+        crate::render::DpiRoute::Direct
+    } else {
+        crate::render::DpiRoute::Socks(SOCKS_PORT)
+    }
+}
 
 const HOSTS: &str = "run/dpi-hosts.txt";
 const IPSET: &str = "run/dpi-ips.txt";
@@ -68,9 +88,13 @@ impl Dpi {
         self.binary().parent().map(Path::to_path_buf).unwrap_or_default()
     }
 
-    /// Движок есть и укомплектован: без lua-скриптов стратегия не соберётся.
+    /// Движок есть и укомплектован: winws2 без lua-скриптов не соберёт
+    /// стратегию, tpws самодостаточен.
     pub fn supported(&self) -> bool {
-        cfg!(windows) && self.present() && LUA.iter().all(|f| self.lua_dir().join(f).is_file())
+        if !self.present() {
+            return false;
+        }
+        !cfg!(windows) || LUA.iter().all(|f| self.lua_dir().join(f).is_file())
     }
 
     /// «github version v1.0.5.2 (…)» → «1.0.5.2».
@@ -95,9 +119,30 @@ impl Dpi {
         }
     }
 
-    /// Списки и фильтр для winws2 из общего списка доменов DPI.
+    /// Списки, фильтр и аргументы движка из общего списка доменов DPI.
     fn prepare(&self, store: &Store, tun: bool) -> Result<Vec<String>> {
         let m = lists::parse_list(&store.read_text(store::DPI_DOMAINS));
+        if m.domains.is_empty() && m.cidrs.is_empty() {
+            bail!("список доменов для обхода DPI пуст");
+        }
+        if !cfg!(windows) {
+            // tpws сам принимает соединения: перехватывать нечего, зато нужен
+            // порт и список доменов, к которым применять обход.
+            let mut args = vec![
+                "--socks".to_owned(),
+                "--bind-addr=127.0.0.1".to_owned(),
+                format!("--port={SOCKS_PORT}"),
+            ];
+            if !m.domains.is_empty() {
+                store.write_text(HOSTS, &format!("{}
+", m.domains.join("
+")))?;
+                args.push(format!("--hostlist={}", store.path(HOSTS).display()));
+            }
+            args.extend(self.strategy(store).split_whitespace().map(str::to_owned));
+            let _ = tun;
+            return Ok(args);
+        }
         let mut args = vec![
             "--wf-tcp-out=80,443".to_owned(),
             "--wf-udp-out=443".to_owned(),
@@ -118,9 +163,6 @@ impl Dpi {
             store.write_text(IPSET, &format!("{}\n", m.cidrs.join("\n")))?;
             args.push(format!("--ipset={}", store.path(IPSET).display()));
         }
-        if m.domains.is_empty() && m.cidrs.is_empty() {
-            bail!("список доменов для обхода DPI пуст");
-        }
         args.extend(self.strategy(store).split_whitespace().map(str::to_owned));
         Ok(args)
     }
@@ -139,7 +181,7 @@ impl Dpi {
             return Err("стратегия должна содержать --lua-desync=...".to_owned());
         }
         if !self.supported() {
-            return Err("winws2 не установлен".to_owned());
+            return Err(format!("{EXE} не установлен"));
         }
         let mut args = self.prepare(store, false).map_err(|e| e.to_string())?;
         // Хвост — стратегия из файла; подменяем на проверяемую.
@@ -154,7 +196,7 @@ impl Dpi {
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| format!("не удалось запустить winws2: {e}"))?;
+            .map_err(|e| format!("не удалось запустить {EXE}: {e}"))?;
         if out.status.success() {
             return Ok(());
         }
@@ -165,26 +207,29 @@ impl Dpi {
     pub async fn start(&self, store: &Store, tun: bool) -> Result<u32> {
         self.stop().await;
         if !self.supported() {
-            bail!("winws2 не установлен: {}", self.binary().display());
+            bail!("{EXE} не установлен: {}", self.binary().display());
         }
         let args = self.prepare(store, tun)?;
         if let Some(dir) = self.log.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let _ = std::fs::remove_file(&self.log);
-        let mut child = self
-            .command()
-            .args(&args)
-            .arg(format!("--debug=@{}", self.log.display()))
-            .kill_on_drop(true)
-            .spawn()
-            .context("не удалось запустить winws2")?;
+        let mut cmd = self.command();
+        cmd.args(&args);
+        if cfg!(windows) {
+            // winws2 умеет писать сам; tpws — только в поток, его и перехватим.
+            cmd.arg(format!("--debug=@{}", self.log.display()));
+        } else {
+            let f = std::fs::File::create(&self.log)?;
+            cmd.arg("--debug=1").stdout(Stdio::from(f.try_clone()?)).stderr(Stdio::from(f));
+        }
+        let mut child = cmd.kill_on_drop(true).spawn().context("не удалось запустить движок обхода")?;
         let pid = child.id().unwrap_or(0);
         // Драйвер WinDivert поднимается сразу; если фильтр не открылся,
         // процесс умирает за доли секунды, причина — в хвосте лога.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         if let Ok(Some(status)) = child.try_wait() {
-            bail!("winws2 завершился сразу ({status}): {}", self.log_tail(6));
+            bail!("{EXE} завершился сразу ({status}): {}", self.log_tail(6));
         }
         *self.child.lock().await = Some(child);
         Ok(pid)

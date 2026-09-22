@@ -164,7 +164,43 @@ pub async fn install(
 // ---------- winws2 (zapret2) ----------
 
 pub const DPI_STATE: &str = "run/dpi-bins.json";
-const ZAPRET2_RELEASE: &str = "https://api.github.com/repos/bol-van/zapret2/releases/latest";
+
+/// Windows берёт winws2 из zapret2 (нужен WinDivert), macOS — tpws из
+/// первого zapret: там готовая сборка `binaries/mac64`.
+#[cfg(windows)]
+const DPI_REPO: &str = "bol-van/zapret2";
+#[cfg(not(windows))]
+const DPI_REPO: &str = "bol-van/zapret";
+#[cfg(windows)]
+const DPI_ARCH_DIR: &str = "windows-x86_64/";
+#[cfg(not(windows))]
+const DPI_ARCH_DIR: &str = "mac64/";
+
+fn dpi_zip_url(version: &str) -> String {
+    let name = if cfg!(windows) { "zapret2" } else { "zapret" };
+    format!("https://github.com/{DPI_REPO}/releases/download/v{version}/{name}-v{version}.zip")
+}
+
+/// Что забираем из архива: бинарник движка, его спутники и lua-стратегии.
+/// Бинарники есть под несколько платформ — берём только свою.
+fn dpi_wanted() -> Vec<&'static str> {
+    if cfg!(windows) {
+        let mut v = vec!["winws2.exe", "cygwin1.dll", "WinDivert.dll", "WinDivert64.sys"];
+        v.extend(crate::dpi::LUA);
+        v
+    } else {
+        vec!["tpws"]
+    }
+}
+
+/// Файл из архива нужен, если это одна из целей и он из каталога нашей
+/// платформы (lua лежат отдельно от бинарников).
+fn dpi_take(path: &str, base: &str) -> bool {
+    if !dpi_wanted().contains(&base) {
+        return false;
+    }
+    base.ends_with(".lua") || path.contains(DPI_ARCH_DIR)
+}
 
 pub fn dpi_state(store: &Store) -> Value {
     store
@@ -176,7 +212,8 @@ pub fn dpi_state(store: &Store) -> Value {
 /// одним архивом, версии между собой согласованы.
 pub async fn dpi_check(store: &Store, dpi: &crate::dpi::Dpi, proxy: Option<&str>) -> Result<Value> {
     let current = dpi.version().await.unwrap_or_default();
-    let rel: Value = get_any(ZAPRET2_RELEASE, proxy, Duration::from_secs(30)).await?.json().await?;
+    let url = format!("https://api.github.com/repos/{DPI_REPO}/releases/latest");
+    let rel: Value = get_any(&url, proxy, Duration::from_secs(30)).await?.json().await?;
     let available = rel["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_owned();
     let changelog: String = rel["body"].as_str().unwrap_or("").chars().take(6000).collect();
     let st = json!({
@@ -193,10 +230,7 @@ pub async fn dpi_check(store: &Store, dpi: &crate::dpi::Dpi, proxy: Option<&str>
 /// Движок и его lua-скрипты кладутся рядом друг с другом: `supported()`
 /// требует все три файла, иначе стратегия не соберётся.
 fn extract_dpi(zip_bytes: &[u8], dir: &Path) -> Result<Vec<String>> {
-    let want: Vec<&str> = ["winws2.exe", "cygwin1.dll", "WinDivert.dll", "WinDivert64.sys"]
-        .into_iter()
-        .chain(crate::dpi::LUA)
-        .collect();
+    let want = dpi_wanted();
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).context("архив повреждён")?;
     let mut got = Vec::new();
     std::fs::create_dir_all(dir)?;
@@ -204,9 +238,7 @@ fn extract_dpi(zip_bytes: &[u8], dir: &Path) -> Result<Vec<String>> {
         let mut f = z.by_index(i)?;
         let name = f.name().to_owned();
         let base = name.rsplit('/').next().unwrap_or("").to_owned();
-        // Бинарники есть под x86 и x86_64 — берём только 64-битные.
-        let bin_ok = name.contains("windows-x86_64/");
-        if !want.contains(&base.as_str()) || (base.ends_with(".lua") == bin_ok) {
+        if !dpi_take(&name, &base) {
             continue;
         }
         let mut buf = Vec::with_capacity(f.size() as usize);
@@ -219,6 +251,13 @@ fn extract_dpi(zip_bytes: &[u8], dir: &Path) -> Result<Vec<String>> {
             let _ = std::fs::remove_file(&old);
             std::fs::rename(&dest, &old).map_err(|_| e)?;
             store::write_atomic(&dest, &buf)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if !base.ends_with(".lua") {
+                let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+            }
         }
         got.push(base);
     }
@@ -241,8 +280,8 @@ pub async fn dpi_install(
     if version.is_empty() {
         bail!("в релизах zapret2 нет версии");
     }
-    let url = format!("https://github.com/bol-van/zapret2/releases/download/v{version}/zapret2-v{version}.zip");
-    log(format!("скачиваю zapret2 {version}"));
+    let url = dpi_zip_url(&version);
+    log(format!("скачиваю {} {version}", DPI_REPO.rsplit('/').next().unwrap_or("zapret")));
     let mut resp = get_any(&url, proxy, Duration::from_secs(600)).await?;
     let mut buf = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
@@ -265,6 +304,17 @@ pub async fn dpi_install(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dpi_archive_picks_own_platform() {
+        let arch = if cfg!(windows) { "winws2.exe" } else { "tpws" };
+        let good = format!("zapret/binaries/{DPI_ARCH_DIR}{arch}");
+        assert!(dpi_take(&good, arch));
+        assert!(!dpi_take("zapret/binaries/linux-x86_64/tpws", "tpws"));
+        assert!(!dpi_take("zapret/binaries/windows-x86/winws2.exe", "winws2.exe"));
+        assert!(!dpi_take("zapret/init.d/openwrt/zapret", "zapret"));
+        assert_eq!(dpi_take("zapret2/lua/zapret-lib.lua", "zapret-lib.lua"), cfg!(windows));
+    }
 
     #[test]
     fn semver_orders_patches() {

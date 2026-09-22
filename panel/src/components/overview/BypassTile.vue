@@ -60,27 +60,44 @@ const stateKind = computed(() => {
   return stopped.value ? "warn" : "off";
 });
 
-/* На роутере движков два (tpws и nfqws2), в клиенте один — winws2 из того же
-   zapret2. Поэтому имя движка и набор режимов зависят от того, где мы. */
-const engineName = computed(() => (__CLIENT__ ? "winws2" : "zapret2"));
+/* На роутере движков два (tpws и nfqws2), в клиенте — один, свой на каждой
+   платформе: Windows — winws2 (режим zapret2), macOS — tpws (режим zapret). */
+const isMac = computed(() => status.data?.platform === "macos");
+const engineName = computed(() => {
+  if (!__CLIENT__) return "zapret2";
+  return isMac.value ? "tpws" : "winws2";
+});
+const clientMode = computed<BypassMode>(() => (isMac.value ? "zapret" : "zapret2"));
 
 const zapret2Hint = computed(() => {
   if (status.zapret2Supported) return undefined;
-  if (__CLIENT__) return "winws2 не установлен";
+  if (__CLIENT__) return `${engineName.value} не установлен`;
   if (status.nfqws2Missing) return "Пакет nfqws2 не установлен";
   return "Нужен NFQUEUE — на этой платформе его нет";
 });
 
-const modeOptions = computed(() => [
-  { value: "off", label: "Выкл" },
-  ...(__CLIENT__ ? [] : [{ value: "zapret", label: "zapret" }]),
-  {
-    value: "zapret2",
-    label: engineName.value,
-    disabled: !status.zapret2Supported,
-    hint: zapret2Hint.value,
-  },
-]);
+const modeOptions = computed(() =>
+  __CLIENT__
+    ? [
+        { value: "off", label: "Выкл" },
+        {
+          value: clientMode.value,
+          label: engineName.value,
+          disabled: !status.zapret2Supported,
+          hint: zapret2Hint.value,
+        },
+      ]
+    : [
+        { value: "off", label: "Выкл" },
+        { value: "zapret", label: "zapret" },
+        {
+          value: "zapret2",
+          label: "zapret2",
+          disabled: !status.zapret2Supported,
+          hint: zapret2Hint.value,
+        },
+      ],
+);
 
 async function run(tag: string, fn: () => Promise<unknown>, ok: string, fail: string) {
   busy.value = tag;
@@ -178,7 +195,7 @@ async function saveStrategy() {
         {{ engineName }} {{ status.data.binaries.nfqws2_version }}
       </span>
       <span v-else-if="running === 'zapret' && status.data?.binaries?.tpws_version" class="mono dim">
-        tpws {{ status.data.binaries.tpws_version }}
+        {{ engineName }} {{ status.data.binaries.tpws_version }}
       </span>
     </p>
 
@@ -194,7 +211,10 @@ async function saveStrategy() {
 
     <p v-if="status.nfqws2Missing" class="hint">
       <template v-if="status.isClient">
-        winws2 не найден: он ставится вместе с приложением, переустановите его.
+        {{ engineName }} не найден — поставьте его в «Журнале»:
+        <RouterLink :to="{ path: '/journal', query: { focus: 'updates' } }">
+          обновления движков
+        </RouterLink>.
       </template>
       <template v-else>
         zapret2 требует пакет nfqws2 —
@@ -232,7 +252,9 @@ async function saveStrategy() {
         <UiButton :busy="busy === 'restart'" @click="restart">Перезапустить</UiButton>
         <UiButton :busy="busy === 'stop'" @click="stop">Стоп</UiButton>
       </template>
-      <UiButton v-if="mode === 'zapret2'" @click="openStrategy">Стратегия</UiButton>
+      <UiButton v-if="mode === 'zapret2' || (status.isClient && mode === 'zapret')" @click="openStrategy">
+        Стратегия
+      </UiButton>
       <UiButton
         v-else-if="mode === 'zapret'"
         @click="$router.push({ path: '/journal', query: { focus: 'services' } })"

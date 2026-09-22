@@ -37,9 +37,10 @@ pub struct Params<'a> {
     pub ruleset_dir: &'a Path,
     pub clash_port: u16,
     pub clash_secret: &'a str,
-    /// Домены DPI-обхода уходят напрямую, чтобы их обработал winws2/tpws,
-    /// а не VPN — как на роутере, где REDIRECT в tpws стоит раньше sing-box.
-    pub dpi_enabled: bool,
+    /// Куда уходят домены DPI-обхода, пока движок работает: на Windows —
+    /// напрямую (winws2 правит их на проводе), на macOS — в локальный SOCKS
+    /// tpws. Выключенный движок = `DpiRoute::Off`, домены идут обычным путём.
+    pub dpi: DpiRoute,
     /// Без TUN — только для разработки без прав администратора
     /// (`DETOUR_DEV_NO_TUN`): вместо туннеля вход `dev-in`, чей трафик идёт
     /// по тем же правилам, что шёл бы из TUN.
@@ -47,6 +48,13 @@ pub struct Params<'a> {
 }
 
 pub const DEV_PORT: u16 = 18282;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DpiRoute {
+    Off,
+    Direct,
+    Socks(u16),
+}
 
 pub struct Rendered {
     pub config: Value,
@@ -209,8 +217,14 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
         true
     };
 
-    if p.dpi_enabled && add_set("dpi", &lists::parse_list(&store.read_text(store::DPI_DOMAINS))) {
-        rules.push(json!({ "rule_set": ["dpi"], "outbound": "direct" }));
+    if p.dpi != DpiRoute::Off && add_set("dpi", &lists::parse_list(&store.read_text(store::DPI_DOMAINS))) {
+        if let DpiRoute::Socks(port) = p.dpi {
+            b.outbounds.push(json!({
+                "type": "socks", "tag": "dpi", "server": "127.0.0.1", "server_port": port, "version": "5",
+            }));
+        }
+        let out = if matches!(p.dpi, DpiRoute::Socks(_)) { "dpi" } else { "direct" };
+        rules.push(json!({ "rule_set": ["dpi"], "outbound": out }));
     }
 
     let mode = settings.routing_mode();
@@ -446,7 +460,7 @@ mod tests {
     }
 
     fn params<'a>(chain: &'a [String], dir: &'a Path) -> Params<'a> {
-        Params { chain, log_path: dir, ruleset_dir: dir, clash_port: 19090, clash_secret: "s", dpi_enabled: false, tun: true }
+        Params { chain, log_path: dir, ruleset_dir: dir, clash_port: 19090, clash_secret: "s", dpi: DpiRoute::Off, tun: true }
     }
 
     #[test]
@@ -467,6 +481,29 @@ mod tests {
         let rules = r.config["route"]["rules"].as_array().unwrap();
         let private = rules.iter().position(|x| x["ip_is_private"] == true).unwrap();
         assert_eq!(rules[private + 1], json!({ "ip_version": 6, "action": "reject" }));
+    }
+
+    #[test]
+    fn dpi_route_direct_or_socks() {
+        let s = tmp_store("dpi-route");
+        put_profile(&s, "a", json!({ "type": "trojan", "server": "vpn.example.com", "server_port": 443 }));
+        s.write_text(store::DPI_DOMAINS, "blocked.example.com
+").unwrap();
+        let chain = vec!["a".to_owned()];
+        let rule_out = |p: &Params| -> String {
+            let r = render(&s, &Settings::default(), p).unwrap();
+            let rules = r.config["route"]["rules"].as_array().unwrap().clone();
+            let hit = rules.iter().find(|x| x["rule_set"] == json!(["dpi"]));
+            let out = hit.map(|x| x["outbound"].as_str().unwrap_or("").to_owned()).unwrap_or_default();
+            let has_socks = r.config["outbounds"].as_array().unwrap().iter().any(|o| o["tag"] == "dpi");
+            format!("{out}{}", if has_socks { "+socks" } else { "" })
+        };
+        let mut p = params(&chain, s.root());
+        assert_eq!(rule_out(&p), "", "выключенный движок не трогает маршруты");
+        p.dpi = DpiRoute::Direct;
+        assert_eq!(rule_out(&p), "direct", "winws2 правит трафик на проводе");
+        p.dpi = DpiRoute::Socks(19487);
+        assert_eq!(rule_out(&p), "dpi+socks", "tpws принимает соединения сам");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod devhttp;
+mod launchd;
 #[cfg(windows)]
 mod service;
 
@@ -14,8 +15,8 @@ use tokio::sync::watch;
 
 const USAGE: &str = "\
 detour-svc run [--data DIR] [--dev-http 127.0.0.1:18080]   передний план (консоль, launchd)
-detour-svc install | uninstall                             регистрация службы Windows
-detour-svc service                                         точка входа для SCM";
+detour-svc install | uninstall                             служба Windows / демон launchd
+detour-svc service                                         точка входа для SCM (Windows)";
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -26,6 +27,10 @@ fn main() -> Result<()> {
         Some("install") => service::install(),
         #[cfg(windows)]
         Some("uninstall") => service::uninstall(),
+        #[cfg(target_os = "macos")]
+        Some("install") => launchd::install(),
+        #[cfg(target_os = "macos")]
+        Some("uninstall") => launchd::uninstall(),
         Some("run") => foreground(&args[1..]),
         _ => bail!("{USAGE}"),
     }

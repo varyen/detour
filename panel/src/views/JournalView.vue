@@ -457,12 +457,18 @@ const updatesSummary = computed(() => {
   return `панель ${o.panel?.current_version || status.data?.version || "—"} · всё свежее`;
 });
 
+/** Движок обхода в клиенте зависит от платформы. */
+const dpiEngine = computed(() => (status.data?.platform === "macos" ? "tpws" : "winws2"));
+
 /* В клиенте строка нужна именно тогда, когда движка ещё нет: ею его и ставят
-   (установщик winws2 не несёт — Defender метит WinDivert). */
+   (в установщик он не кладётся — Defender метит WinDivert). */
 const nfqws2Visible = computed(
   () =>
-    status.isClient ||
-    (!status.isKeenetic && status.data?.binaries?.nfqws2_supported !== false),
+    (status.isClient && dpiEngine.value === "winws2") ||
+    (!status.isClient && !status.isKeenetic && status.data?.binaries?.nfqws2_supported !== false),
+);
+const tpwsVisible = computed(
+  () => !status.isClient || dpiEngine.value === "tpws",
 );
 
 /** changelog приходит в base64 (UTF-8) — иначе кириллица не переживёт shell. */
@@ -1126,7 +1132,7 @@ onBeforeUnmount(() => {
 
       <div class="svc">
         <p class="svc-name">
-          {{ status.isClient ? "Обход DPI (winws2)" : "zapret (tpws)" }}
+          {{ status.isClient ? `Обход DPI (${dpiEngine})` : "zapret (tpws)" }}
           <small :class="zp?.running ? 'ok' : 'bad'">
             {{ zp?.running ? "работает" : "остановлен" }}
             <template v-if="isSet(zp?.port)"> · порт {{ zp?.port }}</template>
@@ -1227,7 +1233,7 @@ onBeforeUnmount(() => {
         @changelog="showChangelog('singbox')"
       />
       <UpdateRow
-        v-if="!status.isClient"
+        v-if="tpwsVisible"
         title="tpws (обход DPI)"
         :state="upd?.tpws ?? null"
         :installed="status.data?.binaries?.tpws_version"
@@ -1239,7 +1245,7 @@ onBeforeUnmount(() => {
       />
       <UpdateRow
         v-if="nfqws2Visible"
-        :title="status.isClient ? 'winws2 (обход DPI)' : 'nfqws2 (zapret2)'"
+        :title="status.isClient ? `${dpiEngine} (обход DPI)` : 'nfqws2 (zapret2)'"
         :state="upd?.nfqws2 ?? null"
         :installed="status.data?.binaries?.nfqws2_version"
         :busy-check="updBusy === 'check:nfqws2'"

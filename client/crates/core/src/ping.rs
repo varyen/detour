@@ -85,9 +85,32 @@ fn icmp_blocking(src: Option<Ipv4Addr>, dst: Ipv4Addr) -> Option<i64> {
     }
 }
 
+/// На macOS сырой ICMP-сокет требует root, а демон под ним и работает; но
+/// проще и безопаснее спросить системный `ping`: он умеет и адрес источника
+/// (`-S`), без которого при поднятом TUN эхо ушло бы в туннель.
 #[cfg(not(windows))]
-fn icmp_blocking(_src: Option<Ipv4Addr>, _dst: Ipv4Addr) -> Option<i64> {
-    None
+fn icmp_blocking(src: Option<Ipv4Addr>, dst: Ipv4Addr) -> Option<i64> {
+    let mut c = std::process::Command::new("ping");
+    c.arg("-c").arg("1").arg("-n");
+    #[cfg(target_os = "macos")]
+    c.arg("-W").arg("2000");
+    #[cfg(not(target_os = "macos"))]
+    c.arg("-W").arg("2");
+    if let Some(s) = src {
+        c.arg("-S").arg(s.to_string());
+    }
+    let out = c.arg(dst.to_string()).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_ping_ms(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `64 bytes from 1.1.1.1: icmp_seq=0 ttl=57 time=12.345 ms` → 12.
+#[cfg_attr(windows, allow(dead_code))]
+fn parse_ping_ms(text: &str) -> Option<i64> {
+    let ms: f64 = text.split("time=").nth(1)?.split_whitespace().next()?.parse().ok()?;
+    Some((ms.round() as i64).max(1))
 }
 
 async fn icmp(src: Option<Ipv4Addr>, dst: Ipv4Addr) -> Option<i64> {
@@ -133,5 +156,19 @@ pub async fn ping(ob: &Value, src: Option<Ipv4Addr>) -> Ping {
     match tcp(src, addr).await {
         Some(ms) => Ping { rtt: ms, ok: true, ts: now, server: host.clone(), method: "tcp".into() },
         None => fail("tcp"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_rtt_from_ping_output() {
+        let text = "PING 1.1.1.1 (1.1.1.1): 56 data bytes
+64 bytes from 1.1.1.1: icmp_seq=0 ttl=57 time=12.345 ms
+";
+        assert_eq!(parse_ping_ms(text), Some(12));
+        assert_eq!(parse_ping_ms("Request timeout for icmp_seq 0"), None);
     }
 }

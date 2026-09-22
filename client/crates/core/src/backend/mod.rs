@@ -300,9 +300,10 @@ impl Backend {
             "bins_update_check" => self.bins_check().await,
             "bins_update_status" => self.bins_status(),
             "bins_update_apply" | "singbox_opkg_upgrade" => self.bins_apply(),
-            "nfqws2_update_check" => self.dpi_bins_check().await,
-            "nfqws2_update_status" => self.dpi_bins_status(),
-            "nfqws2_update_apply" => self.dpi_bins_apply(),
+            // Канал у движка один, но панель зовёт его по имени платформы.
+            "nfqws2_update_check" | "tpws_update_check" => self.dpi_bins_check().await,
+            "nfqws2_update_status" | "tpws_update_status" => self.dpi_bins_status(),
+            "nfqws2_update_apply" | "tpws_update_apply" => self.dpi_bins_apply(),
             "updates_overview" => self.updates_overview().await,
             "autocheck_status" => self.autocheck_status(),
             "autocheck_set" => self.autocheck_set(body()?)?,
@@ -392,7 +393,11 @@ impl Backend {
                 ruleset_dir: rules,
                 clash_port: CLASH_PORT,
                 clash_secret: &self.clash_secret,
-                dpi_enabled: self.dpi_on.load(std::sync::atomic::Ordering::Relaxed),
+                dpi: if self.dpi_on.load(std::sync::atomic::Ordering::Relaxed) {
+                    crate::dpi::route()
+                } else {
+                    render::DpiRoute::Off
+                },
                 tun: self.tun_enabled(),
             },
         )
@@ -419,6 +424,7 @@ impl Backend {
         let chain = settings.active_chain();
         let pid = self.engine.pid().await;
         let dpi_pid = self.dpi.pid().await;
+        let dpi_version = self.dpi.version().await;
         let proxied = lists::parse_list(&self.store.read_text(store::PROXY_DOMAINS));
         let dpi = lists::parse_list(&self.store.read_text(store::DPI_DOMAINS));
         let version = self.engine.version().await.unwrap_or_else(|| "?".into());
@@ -436,10 +442,11 @@ impl Backend {
                 "singbox_present": self.engine.present(),
                 "singbox_version": version,
                 "bins_version": version,
-                "tpws_present": false,
-                "nfqws2_present": self.dpi.present(),
-                "nfqws2_supported": self.dpi.supported(),
-                "nfqws2_version": self.dpi.version().await,
+                "tpws_present": !cfg!(windows) && self.dpi.present(),
+                "tpws_version": if cfg!(windows) { None } else { dpi_version.clone() },
+                "nfqws2_present": cfg!(windows) && self.dpi.present(),
+                "nfqws2_supported": cfg!(windows) && self.dpi.supported(),
+                "nfqws2_version": if cfg!(windows) { dpi_version } else { None },
             },
             "singbox": {
                 "running": pid.is_some(),

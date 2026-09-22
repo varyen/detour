@@ -853,9 +853,14 @@ onBeforeUnmount(() => {
           sing-box {{ status.data?.binaries?.singbox_version ?? "—" }}
           <i v-if="newVersion('singbox')" class="up">→ {{ newVersion("singbox") }}</i>
         </span>
-        <!-- Движок обхода DPI: на роутере это tpws, в клиенте — winws2. -->
+        <!-- Движок обхода DPI свой на каждой платформе. -->
         <span v-if="status.isClient">
-          winws2 {{ status.data?.binaries?.nfqws2_version ?? "—" }}
+          {{ status.data?.platform === "macos" ? "tpws" : "winws2" }}
+          {{
+            (status.data?.platform === "macos"
+              ? status.data?.binaries?.tpws_version
+              : status.data?.binaries?.nfqws2_version) ?? "—"
+          }}
         </span>
         <span v-else>
           tpws {{ status.data?.binaries?.tpws_version ?? "—" }}
