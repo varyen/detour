@@ -457,8 +457,8 @@ const updatesSummary = computed(() => {
   return `панель ${o.panel?.current_version || status.data?.version || "—"} · всё свежее`;
 });
 
-/** Движок обхода в клиенте зависит от платформы. */
-const dpiEngine = computed(() => (status.data?.platform === "macos" ? "tpws" : "winws2"));
+/** Движок обхода в клиенте зависит от платформы: winws2 только на Windows. */
+const dpiEngine = computed(() => (status.data?.platform === "windows" ? "winws2" : "tpws"));
 
 /* В клиенте строка нужна именно тогда, когда движка ещё нет: ею его и ставят
    (в установщик он не кладётся — Defender метит WinDivert). */
@@ -467,8 +467,12 @@ const nfqws2Visible = computed(
     (status.isClient && dpiEngine.value === "winws2") ||
     (!status.isClient && !status.isKeenetic && status.data?.binaries?.nfqws2_supported !== false),
 );
+/* На Android оба движка зашиты в APK: sing-box — библиотекой libbox, tpws —
+   в jniLibs, а из каталога данных система запускать файлы не даёт. Обновляются
+   они вместе с приложением, отдельных кнопок быть не должно. */
+const bundledEngines = computed(() => status.isClient && status.data?.platform === "android");
 const tpwsVisible = computed(
-  () => !status.isClient || dpiEngine.value === "tpws",
+  () => !status.isClient || (dpiEngine.value === "tpws" && !bundledEngines.value),
 );
 
 /** changelog приходит в base64 (UTF-8) — иначе кириллица не переживёт shell. */
@@ -1218,6 +1222,7 @@ onBeforeUnmount(() => {
         @changelog="showChangelog('panel')"
       />
       <UpdateRow
+        v-if="!bundledEngines"
         title="sing-box"
         :state="upd?.singbox ?? null"
         :installed="status.data?.binaries?.singbox_version"

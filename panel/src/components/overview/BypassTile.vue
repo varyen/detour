@@ -24,6 +24,11 @@ import { isSet } from "@/lib/format";
 const NFQWS2_DEFAULT_STRATEGY =
   "--filter-tcp=443 --filter-l7=tls --payload=tls_client_hello --lua-desync=tcpseg:pos=0,midsld:ip_id=rnd:repeats=2";
 
+/* Дублирует DEFAULT_STRATEGY из client/crates/core/src/dpi.rs: у tpws своих
+   lua-стратегий нет, десинхронизация собирается флагами. */
+const TPWS_DEFAULT_STRATEGY =
+  "--filter-tcp=80 --methodeol --new --filter-tcp=443 --split-pos=1,midsld --disorder";
+
 const status = useStatusStore();
 const toast = useToastStore();
 
@@ -60,14 +65,21 @@ const stateKind = computed(() => {
   return stopped.value ? "warn" : "off";
 });
 
-/* На роутере движков два (tpws и nfqws2), в клиенте — один, свой на каждой
-   платформе: Windows — winws2 (режим zapret2), macOS — tpws (режим zapret). */
-const isMac = computed(() => status.data?.platform === "macos");
+/* На роутере движков два (tpws и nfqws2), в клиенте — один: winws2 (режим
+   zapret2) только на Windows, где есть WinDivert; на macOS и Android — tpws
+   в режиме SOCKS. */
+const isWindows = computed(() => status.data?.platform === "windows");
 const engineName = computed(() => {
   if (!__CLIENT__) return "zapret2";
-  return isMac.value ? "tpws" : "winws2";
+  return isWindows.value ? "winws2" : "tpws";
 });
-const clientMode = computed<BypassMode>(() => (isMac.value ? "zapret" : "zapret2"));
+const clientMode = computed<BypassMode>(() => (isWindows.value ? "zapret2" : "zapret"));
+
+/* lua-стратегии понимает только winws2; tpws с такой строкой не запустится. */
+const needsLuaDesync = computed(() => !__CLIENT__ || isWindows.value);
+const defaultStrategy = computed(() =>
+  needsLuaDesync.value ? NFQWS2_DEFAULT_STRATEGY : TPWS_DEFAULT_STRATEGY,
+);
 
 const zapret2Hint = computed(() => {
   if (status.zapret2Supported) return undefined;
@@ -150,7 +162,7 @@ async function openStrategy() {
   /* GET отдаёт пустоту, если своя стратегия ещё не сохранена. Подставляем
      действующую из bypass_status — она и есть дефолт бэкенда. */
   const stored = await overview.bypassStrategyGet().catch(() => "");
-  strategy.value = (stored || bp.value?.strategy || NFQWS2_DEFAULT_STRATEGY).trim();
+  strategy.value = (stored || bp.value?.strategy || defaultStrategy.value).trim();
   strategyOpen.value = true;
 }
 
@@ -159,8 +171,12 @@ async function saveStrategy() {
   /* Ту же проверку делает CGI (detour-api:2923), но получить отказ уже после
      отправки — хуже, чем узнать сразу: без --lua-desync стратегия ничего не
      обходит. */
-  if (!line.includes("--lua-desync=")) {
+  if (needsLuaDesync.value && !line.includes("--lua-desync=")) {
     strategyErr.value = "Стратегия должна содержать --lua-desync=…";
+    return;
+  }
+  if (!line) {
+    strategyErr.value = "Стратегия пуста";
     return;
   }
   busy.value = "strategy";
@@ -271,9 +287,12 @@ async function saveStrategy() {
     @close="strategyOpen = false"
   >
     <p class="note">
-      Одна строка аргументов {{ engineName }}. Обязателен <code>--lua-desync=…</code> —
-      без него движок поднимется, но обходить ничего не будет. Сохранение при
-      работающем движке сразу его перезапускает.
+      Одна строка аргументов {{ engineName }}.
+      <template v-if="needsLuaDesync">
+        Обязателен <code>--lua-desync=…</code> — без него движок поднимется, но
+        обходить ничего не будет.
+      </template>
+      Сохранение при работающем движке сразу его перезапускает.
     </p>
     <textarea v-model="strategy" rows="6" spellcheck="false" aria-label="Строка стратегии"></textarea>
     <p v-if="strategyErr" class="err">{{ strategyErr }}</p>
@@ -281,7 +300,7 @@ async function saveStrategy() {
       <UiButton variant="primary" :busy="busy === 'strategy'" @click="saveStrategy">
         Сохранить
       </UiButton>
-      <UiButton @click="strategy = NFQWS2_DEFAULT_STRATEGY">По умолчанию</UiButton>
+      <UiButton @click="strategy = defaultStrategy">По умолчанию</UiButton>
       <UiButton @click="strategyOpen = false">Отмена</UiButton>
     </template>
   </DrawerSheet>
