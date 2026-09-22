@@ -222,6 +222,13 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
             b.outbounds.push(json!({
                 "type": "socks", "tag": "dpi", "server": "127.0.0.1", "server_port": port, "version": "5",
             }));
+            // Сам tpws ходит наружу через тот же туннель, и его соединение
+            // снова попадает в правило обхода — петля. На Android от неё
+            // спасает исключение своего пакета из VpnService, на macOS —
+            // отбор по имени процесса.
+            if !cfg!(target_os = "android") {
+                rules.push(json!({ "process_name": [crate::dpi::EXE], "outbound": "direct" }));
+            }
         }
         let out = if matches!(p.dpi, DpiRoute::Socks(_)) { "dpi" } else { "direct" };
         rules.push(json!({ "rule_set": ["dpi"], "outbound": out }));
@@ -504,6 +511,16 @@ mod tests {
         assert_eq!(rule_out(&p), "direct", "winws2 правит трафик на проводе");
         p.dpi = DpiRoute::Socks(19487);
         assert_eq!(rule_out(&p), "dpi+socks", "tpws принимает соединения сам");
+
+        let r = render(&s, &Settings::default(), &p).unwrap();
+        let rules = r.config["route"]["rules"].as_array().unwrap();
+        let own = rules.iter().position(|x| x["process_name"] == json!([crate::dpi::EXE]));
+        let dpi = rules.iter().position(|x| x["rule_set"] == json!(["dpi"])).unwrap();
+        if cfg!(target_os = "android") {
+            assert!(own.is_none(), "на Android петлю режет VpnService");
+        } else {
+            assert!(own.unwrap() < dpi, "трафик самого tpws уходит напрямую до правила обхода");
+        }
     }
 
     #[test]

@@ -17,6 +17,16 @@ const APPLY_LOG: &str = "run/apply.log";
 const SENTINEL: &str = "===DETOUR_APPLY_DONE rc=";
 const AUTOCHECK_EVERY: i64 = 6 * 3600;
 
+/// Отказ для платформ, где движки зашиты в приложение.
+fn bundled() -> Option<Response> {
+    (!crate::dpi::UPDATABLE).then(|| {
+        Response::json(&json!({
+            "status": "error",
+            "message": "движки зашиты в приложение и обновляются вместе с ним",
+        }))
+    })
+}
+
 impl Backend {
     // ---------- российские подсети ----------
 
@@ -76,6 +86,9 @@ impl Backend {
     // ---------- обновление sing-box ----------
 
     pub(super) async fn bins_check(&self) -> Response {
+        if let Some(r) = bundled() {
+            return r;
+        }
         let proxy = self.fetch_proxy().await;
         match updater::check(&self.store, &self.engine, proxy.as_deref()).await {
             Ok(v) => Response::json(&v),
@@ -86,6 +99,9 @@ impl Backend {
     // ---------- winws2 ----------
 
     pub(super) async fn dpi_bins_check(&self) -> Response {
+        if let Some(r) = bundled() {
+            return r;
+        }
         let proxy = self.fetch_proxy().await;
         match updater::dpi_check(&self.store, &self.dpi, proxy.as_deref()).await {
             Ok(v) => Response::json(&v),
@@ -98,6 +114,9 @@ impl Backend {
     }
 
     pub(super) fn dpi_bins_apply(&self) -> Response {
+        if let Some(r) = bundled() {
+            return r;
+        }
         let _ = self.store.write_text(APPLY_LOG, "установка winws2: начинаю
 ");
         let _ = self.jobs.send(Job::DpiApply);
@@ -139,6 +158,9 @@ impl Backend {
 
     /// Состояние «в работе» пишется до ответа: панель опрашивает журнал сразу.
     pub(super) fn bins_apply(&self) -> Response {
+        if let Some(r) = bundled() {
+            return r;
+        }
         let _ = self.store.write_text(APPLY_LOG, "обновление sing-box: начинаю\n");
         let _ = self.jobs.send(Job::BinsApply);
         Response::json(&json!({ "ok": true, "status": "started" }))
@@ -233,7 +255,7 @@ impl Backend {
                 self.reapply_quiet().await;
             }
         }
-        if self.autocheck_on() && self.engine.present() {
+        if self.autocheck_on() && crate::dpi::UPDATABLE && self.engine.present() {
             let st = updater::state(&self.store);
             let last = st
                 .get("last_check")

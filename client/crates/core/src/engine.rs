@@ -1,9 +1,11 @@
-//! sing-box дочерним процессом (десктоп). На Android движок будет другим —
-//! libbox внутри VpnService, — с тем же набором методов.
+//! sing-box дочерним процессом (десктоп). На Android дочерний процесс не
+//! годится: TUN открывает только сама система, и файловый дескриптор нельзя
+//! передать наружу, — поэтому там конфиг поднимает libbox внутри процесса
+//! приложения, а ядро дёргает его через мост `tunnel`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::{bail, Context, Result};
 use tokio::process::{Child, Command};
@@ -13,6 +15,34 @@ use tokio::sync::Mutex;
 pub const EXE: &str = "sing-box.exe";
 #[cfg(not(windows))]
 pub const EXE: &str = "sing-box";
+
+/// Мост в платформенный туннель (Android): ставится приложением при старте.
+#[cfg(target_os = "android")]
+pub mod tunnel {
+    use std::path::Path;
+    use std::sync::OnceLock;
+
+    pub trait Tunnel: Send + Sync {
+        /// Поднять туннель по готовому конфигу; возвращает условный pid.
+        fn start(&self, config: &Path) -> anyhow::Result<u32>;
+        fn stop(&self);
+        fn running(&self) -> bool;
+        /// Разобрать конфиг, не трогая живой туннель.
+        fn check(&self, config: &Path) -> Result<(), String>;
+        /// Версия ядра, вкомпилированного в приложение.
+        fn version(&self) -> Option<String>;
+    }
+
+    static TUNNEL: OnceLock<Box<dyn Tunnel>> = OnceLock::new();
+
+    pub fn set(t: Box<dyn Tunnel>) {
+        let _ = TUNNEL.set(t);
+    }
+
+    pub fn get() -> Option<&'static dyn Tunnel> {
+        TUNNEL.get().map(AsRef::as_ref)
+    }
+}
 
 pub struct Engine {
     /// Скачанное обновлением — побеждает поставленное установщиком.
@@ -56,7 +86,19 @@ impl Engine {
     }
 
     pub fn present(&self) -> bool {
+        #[cfg(target_os = "android")]
+        {
+            return tunnel::get().is_some();
+        }
+        #[allow(unreachable_code)]
         self.binary().is_file()
+    }
+
+    /// Пробы профилей поднимают второй экземпляр движка рядом с рабочим. На
+    /// Android такого нет: ядро вкомпилировано в приложение в единственном
+    /// числе, и проверять профили нечем.
+    pub fn probes_supported(&self) -> bool {
+        !cfg!(target_os = "android") && self.present()
     }
 
     fn command_for(&self, bin: &Path, dir: &Path) -> Command {
@@ -72,6 +114,11 @@ impl Engine {
     }
 
     pub async fn version(&self) -> Option<String> {
+        #[cfg(target_os = "android")]
+        {
+            return tunnel::get().and_then(|t| t.version());
+        }
+        #[allow(unreachable_code)]
         let bin = self.binary();
         let mtime = std::fs::metadata(&bin).and_then(|m| m.modified()).ok()?;
         let mut cache = self.version.lock().await;
@@ -87,6 +134,14 @@ impl Engine {
 
     /// `sing-box check` — живой конфиг не трогаем, пока новый не прошёл.
     pub async fn check(&self, config: &Path) -> Result<(), String> {
+        #[cfg(target_os = "android")]
+        {
+            let Some(t) = tunnel::get() else {
+                return Err("туннель ещё не подключён приложением".to_owned());
+            };
+            return t.check(config);
+        }
+        #[allow(unreachable_code)]
         if !self.present() {
             return Err(format!("sing-box не найден: {}", self.binary().display()));
         }
@@ -112,6 +167,15 @@ impl Engine {
     }
 
     pub async fn start(&self, config: &Path) -> Result<u32> {
+        #[cfg(target_os = "android")]
+        {
+            let Some(t) = tunnel::get() else {
+                bail!("туннель ещё не подключён приложением");
+            };
+            return t.start(config);
+        }
+        #[cfg(not(target_os = "android"))]
+        {
         self.stop().await;
         if !self.present() {
             bail!("sing-box не найден: {}", self.binary().display());
@@ -137,12 +201,13 @@ impl Engine {
 
         // TUN и маршруты поднимаются за доли секунды; если процесс умер сразу
         // — это ошибка конфига или прав, и причина лежит в хвосте stderr.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         if let Ok(Some(status)) = child.try_wait() {
             bail!("sing-box завершился сразу ({status}): {}", self.stderr_tail(8));
         }
         *self.child.lock().await = Some(child);
         Ok(pid)
+        }
     }
 
     /// Отдельный процесс для проб (проверка профилей): свой конфиг, свой
@@ -164,12 +229,22 @@ impl Engine {
     }
 
     pub async fn stop(&self) {
+        #[cfg(target_os = "android")]
+        if let Some(t) = tunnel::get() {
+            t.stop();
+            return;
+        }
         if let Some(mut c) = self.child.lock().await.take() {
             let _ = c.kill().await;
         }
     }
 
     pub async fn pid(&self) -> Option<u32> {
+        #[cfg(target_os = "android")]
+        {
+            return tunnel::get().filter(|t| t.running()).map(|_| 1);
+        }
+        #[allow(unreachable_code)]
         let mut guard = self.child.lock().await;
         let child = guard.as_mut()?;
         match child.try_wait() {

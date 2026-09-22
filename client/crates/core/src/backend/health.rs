@@ -136,7 +136,7 @@ impl Backend {
         let urls: Vec<Value> = probe::urls(&self.store).into_iter().map(|(l, u)| json!({ "label": l, "url": u })).collect();
         Response::json(&json!({
             "now": now_epoch(),
-            "supported": self.engine.present(),
+            "supported": self.engine.probes_supported(),
             "enabled": cfg.enabled,
             "auto_switch": cfg.auto_switch,
             "speed": cfg.speed,
@@ -264,7 +264,7 @@ impl Backend {
     /// случайной фазой, чтобы не проверять всё разом. `all` — полная проверка.
     pub(super) async fn health_tick(&self, all: bool) {
         let cfg = self.health_cfg();
-        if !cfg.enabled || !self.engine.present() {
+        if !cfg.enabled || !self.engine.probes_supported() {
             return;
         }
         let _sweep = self.sweep_lock.lock().await;

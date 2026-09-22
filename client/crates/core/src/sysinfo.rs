@@ -53,7 +53,24 @@ pub fn system(data: &Path) -> Value {
             }
         }
     }
-    #[cfg(unix)]
+    // Android и Linux: всё берётся из /proc, без внешних команд.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let cores = v["cpu_cores"].as_u64().unwrap_or(1).max(1);
+        if let Some(secs) = read("/proc/uptime").and_then(|t| parse_proc_uptime(&t)) {
+            v["uptime"] = json!(fmt_uptime(secs));
+        }
+        if let Some((total, avail)) = read("/proc/meminfo").and_then(|t| parse_meminfo(&t)) {
+            v["memory"] = json!(format!("{}MB/{}MB", (total - avail) / 1024, total / 1024));
+        }
+        if let Some(kb) = out("df", &["-k", &data.to_string_lossy()]).as_deref().and_then(parse_df_avail) {
+            v["disk_free"] = json!(format!("{}MB", kb / 1024));
+        }
+        if let Some(load) = read("/proc/loadavg").and_then(|t| parse_loadavg(&t)) {
+            v["cpu"] = json!(((load * 100.0 / cores as f64).round() as u64).min(100).to_string());
+        }
+    }
+    #[cfg(target_os = "macos")]
     {
         let cores = v["cpu_cores"].as_u64().unwrap_or(1).max(1);
         if let Some(sec) = out("sysctl", &["-n", "kern.boottime"]).as_deref().and_then(parse_boottime) {
@@ -86,26 +103,31 @@ fn fmt_uptime(secs: u64) -> String {
 }
 
 #[cfg(unix)]
+fn read(path: &str) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+#[cfg(unix)]
 fn out(bin: &str, args: &[&str]) -> Option<String> {
     let o = std::process::Command::new(bin).args(args).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
 /// `{ sec = 1790000000, usec = 123456 } Mon Sep 22 …` → 1790000000.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_boottime(s: &str) -> Option<i64> {
     let rest = s.split("sec = ").nth(1)?;
     rest.split(|c: char| !c.is_ascii_digit()).find(|x| !x.is_empty())?.parse().ok()
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_num(s: &str) -> Option<u64> {
     s.trim().parse().ok()
 }
 
 /// `vm_stat`: свободной считаем сумму свободных и неактивных страниц —
 /// неактивные система отдаёт под нагрузкой не хуже свободных.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_vm_stat_free(s: &str) -> Option<u64> {
     let page = s
         .lines()
@@ -132,7 +154,30 @@ fn parse_df_avail(s: &str) -> Option<u64> {
     line.split_whitespace().nth(3)?.parse().ok()
 }
 
-/// `{ 1.85 2.03 2.11 }` → 1.85.
+/// `12345.67 98765.43` → 12345 секунд.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_proc_uptime(s: &str) -> Option<u64> {
+    Some(s.split_whitespace().next()?.parse::<f64>().ok()? as u64)
+}
+
+/// `/proc/meminfo` → (всего, доступно) в килобайтах.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_meminfo(s: &str) -> Option<(u64, u64)> {
+    let field = |name: &str| -> Option<u64> {
+        s.lines()
+            .find(|l| l.starts_with(name))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    };
+    let total = field("MemTotal:")?;
+    // MemAvailable честнее суммы free+cached: ядро уже учло невытесняемое.
+    let avail = field("MemAvailable:").or_else(|| field("MemFree:"))?;
+    Some((total, avail))
+}
+
+/// `{ 1.85 2.03 2.11 }` или `1.85 2.03 2.11 1/234 5678` → 1.85.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn parse_loadavg(s: &str) -> Option<f64> {
     s.split_whitespace().find_map(|w| w.trim_matches(|c| c == '{' || c == '}').parse::<f64>().ok())

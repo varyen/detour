@@ -63,5 +63,14 @@ landing/raw-video/
 # Клиент (Tauri): сборка Rust, зависимости CLI, сгенерированные схемы
 /client/target/
 /client/node_modules/
-/client/app/gen/
+# Проект Android держим в репозитории (там наш Kotlin), мусор сборки — нет.
+/client/app/gen/schemas/
+/client/app/gen/apple/
+/client/app/gen/android/.gradle/
+/client/app/gen/android/build/
+/client/app/gen/android/local.properties
+/client/app/gen/android/app/build/
+/client/app/gen/android/app/libs/
+/client/app/gen/android/app/src/main/jniLibs/
+/client/app/gen/android/.idea/
 /panel/dist-client/

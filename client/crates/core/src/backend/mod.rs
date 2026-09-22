@@ -377,8 +377,11 @@ impl Backend {
             {
                 bail!("TUN в режиме разработки не поднимается: DETOUR_DEV_NO_TUN=1 даёт вход dev-in, DETOUR_ALLOW_TUN=1 — только на стенде");
             }
-            self.engine.start(&self.store.path(store::CONFIG)).await?;
+            // Намерение ставим до старта: на Android первый запуск обычно
+            // упирается в диалог разрешения, и поднять туннель должен сторож,
+            // когда человек согласится.
             self.set_want_vpn(true);
+            self.engine.start(&self.store.path(store::CONFIG)).await?;
         }
         Ok(())
     }

@@ -668,7 +668,9 @@ dependencies = [
 name = "detour-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "detour-core",
+ "jni 0.21.1",
  "serde",
  "serde_json",
  "tauri",
@@ -684,6 +686,7 @@ dependencies = [
  "base64 0.23.1",
  "getrandom 0.3.4",
  "humantime",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

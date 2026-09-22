@@ -33,6 +33,10 @@ pub const LUA: [&str; 3] = ["zapret-lib.lua", "zapret-antidpi.lua", "zapret-auto
 /// Локальный SOCKS tpws: домены обхода sing-box отправляет в него.
 pub const SOCKS_PORT: u16 = 19487;
 
+/// На Android оба движка приезжают внутри APK и обновляются вместе с
+/// приложением: из каталога данных система запускать файлы не даёт.
+pub const UPDATABLE: bool = !cfg!(target_os = "android");
+
 /// Те же строки, что `NFQWS_STRATEGY_DEFAULT` и `zapret-tpws.conf` на роутере.
 #[cfg(windows)]
 pub const DEFAULT_STRATEGY: &str =
@@ -50,6 +54,32 @@ pub fn route() -> crate::render::DpiRoute {
     }
 }
 
+/// Не отдавать долгоживущему движку чужие дескрипторы. На Android туннель
+/// поднимается в том же процессе, и libbox дублирует дескриптор TUN без
+/// `FD_CLOEXEC`: tpws, запущенный при поднятом туннеле, держал бы его и после
+/// остановки, и в системе копились бы мёртвые tun-интерфейсы.
+#[cfg(unix)]
+fn close_inherited(c: &mut Command) {
+    // SAFETY: между fork и exec зовём только fcntl — он async-signal-safe.
+    // Метим, а не закрываем: собственный канал std для ошибки exec и так
+    // помечен и должен дожить до exec.
+    unsafe {
+        c.pre_exec(|| {
+            let max = match libc::sysconf(libc::_SC_OPEN_MAX) {
+                n if n > 0 && n < 65536 => n as i32,
+                _ => 4096,
+            };
+            for fd in 3..max {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 const HOSTS: &str = "run/dpi-hosts.txt";
 const IPSET: &str = "run/dpi-ips.txt";
 const FILTER: &str = "run/dpi-filter.txt";
@@ -63,7 +93,9 @@ pub struct Dpi {
 
 impl Dpi {
     pub fn new(data: &Path, log: PathBuf) -> Self {
-        let bundled = match std::env::var_os("DETOUR_WINWS") {
+        // На Android движок лежит в APK (`nativeLibraryDir/libtpws.so`), путь
+        // туда знает только java-сторона и передаёт его переменной.
+        let bundled = match std::env::var_os("DETOUR_DPI_BIN").or_else(|| std::env::var_os("DETOUR_WINWS")) {
             Some(p) => Some(PathBuf::from(p)),
             None => std::env::current_exe()
                 .ok()
@@ -172,13 +204,20 @@ impl Dpi {
         c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         #[cfg(windows)]
         c.creation_flags(0x0800_0000);
+        #[cfg(unix)]
+        close_inherited(&mut c);
         c
     }
 
     /// Проверка стратегии без перехвата: winws2 разбирает аргументы и выходит.
     pub async fn check(&self, store: &Store, strategy: &str) -> Result<(), String> {
-        if !strategy.contains("--lua-desync=") {
+        // lua-стратегии понимает только winws2; у tpws десинхронизация
+        // собирается собственными флагами.
+        if cfg!(windows) && !strategy.contains("--lua-desync=") {
             return Err("стратегия должна содержать --lua-desync=...".to_owned());
+        }
+        if strategy.trim().is_empty() {
+            return Err("стратегия пуста".to_owned());
         }
         if !self.supported() {
             return Err(format!("{EXE} не установлен"));
