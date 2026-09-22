@@ -18,6 +18,14 @@ export const useStatusStore = defineStore("status", () => {
 
   const platform = computed(() => data.value?.platform ?? "openwrt");
   const isKeenetic = computed(() => platform.value === "keenetic");
+  /* Панель в приложении на самом устройстве, а не на роутере: нет LAN,
+     файрвола, nginx, opkg и входа по паролю. Сборка это знает заранее —
+     роутерные разделы не мелькают до первого ответа status. */
+  const isClient = computed(
+    () => __CLIENT__ || ["windows", "macos", "android", "ios"].includes(platform.value),
+  );
+  /** «после перезагрузки роутера / устройства» — родительный падеж для подсказок. */
+  const hostGen = computed(() => (isClient.value ? "устройства" : "роутера"));
 
   /* Возможности определяем по ответу бэкенда, а не по платформе: MT6000 —
      тоже openwrt, но без аппаратного офлоада, а проброс зависит от nginx и
@@ -126,6 +134,8 @@ export const useStatusStore = defineStore("status", () => {
     lastLoaded,
     platform,
     isKeenetic,
+    isClient,
+    hostGen,
     zapret2Supported,
     nfqws2Missing,
     bypassRunning,

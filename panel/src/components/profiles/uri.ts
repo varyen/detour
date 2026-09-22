@@ -553,7 +553,9 @@ export function parseShareLink(raw: string): ProfileDraft | null {
     d.type = "shadowsocks";
     d.tls = false;
     d.server = colon >= 0 ? hostPort.slice(0, colon) : hostPort;
-    d.port = colon >= 0 ? hostPort.slice(colon + 1) : "";
+    /* `host:8388/?plugin=…` — хвост после порта не часть порта: иначе профиль
+       получался без server_port. */
+    d.port = colon >= 0 ? hostPort.slice(colon + 1).replace(/\/.*$/, "") : "";
     const sep = userinfo.indexOf(":");
     d.method = sep >= 0 ? userinfo.slice(0, sep) : "aes-256-gcm";
     d.password = sep >= 0 ? userinfo.slice(sep + 1) : "";

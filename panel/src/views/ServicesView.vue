@@ -224,6 +224,7 @@ async function loadClients() {
 async function loadAll() {
   secureContext.value = window.isSecureContext;
   if ("Notification" in window) pushPerm.value = Notification.permission;
+  if (status.isClient) return;
   await Promise.allSettled([
     loadPortmap(),
     loadCert(),
@@ -673,11 +674,44 @@ const SECTION_LABELS: Record<string, string> = {
   whitelist_domains: "список исключений",
   zapret_conf: "параметры обхода DPI",
   zapret_domains: "домены для обхода DPI",
+  subscriptions: "подписки",
+  chains: "цепочки",
+  route_map: "отдельные маршруты",
+  udp_vpn_list: "список UDP через VPN",
+  egress_blocklist: "запрещённые адреса",
+  ru_subnets_exclude: "исключения из российских адресов",
+  autoswitch_exclude: "профили вне автопереключения",
+  speedcheck_exclude: "профили без замера скорости",
+  torrent_allow: "профили с разрешёнными торрентами",
 };
 
+/* Эти разделы восстанавливает только приложение, и для него сам ключ — уже
+   значение: пустой список в копии очищает список здесь. Роутер их пропускает. */
+const CLIENT_SECTIONS = [
+  "subscriptions",
+  "chains",
+  "route_map",
+  "udp_vpn_list",
+  "egress_blocklist",
+  "ru_subnets_exclude",
+  "autoswitch_exclude",
+  "speedcheck_exclude",
+  "torrent_allow",
+];
+
 function sectionsOf(doc: Record<string, unknown>): string[] {
+  const client = status.isClient;
+  const hasSubs = Array.isArray(doc.subscriptions) && doc.subscriptions.length > 0;
   return Object.keys(SECTION_LABELS).filter((k) => {
     const v = doc[k];
+    if (CLIENT_SECTIONS.includes(k)) {
+      if (!client) return false;
+      return Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null;
+    }
+    /* Параметры tpws приложению не нужны, а старая одиночная подписка
+       берётся, только если списка подписок в копии нет. */
+    if (client && k === "zapret_conf") return false;
+    if (client && k === "subscription" && hasSubs) return false;
     if (typeof v === "string") return v.length > 0;
     /* Пустой объект подписки роутер тоже не пишет — не обещаем его. */
     if (v && typeof v === "object") return Object.keys(v).length > 0;
@@ -748,6 +782,7 @@ onMounted(async () => {
       title: "Открыть доступ к устройству снаружи",
       group: "сервисы",
       keywords: "проброс порт публикация",
+      available: () => !status.isClient,
       run: () => addPortmap(),
     },
     {
@@ -755,6 +790,7 @@ onMounted(async () => {
       title: "Применить настройки доступа заново",
       group: "сервисы",
       keywords: "проброс порт",
+      available: () => !status.isClient,
       run: () => void applyPortmap(),
     },
     {
@@ -762,6 +798,7 @@ onMounted(async () => {
       title: "Выпустить сертификат для своего домена",
       group: "сервисы",
       keywords: "https сертификат домен",
+      available: () => !status.isClient,
       run: () => {
         open.cert = true;
         sheetCert.value = true;
@@ -772,7 +809,7 @@ onMounted(async () => {
       title: "Отправить пробное уведомление",
       group: "сервисы",
       keywords: "push уведомления",
-      available: () => pushReady.value,
+      available: () => !status.isClient && pushReady.value,
       run: () => void pushTest(),
     },
     {
@@ -795,6 +832,7 @@ onMounted(async () => {
       title: "Сменить пароль от панели",
       group: "доступ",
       keywords: "логин учётная запись",
+      available: () => !status.isClient,
       run: () => {
         open.account = true;
         sheetPassword.value = true;
@@ -811,6 +849,7 @@ onBeforeUnmount(() => unregister?.());
   <div class="areas">
     <!-- ===== проброс сервисов ===== -->
     <ServicePanel
+      v-if="!status.isClient"
       id="svc-portmap"
       v-model:open="open.portmap"
       title="Доступ к домашним устройствам снаружи"
@@ -902,6 +941,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- ===== сертификат ===== -->
     <ServicePanel
+      v-if="!status.isClient"
       id="svc-cert"
       v-model:open="open.cert"
       title="Свой домен и защищённое соединение"
@@ -943,6 +983,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- ===== уведомления ===== -->
     <ServicePanel
+      v-if="!status.isClient"
       id="svc-push"
       v-model:open="open.push"
       title="Уведомления в браузер"
@@ -1152,9 +1193,10 @@ onBeforeUnmount(() => unregister?.());
           </li>
         </ul>
         <p class="note faint">
-          Остальное останется как есть. После восстановления роутер перезапустит
-          VPN — соединения на несколько секунд прервутся. Вернуть текущие списки
-          обратно можно будет только из другой копии.
+          Остальное останется как есть. После восстановления
+          {{ status.isClient ? "VPN перезапустится" : "роутер перезапустит VPN" }} —
+          соединения на несколько секунд прервутся. Вернуть текущие списки обратно
+          можно будет только из другой копии.
         </p>
       </template>
 
@@ -1176,6 +1218,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- ===== вход в панель ===== -->
     <ServicePanel
+      v-if="!status.isClient"
       id="svc-account"
       v-model:open="open.account"
       title="Вход в панель"

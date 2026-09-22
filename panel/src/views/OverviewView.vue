@@ -344,6 +344,35 @@ const sbAutostart = computed({
     ),
 });
 
+/* Kill-switch есть только в клиенте: на роутере ту же роль играет режим
+   «Все через VPN» и правила файрвола. */
+const killswitch = ref(false);
+const killswitchOn = computed({
+  get: () => killswitch.value,
+  set: (on: boolean) =>
+    void svc(
+      "killswitch",
+      async () => {
+        await overview.killswitchSet(on);
+        killswitch.value = on;
+      },
+      on
+        ? "Пока VPN не поднялся, трафик наружу не пойдёт"
+        : "Трафик пойдёт напрямую, если VPN упадёт",
+      "Не удалось изменить защиту от утечки",
+    ),
+});
+
+async function loadKillswitch() {
+  if (!status.isClient) return;
+  try {
+    const r = await overview.killswitchStatus();
+    killswitch.value = r?.enabled === true;
+  } catch {
+    /* старая служба без этого действия — переключатель просто выключен */
+  }
+}
+
 /* «Проверить» спрашивает GitHub про версию панели: у бинарников свой канал
    (opkg-фид), его дёргает cron и кнопки в «Журнале» — здесь достаточно самой
    панели, а остальное подтянется перечитыванием сводки. */
@@ -409,11 +438,12 @@ const rxSpeed = computed(() => dirSpeed("rx"));
 const txSpeed = computed(() => dirSpeed("tx"));
 
 async function loadExtras() {
-  const c = await overview.lanClients().catch(() => null);
+  const c = status.isClient ? null : await overview.lanClients().catch(() => null);
   if (c) {
     clientList.value = c.clients ?? [];
     clients.value = clientList.value.length;
   }
+  await loadKillswitch();
   await loadTraffic();
   trafficTimer = window.setInterval(() => {
     if (document.visibilityState === "visible") void loadTraffic();
@@ -640,13 +670,24 @@ onBeforeUnmount(() => {
            перезагрузки роутера «почему нет VPN» решается здесь, а не поиском по
            разделам. -->
       <SwitchToggle
+        v-if="status.isClient"
+        v-model="killswitchOn"
+        label="Не выпускать трафик мимо VPN"
+        :busy="busy === 'killswitch'"
+        :hint="
+          killswitchOn
+            ? 'Пока туннель не поднят, выход в интернет закрыт — утечки не будет'
+            : 'Если VPN упадёт, трафик пойдёт напрямую'
+        "
+      />
+      <SwitchToggle
         v-model="sbAutostart"
         label="Автозапуск"
         :busy="busy === 'sbauto'"
         :hint="
           sbAutostart
-            ? 'Поднимется сам после перезагрузки роутера'
-            : 'После перезагрузки роутера останется выключенным'
+            ? `Поднимется сам после перезагрузки ${status.hostGen}`
+            : `После перезагрузки ${status.hostGen} останется выключенным`
         "
       />
       <template #actions>
@@ -785,7 +826,7 @@ onBeforeUnmount(() => {
           >
         </span>
       </p>
-      <template #actions>
+      <template v-if="!status.isClient" #actions>
         <UiButton :disabled="!clients" @click="clientsOpen = true">
           Устройства в сети{{ clients ? ` · ${clients}` : "" }}
         </UiButton>
@@ -812,7 +853,11 @@ onBeforeUnmount(() => {
           sing-box {{ status.data?.binaries?.singbox_version ?? "—" }}
           <i v-if="newVersion('singbox')" class="up">→ {{ newVersion("singbox") }}</i>
         </span>
-        <span>
+        <!-- Движок обхода DPI: на роутере это tpws, в клиенте — winws2. -->
+        <span v-if="status.isClient">
+          winws2 {{ status.data?.binaries?.nfqws2_version ?? "—" }}
+        </span>
+        <span v-else>
           tpws {{ status.data?.binaries?.tpws_version ?? "—" }}
           <i v-if="newVersion('tpws')" class="up">→ {{ newVersion("tpws") }}</i>
         </span>

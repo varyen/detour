@@ -19,6 +19,11 @@ export const API_URL = "/cgi-bin/detour-api";
 /** Сколько ждём ответа, если действие не объявило свой таймаут. */
 const DEFAULT_TIMEOUT_MS = 20_000;
 
+/* Кто отвечает на запросы: в клиенте это служба на самом устройстве. */
+const HOST_SILENT = __CLIENT__ ? "Служба Detour не ответила" : "Роутер не ответил";
+const HOST_SAID = __CLIENT__ ? "Служба Detour ответила" : "Роутер ответил";
+const HOST_UNREACHABLE = __CLIENT__ ? "Нет связи со службой Detour" : "Нет связи с роутером";
+
 export class AuthError extends Error {
   constructor() {
     super("Требуется вход");
@@ -122,11 +127,13 @@ function buildUrl(
   return u.pathname + u.search;
 }
 
-/** Сырой запрос: отдаёт текст ответа. Здесь же обработка 401/429/перезапуска. */
-export async function requestText(
-  action: string,
-  opts: RequestOptions = {},
-): Promise<string> {
+interface RawResponse {
+  status: number;
+  text: string;
+  retryAfter?: string | null;
+}
+
+async function viaFetch(action: string, opts: RequestOptions): Promise<RawResponse> {
   const method = opts.method ?? (opts.body !== undefined ? "POST" : "GET");
   const ctrl = new AbortController();
   const timer = setTimeout(
@@ -150,18 +157,91 @@ export async function requestText(
   } catch (e) {
     clearTimeout(timer);
     if ((e as Error).name === "AbortError") {
-      throw new ApiError(`Роутер не ответил за отведённое время (${action})`);
+      throw new ApiError(`${HOST_SILENT} за отведённое время (${action})`);
     }
-    throw new ApiError(`Нет связи с роутером (${action})`);
+    throw new ApiError(`${HOST_UNREACHABLE} (${action})`);
   }
   clearTimeout(timer);
+
+  const text = res.status === 401 ? "" : await res.text().catch(() => "");
+  return { status: res.status, text, retryAfter: res.headers.get("Retry-After") };
+}
+
+type InvokeBody = { kind: "text" | "base64"; data: string } | null;
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+async function encodeInvokeBody(b: unknown): Promise<InvokeBody> {
+  if (b === undefined) return null;
+  if (typeof b === "string") return { kind: "text", data: b };
+  if (b instanceof URLSearchParams) return { kind: "text", data: b.toString() };
+  if (b instanceof Blob) {
+    return { kind: "base64", data: bytesToBase64(new Uint8Array(await b.arrayBuffer())) };
+  }
+  if (b instanceof ArrayBuffer) return { kind: "base64", data: bytesToBase64(new Uint8Array(b)) };
+  if (ArrayBuffer.isView(b)) {
+    return { kind: "base64", data: bytesToBase64(new Uint8Array(b.buffer, b.byteOffset, b.byteLength)) };
+  }
+  if (b instanceof FormData) throw new ApiError("Загрузка форм в приложении не поддерживается");
+  return { kind: "text", data: JSON.stringify(b) };
+}
+
+/** Приложение Detour: тот же запрос уходит в локальную службу через Tauri. */
+async function viaInvoke(action: string, opts: RequestOptions): Promise<RawResponse> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  const params: Record<string, string> = {};
+  for (const [k, v] of Object.entries(opts.params ?? {})) {
+    if (v !== undefined) params[k] = String(v);
+  }
+  const body = await encodeInvokeBody(opts.body);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new ApiError(`Служба Detour не ответила за отведённое время (${action})`)),
+      opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    );
+    opts.signal?.addEventListener("abort", () => reject(new ApiError(`Запрос отменён (${action})`)), {
+      once: true,
+    });
+  });
+  try {
+    const r = await Promise.race([
+      invoke<{ status: number; body: string }>("api", { action, params, body }),
+      limit,
+    ]);
+    return { status: r.status, text: r.body };
+  } catch (e) {
+    if (e instanceof ApiError) throw e;
+    throw new ApiError(`Нет связи со службой Detour (${action})`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* В `--mode client` панель может открыться и в обычном браузере (разработка
+   через dev-http службы) — тогда Tauri нет и запросы идут обычным fetch. */
+const useInvoke = __CLIENT__ && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** Сырой запрос: отдаёт текст ответа. Здесь же обработка 401/429/перезапуска. */
+export async function requestText(
+  action: string,
+  opts: RequestOptions = {},
+): Promise<string> {
+  const res = useInvoke ? await viaInvoke(action, opts) : await viaFetch(action, opts);
 
   if (res.status === 401) {
     for (const fn of authListeners) fn();
     throw new AuthError();
   }
 
-  const text = await res.text().catch(() => "");
+  const text = res.text;
 
   if (res.status === 429) {
     let retry = 60;
@@ -170,14 +250,14 @@ export async function requestText(
       if (typeof j.retry_after === "number") retry = j.retry_after;
     } catch {
       /* тело не JSON — берём заголовок */
-      const h = Number(res.headers.get("Retry-After"));
+      const h = Number(res.retryAfter);
       if (Number.isFinite(h) && h > 0) retry = h;
     }
     throw new LockedOutError(retry);
   }
 
-  if (!res.ok) {
-    throw new ApiError(`Роутер ответил ${res.status} (${action})`, res.status, text);
+  if (res.status < 200 || res.status >= 300) {
+    throw new ApiError(`${HOST_SAID} ${res.status} (${action})`, res.status, text);
   }
 
   if (!text.trim() && !opts.allowEmpty) throw new ServerRestartingError();

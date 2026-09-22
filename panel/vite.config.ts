@@ -42,76 +42,96 @@ function buildStamp() {
   };
 }
 
-export default defineConfig({
-  base: BASE,
-  define: {
-    __PANEL_BUILD__: JSON.stringify(panelVersion()),
-  },
-  plugins: [
-    vue(),
-    buildStamp(),
-    VitePWA({
-      /* injectManifest, а не generateSW: свой воркер уже принимает Web Push
-         (payload-less, с авторизацией по push-эндпоинту) — эту логику нельзя
-         потерять, workbox только добавляет прекеш оболочки. */
-      strategies: "injectManifest",
-      srcDir: "src",
-      filename: "sw.ts",
-      registerType: "prompt",
-      injectRegister: null, // регистрируем вручную, чтобы пережить http://
-      /* uhttpd на роутере без /etc/mime.types и про .webmanifest не знает —
-         отдаём манифест как .json. */
-      manifestFilename: "manifest.json",
-      injectManifest: {
-        globPatterns: ["**/*.{js,css,html,svg,png,woff2}"],
-      },
-      manifest: {
-        name: "Detour",
-        short_name: "Detour",
-        description: "Управление обходом блокировок на роутере",
-        lang: "ru",
-        start_url: BASE,
-        scope: BASE,
-        display: "standalone",
-        orientation: "portrait-primary",
-        background_color: "#070c12",
-        theme_color: "#070c12",
-        icons: [
-          { src: "icons/icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "icons/icon-512.png", sizes: "512x512", type: "image/png" },
-          {
-            src: "icons/icon-maskable-512.png",
-            sizes: "512x512",
-            type: "image/png",
-            purpose: "maskable",
+/* В клиенте (Tauri) service worker не нужен и не заведётся на его схеме, а
+   pwa.ts импортирует виртуальный модуль плагина — отдаём заглушку. */
+function pwaStub() {
+  const id = "\0pwa-register-stub";
+  return {
+    name: "detour-pwa-stub",
+    resolveId: (s: string) => (s === "virtual:pwa-register" ? id : null),
+    load: (s: string) => (s === id ? "export function registerSW() { return () => {}; }" : null),
+  };
+}
+
+/* `--mode client` — сборка для приложения Detour (Windows/macOS/Android):
+   панель та же, но лежит в корне WebView и говорит с локальной службой через
+   invoke, а не с CGI роутера. */
+export default defineConfig(({ mode }) => {
+  const client = mode === "client";
+  return {
+    base: client ? "/" : BASE,
+    define: {
+      __PANEL_BUILD__: JSON.stringify(panelVersion()),
+      __CLIENT__: JSON.stringify(client),
+    },
+    plugins: [
+      vue(),
+      buildStamp(),
+      client ? pwaStub() : VitePWA({
+        /* injectManifest, а не generateSW: свой воркер уже принимает Web Push
+           (payload-less, с авторизацией по push-эндпоинту) — эту логику нельзя
+           потерять, workbox только добавляет прекеш оболочки. */
+        strategies: "injectManifest",
+        srcDir: "src",
+        filename: "sw.ts",
+        registerType: "prompt",
+        injectRegister: null, // регистрируем вручную, чтобы пережить http://
+        /* uhttpd на роутере без /etc/mime.types и про .webmanifest не знает —
+           отдаём манифест как .json. */
+        manifestFilename: "manifest.json",
+        injectManifest: {
+          globPatterns: ["**/*.{js,css,html,svg,png,woff2}"],
+        },
+        manifest: {
+          name: "Detour",
+          short_name: "Detour",
+          description: "Управление обходом блокировок на роутере",
+          lang: "ru",
+          start_url: BASE,
+          scope: BASE,
+          display: "standalone",
+          orientation: "portrait-primary",
+          background_color: "#070c12",
+          theme_color: "#070c12",
+          icons: [
+            { src: "icons/icon-192.png", sizes: "192x192", type: "image/png" },
+            { src: "icons/icon-512.png", sizes: "512x512", type: "image/png" },
+            {
+              src: "icons/icon-maskable-512.png",
+              sizes: "512x512",
+              type: "image/png",
+              purpose: "maskable",
+            },
+          ],
+        },
+        devOptions: { enabled: false },
+      }),
+    ],
+    resolve: {
+      alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+    },
+    build: {
+      outDir: client ? "dist-client" : "dist",
+      target: "es2020",
+      /* uhttpd отдаёт файлы без сжатия и держит мало параллельных запросов —
+         дробить бандл на десяток чанков контрпродуктивно. Один vendor + один
+         app, имена с хешом (кеш-бастинг, которого не было у старой панели). */
+      cssCodeSplit: false,
+      chunkSizeWarningLimit: 700,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes("node_modules")) return "vendor";
           },
-        ],
-      },
-      devOptions: { enabled: false },
-    }),
-  ],
-  resolve: {
-    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
-  },
-  build: {
-    target: "es2020",
-    /* uhttpd отдаёт файлы без сжатия и держит мало параллельных запросов —
-       дробить бандл на десяток чанков контрпродуктивно. Один vendor + один
-       app, имена с хешом (кеш-бастинг, которого не было у старой панели). */
-    cssCodeSplit: false,
-    chunkSizeWarningLimit: 700,
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.includes("node_modules")) return "vendor";
         },
       },
     },
-  },
-  server: {
-    port: 5199,
-    proxy: {
-      "/cgi-bin": { target: DEV_TARGET, changeOrigin: true },
+    server: {
+      port: 5199,
+      strictPort: client,
+      proxy: {
+        "/cgi-bin": { target: DEV_TARGET, changeOrigin: true },
+      },
     },
-  },
+  };
 });

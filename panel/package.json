@@ -4,11 +4,14 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
+    "build:client": "vue-tsc -b && vite build --mode client",
+    "dev:client": "vite --mode client",
     "preview": "vite preview",
     "typecheck": "vue-tsc -b --noEmit"
   },
   "description": "Detour router panel — Vue 3 PWA frontend",
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
     "pinia": "^4.0.2",
     "vue": "^3.5.41",
     "vue-router": "^5.2.0"

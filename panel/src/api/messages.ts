@@ -14,7 +14,9 @@ const EXACT: Record<string, string> = {
   "profile not found": "Профиль не найден",
   "chain not found": "Цепочка не найдена",
   "not found": "Не найдено",
-  "invalid json": "Роутер не понял отправленные данные",
+  "invalid json": __CLIENT__
+    ? "Служба Detour не поняла отправленные данные"
+    : "Роутер не понял отправленные данные",
   "no active profile": "Сейчас не выбран ни один VPN",
   "failed to render config (bad chain?)":
     "Не удалось собрать конфигурацию — проверьте активную цепочку",
@@ -31,8 +33,8 @@ const PARTIAL: [RegExp, string][] = [
   [/^url must start with/i, "Адрес должен начинаться с http:// или https://"],
   [/only a-z A-Z 0-9/i, "В имени допустимы только латиница, цифры, точка, дефис и подчёркивание"],
   [/id invalid/i, "Недопустимый идентификатор"],
-  [/timeout/i, "Роутер не ответил вовремя"],
-  [/no space left/i, "На роутере кончилось место"],
+  [/timeout/i, __CLIENT__ ? "Служба Detour не ответила вовремя" : "Роутер не ответил вовремя"],
+  [/no space left/i, __CLIENT__ ? "На диске кончилось место" : "На роутере кончилось место"],
 ];
 
 export function translateApiError(raw: string): string {

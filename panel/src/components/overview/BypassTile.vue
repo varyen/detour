@@ -60,11 +60,27 @@ const stateKind = computed(() => {
   return stopped.value ? "warn" : "off";
 });
 
+/* На роутере движков два (tpws и nfqws2), в клиенте один — winws2 из того же
+   zapret2. Поэтому имя движка и набор режимов зависят от того, где мы. */
+const engineName = computed(() => (__CLIENT__ ? "winws2" : "zapret2"));
+
 const zapret2Hint = computed(() => {
   if (status.zapret2Supported) return undefined;
+  if (__CLIENT__) return "winws2 не установлен";
   if (status.nfqws2Missing) return "Пакет nfqws2 не установлен";
   return "Нужен NFQUEUE — на этой платформе его нет";
 });
+
+const modeOptions = computed(() => [
+  { value: "off", label: "Выкл" },
+  ...(__CLIENT__ ? [] : [{ value: "zapret", label: "zapret" }]),
+  {
+    value: "zapret2",
+    label: engineName.value,
+    disabled: !status.zapret2Supported,
+    hint: zapret2Hint.value,
+  },
+]);
 
 async function run(tag: string, fn: () => Promise<unknown>, ok: string, fail: string) {
   busy.value = tag;
@@ -152,23 +168,14 @@ async function saveStrategy() {
       v-model="mode"
       label="Движок обхода DPI"
       :busy="busy === 'mode'"
-      :options="[
-        { value: 'off', label: 'Выкл' },
-        { value: 'zapret', label: 'zapret' },
-        {
-          value: 'zapret2',
-          label: 'zapret2',
-          disabled: !status.zapret2Supported,
-          hint: zapret2Hint,
-        },
-      ]"
+      :options="modeOptions"
     />
 
     <p class="state">
       <i class="dot" :class="stateKind" aria-hidden="true"></i>
       <span>{{ stateText }}</span>
       <span v-if="running === 'zapret2' && status.data?.binaries?.nfqws2_version" class="mono dim">
-        nfqws2 {{ status.data.binaries.nfqws2_version }}
+        {{ engineName }} {{ status.data.binaries.nfqws2_version }}
       </span>
       <span v-else-if="running === 'zapret' && status.data?.binaries?.tpws_version" class="mono dim">
         tpws {{ status.data.binaries.tpws_version }}
@@ -186,10 +193,15 @@ async function saveStrategy() {
     </p>
 
     <p v-if="status.nfqws2Missing" class="hint">
-      zapret2 требует пакет nfqws2 —
-      <RouterLink :to="{ path: '/journal', query: { focus: 'updates' } }">
-        поставить в «Журнале»
-      </RouterLink>.
+      <template v-if="status.isClient">
+        winws2 не найден: он ставится вместе с приложением, переустановите его.
+      </template>
+      <template v-else>
+        zapret2 требует пакет nfqws2 —
+        <RouterLink :to="{ path: '/journal', query: { focus: 'updates' } }">
+          поставить в «Журнале»
+        </RouterLink>.
+      </template>
     </p>
     <!-- Какие сайты вообще идут в обход — правится в «Правилах», а видно здесь. -->
     <p class="hint">
@@ -207,8 +219,8 @@ async function saveStrategy() {
         mode === 'off'
           ? 'Нечего запускать: движок выключен'
           : autostart
-            ? 'Поднимется сам после перезагрузки роутера'
-            : 'После перезагрузки роутера останется выключенным'
+            ? `Поднимется сам после перезагрузки ${status.hostGen}`
+            : `После перезагрузки ${status.hostGen} останется выключенным`
       "
     />
 
@@ -232,16 +244,16 @@ async function saveStrategy() {
 
   <DrawerSheet
     :open="strategyOpen"
-    title="Стратегия nfqws2"
+    :title="`Стратегия ${engineName}`"
     wide
     @close="strategyOpen = false"
   >
     <p class="note">
-      Одна строка аргументов nfqws2. Обязателен <code>--lua-desync=…</code> — без
-      него движок поднимется, но обходить ничего не будет. Сохранение при активном
-      zapret2 сразу перезапускает движок.
+      Одна строка аргументов {{ engineName }}. Обязателен <code>--lua-desync=…</code> —
+      без него движок поднимется, но обходить ничего не будет. Сохранение при
+      работающем движке сразу его перезапускает.
     </p>
-    <textarea v-model="strategy" rows="6" spellcheck="false" aria-label="Стратегия nfqws2"></textarea>
+    <textarea v-model="strategy" rows="6" spellcheck="false" aria-label="Строка стратегии"></textarea>
     <p v-if="strategyErr" class="err">{{ strategyErr }}</p>
     <template #footer>
       <UiButton variant="primary" :busy="busy === 'strategy'" @click="saveStrategy">

@@ -125,7 +125,7 @@ const LISTS: Record<ListKey, ListDef> = {
   },
   zapret: {
     title: "Сайты через обход DPI",
-    hint: "Список общий для обеих стратегий обхода. Эти сайты открываются без туннеля — провайдеру просто мешают их распознать.",
+    hint: "Эти сайты открываются без туннеля — провайдеру просто мешают их распознать. Список один на все стратегии обхода.",
     placeholder: "// Комментарий\nexample.com\n*.example.com",
     applyNote:
       "Применение обновляет список адресов и перезапускает обход DPI — обычно это несколько десятков секунд.",
@@ -321,6 +321,7 @@ const si = ref<SelfIntercept | null>(null);
 const siMode = reactive<Record<string, "off" | "split" | "full">>({});
 
 async function loadSelfIntercept() {
+  if (status.isClient) return;
   try {
     const d = await rules.selfInterceptGet();
     si.value = {
@@ -430,6 +431,7 @@ const secureList = ref("");
 const fileEl = ref<HTMLInputElement | null>(null);
 
 async function loadHosts() {
+  if (status.isClient) return;
   try {
     const d = (await rules.hostsStatus()) as HostsFull | null;
     hosts.value = d;
@@ -594,7 +596,8 @@ const egressSummary = computed(() =>
 
 const rulistSummary = computed(() => {
   const r = rulist.value;
-  if (!r || r.supported === false) return "не установлено на этом роутере";
+  if (!r || r.supported === false)
+    return `не установлено на этом ${status.isClient ? "устройстве" : "роутере"}`;
   if (r.enabled === false) return "выключено — российские адреса не выделяются";
   const parts = [`${fmtInt(asNum(r.count))} подсетей`];
   if (r.source_label) parts.push(r.source_label);
@@ -711,7 +714,7 @@ onMounted(async () => {
       title: "Обновить приоритетный hosts",
       group: "правила",
       keywords: "dns hosts",
-      available: () => hosts.value?.supported !== false,
+      available: () => !status.isClient && hosts.value?.supported !== false,
       run: () => void hostsRefresh(),
     },
   ]);
@@ -847,8 +850,10 @@ onBeforeUnmount(() => unregister?.());
     >
       <p class="hint">
         Эти сайты открываются без туннеля: трафик идёт напрямую, но так, что
-        провайдер не может его распознать. Список общий для обеих стратегий
-        обхода — сам движок включается <RouterLink to="/">на «Обзоре»</RouterLink>.
+        провайдер не может его распознать.
+        <template v-if="!status.isClient">Список общий для обеих стратегий обхода —</template>
+        <template v-else>Сам</template>
+        движок включается <RouterLink to="/">на «Обзоре»</RouterLink>.
       </p>
       <div class="row">
         <UiButton variant="primary" @click="openEditor('zapret')">
@@ -885,6 +890,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 6. Перехват прокси -->
     <RuleSection
+      v-if="!status.isClient"
       id="rule-si"
       title="Перехват трафика к прокси"
       :summary="siSummary"
@@ -1019,7 +1025,7 @@ onBeforeUnmount(() => unregister?.());
           :model-value="rulist?.auto === true"
           label="Обновлять самому"
           :busy="busy === 'rulist'"
-          hint="Раз в несколько дней роутер скачает свежий список"
+          :hint="`Раз в несколько дней ${status.isClient ? 'приложение скачает' : 'роутер скачает'} свежий список`"
           @update:model-value="(v) => rulistSet({ auto: v })"
         />
         <div class="field">
@@ -1060,6 +1066,7 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 10. Приоритетный hosts + Secure DNS -->
     <RuleSection
+      v-if="!status.isClient"
       id="rule-hosts"
       title="Свой DNS-список и шифрование DNS"
       :summary="hostsSummary"

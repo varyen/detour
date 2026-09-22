@@ -79,14 +79,14 @@ function reloadPage() {
 
 const LOG_SOURCES: { value: LogName; label: string }[] = [
   { value: "singbox", label: "sing-box" },
-  { value: "zapret", label: "zapret" },
+  { value: "zapret", label: __CLIENT__ ? "обход DPI" : "zapret" },
   { value: "health", label: "проверка" },
   { value: "update", label: "обновления" },
   { value: "apply", label: "установка" },
 ];
 const LOG_TITLE: Record<LogName, string> = {
   singbox: "sing-box",
-  zapret: "zapret",
+  zapret: __CLIENT__ ? "обход DPI" : "zapret",
   health: "проверка профилей",
   update: "проверка обновлений",
   apply: "установка обновлений",
@@ -310,7 +310,8 @@ async function runOp(svc: Svc, op: Op) {
 
 const servicesSummary = computed(() => {
   const a = sb.value?.running ? "sing-box работает" : "sing-box остановлен";
-  const b = zp.value?.running ? "zapret работает" : "zapret остановлен";
+  const dpi = status.isClient ? "обход DPI" : "zapret";
+  const b = zp.value?.running ? `${dpi} работает` : `${dpi} остановлен`;
   return `${a} · ${b}`;
 });
 
@@ -456,8 +457,12 @@ const updatesSummary = computed(() => {
   return `панель ${o.panel?.current_version || status.data?.version || "—"} · всё свежее`;
 });
 
+/* В клиенте строка нужна именно тогда, когда движка ещё нет: ею его и ставят
+   (установщик winws2 не несёт — Defender метит WinDivert). */
 const nfqws2Visible = computed(
-  () => !status.isKeenetic && status.data?.binaries?.nfqws2_supported !== false,
+  () =>
+    status.isClient ||
+    (!status.isKeenetic && status.data?.binaries?.nfqws2_supported !== false),
 );
 
 /** changelog приходит в base64 (UTF-8) — иначе кириллица не переживёт shell. */
@@ -919,6 +924,7 @@ onMounted(async () => {
       title: "Показать правила файрвола",
       group: "журнал",
       keywords: "nat nft iptables",
+      available: () => !status.isClient,
       run: () => void openFw(),
     },
     {
@@ -926,6 +932,7 @@ onMounted(async () => {
       title: "Проверить обновление панели",
       group: "журнал",
       keywords: "версия релиз",
+      available: () => !status.isClient,
       run: () => {
         openArea("updates");
         void checkChannel("panel");
@@ -936,6 +943,7 @@ onMounted(async () => {
       title: "Установить обновление панели",
       group: "журнал",
       keywords: "версия релиз ipk",
+      available: () => !status.isClient,
       run: () => void applyChannel("panel"),
     },
     {
@@ -943,6 +951,7 @@ onMounted(async () => {
       title: "Установить панель из файла (.ipk / .apk)",
       group: "журнал",
       keywords: "загрузить пакет подпись",
+      available: () => !status.isClient,
       run: () => {
         localOpen.value = true;
       },
@@ -1041,16 +1050,24 @@ onBeforeUnmount(() => {
       id="area-config"
       v-model:open="areas.config"
       title="Конфигурация sing-box"
-      summary="весь config.json целиком; перед сохранением роутер сам проверит его"
+      :summary="
+        status.isClient
+          ? 'весь config.json целиком; собирается сам из профилей и списков'
+          : 'весь config.json целиком; перед сохранением роутер сам проверит его'
+      "
     >
-      <p class="hint">
+      <p v-if="status.isClient" class="hint">
+        Приложение собирает конфигурацию само из профилей и правил и пересобирает
+        её при каждом изменении — здесь её можно только посмотреть.
+      </p>
+      <p v-else class="hint">
         Панель обычно собирает конфигурацию сама из профилей и правил. Ручная правка
         живёт до ближайшей пересборки — пользуйтесь ей для разбора, а не как
         постоянной настройкой.
       </p>
       <div class="acts">
         <UiButton variant="primary" :busy="cfgLoading" @click="openConfig">
-          Открыть редактор
+          {{ status.isClient ? "Показать" : "Открыть редактор" }}
         </UiButton>
       </div>
     </JournalArea>
@@ -1109,7 +1126,7 @@ onBeforeUnmount(() => {
 
       <div class="svc">
         <p class="svc-name">
-          zapret (tpws)
+          {{ status.isClient ? "Обход DPI (winws2)" : "zapret (tpws)" }}
           <small :class="zp?.running ? 'ok' : 'bad'">
             {{ zp?.running ? "работает" : "остановлен" }}
             <template v-if="isSet(zp?.port)"> · порт {{ zp?.port }}</template>
@@ -1149,13 +1166,16 @@ onBeforeUnmount(() => {
           >
             Добавить в автозапуск
           </UiButton>
-          <UiButton @click="openArgs">Аргументы</UiButton>
+          <!-- Аргументы tpws; в клиенте движок другой, у него строка стратегии
+               правится на «Обзоре». -->
+          <UiButton v-if="!status.isClient" @click="openArgs">Аргументы</UiButton>
         </div>
       </div>
     </JournalArea>
 
     <!-- ==================== файрвол ==================== -->
     <JournalArea
+      v-if="!status.isClient"
       id="area-firewall"
       v-model:open="areas.firewall"
       title="Файрвол"
@@ -1181,6 +1201,7 @@ onBeforeUnmount(() => {
       :summary="updatesSummary"
     >
       <UpdateRow
+        v-if="!status.isClient"
         title="Панель"
         :state="upd?.panel ?? null"
         :installed="status.data?.version"
@@ -1196,12 +1217,17 @@ onBeforeUnmount(() => {
         :installed="status.data?.binaries?.singbox_version"
         :busy-check="updBusy === 'check:singbox'"
         :busy-apply="updBusy === 'apply:singbox'"
-        note="Пакет берётся из нашего opkg-фида."
+        :note="
+          status.isClient
+            ? 'Берётся из релизов sing-box на GitHub.'
+            : 'Пакет берётся из нашего opkg-фида.'
+        "
         @check="checkChannel('singbox')"
         @apply="applyChannel('singbox')"
         @changelog="showChangelog('singbox')"
       />
       <UpdateRow
+        v-if="!status.isClient"
         title="tpws (обход DPI)"
         :state="upd?.tpws ?? null"
         :installed="status.data?.binaries?.tpws_version"
@@ -1213,7 +1239,7 @@ onBeforeUnmount(() => {
       />
       <UpdateRow
         v-if="nfqws2Visible"
-        title="nfqws2 (zapret2)"
+        :title="status.isClient ? 'winws2 (обход DPI)' : 'nfqws2 (zapret2)'"
         :state="upd?.nfqws2 ?? null"
         :installed="status.data?.binaries?.nfqws2_version"
         :busy-check="updBusy === 'check:nfqws2'"
@@ -1227,12 +1253,16 @@ onBeforeUnmount(() => {
         v-model="autocheckOn"
         label="Проверять обновления сама"
         :busy="autocheckBusy"
-        hint="Раз в шесть часов роутер сам спрашивает, не вышла ли новая версия"
+        :hint="
+          status.isClient
+            ? 'Раз в шесть часов приложение само проверяет, не вышел ли новый sing-box'
+            : 'Раз в шесть часов роутер сам спрашивает, не вышла ли новая версия'
+        "
       />
 
       <div class="acts">
         <UiButton @click="loadUpdates">Перечитать сводку</UiButton>
-        <UiButton @click="localOpen = true">Установить из файла</UiButton>
+        <UiButton v-if="!status.isClient" @click="localOpen = true">Установить из файла</UiButton>
         <UiButton v-if="applyText || applyNote" @click="applyOpen = true">
           Журнал установки
         </UiButton>
@@ -1255,7 +1285,7 @@ onBeforeUnmount(() => {
         label="Проверять профили по расписанию"
         :busy="healthBusy === 'enabled'"
         :disabled="health?.supported === false"
-        hint="Роутер сам ходит по целям через каждый профиль и отмечает живые"
+        :hint="`${status.isClient ? 'Приложение само ходит' : 'Роутер сам ходит'} по целям через каждый профиль и отмечает живые`"
       />
       <SwitchToggle
         v-model="healthAuto"
@@ -1325,12 +1355,17 @@ onBeforeUnmount(() => {
     @close="cfgOpen = false"
   >
     <div class="sheetc">
-      <p class="hint">
+      <p v-if="!status.isClient" class="hint">
         Сохранение пройдёт только если sing-box примет файл: роутер запускает проверку
         и возвращает её вывод целиком.
       </p>
       <p v-if="cfgLoading" class="hint">Читаю конфигурацию…</p>
-      <CodeArea v-model="cfgText" label="Конфигурация sing-box" :rows="20" />
+      <CodeArea
+        v-model="cfgText"
+        label="Конфигурация sing-box"
+        :rows="20"
+        :readonly="status.isClient"
+      />
       <div v-if="cfgError" class="err">
         <p class="err-h">sing-box отверг файл:</p>
         <pre class="err-b">{{ cfgError }}</pre>
@@ -1338,10 +1373,17 @@ onBeforeUnmount(() => {
     </div>
     <template #footer>
       <div class="sheetc acts">
-        <UiButton variant="primary" :busy="cfgSaving" @click="saveConfig">
+        <UiButton
+          v-if="!status.isClient"
+          variant="primary"
+          :busy="cfgSaving"
+          @click="saveConfig"
+        >
           Проверить и сохранить
         </UiButton>
-        <UiButton :busy="cfgLoading" @click="loadConfig">Вернуть с роутера</UiButton>
+        <UiButton :busy="cfgLoading" @click="loadConfig">
+          {{ status.isClient ? "Перечитать" : "Вернуть с роутера" }}
+        </UiButton>
         <UiButton @click="cfgOpen = false">Закрыть</UiButton>
       </div>
     </template>

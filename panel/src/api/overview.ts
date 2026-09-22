@@ -17,6 +17,18 @@ const RESTART_TIMEOUT = 120_000;
 export const overview = {
   status: () => requestJson<StatusResponse>("status", { timeoutMs: 30_000 }),
 
+  /* Клиентское: пока VPN не поднялся, выход в интернет закрыт правилом
+     брандмауэра. На роутере той же цели служит «Все через VPN». */
+  killswitchStatus: () =>
+    requestJsonTolerant<{ ok: boolean; supported?: boolean; enabled?: boolean }>(
+      "killswitch_status",
+    ),
+  killswitchSet: (on: boolean) =>
+    requestJson<{ ok: boolean; enabled: boolean }>("killswitch_set", {
+      method: "POST",
+      params: { on: on ? "1" : "0" },
+    }),
+
   lanClients: () =>
     requestJson<{ ok: boolean; clients: LanClient[] }>("lan_clients"),
 

@@ -1,7 +1,7 @@
 /* Формы ответов detour-api. Описано то, что панель действительно читает;
    поля, которые бэкенд отдаёт «на всякий случай», намеренно не тянем. */
 
-export type Platform = "openwrt" | "keenetic";
+export type Platform = "openwrt" | "keenetic" | "windows" | "macos" | "android" | "ios";
 export type RoutingMode = "proxy-list" | "all-except";
 export type SingboxMode = "single" | "multi";
 export type BypassMode = "off" | "zapret" | "zapret2";

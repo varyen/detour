@@ -15,6 +15,9 @@ import type { Subscription } from "@/api";
 import { useProfilesStore } from "@/stores/profiles";
 import { useToastStore } from "@/stores/toast";
 import { asNum, fmtAgo, fmtBytes, fmtInt } from "@/lib/format";
+import { useStatusStore } from "@/stores/status";
+
+const status = useStatusStore();
 
 /** Запись подписки на диске шире, чем то, что объявлено в контракте панели. */
 type SubRecord = Subscription & {
@@ -303,8 +306,9 @@ defineExpose({ openNew, refreshAll, reload: load });
 <template>
   <TileCard title="Подписки">
     <p class="lead">
-      Подписка — ссылка поставщика, из которой роутер сам достаёт список серверов
-      и раскладывает их профилями в указанную группу.
+      Подписка — ссылка поставщика, из которой
+      {{ status.isClient ? "приложение само" : "роутер сам" }} достаёт список серверов и
+      раскладывает их профилями в указанную группу.
     </p>
 
     <p v-if="loading && !items.length" class="empty">Читаю список…</p>
@@ -375,7 +379,10 @@ defineExpose({ openNew, refreshAll, reload: load });
         />
       </PField>
 
-      <PField label="Идентификатор" hint="Имя файла на роутере: латиница, цифры, . _ -">
+      <PField
+        label="Идентификатор"
+        :hint="`Имя файла на ${status.isClient ? 'устройстве' : 'роутере'}: латиница, цифры, . _ -`"
+      >
         <input v-model="draft.id" type="text" :disabled="!isNew" spellcheck="false" />
       </PField>
 

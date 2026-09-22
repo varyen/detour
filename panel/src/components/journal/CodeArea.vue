@@ -7,6 +7,7 @@ defineProps<{
   label: string;
   rows?: number;
   placeholder?: string;
+  readonly?: boolean;
 }>();
 </script>
 
@@ -17,6 +18,7 @@ defineProps<{
     :rows="rows ?? 14"
     :aria-label="label"
     :placeholder="placeholder"
+    :readonly="readonly"
     spellcheck="false"
     autocapitalize="off"
     autocomplete="off"

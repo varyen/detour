@@ -25,11 +25,19 @@ const { theme, toggle: toggleTheme } = useTheme();
 
 const title = computed(() => (route.meta.title as string) ?? "Обзор");
 
+const PLATFORM_LABEL: Record<string, string> = {
+  openwrt: "OpenWrt",
+  keenetic: "Keenetic",
+  windows: "Windows",
+  macos: "macOS",
+  android: "Android",
+};
+
 const subtitle = computed(() => {
   const d = status.data;
-  if (!d) return "Соединяюсь с роутером…";
+  if (!d) return __CLIENT__ ? "Соединяюсь со службой…" : "Соединяюсь с роутером…";
   const parts = [
-    d.platform === "keenetic" ? "Keenetic" : "OpenWrt",
+    PLATFORM_LABEL[d.platform] ?? d.platform,
     d.binaries?.singbox_version ? `sing-box ${d.binaries.singbox_version}` : "",
     d.version ? `панель ${d.version}` : "",
   ].filter(Boolean);

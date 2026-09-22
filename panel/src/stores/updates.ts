@@ -13,7 +13,7 @@ export const CHANNEL_TITLE: Record<UpdateChannel, string> = {
   panel: "Панель",
   singbox: "sing-box",
   tpws: "tpws (обход DPI)",
-  nfqws2: "nfqws2 (zapret2)",
+  nfqws2: __CLIENT__ ? "winws2 (обход DPI)" : "nfqws2 (zapret2)",
 };
 
 export const CHANNELS: UpdateChannel[] = ["panel", "singbox", "tpws", "nfqws2"];

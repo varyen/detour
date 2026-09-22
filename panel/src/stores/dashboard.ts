@@ -24,6 +24,8 @@ export interface DashTile {
   hint: string;
   /** Ширина по умолчанию, в колонках из шести. */
   span: number;
+  /** Только на роутере: в приложении на устройстве этих подсистем нет. */
+  router?: boolean;
 }
 
 /** Каталог в порядке по умолчанию. Порядок здесь = порядок на чистой панели. */
@@ -34,18 +36,19 @@ export const DASH_TILES: DashTile[] = [
   { id: "scope", title: "Область действия", hint: "«Все через VPN» и UDP через VPN", span: 2 },
   { id: "bypass", title: "Обход DPI", hint: "движок, стратегия, автозапуск", span: 2 },
   { id: "health", title: "Здоровье профилей", hint: "сколько профилей проходят проверку", span: 2 },
-  { id: "uplinks", title: "Каналы в интернет", hint: "провайдеры, скорость, канал для входящих", span: 2 },
+  { id: "uplinks", title: "Каналы в интернет", hint: "провайдеры, скорость, канал для входящих", span: 2, router: true },
   { id: "routing", title: "Маршрутизация", hint: "режим туннеля, маршруты по сайтам, списки правил", span: 2 },
-  { id: "services", title: "Сервисы и доступ", hint: "сертификат, проброс портов, уведомления", span: 2 },
+  { id: "services", title: "Сервисы и доступ", hint: "сертификат, проброс портов, уведомления", span: 2, router: true },
   { id: "system", title: "Система", hint: "процессор, память, диск, устройства в сети", span: 2 },
   { id: "versions", title: "Версии", hint: "версии панели и бинарников, обновления", span: 2 },
 ];
 
 const KEY = "detour:dashboard";
-const IDS = DASH_TILES.map((t) => t.id);
+const CATALOG = __CLIENT__ ? DASH_TILES.filter((t) => !t.router) : DASH_TILES;
+const IDS = CATALOG.map((t) => t.id);
 
 const DEFAULT_SPANS: Record<string, number> = Object.fromEntries(
-  DASH_TILES.map((t) => [t.id, t.span]),
+  CATALOG.map((t) => [t.id, t.span]),
 );
 const ALLOWED: number[] = SPANS.map((s) => s.span);
 
@@ -112,7 +115,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
   /** Карточки в выбранном порядке — для редактора состава. */
   const tiles = computed<DashTile[]>(() =>
     order.value
-      .map((id) => DASH_TILES.find((t) => t.id === id))
+      .map((id) => CATALOG.find((t) => t.id === id))
       .filter((t): t is DashTile => !!t),
   );
 
@@ -127,7 +130,7 @@ export const useDashboardStore = defineStore("dashboard", () => {
   );
 
   function isVisible(id: string) {
-    return !hidden.value.includes(id);
+    return IDS.includes(id) && !hidden.value.includes(id);
   }
 
   function spanOf(id: string) {
