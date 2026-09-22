@@ -1,0 +1,355 @@
+[
+  {
+    "uri": "vless://00000000-0000-0000-0000-000000000001@vpn.example.com:443?security=reality&sni=www.example.com&fp=chrome&pbk=PUBKEY123&sid=ab12&type=tcp&flow=xtls-rprx-vision#%F0%9F%87%B3%F0%9F%87%B1%20NL%20Reality",
+    "name": "🇳🇱 NL Reality",
+    "outbound": {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "reality": {
+          "enabled": true,
+          "public_key": "PUBKEY123",
+          "short_id": "ab12"
+        },
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      }
+    }
+  },
+  {
+    "uri": "vless://00000000-0000-0000-0000-000000000001@vpn.example.com:8443?security=tls&type=ws&path=%2Fws%3Fed%3D2048&host=cdn.example.com&sni=cdn.example.com&alpn=h2,http/1.1#WS",
+    "name": "WS",
+    "outbound": {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 8443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "tls": {
+        "enabled": true,
+        "server_name": "cdn.example.com",
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ]
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/ws?ed=2048",
+        "headers": {
+          "Host": "cdn.example.com"
+        }
+      }
+    }
+  },
+  {
+    "uri": "vless://00000000-0000-0000-0000-000000000001@[2001:db8::1]:443?security=tls&type=grpc&serviceName=grpcsvc#IPv6%20gRPC",
+    "name": "IPv6 gRPC",
+    "outbound": {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "2001:db8::1",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "tls": {
+        "enabled": true
+      },
+      "transport": {
+        "type": "grpc",
+        "service_name": "grpcsvc"
+      }
+    }
+  },
+  {
+    "uri": "vless://00000000-0000-0000-0000-000000000001@vpn.example.com:443?security=reality&sni=www.example.com&fp=chrome&pbk=K&sid=&type=xhttp&path=%2Fx#xhttp",
+    "name": "xhttp",
+    "outbound": {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.example.com",
+        "reality": {
+          "enabled": true,
+          "public_key": "K",
+          "short_id": ""
+        },
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      }
+    }
+  },
+  {
+    "uri": "VLESS://00000000-0000-0000-0000-000000000001@vpn.example.com:443?security=none#Upper",
+    "name": "Upper",
+    "outbound": {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001"
+    }
+  },
+  {
+    "uri": "vless://00000000-0000-0000-0000-000000000001@vpn.example.com:443/?security=tls&type=h2&path=%2Fh2&host=h2.example.com#H2",
+    "name": "H2",
+    "outbound": {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "tls": {
+        "enabled": true
+      },
+      "transport": {
+        "type": "http",
+        "path": "/h2",
+        "host": [
+          "h2.example.com"
+        ]
+      }
+    }
+  },
+  {
+    "uri": "trojan://p%40ss+word@vpn.example.com:443?sni=vpn.example.com&allowInsecure=1#Trojan+DE",
+    "name": "Trojan+DE",
+    "outbound": {
+      "type": "trojan",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "password": "p@ss+word",
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.example.com",
+        "insecure": true
+      }
+    }
+  },
+  {
+    "uri": "trojan://pw@vpn.example.com:443?security=none&type=ws&path=%2Ft#Trojan%20WS",
+    "name": "Trojan WS",
+    "outbound": {
+      "type": "trojan",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "password": "pw",
+      "tls": {
+        "enabled": true
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/t"
+      }
+    }
+  },
+  {
+    "uri": "vmess://eyJ2IjoiMiIsInBzIjoi0JzQvtGB0LrQstCwIFZNZXNzIiwiYWRkIjoidnBuLmV4YW1wbGUuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxIiwiYWlkIjoiMCIsIm5ldCI6IndzIiwicGF0aCI6Ii92IiwiaG9zdCI6ImguZXhhbXBsZS5jb20iLCJ0bHMiOiJ0bHMiLCJzbmkiOiIifQ==#junk",
+    "name": "Москва VMess",
+    "outbound": {
+      "type": "vmess",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "security": "auto",
+      "alter_id": 0,
+      "tls": {
+        "enabled": true,
+        "server_name": "h.example.com"
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/v",
+        "headers": {
+          "Host": "h.example.com"
+        }
+      }
+    }
+  },
+  {
+    "uri": "vmess://eyJ2IjoyLCJwcyI6ImdSUEMiLCJhZGQiOiJ2cG4uZXhhbXBsZS5jb20iLCJwb3J0Ijo4NDQzLCJpZCI6IjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSIsImFpZCI6NjQsIm5ldCI6ImdycGMiLCJwYXRoIjoic3ZjIiwidGxzIjoiIiwiZnAiOiJmaXJlZm94IiwiYWxwbiI6ImgyIn0=",
+    "name": "gRPC",
+    "outbound": {
+      "type": "vmess",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 8443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "security": "auto",
+      "alter_id": 64,
+      "transport": {
+        "type": "grpc",
+        "service_name": "svc"
+      }
+    }
+  },
+  {
+    "uri": "ss://YWVzLTI1Ni1nY206cGFzcw@vpn.example.com:8388#SS",
+    "name": "SS",
+    "outbound": {
+      "type": "shadowsocks",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 8388,
+      "method": "aes-256-gcm",
+      "password": "pass"
+    }
+  },
+  {
+    "uri": "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpzZWNyZXRAdnBuLmV4YW1wbGUuY29tOjgzODk=#Legacy",
+    "name": "Legacy",
+    "outbound": {
+      "type": "shadowsocks",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 8389,
+      "method": "chacha20-ietf-poly1305",
+      "password": "secret"
+    }
+  },
+  {
+    "uri": "ss://2022-blake3-aes-128-gcm:a2V5@vpn.example.com:443/?plugin=obfs#Plain",
+    "name": "Plain",
+    "outbound": {
+      "type": "shadowsocks",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "a2V5"
+    }
+  },
+  {
+    "uri": "hysteria2://pass@vpn.example.com:8443?sni=vpn.example.com&obfs=salamander&obfs-password=ob&insecure=1&alpn=h3&fp=chrome#HY2",
+    "name": "HY2",
+    "outbound": {
+      "type": "hysteria2",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 8443,
+      "password": "pass",
+      "obfs": {
+        "type": "salamander",
+        "password": "ob"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.example.com",
+        "alpn": [
+          "h3"
+        ],
+        "insecure": true
+      }
+    }
+  },
+  {
+    "uri": "hy2://pass@vpn.example.com?sni=x.example.com#hy2%20default%20port",
+    "name": "hy2 default port",
+    "outbound": {
+      "type": "hysteria2",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "password": "pass",
+      "tls": {
+        "enabled": true,
+        "server_name": "x.example.com"
+      }
+    }
+  },
+  {
+    "uri": "tuic://00000000-0000-0000-0000-000000000001:pa%3Ass@vpn.example.com:443?congestion_control=bbr&alpn=h3&sni=vpn.example.com&allow_insecure=1#TUIC",
+    "name": "TUIC",
+    "outbound": {
+      "type": "tuic",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "password": "pa:ss",
+      "congestion_control": "bbr",
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.example.com",
+        "alpn": [
+          "h3"
+        ],
+        "insecure": true
+      }
+    }
+  },
+  {
+    "uri": "socks5://user:pw@proxy.example.com:1080#SOCKS",
+    "name": "SOCKS",
+    "outbound": {
+      "type": "socks",
+      "tag": "proxy",
+      "server": "proxy.example.com",
+      "server_port": 1080,
+      "version": "5",
+      "username": "user",
+      "password": "pw"
+    }
+  },
+  {
+    "uri": "socks://proxy.example.com:1080",
+    "name": "",
+    "outbound": {
+      "type": "socks",
+      "tag": "proxy",
+      "server": "proxy.example.com",
+      "server_port": 1080,
+      "version": "5"
+    }
+  },
+  {
+    "uri": "https://user:pw@proxy.example.com:443#HTTPS%20proxy",
+    "name": "HTTPS proxy",
+    "outbound": {
+      "type": "http",
+      "tag": "proxy",
+      "server": "proxy.example.com",
+      "server_port": 443,
+      "username": "user",
+      "password": "pw",
+      "tls": {
+        "enabled": true
+      }
+    }
+  },
+  {
+    "uri": "http://proxy.example.com:3128",
+    "name": "",
+    "outbound": {
+      "type": "http",
+      "tag": "proxy",
+      "server": "proxy.example.com",
+      "server_port": 3128
+    }
+  },
+  {
+    "uri": "wireguard://key@vpn.example.com:51820#WG"
+  },
+  {
+    "uri": "vmess://not-base64!!"
+  },
+  {
+    "uri": "just text"
+  }
+]

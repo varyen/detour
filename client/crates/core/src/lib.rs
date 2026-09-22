@@ -1,0 +1,23 @@
+pub mod backend;
+pub mod chains;
+pub mod dpi;
+pub mod engine;
+pub mod geo;
+pub mod ids;
+pub mod ipc;
+pub mod lists;
+pub mod paths;
+pub mod ping;
+pub mod probe;
+pub mod profiles;
+pub mod render;
+pub mod rulist;
+pub mod settings;
+pub mod sharelink;
+pub mod store;
+pub mod subscription;
+pub mod sysinfo;
+pub mod traffic;
+pub mod updater;
+
+pub const VERSION: &str = env!("DETOUR_VERSION");

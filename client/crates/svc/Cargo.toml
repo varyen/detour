@@ -1,0 +1,16 @@
+[package]
+name = "detour-svc"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+detour-core.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"

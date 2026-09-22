@@ -59,3 +59,9 @@ panel/*.tsbuildinfo
 landing/gen-src/
 landing/video/
 landing/raw-video/
+
+# Клиент (Tauri): сборка Rust, зависимости CLI, сгенерированные схемы
+/client/target/
+/client/node_modules/
+/client/app/gen/
+/panel/dist-client/
