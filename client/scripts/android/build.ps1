@@ -1,7 +1,8 @@
 ﻿# Сборка Android-версии Detour.
 #   pwsh client/scripts/android/build.ps1 [-Abi arm64|x86_64|both] [-Release]
 #                                         [-Keystore keys/android-release.jks]
-# С -Keystore release-APK подписывается (пароль — в $env:DETOUR_KS_PASS) и
+# С -Keystore release-APK подписывается (пароль — в $env:DETOUR_KS_PASS или в
+# файле рядом с ключом: keys/android-release.pass) и
 # кладётся в releases/client как detour-client-android_<версия>_<abi>.apk.
 # Ключ менять нельзя: APK с другой подписью не встанет поверх старой версии.
 #
@@ -125,7 +126,12 @@ $apk = Get-ChildItem (Join-Path $client 'app\gen\android\app\build\outputs\apk')
 if ($apk) { Write-Host "готово: $($apk.FullName) ($([int]($apk.Length/1MB)) МБ)" }
 
 if ($Release -and $Keystore) {
-  if (-not $env:DETOUR_KS_PASS) { throw "нет пароля ключа: `$env:DETOUR_KS_PASS" }
+  # пароль рядом с ключом (keys/*.pass в .gitignore) — чтобы не вводить на каждой сборке
+  $passFile = [IO.Path]::ChangeExtension((Resolve-Path $Keystore).Path, '.pass')
+  if (-not $env:DETOUR_KS_PASS -and (Test-Path $passFile)) {
+    $env:DETOUR_KS_PASS = (Get-Content $passFile -Raw).Trim()
+  }
+  if (-not $env:DETOUR_KS_PASS) { throw "нет пароля ключа: `$env:DETOUR_KS_PASS или $passFile" }
   $bt = Get-ChildItem "$sdk\build-tools" | Sort-Object { [version]$_.Name } | Select-Object -Last 1
   $version = (Get-Content (Join-Path $root 'VERSION') -Raw).Trim()
   $outDir = Join-Path $root 'releases\client'

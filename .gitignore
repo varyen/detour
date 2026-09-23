@@ -79,3 +79,7 @@ landing/raw-video/
 
 # AWG test stand: downloaded mihomo binary
 tools/awg-stand/.cache/
+
+# пароль ключа подписи Android (читает client/scripts/android/build.ps1)
+keys/*.pass
+keys/*.jks.*
