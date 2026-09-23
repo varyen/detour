@@ -153,6 +153,9 @@ impl Backend {
 
     /// Старт службы: поднять VPN, если включён автозапуск и есть что поднимать.
     pub async fn boot(&self) {
+        // Правило могло остаться от прошлой жизни службы (упала, не дойдя до
+        // shutdown). Нужно ли оно сейчас, решит сторож первым же тиком.
+        self.killswitch(false);
         self.dpi_boot().await;
         if !self.store.flag(store::AUTOSTART_SINGBOX) {
             return;

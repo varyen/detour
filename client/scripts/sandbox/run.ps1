@@ -14,6 +14,8 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $stand = Join-Path $Work 'stand'; $out = Join-Path $Work 'out'
 New-Item -ItemType Directory -Force $stand, $out | Out-Null
 Get-ChildItem $out -File -ErrorAction SilentlyContinue | Remove-Item -Force
+# test-installer берёт первый detour-setup-*.exe: старый от прошлого прогона подменил бы новый.
+Get-ChildItem $stand -Filter 'detour-setup-*.exe' -ErrorAction SilentlyContinue | Remove-Item -Force
 
 Push-Location $root
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
@@ -55,8 +57,13 @@ try {
     Get-Content (Join-Path $out 'dpi.txt') -Encoding utf8
   }
   if ($Only -in 'installer', 'all' -and $Setup) {
-    wsb exec --id $id -r System -c "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\stand\test-installer.ps1" | Out-Null
+    $job = Start-Job { wsb exec --id $using:id -r System -c "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\stand\test-installer.ps1" }
+    for ($i = 0; $i -lt 60 -and -not (Test-Path (Join-Path $out 'installed.flag')); $i++) { Start-Sleep 2 }
+    wsb exec --id $id -r ExistingLogin -c "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\stand\window-shot.ps1" | Out-Null
+    "" | Out-File (Join-Path $out 'ui.done')
+    $null = Wait-Job $job -Timeout 600; Remove-Job $job -Force
     Get-Content (Join-Path $out 'installer.txt') -Encoding utf8
+    Write-Host "снимок окна: $(Join-Path $out 'window.png')"
   }
 } finally {
   wsb stop --id $id | Out-Null

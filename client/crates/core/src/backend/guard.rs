@@ -86,6 +86,10 @@ impl Backend {
                 pfctl(&["-E"]);
                 pfctl(&["-a", PF_ANCHOR, "-f", PF_ANCHOR_FILE]);
             } else {
+                // Файл тоже чистим: /etc/pf.conf грузит якорь из него при
+                // загрузке системы, и оставшиеся правила перекрыли бы выход
+                // в сеть всем, включая сам туннель.
+                let _ = std::fs::write(PF_ANCHOR_FILE, "");
                 pfctl(&["-a", PF_ANCHOR, "-F", "rules"]);
             }
             return;

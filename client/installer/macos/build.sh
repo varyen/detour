@@ -20,7 +20,10 @@ echo "== панель"
 ( cd "$ROOT/panel" && npm run build:client )
 
 echo "== служба и интерфейс"
-( cd "$ROOT/client" && cargo build --release -p detour-svc -p detour-app )
+# custom-protocol — иначе Tauri считает сборку отладочной и открывает в окне
+# devUrl (localhost:5199) вместо встроенной панели.
+( cd "$ROOT/client" && cargo build --release -p detour-svc \
+    && cargo build --release -p detour-app --features tauri/custom-protocol )
 
 echo "== сборка Detour.app $VERSION"
 rm -rf "$APP"

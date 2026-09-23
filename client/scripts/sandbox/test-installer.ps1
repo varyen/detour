@@ -44,6 +44,11 @@ L "ярлык: $(Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Progra
 $s = Pipe 'status'
 L "канал отвечает: платформа=$($s.platform) версия=$($s.version) sing-box=$($s.binaries.singbox_version) winws2=$($s.binaries.nfqws2_supported)"
 
+# run.ps1 по этому флагу открывает окно приложения в сессии пользователя.
+"" | Out-File "$out\installed.flag"
+for ($i = 0; $i -lt 60 -and -not (Test-Path "$out\ui.done"); $i++) { Start-Sleep 2 }
+L "окно: $((Get-Content "$out\window.txt" -Encoding utf8 -ErrorAction SilentlyContinue | Where-Object { $_ }) -join ' | ')"
+
 # Движок обхода ставится из самого приложения — установщик его не несёт.
 L "ставлю winws2: $((Pipe 'nfqws2_update_apply' @{} '') | ConvertTo-Json -Compress)"
 for ($i = 0; $i -lt 60; $i++) {

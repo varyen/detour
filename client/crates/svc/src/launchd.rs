@@ -11,9 +11,11 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 pub const LABEL: &str = "com.detour.svc";
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const PLIST_DIR: &str = "/Library/LaunchDaemons";
 const LOG: &str = "/Library/Logs/Detour";
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn plist_path() -> PathBuf {
     Path::new(PLIST_DIR).join(format!("{LABEL}.plist"))
 }
@@ -49,7 +51,10 @@ pub fn plist(exe: &Path) -> String {
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const PF_CONF: &str = "/etc/pf.conf";
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const PF_ANCHOR_FILE: &str = "/etc/pf.anchors/detour";
 const PF_MARK: &str = "# detour kill-switch";
 
 /// Правила защиты от утечки живут в отдельном якоре, но pf их не увидит, пока
@@ -94,6 +99,24 @@ fn launchctl(args: &[&str]) -> Result<()> {
     bail!("launchctl {}: {msg}", args.join(" "));
 }
 
+/// `bootout` возвращается раньше, чем launchd на самом деле выгрузит демон, и
+/// `bootstrap` сразу следом падает с «Input/output error» — ждём, пока метка
+/// исчезнет.
+#[cfg(target_os = "macos")]
+fn wait_unloaded() {
+    for _ in 0..50 {
+        let loaded = Command::new("/bin/launchctl")
+            .args(["print", &format!("system/{LABEL}")])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !loaded {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn install() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -103,8 +126,15 @@ pub fn install() -> Result<()> {
     // Перерегистрация: старый демон сначала выгружаем, иначе launchctl
     // откажется загружать тот же Label.
     let _ = launchctl(&["bootout", &format!("system/{LABEL}")]);
+    wait_unloaded();
     std::fs::write(&path, plist(&exe)).with_context(|| format!("не записать {}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+    // Файл якоря должен существовать раньше ссылки на него: иначе pfctl
+    // отвергает весь /etc/pf.conf, и система остаётся без своих правил pf.
+    std::fs::create_dir_all("/etc/pf.anchors")?;
+    if !Path::new(PF_ANCHOR_FILE).exists() {
+        std::fs::write(PF_ANCHOR_FILE, "").context("не создать файл якоря pf")?;
+    }
     if let Some(conf) = std::fs::read_to_string(PF_CONF).ok().and_then(|t| pf_conf_with_anchor(&t)) {
         std::fs::write(PF_CONF, conf).context("не записать /etc/pf.conf")?;
         let _ = Command::new("/sbin/pfctl").args(["-f", PF_CONF]).status();
@@ -126,7 +156,7 @@ pub fn uninstall() -> Result<()> {
         let _ = std::fs::write(PF_CONF, conf);
         let _ = Command::new("/sbin/pfctl").args(["-f", PF_CONF]).status();
     }
-    let _ = std::fs::remove_file("/etc/pf.anchors/detour");
+    let _ = std::fs::remove_file(PF_ANCHOR_FILE);
     println!("демон {LABEL} удалён");
     Ok(())
 }

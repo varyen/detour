@@ -117,8 +117,7 @@ impl Backend {
         if let Some(r) = bundled() {
             return r;
         }
-        let _ = self.store.write_text(APPLY_LOG, "установка winws2: начинаю
-");
+        let _ = self.store.write_text(APPLY_LOG, &format!("установка {}: начинаю\n", crate::dpi::NAME));
         let _ = self.jobs.send(Job::DpiApply);
         Response::json(&json!({ "ok": true, "status": "started" }))
     }

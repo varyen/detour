@@ -226,7 +226,7 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
             // снова попадает в правило обхода — петля. На Android от неё
             // спасает исключение своего пакета из VpnService, на macOS —
             // отбор по имени процесса.
-            if !cfg!(target_os = "android") {
+            if !cfg!(any(target_os = "android", target_os = "ios")) {
                 rules.push(json!({ "process_name": [crate::dpi::EXE], "outbound": "direct" }));
             }
         }
@@ -516,7 +516,7 @@ mod tests {
         let rules = r.config["route"]["rules"].as_array().unwrap();
         let own = rules.iter().position(|x| x["process_name"] == json!([crate::dpi::EXE]));
         let dpi = rules.iter().position(|x| x["rule_set"] == json!(["dpi"])).unwrap();
-        if cfg!(target_os = "android") {
+        if cfg!(any(target_os = "android", target_os = "ios")) {
             assert!(own.is_none(), "на Android петлю режет VpnService");
         } else {
             assert!(own.unwrap() < dpi, "трафик самого tpws уходит напрямую до правила обхода");

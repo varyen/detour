@@ -27,15 +27,19 @@ pub const EXE: &str = "winws2.exe";
 #[cfg(not(windows))]
 pub const EXE: &str = "tpws";
 
+/// Имя движка для людей: в журналах и сообщениях.
+pub const NAME: &str = if cfg!(windows) { "winws2" } else { "tpws" };
+
 /// Лежат рядом с бинарником winws2; без них стратегии не работают.
 pub const LUA: [&str; 3] = ["zapret-lib.lua", "zapret-antidpi.lua", "zapret-auto.lua"];
 
 /// Локальный SOCKS tpws: домены обхода sing-box отправляет в него.
 pub const SOCKS_PORT: u16 = 19487;
 
-/// На Android оба движка приезжают внутри APK и обновляются вместе с
-/// приложением: из каталога данных система запускать файлы не даёт.
-pub const UPDATABLE: bool = !cfg!(target_os = "android");
+/// На телефонах движки приезжают внутри приложения и обновляются вместе с
+/// ним: из каталога данных система запускать файлы не даёт (на iOS — вовсе
+/// никаких сторонних процессов, поэтому обхода DPI там нет).
+pub const UPDATABLE: bool = !cfg!(any(target_os = "android", target_os = "ios"));
 
 /// Те же строки, что `NFQWS_STRATEGY_DEFAULT` и `zapret-tpws.conf` на роутере.
 #[cfg(windows)]
@@ -158,19 +162,16 @@ impl Dpi {
             bail!("список доменов для обхода DPI пуст");
         }
         if !cfg!(windows) {
-            // tpws сам принимает соединения: перехватывать нечего, зато нужен
-            // порт и список доменов, к которым применять обход.
+            // tpws сам принимает соединения, и в него попадает только то, что
+            // sing-box уже отобрал по списку — и домены, и подсети. Свои
+            // hostlist/ipset здесь лишние и вредные: стоя перед стратегией,
+            // они уходят только в её первый профиль, и адреса из списка
+            // оставались бы без обхода.
             let mut args = vec![
                 "--socks".to_owned(),
                 "--bind-addr=127.0.0.1".to_owned(),
                 format!("--port={SOCKS_PORT}"),
             ];
-            if !m.domains.is_empty() {
-                store.write_text(HOSTS, &format!("{}
-", m.domains.join("
-")))?;
-                args.push(format!("--hostlist={}", store.path(HOSTS).display()));
-            }
             args.extend(self.strategy(store).split_whitespace().map(str::to_owned));
             let _ = tun;
             return Ok(args);
@@ -315,13 +316,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn prepare_builds_lists_and_filter() {
-        let dir = std::env::temp_dir().join(format!("detour-dpi2-{}", store::now_epoch()));
+    fn dpi_store(tag: &str) -> (std::path::PathBuf, Store) {
+        let dir = std::env::temp_dir().join(format!("detour-{tag}-{}", store::now_epoch()));
         let s = Store::new(dir.clone());
         std::fs::create_dir_all(dir.join("run")).unwrap();
         std::fs::create_dir_all(dir.join("lists")).unwrap();
-        s.write_text(store::DPI_DOMAINS, "example.com\n1.2.3.0/24\n").unwrap();
+        s.write_text(store::DPI_DOMAINS, "example.com
+1.2.3.0/24
+").unwrap();
+        (dir, s)
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn prepare_builds_lists_and_filter() {
+        let (dir, s) = dpi_store("dpi-win");
         let d = Dpi::new(&dir, dir.join("dpi.log"));
         let args = d.prepare(&s, true).unwrap();
         assert!(args.iter().any(|a| a.starts_with("--hostlist=")));
@@ -330,6 +339,21 @@ mod tests {
         assert!(args.contains(&"--lua-desync=tcpseg:pos=0,midsld:ip_id=rnd:repeats=2".to_owned()));
         assert_eq!(s.read_text(HOSTS).trim(), "example.com");
         assert!(s.read_text(FILTER).contains("172.19.0.1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn tpws_takes_everything_sing_box_routes_in() {
+        let (dir, s) = dpi_store("dpi-tpws");
+        let d = Dpi::new(&dir, dir.join("dpi.log"));
+        let args = d.prepare(&s, true).unwrap();
+        assert_eq!(&args[..3], ["--socks", "--bind-addr=127.0.0.1", "--port=19487"]);
+        assert!(
+            !args.iter().any(|a| a.starts_with("--hostlist=") || a.starts_with("--ipset=")),
+            "отбор делает sing-box, фильтр tpws урезал бы список до первого профиля"
+        );
+        assert!(args.ends_with(&DEFAULT_STRATEGY.split_whitespace().map(str::to_owned).collect::<Vec<_>>()));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

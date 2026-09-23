@@ -1,7 +1,8 @@
-//! sing-box дочерним процессом (десктоп). На Android дочерний процесс не
-//! годится: TUN открывает только сама система, и файловый дескриптор нельзя
-//! передать наружу, — поэтому там конфиг поднимает libbox внутри процесса
-//! приложения, а ядро дёргает его через мост `tunnel`.
+//! sing-box дочерним процессом (десктоп). На телефонах дочерний процесс не
+//! годится: TUN открывает только сама система, — поэтому конфиг поднимает
+//! libbox: на Android в процессе приложения (VpnService), на iOS в отдельном
+//! процессе-расширении (NEPacketTunnelProvider). Ядро дёргает его через мост
+//! `tunnel`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -16,8 +17,8 @@ pub const EXE: &str = "sing-box.exe";
 #[cfg(not(windows))]
 pub const EXE: &str = "sing-box";
 
-/// Мост в платформенный туннель (Android): ставится приложением при старте.
-#[cfg(target_os = "android")]
+/// Мост в платформенный туннель (Android, iOS): ставится приложением при старте.
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub mod tunnel {
     use std::path::Path;
     use std::sync::OnceLock;
@@ -86,7 +87,7 @@ impl Engine {
     }
 
     pub fn present(&self) -> bool {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             return tunnel::get().is_some();
         }
@@ -98,7 +99,7 @@ impl Engine {
     /// Android такого нет: ядро вкомпилировано в приложение в единственном
     /// числе, и проверять профили нечем.
     pub fn probes_supported(&self) -> bool {
-        !cfg!(target_os = "android") && self.present()
+        !cfg!(any(target_os = "android", target_os = "ios")) && self.present()
     }
 
     fn command_for(&self, bin: &Path, dir: &Path) -> Command {
@@ -114,7 +115,7 @@ impl Engine {
     }
 
     pub async fn version(&self) -> Option<String> {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             return tunnel::get().and_then(|t| t.version());
         }
@@ -134,7 +135,7 @@ impl Engine {
 
     /// `sing-box check` — живой конфиг не трогаем, пока новый не прошёл.
     pub async fn check(&self, config: &Path) -> Result<(), String> {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let Some(t) = tunnel::get() else {
                 return Err("туннель ещё не подключён приложением".to_owned());
@@ -167,14 +168,14 @@ impl Engine {
     }
 
     pub async fn start(&self, config: &Path) -> Result<u32> {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             let Some(t) = tunnel::get() else {
                 bail!("туннель ещё не подключён приложением");
             };
             return t.start(config);
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
         self.stop().await;
         if !self.present() {
@@ -229,7 +230,7 @@ impl Engine {
     }
 
     pub async fn stop(&self) {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         if let Some(t) = tunnel::get() {
             t.stop();
             return;
@@ -240,7 +241,7 @@ impl Engine {
     }
 
     pub async fn pid(&self) -> Option<u32> {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             return tunnel::get().filter(|t| t.running()).map(|_| 1);
         }

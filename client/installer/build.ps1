@@ -31,8 +31,13 @@ Pop-Location
 Write-Host "== служба и интерфейс (release, статический CRT)"
 Push-Location $client
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
-cargo build --release -p detour-svc -p detour-app
-if ($LASTEXITCODE) { throw "сборка Rust не прошла" }
+cargo build --release -p detour-svc
+if ($LASTEXITCODE) { throw "сборка службы не прошла" }
+# Без custom-protocol Tauri считает сборку отладочной и открывает в окне
+# devUrl (localhost:5199) вместо встроенной панели — это делает tauri build,
+# а мы собираем cargo напрямую.
+cargo build --release -p detour-app --features tauri/custom-protocol
+if ($LASTEXITCODE) { throw "сборка интерфейса не прошла" }
 Pop-Location
 Copy-Item (Join-Path $client 'target\release\detour-svc.exe') $stage
 Copy-Item (Join-Path $client 'target\release\detour-app.exe') $stage

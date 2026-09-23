@@ -205,7 +205,7 @@ fn dpi_take(path: &str, base: &str) -> bool {
 pub fn dpi_state(store: &Store) -> Value {
     store
         .read_json(DPI_STATE)
-        .unwrap_or_else(|| json!({ "status": "unknown", "message": "winws2 ещё не проверяли" }))
+        .unwrap_or_else(|| json!({ "status": "unknown", "message": format!("{} ещё не проверяли", crate::dpi::NAME) }))
 }
 
 /// Последний релиз zapret2. Пиннинга по minor тут нет: стратегия и lua едут
@@ -295,8 +295,8 @@ pub async fn dpi_install(
     let files = extract_dpi(&buf, &dir)?;
     log(format!("поставлено файлов: {}", files.len()));
     match dpi.version().await {
-        Some(v) => log(format!("winws2 {v} установлен")),
-        None => bail!("winws2 не запускается после установки"),
+        Some(v) => log(format!("{} {v} установлен", crate::dpi::NAME)),
+        None => bail!("{} не запускается после установки", crate::dpi::NAME),
     }
     Ok(version)
 }
