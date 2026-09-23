@@ -40,7 +40,9 @@ Start-Sleep 8
 $svc = Get-Service DetourSvc -ErrorAction SilentlyContinue
 L "служба после установки: $($svc.Status)/$($svc.StartType)"
 L "файлы: $((Get-ChildItem 'C:\Program Files\Detour' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ' ')"
-L "ярлык: $(Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Detour\Detour.lnk")"
+$wv = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv
+L "WebView2: $(if ($wv) { $wv } else { 'нет' })"
+L "ярлык:$(Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Detour\Detour.lnk")"
 $s = Pipe 'status'
 L "канал отвечает: платформа=$($s.platform) версия=$($s.version) sing-box=$($s.binaries.singbox_version) winws2=$($s.binaries.nfqws2_supported)"
 

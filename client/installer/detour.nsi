@@ -112,15 +112,17 @@ Section "Detour" SecMain
     ReadRegStr $0 HKLM "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" "pv"
   ${EndIf}
   ${If} $0 == ""
+    ; Загрузчик Microsoft лежит внутри установщика: NSISdl не умеет HTTPS,
+    ; а ссылка Microsoft ведёт именно туда. Саму среду загрузчик качает сам.
     DetailPrint "Ставлю среду WebView2…"
-    NSISdl::download /TIMEOUT=60000 "https://go.microsoft.com/fwlink/p/?LinkId=2124703" "$TEMP\MicrosoftEdgeWebview2Setup.exe"
+    InitPluginsDir
+    SetOutPath "$PLUGINSDIR"
+    File "${STAGE}\MicrosoftEdgeWebview2Setup.exe"
+    nsExec::ExecToLog '"$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" /silent /install'
     Pop $1
-    ${If} $1 == "success"
-      nsExec::ExecToLog '"$TEMP\MicrosoftEdgeWebview2Setup.exe" /silent /install'
-      Pop $1
-      Delete "$TEMP\MicrosoftEdgeWebview2Setup.exe"
-    ${Else}
-      MessageBox MB_ICONEXCLAMATION "Не удалось скачать WebView2 ($1). Поставьте его вручную, иначе окно Detour не откроется."
+    SetOutPath "$INSTDIR"
+    ${If} $1 != 0
+      MessageBox MB_ICONEXCLAMATION "Среда WebView2 не установилась (код $1). Поставьте её вручную с developer.microsoft.com/microsoft-edge/webview2, иначе окно Detour не откроется." /SD IDOK
     ${EndIf}
   ${EndIf}
 

@@ -213,9 +213,16 @@ pub fn dpi_state(store: &Store) -> Value {
 pub async fn dpi_check(store: &Store, dpi: &crate::dpi::Dpi, proxy: Option<&str>) -> Result<Value> {
     let current = dpi.version().await.unwrap_or_default();
     let url = format!("https://api.github.com/repos/{DPI_REPO}/releases/latest");
-    let rel: Value = get_any(&url, proxy, Duration::from_secs(30)).await?.json().await?;
-    let available = rel["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_owned();
-    let changelog: String = rel["body"].as_str().unwrap_or("").chars().take(6000).collect();
+    let (available, changelog) = match dpi_latest_api(&url, proxy).await {
+        Ok(v) => v,
+        // Анонимный API режется лимитом по IP (403 за общим NAT), а страница
+        // releases/latest просто редиректит на тег — лимита у неё нет.
+        Err(e) => {
+            let page = format!("https://github.com/{DPI_REPO}/releases/latest");
+            let resp = get_any(&page, proxy, Duration::from_secs(30)).await.map_err(|_| e)?;
+            (tag_from_release_url(resp.url().as_str()).unwrap_or_default(), String::new())
+        }
+    };
     let st = json!({
         "current": current,
         "available": available,
@@ -225,6 +232,20 @@ pub async fn dpi_check(store: &Store, dpi: &crate::dpi::Dpi, proxy: Option<&str>
     });
     store.write_json(DPI_STATE, &st)?;
     Ok(st)
+}
+
+async fn dpi_latest_api(url: &str, proxy: Option<&str>) -> Result<(String, String)> {
+    let rel: Value = get_any(url, proxy, Duration::from_secs(30)).await?.json().await?;
+    let available = rel["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_owned();
+    let changelog = rel["body"].as_str().unwrap_or("").chars().take(6000).collect();
+    Ok((available, changelog))
+}
+
+/// `…/releases/tag/v1.0.5.2` → `1.0.5.2`.
+fn tag_from_release_url(url: &str) -> Option<String> {
+    let tag = url.split("/releases/tag/").nth(1)?.split(['?', '#', '/']).next()?;
+    let v = tag.trim_start_matches('v');
+    (!v.is_empty()).then(|| v.to_owned())
 }
 
 /// Движок и его lua-скрипты кладутся рядом друг с другом: `supported()`
@@ -314,6 +335,13 @@ mod tests {
         assert!(!dpi_take("zapret/binaries/windows-x86/winws2.exe", "winws2.exe"));
         assert!(!dpi_take("zapret/init.d/openwrt/zapret", "zapret"));
         assert_eq!(dpi_take("zapret2/lua/zapret-lib.lua", "zapret-lib.lua"), cfg!(windows));
+    }
+
+    #[test]
+    fn tag_from_redirect() {
+        let u = "https://github.com/bol-van/zapret2/releases/tag/v1.0.5.2";
+        assert_eq!(tag_from_release_url(u).as_deref(), Some("1.0.5.2"));
+        assert_eq!(tag_from_release_url("https://github.com/bol-van/zapret2/releases"), None);
     }
 
     #[test]

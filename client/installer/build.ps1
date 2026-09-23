@@ -42,6 +42,12 @@ Pop-Location
 Copy-Item (Join-Path $client 'target\release\detour-svc.exe') $stage
 Copy-Item (Join-Path $client 'target\release\detour-app.exe') $stage
 Copy-Item $SingBox (Join-Path $stage 'sing-box.exe')
+# Загрузчик WebView2 (~2 МБ) едет внутри установщика: без среды окно не откроется,
+# а в песочнице и на урезанных сборках Windows её нет.
+& curl.exe -sfL --max-time 120 -o (Join-Path $stage 'MicrosoftEdgeWebview2Setup.exe') 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+if ($LASTEXITCODE) { throw "не скачался загрузчик WebView2" }
+$wv = Get-AuthenticodeSignature (Join-Path $stage 'MicrosoftEdgeWebview2Setup.exe')
+if ($wv.Status -ne 'Valid' -or $wv.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw "загрузчик WebView2 без подписи Microsoft" }
 
 if ($NoDpi) {
   Write-Host "== winws2 не кладём (-NoDpi)"
