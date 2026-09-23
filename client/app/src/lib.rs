@@ -4,12 +4,14 @@ use detour_core::ipc::{Body, Request, Response};
 
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "ios")]
+mod ios;
 
 /// На десктопе привилегированная часть — отдельная служба, и панель ходит в
-/// неё по каналу. На Android службы нет: система не даст держать демона, а TUN
-/// открывается только из процесса приложения, — поэтому ядро работает прямо
-/// здесь, а «канал» вырождается в вызов функции.
-#[cfg(target_os = "android")]
+/// неё по каналу. На телефонах службы нет: система не даст держать демона, —
+/// поэтому ядро работает прямо здесь, а «канал» вырождается в вызов функции.
+/// Туннель поднимает платформа: VpnService на Android, расширение на iOS.
+#[cfg(any(target_os = "android", target_os = "ios"))]
 mod inproc {
     use std::sync::{Arc, OnceLock};
 
@@ -49,11 +51,11 @@ async fn api(
         params: params.unwrap_or_default(),
         body,
     };
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         inproc::call(&req).await
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         detour_core::ipc::call(&req)
             .await
@@ -64,12 +66,16 @@ async fn api(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![api]);
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     let builder = builder.setup(|app| {
         use tauri::Manager;
         // Каталог приложения — единственное место, куда можно писать без прав.
         let dir = app.path().app_data_dir()?;
         std::fs::create_dir_all(&dir)?;
+        // На Android мост ставит java-сторона в nativeInit, на iOS звать
+        // некого — ставим сами.
+        #[cfg(target_os = "ios")]
+        ios::install();
         inproc::init(dir)?;
         Ok(())
     });
