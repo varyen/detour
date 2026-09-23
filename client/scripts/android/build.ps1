@@ -1,5 +1,9 @@
 ﻿# Сборка Android-версии Detour.
 #   pwsh client/scripts/android/build.ps1 [-Abi arm64|x86_64|both] [-Release]
+#                                         [-Keystore keys/android-release.jks]
+# С -Keystore release-APK подписывается (пароль — в $env:DETOUR_KS_PASS) и
+# кладётся в releases/client как detour-client-android_<версия>_<abi>.apk.
+# Ключ менять нельзя: APK с другой подписью не встанет поверх старой версии.
 #
 # Что происходит:
 #  1. libbox.aar — ядро sing-box для Android. Собирается gomobile из исходников
@@ -15,6 +19,7 @@
 param(
   [ValidateSet('arm64', 'x86_64', 'both')] [string] $Abi = 'arm64',
   [switch] $Release,
+  [string] $Keystore,
   [string] $Work = (Join-Path ([IO.Path]::GetTempPath()) "detour-android"),
   [string] $SingBoxVersion = "1.13.21",
   [string] $GoVersion = "1.24.7",
@@ -102,3 +107,20 @@ Pop-Location
 $apk = Get-ChildItem (Join-Path $client 'app\gen\android\app\build\outputs\apk') -Recurse -Filter *.apk -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime | Select-Object -Last 1
 if ($apk) { Write-Host "готово: $($apk.FullName) ($([int]($apk.Length/1MB)) МБ)" }
+
+if ($Release -and $Keystore) {
+  if (-not $env:DETOUR_KS_PASS) { throw "нет пароля ключа: `$env:DETOUR_KS_PASS" }
+  $bt = Get-ChildItem "$sdk\build-tools" | Sort-Object { [version]$_.Name } | Select-Object -Last 1
+  $version = (Get-Content (Join-Path $root 'VERSION') -Raw).Trim()
+  $outDir = Join-Path $root 'releases\client'
+  New-Item -ItemType Directory -Force $outDir | Out-Null
+  $signed = Join-Path $outDir "detour-client-android_${version}_$Abi.apk"
+  $aligned = Join-Path $Work 'aligned.apk'
+  & (Join-Path $bt.FullName 'zipalign.exe') -p -f 4 $apk.FullName $aligned
+  if ($LASTEXITCODE) { throw "zipalign не прошёл" }
+  & (Join-Path $bt.FullName 'apksigner.bat') sign --ks (Resolve-Path $Keystore) --ks-key-alias detour `
+    --ks-pass env:DETOUR_KS_PASS --out $signed $aligned
+  if ($LASTEXITCODE) { throw "подпись не прошла" }
+  & (Join-Path $bt.FullName 'apksigner.bat') verify --print-certs $signed | Select-Object -First 2
+  Write-Host "подписано: $signed"
+}

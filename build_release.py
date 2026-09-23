@@ -9,6 +9,7 @@ Usage:
 Output:
     releases/v<version>/detour_<version>_all.ipk            (+ .ipk.sig)
     releases/v<version>/detour-keenetic_<version>_all.ipk   (+ .ipk.sig)
+    releases/v<version>/detour-client-<platform>_<version>_*    (+ .sig; из releases/client)
     releases/v<version>/RELEASE_NOTES.md
 
 sing-box is NOT bundled here. The panel package installs on its own, then its
@@ -880,6 +881,51 @@ def sign_ipk(ipk_path):
     return sig_path
 
 
+# ============ клиент (client/) ============
+
+# Сборки клиента лежат в releases/client под именами своих сборщиков, в релиз
+# они уезжают как detour-client-<платформа>_… Префикс detour-client- выбран
+# намеренно: роутерный detour-update ищет ассеты по ^detour_ и ^detour-keenetic_,
+# и Android-.apk под именем detour_* старые панели на OpenWrt 25.12 приняли бы
+# за свой пакет.
+CLIENT_DIR = os.path.join(RELEASES_DIR, "client")
+
+
+def client_artifacts(version):
+    """[(платформа, исходный путь, имя в релизе)] для найденных сборок версии."""
+    found = []
+    exe = os.path.join(CLIENT_DIR, f"detour-setup-{version}.exe")
+    if os.path.isfile(exe):
+        found.append(("windows", exe, f"detour-client-windows_{version}_x64-setup.exe"))
+    dmg = os.path.join(CLIENT_DIR, f"Detour-{version}.dmg")
+    if os.path.isfile(dmg):
+        found.append(("macos", dmg, f"detour-client-macos_{version}_x64.dmg"))
+    if os.path.isdir(CLIENT_DIR):
+        prefix = f"detour-client-android_{version}_"
+        for n in sorted(os.listdir(CLIENT_DIR)):
+            if n.startswith(prefix) and n.endswith(".apk"):
+                found.append(("android", os.path.join(CLIENT_DIR, n), n))
+    return found
+
+
+def add_client(version, out_dir, required):
+    import shutil
+    arts = client_artifacts(version)
+    have = {p for p, _, _ in arts}
+    missing = [p for p in required if p not in have]
+    if missing:
+        die(f"нет клиентских сборок {version} для: {', '.join(missing)} "
+            f"(ищу в {CLIENT_DIR}); --client-platforms сужает список")
+    out = []
+    for platform, src, name in arts:
+        dst = os.path.join(out_dir, name)
+        shutil.copyfile(src, dst)
+        sig = sign_ipk(dst)
+        print(f"  [{platform}] {name}  ({os.path.getsize(dst):,} B, sha256 {sha256_file(dst)[:16]}...)")
+        out.append((platform, dst, sig))
+    return out
+
+
 # ============ git/notes ============
 
 def read_changelog_notes(version):
@@ -1080,6 +1126,7 @@ def publish_to_github(version, out_dir):
     assets_to_upload = sorted(
         os.path.join(out_dir, n) for n in os.listdir(out_dir)
         if n.endswith((".ipk", ".ipk.sig", ".apk", ".apk.sig"))
+        or n.startswith("detour-client-")
     )
     if not assets_to_upload:
         die(f"no package artefacts in {out_dir} — build first")
@@ -1099,7 +1146,12 @@ def publish_to_github(version, out_dir):
     for path in assets_to_upload:
         name = os.path.basename(path)
         size = os.path.getsize(path)
-        ctype = "application/x-debian-package" if name.endswith(".ipk") else "application/octet-stream"
+        if name.endswith(".ipk"):
+            ctype = "application/x-debian-package"
+        elif name.startswith("detour-client-") and name.endswith(".apk"):
+            ctype = "application/vnd.android.package-archive"
+        else:
+            ctype = "application/octet-stream"
         print(f"[publish] uploading {name} ({size} bytes)...")
         with open(path, "rb") as f:
             data = f.read()
@@ -1130,7 +1182,11 @@ def main():
                     help="Don't fail if releases/v<version>/ already exists — overwrite it")
     ap.add_argument("--no-keenetic", action="store_true",
                     help="Skip the Keenetic/Entware .ipk (built into the same release by default)")
+    ap.add_argument("--client-platforms", default="windows,macos,android",
+                    help="Клиентские сборки, без которых релиз не собирается (через запятую); "
+                         "пустая строка — клиент не класть")
     args = ap.parse_args()
+    client_required = [p for p in args.client_platforms.split(",") if p.strip()]
 
     version = parse_version(args.version)
     out_dir = os.path.join(RELEASES_DIR, f"v{version}")
@@ -1211,6 +1267,12 @@ def main():
         print(f"  signed: {keenetic_sig}" if keenetic_sig else "  (UNSIGNED)")
         built.append(("keenetic", keenetic_ipk, keenetic_sig))
 
+    client = []
+    if client_required:
+        print("\n[client] Collecting client builds ...")
+        client = add_client(version, out_dir, client_required)
+        built += [(f"client/{p}", path, sig) for p, path, sig in client]
+
     # --- release notes ---
     print("\n[notes] Writing release notes ...")
     notes_path = os.path.join(out_dir, "RELEASE_NOTES.md")
@@ -1225,6 +1287,21 @@ def main():
         if keenetic_ipk:
             f.write(f"- `{os.path.basename(keenetic_ipk)}` — Keenetic/Entware (mipsel) package "
                     "(on first install it bootstraps our mipsel feed and then pulls sing-box + tpws-zapret automatically; nothing bundled).\n")
+        if client:
+            client_desc = {
+                "windows": "Windows 10/11 x64 — установщик: служба + приложение, sing-box внутри; "
+                           "движок обхода DPI (winws2) ставится из приложения",
+                "macos": "macOS (Intel; на Apple Silicon — через Rosetta) — образ диска с Detour.app; "
+                         "после копирования в «Программы» службу ставит "
+                         "`sudo /Applications/Detour.app/Contents/MacOS/detour-svc install`",
+                "android": "Android 7+ — APK, VPN через VpnService, tpws внутри",
+            }
+            f.write("\n## Клиент для устройств\n\n"
+                    "Та же панель, но маршрутизирует само устройство (sing-box в режиме TUN), "
+                    "роутер не нужен. Сборки не подписаны сертификатами Microsoft/Apple — "
+                    "SmartScreen и Gatekeeper покажут предупреждение.\n\n")
+            for p, path, _sig in client:
+                f.write(f"- `{os.path.basename(path)}` — {client_desc[p]}.\n")
         f.write("\n## Binaries (sing-box + tpws-zapret)\n\n")
         f.write(
             "Neither binary is bundled — after the panel package lands, its postinst "

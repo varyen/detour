@@ -3,9 +3,10 @@
 > Веб-панель управления обходом блокировок для роутеров GL.iNet / OpenWrt.
 > Два движка под одним SPA-интерфейсом — **sing-box** (Trojan/VLESS-прокси) и
 > **zapret-tpws** (DPI-bypass) — с самообновлением по подписанным релизам
-> (`.ipk` для opkg, `.apk` для OpenWrt 25.12+).
+> (`.ipk` для opkg, `.apk` для OpenWrt 25.12+). С версии 2.0 — ещё и клиент
+> для Windows, macOS и Android: та же панель, но без роутера.
 
-**Версия:** [`1.58.1`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
+**Версия:** [`2.0.0`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
@@ -83,6 +84,23 @@ opkg install /tmp/detour-keenetic_X.Y.Z_all.ipk
 После установки панель доступна по адресу `http://<IP-роутера>:8080/detour/`.
 Дальше обновляться проще всего из самой панели или командой `detour-update apply`
 на роутере.
+
+### Клиент для устройства (Windows, macOS, Android)
+
+Если роутера с OpenWrt/Keenetic нет — ставьте клиент на само устройство. Внутри
+та же панель, профили и списки сайтов, но маршрутизирует устройство:
+sing-box работает в режиме TUN. Файлы лежат в том же релизе:
+
+- `detour-client-windows_X.Y.Z_x64-setup.exe` — Windows 10/11. Ставит службу
+  и приложение; движок обхода DPI (winws2) ставится из самого приложения.
+- `detour-client-macos_X.Y.Z_x64.dmg` — macOS (Intel, на Apple Silicon идёт
+  через Rosetta). Перетащите Detour.app в «Программы» и один раз поставьте службу:
+  `sudo /Applications/Detour.app/Contents/MacOS/detour-svc install`.
+- `detour-client-android_X.Y.Z_arm64.apk` — Android 7+.
+
+Сборки не подписаны сертификатами Microsoft и Apple: SmartScreen и Gatekeeper
+покажут предупреждение. Подробности об устройстве клиента — в
+[`client/README.md`](client/README.md).
 
 ## Что это
 
@@ -170,6 +188,7 @@ busybox-апплетов и т.п.) и подстраивает деплой.
 | ---------------------- | ----------------------------------------------------------------------------------------- |
 | `router_files/`        | Скрипты, деплоящиеся на роутер: init.d, CGI, updater, shim'ы.                             |
 | `panel/`               | Основная панель на Vue 3 + PWA (ставится в `/detour/`; старая однофайловая — на `/detour-old/`). Сборка `npm run build` → `panel/dist`. |
+| `client/`              | Клиент для Windows/macOS/Android (Rust + Tauri 2): ядро, служба, приложение, установщики. |
 | `router-backup/`       | Зеркало живого состояния роутера (gitignored). Источник конфигов и бинарников при сборке. |
 | `build_release.py`     | Сборка подписанных пакетов панели: `.ipk` + `.apk` (`detour`) и `.ipk` (`detour-keenetic`). |
 | `apk_pkg.py`           | Сборщик пакетов формата APKv2 на чистом Python (для OpenWrt 25.12+).                      |

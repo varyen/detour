@@ -25,6 +25,7 @@ keenetic/bins/
 keys/release.key
 keys/*.key
 keys/*.sec
+keys/*.jks
 releases/
 
 # Temporary diagnostic / one-off scripts (underscore prefix convention)
@@ -74,3 +75,4 @@ landing/raw-video/
 /client/app/gen/android/app/src/main/jniLibs/
 /client/app/gen/android/.idea/
 /panel/dist-client/
+.clauder/
