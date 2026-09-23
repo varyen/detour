@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
 
+use crate::awg::{self, Sidecars};
 use crate::chains::ChainStore;
 use crate::lists::{self, Matchers, UdpItem};
 use crate::profiles;
@@ -59,6 +60,8 @@ pub enum DpiRoute {
 pub struct Rendered {
     pub config: Value,
     pub rulesets: Vec<(PathBuf, Value)>,
+    /// AmneziaWG-профили этой сборки — их поднимает сайдкар mihomo.
+    pub awg: Sidecars,
 }
 
 #[derive(Clone)]
@@ -67,11 +70,21 @@ pub enum Hop {
     Endpoint(Value),
 }
 
-fn hop(store: &Store, id: &str, tag: &str, detour: Option<&str>) -> Result<Hop> {
+fn hop(store: &Store, id: &str, tag: &str, detour: Option<&str>, awg: &mut Sidecars) -> Result<Hop> {
     let profile = profiles::load(store, id).ok_or_else(|| anyhow!("профиль {id} не найден"))?;
-    let ob = profiles::outbound(&profile)
+    let mut ob = profiles::outbound(&profile)
         .cloned()
         .ok_or_else(|| anyhow!("у профиля {id} нет параметров подключения"))?;
+    if awg::is_awg(&ob) {
+        if !awg::SUPPORTED {
+            bail!("профиль {id}: AmneziaWG на этой платформе недоступен");
+        }
+        // socks на 127.0.0.1 через предыдущий хоп ушёл бы на удалённую сторону
+        if detour.is_some() {
+            bail!("AmneziaWG-профиль {id} может быть только первым звеном цепочки");
+        }
+        ob = awg::socks_outbound(awg.port_for(id, &ob));
+    }
     prepare(ob, tag, detour).map_err(|e| anyhow!("профиль {id}: {e}"))
 }
 
@@ -85,6 +98,9 @@ pub fn prepare(mut ob: Value, tag: &str, detour: Option<&str>) -> Result<Hop> {
         None => obj.remove("detour"),
     };
     let t = obj.get("type").and_then(Value::as_str).unwrap_or("").to_owned();
+    if t == awg::TYPE {
+        bail!("AmneziaWG работает только через сайдкар mihomo");
+    }
     if QUIC_TYPES.contains(&t.as_str()) {
         if let Some(tls) = obj.get_mut("tls").and_then(Value::as_object_mut) {
             tls.remove("utls");
@@ -149,6 +165,7 @@ fn ruleset(tag: &str, m: &Matchers, dir: &Path) -> (Value, (PathBuf, Value)) {
 struct Builder {
     outbounds: Vec<Value>,
     endpoints: Vec<Value>,
+    awg: Sidecars,
 }
 
 impl Builder {
@@ -164,12 +181,13 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
     if p.chain.is_empty() {
         bail!("no active profile");
     }
-    let mut b = Builder { outbounds: Vec::new(), endpoints: Vec::new() };
+    let mut b = Builder { outbounds: Vec::new(), endpoints: Vec::new(), awg: Sidecars::default() };
     let n = p.chain.len();
     for (i, id) in p.chain.iter().enumerate() {
         let tag = if i + 1 == n { "proxy".to_owned() } else { format!("chain_{}", i + 1) };
         let detour = (i > 0).then(|| format!("chain_{i}"));
-        b.push(hop(store, id, &tag, detour.as_deref())?);
+        let h = hop(store, id, &tag, detour.as_deref(), &mut b.awg)?;
+        b.push(h);
     }
 
     let mut rules: Vec<Value> = vec![
@@ -196,6 +214,13 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
     }
 
     route_targets(store, p.chain, &mut b, &mut rules)?;
+
+    // Сам mihomo ходит к AWG-серверу наружу, и без этого правила его UDP
+    // вернулся бы в TUN и дальше в тот же socks — петля. На Android петлю
+    // режет исключение приложения из VpnService.
+    if !b.awg.is_empty() && !cfg!(any(target_os = "android", target_os = "ios")) {
+        rules.insert(3, json!({ "process_name": [awg::EXE], "outbound": "direct" }));
+    }
 
     let mut rule_sets = Vec::new();
     let mut files = Vec::new();
@@ -351,7 +376,7 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
     if !b.endpoints.is_empty() {
         config["endpoints"] = json!(b.endpoints);
     }
-    Ok(Rendered { config, rulesets: files })
+    Ok(Rendered { config, rulesets: files, awg: b.awg })
 }
 
 /// Карта маршрутов. Цель — профиль или цепочка; пропавшая цель не уходит в
@@ -381,7 +406,8 @@ fn route_targets(store: &Store, active: &[String], b: &mut Builder, rules: &mut 
             for (i, id) in c.hops.iter().enumerate() {
                 let tag = if i + 1 == last { format!("out_{}", c.id) } else { format!("rc{n}_{}", i + 1) };
                 let detour = (i > 0).then(|| format!("rc{n}_{i}"));
-                b.push(hop(store, id, &tag, detour.as_deref())?);
+                let h = hop(store, id, &tag, detour.as_deref(), &mut b.awg)?;
+                b.push(h);
             }
             (format!("out_{}", c.id), c.hops.last().cloned().unwrap_or_default())
         } else if let Some(pos) = active.iter().position(|h| *h == sec.target) {
@@ -389,8 +415,13 @@ fn route_targets(store: &Store, active: &[String], b: &mut Builder, rules: &mut 
             (tag, sec.target.clone())
         } else {
             let tag = format!("out_{}", sec.target);
-            let detour = sec.via_chain.then_some("proxy");
-            b.push(hop(store, &sec.target, &tag, detour)?);
+            // «через цепочку» для AWG невозможно — цель идёт прямо в свой туннель
+            let target_awg = profiles::load(store, &sec.target)
+                .and_then(|p| profiles::outbound(&p).map(awg::is_awg))
+                .unwrap_or(false);
+            let detour = (sec.via_chain && !target_awg).then_some("proxy");
+            let h = hop(store, &sec.target, &tag, detour, &mut b.awg)?;
+            b.push(h);
             (tag, sec.target.clone())
         };
 
@@ -538,6 +569,30 @@ mod tests {
         assert_eq!(ep["peers"][0]["address"], "vpn.example.com");
         assert_eq!(ep["peers"][0]["public_key"], "p");
         assert!(ep.get("server").is_none() && ep.get("peer_public_key").is_none());
+    }
+
+    #[test]
+    fn amneziawg_becomes_socks_to_sidecar() {
+        let s = tmp_store("awg");
+        put_profile(&s, "a", json!({
+            "type": "amneziawg", "server": "203.0.113.5", "server_port": 51820,
+            "private_key": "k", "peer_public_key": "p", "local_address": ["10.8.1.2/32"],
+            "amnezia": { "jc": 4 },
+        }));
+        put_profile(&s, "b", json!({ "type": "vless", "server": "vpn.example.com", "server_port": 443 }));
+        let chain = vec!["a".to_owned(), "b".to_owned()];
+        let r = render(&s, &Settings::default(), &params(&chain, s.root())).unwrap();
+        let obs = r.config["outbounds"].as_array().unwrap();
+        assert_eq!(obs[0], json!({ "type": "socks", "server": "127.0.0.1", "server_port": awg::PORT_BASE, "version": "5", "tag": "chain_1" }));
+        assert_eq!(obs[1]["detour"], "chain_1");
+        assert_eq!(r.awg.list.len(), 1);
+        let rules = r.config["route"]["rules"].as_array().unwrap();
+        let own = rules.iter().any(|x| x["process_name"] == json!([awg::EXE]));
+        assert_eq!(own, !cfg!(any(target_os = "android", target_os = "ios")));
+
+        let wrong = vec!["b".to_owned(), "a".to_owned()];
+        let err = render(&s, &Settings::default(), &params(&wrong, s.root())).err().unwrap();
+        assert!(format!("{err:#}").contains("первым звеном"));
     }
 
     #[test]

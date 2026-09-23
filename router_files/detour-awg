@@ -1,0 +1,278 @@
+#!/bin/sh
+# detour-awg — AmneziaWG через сайдкар mihomo.
+#
+# sing-box AmneziaWG не умеет, mihomo (MetaCubeX, ветка Meta) — умеет все версии:
+# 1.0, 1.5 (i1–i5, j1–j3, itime), 2.0 (s3/s4, H-диапазоны) и 3.x (version: 3,
+# header-protection-key и пр.). Поэтому AWG-профили не попадают в конфиг
+# sing-box напрямую: один процесс mihomo держит по socks-listener'у на
+# 127.0.0.1:<порт> на каждый AWG-профиль, а sing-box видит такой профиль как
+# обычный socks-outbound на этот порт. Маршруты, файрвол, health и счётчики
+# остаются прежними.
+#
+# Профиль (profiles/<id>.json): top-level "type":"amneziawg", outbound —
+#   {"type":"amneziawg","server","server_port","local_address":[...],
+#    "private_key","peer_public_key","pre_shared_key","mtu","reserved",
+#    "amnezia":{ ключи в именах mihomo: jc, jmin, … h1–h4, i1–i5, j1–j3, itime,
+#                version, header-protection-key, content-padding-addition, … }}
+#
+# Порты — 12600+N, закреплены за id в $PORTS, чтобы новый профиль не сдвигал
+# порты уже работающих конфигов sing-box.
+#
+#   detour-awg sync            пересобрать конфиг mihomo, перезапустить при изменении
+#   detour-awg render          только пересобрать конфиг (exit 3 — AWG-профилей нет)
+#   detour-awg outbound <id>   socks-outbound для sing-box (JSON одной строкой)
+#   detour-awg port <id>       порт профиля
+#   detour-awg status          JSON для панели
+#   detour-awg check           проверить текущий конфиг (mihomo -t)
+#   detour-awg run             exec mihomo (зовёт init-скрипт)
+
+PLATFORM=openwrt
+ETC=/etc
+BIN=/usr/bin/mihomo
+RUNDIR=/var/etc/detour-awg
+LOG=/var/log/detour-awg.log
+INITD=/etc/init.d/detour-awg
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    ETC=/opt/etc
+    BIN=/opt/bin/mihomo
+    RUNDIR=/opt/var/run/detour-awg
+    LOG=/opt/var/log/detour-awg.log
+    INITD=/opt/etc/init.d/S55detour-awg
+fi
+PROFILES="$ETC/sing-box/profiles"
+PORTS="$ETC/sing-box/awg-ports"
+CONF="$RUNDIR/config.yaml"
+PORT_BASE=12600
+PORT_MAX=12699
+
+mkdir -p "$RUNDIR"
+
+# Разбор профилей и рендер конфига — в Lua (cjson есть на обеих платформах).
+# $1 = режим: render <out> | port <id>
+awg_lua() {
+    lua - "$PLATFORM" "$PROFILES" "$PORTS" "$PORT_BASE" "$PORT_MAX" "$@" <<'LUA'
+if arg[1] == "keenetic" then
+    package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
+end
+local cjson = require("cjson.safe")
+local pdir, pfile, base, pmax, mode = arg[2], arg[3], tonumber(arg[4]), tonumber(arg[5]), arg[6]
+
+local function read(path)
+    local f = io.open(path, "rb"); if not f then return nil end
+    local s = f:read("*a"); f:close(); return s
+end
+
+-- AWG-профили: id → outbound
+local profiles, ids = {}, {}
+local ls = io.popen('ls "' .. pdir .. '"/*.json 2>/dev/null')
+if ls then
+    for f in ls:lines() do
+        local obj = cjson.decode(read(f) or "")
+        if type(obj) == "table" and type(obj.outbound) == "table"
+           and (obj.outbound.type == "amneziawg" or obj.type == "amneziawg") then
+            local id = obj.id or f:match("([^/]+)%.json$")
+            profiles[id] = obj.outbound
+            ids[#ids + 1] = id
+        end
+    end
+    ls:close()
+end
+table.sort(ids)
+
+-- id → порт; освободившиеся порты переиспользуются, занятые не трогаются
+local ports, used, dirty = {}, {}, false
+for line in (read(pfile) or ""):gmatch("[^\n]+") do
+    local id, p = line:match("^(%S+)%s+(%d+)")
+    p = tonumber(p)
+    if id and p and profiles[id] and not used[p] then ports[id] = p; used[p] = true
+    elseif id then dirty = true end
+end
+for _, id in ipairs(ids) do
+    if not ports[id] then
+        for p = base, pmax do
+            if not used[p] then ports[id] = p; used[p] = true; dirty = true; break end
+        end
+    end
+end
+if dirty then
+    local out = {}
+    for _, id in ipairs(ids) do
+        if ports[id] then out[#out + 1] = id .. " " .. ports[id] end
+    end
+    local f = io.open(pfile .. ".tmp", "w")
+    f:write(table.concat(out, "\n"), #out > 0 and "\n" or "")
+    f:close()
+    os.rename(pfile .. ".tmp", pfile)
+end
+
+if mode == "port" then
+    local p = ports[arg[7] or ""]
+    if not p then os.exit(1) end
+    io.write(p)
+    os.exit(0)
+end
+
+-- render: конфиг mihomo (JSON — подмножество YAML)
+local AWG_KEYS = {
+    "version", "jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
+    "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5",
+    "j1", "j2", "j3", "itime",
+    "header-protection-key", "content-padding-addition", "rekey-after-time",
+    "rekey-timeout", "reject-after-time", "keepalive-timeout",
+    "max-handshake-attempts", "random-trailers", "disable-cookies",
+}
+local NUM = { version = 1, jc = 1, jmin = 1, jmax = 1, s1 = 1, s2 = 1, s3 = 1, s4 = 1, itime = 1 }
+local BOOL = { ["random-trailers"] = 1, ["disable-cookies"] = 1 }
+
+local proxies, listeners = {}, {}
+for _, id in ipairs(ids) do
+    local ob, port = profiles[id], ports[id]
+    local addrs = ob.local_address or ob.address
+    if type(addrs) == "string" then addrs = { addrs } end
+    local ip4, ip6
+    for _, a in ipairs(type(addrs) == "table" and addrs or {}) do
+        local host = tostring(a):gsub("/%d+$", "")
+        if host:find(":", 1, true) then ip6 = ip6 or host else ip4 = ip4 or host end
+    end
+    if port and ob.server and ob.server_port and ob.private_key and ob.peer_public_key and (ip4 or ip6) then
+        local name = "awg-" .. id
+        local px = {
+            name = name, type = "wireguard", server = ob.server, port = tonumber(ob.server_port),
+            ["private-key"] = ob.private_key, ["public-key"] = ob.peer_public_key,
+            ip = ip4, ipv6 = ip6, udp = true, mtu = tonumber(ob.mtu) or 1280,
+            ["allowed-ips"] = { "0.0.0.0/0", "::/0" },
+        }
+        if ob.pre_shared_key and ob.pre_shared_key ~= "" then px["pre-shared-key"] = ob.pre_shared_key end
+        if tonumber(ob.persistent_keepalive_interval) then
+            px["persistent-keepalive"] = tonumber(ob.persistent_keepalive_interval)
+        end
+        local opt, n = {}, 0
+        local src = type(ob.amnezia) == "table" and ob.amnezia or {}
+        for _, k in ipairs(AWG_KEYS) do
+            local v = src[k]
+            if v == nil then v = src[k:gsub("-", "_")] end
+            if v ~= nil and v ~= "" and v ~= cjson.null then
+                if NUM[k] then v = tonumber(v)
+                elseif BOOL[k] then v = (v == true or v == 1 or v == "1" or v == "true")
+                else v = tostring(v) end
+                if v ~= nil then opt[k] = v; n = n + 1 end
+            end
+        end
+        if n > 0 then px["amnezia-wg-option"] = opt end
+        proxies[#proxies + 1] = px
+        listeners[#listeners + 1] = {
+            name = "in-" .. id, type = "socks", listen = "127.0.0.1", port = port,
+            udp = true, proxy = name,
+        }
+    end
+end
+
+if #proxies == 0 then os.exit(3) end
+local conf = {
+    ["log-level"] = "warning",
+    ["allow-lan"] = false,
+    ["bind-address"] = "127.0.0.1",
+    ipv6 = true,
+    mode = "rule",
+    ["unified-delay"] = true,
+    profile = { ["store-selected"] = false, ["store-fake-ip"] = false },
+    proxies = proxies,
+    listeners = listeners,
+    rules = { "MATCH,REJECT" },
+}
+-- cjson пишет «/» как «\/» (в ключах base64 он есть всегда), а YAML-парсер
+-- mihomo такой escape не принимает — и весь конфиг отвергается.
+local out = cjson.encode(conf):gsub("\\/", "/")
+local f = io.open(arg[7], "w")
+f:write(out); f:close()
+LUA
+}
+
+have_bin() { [ -x "$BIN" ]; }
+
+svc() { [ -x "$INITD" ] && "$INITD" "$1" >/dev/null 2>&1; }
+
+# 0 = есть конфиг (новый или прежний), 3 = AWG-профилей нет
+do_sync() {
+    tmp="$CONF.new"
+    awg_lua render "$tmp"
+    rc=$?
+    if [ "$rc" = 3 ]; then
+        rm -f "$tmp" "$CONF"
+        svc stop
+        return 3
+    fi
+    [ "$rc" = 0 ] && [ -s "$tmp" ] || { rm -f "$tmp"; echo "render failed" >&2; return 1; }
+    if [ -f "$CONF" ] && cmp -s "$tmp" "$CONF"; then
+        rm -f "$tmp"
+        have_bin && ! running && svc start
+        return 0
+    fi
+    if have_bin; then
+        err=$("$BIN" -t -d "$RUNDIR" -f "$tmp" 2>&1) || {
+            rm -f "$tmp"
+            echo "mihomo отверг конфиг: $(printf '%s' "$err" | tail -3)" >&2
+            return 1
+        }
+    fi
+    mv "$tmp" "$CONF"
+    have_bin && svc restart
+    return 0
+}
+
+running() {
+    pgrep -f "$BIN -d $RUNDIR" >/dev/null 2>&1 && return 0
+    ps w 2>/dev/null | grep -v grep | grep -q "$BIN -d $RUNDIR"
+}
+
+safe_id() { printf '%s' "$1" | tr -cd 'a-zA-Z0-9_-'; }
+
+case "$1" in
+    sync)
+        do_sync
+        ;;
+    render)
+        # только конфиг, без управления сервисом — для init-скриптов
+        awg_lua render "$CONF.new" && mv "$CONF.new" "$CONF" || { rm -f "$CONF.new"; exit 3; }
+        ;;
+    port)
+        awg_lua port "$(safe_id "$2")"
+        ;;
+    outbound)
+        p=$(awg_lua port "$(safe_id "$2")") || exit 1
+        printf '{"type":"socks","server":"127.0.0.1","server_port":%s,"version":"5"}\n' "$p"
+        ;;
+    check)
+        have_bin || { echo "mihomo не установлен ($BIN)"; exit 1; }
+        [ -f "$CONF" ] || { echo "нет конфига"; exit 1; }
+        "$BIN" -t -d "$RUNDIR" -f "$CONF"
+        ;;
+    run)
+        have_bin || { echo "mihomo не установлен ($BIN)" >&2; exit 1; }
+        [ -f "$CONF" ] || awg_lua render "$CONF" || exit 0
+        exec "$BIN" -d "$RUNDIR" -f "$CONF"
+        ;;
+    status)
+        inst=false; ver=""; run=false
+        if have_bin; then
+            inst=true
+            ver=$("$BIN" -v 2>/dev/null | sed -n 's/.*Mihomo[^v]*v\([0-9][0-9.a-z-]*\).*/\1/p' | head -1)
+        fi
+        running && run=true
+        printf '{"installed":%s,"version":"%s","running":%s,"platform":"%s","profiles":[' "$inst" "$ver" "$run" "$PLATFORM"
+        first=1
+        [ -f "$PORTS" ] && while read -r id port; do
+            [ -n "$id" ] || continue
+            [ "$first" = 1 ] || printf ','
+            first=0
+            printf '{"id":"%s","port":%s}' "$id" "$port"
+        done < "$PORTS"
+        printf ']}\n'
+        ;;
+    *)
+        echo "usage: $0 {sync|outbound <id>|port <id>|status|check|run}" >&2
+        exit 2
+        ;;
+esac

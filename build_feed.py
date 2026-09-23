@@ -38,6 +38,11 @@ Usage:
     python3 build_feed.py --version 1.13.2 --tpws-version 72.12 --publish  # + push feed
     python3 build_feed.py --version 1.13.3                                 # bump sing-box only
     python3 build_feed.py --tpws-version 72.13 --publish                   # bump tpws only
+    python3 build_feed.py --arch all --mihomo-version 1.19.31 --publish    # mihomo (AmneziaWG)
+
+mihomo (MetaCubeX/mihomo, ветка Meta) — сайдкар для AmneziaWG-профилей. Панель от
+него НЕ зависит (~57 МБ ставятся только по кнопке «Установить mihomo»), поэтому
+пакет лежит во всех каталогах фида, включая apk-*, и всегда качается из апстрима.
 """
 import argparse
 import gzip
@@ -89,18 +94,22 @@ PKG_FORMAT = "ipk"
 # `Architecture: all` в opkg-ветке, только выбор делает detour-update, а не opkg.
 APK_FEED_PREFIX = "apk-"
 
-# семейство → (каталог в релизе zapret/zapret2, ожидаемая ELF-сигнатура)
+# семейство → (каталог в релизе zapret/zapret2, суффикс ассета mihomo, ожидаемая
+# ELF-сигнатура)
 #   ELF: (EI_CLASS, EI_DATA, e_machine) — 1=32бит/2=64бит, 1=LE/2=BE
+# mihomo: amd64-v1 — без AVX (старые x86-роутеры), armv5 и *-softfloat — по той
+# же причине, что и zapret linux-arm: работают и на железе с FPU, обратное неверно.
 APK_TARGETS = {
-    "x86_64":  {"zapret": "linux-x86_64", "elf": (2, 1, 0x3E)},
-    "x86":     {"zapret": "linux-x86",    "elf": (1, 1, 0x03)},
-    "aarch64": {"zapret": "linux-arm64",  "elf": (2, 1, 0xB7)},
+    "x86_64":  {"zapret": "linux-x86_64", "mihomo": "amd64-v1",         "elf": (2, 1, 0x3E)},
+    "x86":     {"zapret": "linux-x86",    "mihomo": "386",              "elf": (1, 1, 0x03)},
+    "aarch64": {"zapret": "linux-arm64",  "mihomo": "arm64",            "elf": (2, 1, 0xB7)},
     # zapret собирает linux-arm soft-float — на hard-float armv7 такой статический
     # бинарник запускается штатно, обратное неверно, поэтому берём именно его.
-    "arm":     {"zapret": "linux-arm",    "elf": (1, 1, 0x28)},
-    "mipsel":  {"zapret": "linux-mipsel", "elf": (1, 1, 0x08)},
-    "mips":    {"zapret": "linux-mips",   "elf": (1, 2, 0x08)},
+    "arm":     {"zapret": "linux-arm",    "mihomo": "armv5",            "elf": (1, 1, 0x28)},
+    "mipsel":  {"zapret": "linux-mipsel", "mihomo": "mipsle-softfloat", "elf": (1, 1, 0x08)},
+    "mips":    {"zapret": "linux-mips",   "mihomo": "mips-softfloat",   "elf": (1, 2, 0x08)},
 }
+MIHOMO_REPO = "MetaCubeX/mihomo"
 
 # Кэш скачанных бинарников: router-backup/apk/<семейство>/<имя>. router-backup
 # в .gitignore, поэтому в репозиторий ничего не попадает.
@@ -125,6 +134,8 @@ NFQWS_LUA_FILES = ("zapret-lib.lua", "zapret-antidpi.lua", "zapret-auto.lua")
 # gitignored. Populated by fetch_singbox_mipsel / fetch_tpws_mipsel.
 SB_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "sing-box")
 TPWS_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "sbin", "tpws-zapret")
+MIHOMO_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "mihomo")
+MIHOMO_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "mihomo")
 
 # Upstream source repos for --fetch-upstream (CI auto-publish needs no
 # router-backup). sing-box ships the binary in a per-libc tarball; zapret/zapret2
@@ -201,6 +212,32 @@ fi
 exit 0
 """
 
+# mihomo — сайдкар AmneziaWG (detour-awg). restart сайдкара — no-op, пока нет
+# AWG-профилей, поэтому звать его после обновления бинарника безопасно.
+_MIHOMO_POSTINST = """#!/bin/sh
+set +e
+chmod 0755 /usr/bin/mihomo 2>/dev/null
+[ -x /etc/init.d/detour-awg ] && /etc/init.d/detour-awg restart >/dev/null 2>&1
+exit 0
+"""
+_MIHOMO_PRERM = """#!/bin/sh
+set +e
+[ -x /etc/init.d/detour-awg ] && /etc/init.d/detour-awg stop >/dev/null 2>&1
+exit 0
+"""
+_MIHOMO_POSTINST_MIPSEL = """#!/bin/sh
+set +e
+chmod 0755 /opt/bin/mihomo 2>/dev/null
+[ -x /opt/etc/init.d/S55detour-awg ] && /opt/etc/init.d/S55detour-awg restart >/dev/null 2>&1
+exit 0
+"""
+_MIHOMO_PRERM_MIPSEL = """#!/bin/sh
+set +e
+exit 0
+"""
+_MIHOMO_DESC = ("mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar "
+                "for AmneziaWG profiles (sing-box has no AmneziaWG).")
+
 # Package specs: a list of (src_path, dest_rel, mode) files + maintainer scripts +
 # description. Versions are supplied at build time. Sources are populated locally
 # (sing-box/tpws by update_backups.py; nfqws2 by fetch_nfqws2_assets).
@@ -227,6 +264,12 @@ PKG_SPECS = {
         "prerm": _NFQWS_PRERM,
         "description": ("zapret2 nfqws2 NFQUEUE DPI-bypass engine + LuaJIT desync "
                         "scripts (bol-van/zapret2). Optional — used by zapret2 mode."),
+    },
+    "mihomo": {
+        "files": [(MIHOMO_BINARY, "usr/bin/mihomo", 0o755)],
+        "postinst": _MIHOMO_POSTINST,
+        "prerm": _MIHOMO_PRERM,
+        "description": _MIHOMO_DESC,
     },
 }
 
@@ -287,6 +330,12 @@ PKG_SPECS_MIPSEL = {
         "description": ("zapret tpws transparent DPI-bypass proxy (bol-van/zapret). "
                         "Detour feed build for Keenetic/Entware (mipsel)."),
     },
+    "mihomo": {
+        "files": [(MIHOMO_BINARY_MIPSEL, "opt/bin/mihomo", 0o755)],
+        "postinst": _MIHOMO_POSTINST_MIPSEL,
+        "prerm": _MIHOMO_PRERM_MIPSEL,
+        "description": _MIHOMO_DESC + " Keenetic/Entware (mipsel soft-float).",
+    },
 }
 
 
@@ -312,6 +361,10 @@ def apk_pkg_specs(cpu):
         "nfqws2": dict(
             PKG_SPECS_OPENWRT["nfqws2"],
             files=[(apk_bin_path(cpu, "nfqws2"), "usr/bin/nfqws2", 0o755)] + lua,
+        ),
+        "mihomo": dict(
+            PKG_SPECS_OPENWRT["mihomo"],
+            files=[(apk_bin_path(cpu, "mihomo"), "usr/bin/mihomo", 0o755)],
         ),
     }
 
@@ -570,6 +623,22 @@ def fetch_apk_binaries(cpu, tpws_version=None, nfqws2_rel=None):
                 lm = tf.getmember(f"zapret2-{nfqws2_rel}/lua/{name}")
                 with open(lp, "wb") as f:
                     f.write(tf.extractfile(lm).read())
+
+
+def fetch_mihomo(version, suffix, elf, dest):
+    """Скачать mihomo <version> (ассет mihomo-linux-<suffix>-v<ver>.gz) в dest.
+    mihomo собирается с CGO_ENABLED=0 — бинарник статический, libc ему не важна;
+    проверка ELF ловит ассет не той архитектуры."""
+    url = (f"https://github.com/{MIHOMO_REPO}/releases/download/v{version}/"
+           f"mihomo-linux-{suffix}-v{version}.gz")
+    print(f"  fetching mihomo {version} ({suffix}) ...")
+    data = gzip.decompress(_http_get(url))
+    _assert_static_elf(data, f"mihomo {version} [{suffix}]", elf)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "wb") as f:
+        f.write(data)
+    os.chmod(dest, 0o755)
+    print(f"    -> {dest} ({len(data):,} B)")
 
 
 def fetch_singbox(version):
@@ -988,7 +1057,7 @@ def expand_arches(spec):
     return [spec]
 
 
-def build_arch(arch, args, sb_ver, tpws_ver, nfqws2_ver):
+def build_arch(arch, args, sb_ver, tpws_ver, nfqws2_ver, mihomo_ver=None):
     """Собрать и проиндексировать фид одной архитектуры. Возвращает (имя, путь)."""
     select_arch(arch)
     is_apk = PKG_FORMAT == "apk"
@@ -1033,8 +1102,20 @@ def build_arch(arch, args, sb_ver, tpws_ver, nfqws2_ver):
             fetch_nfqws2_assets(rel=rel, force=args.fetch_upstream)
             build_versions["nfqws2"] = f"{nfqws2_ver}-{args.revision}"
 
+    if mihomo_ver:
+        # mihomo всегда из апстрима: локальной копии с роутера у него нет.
+        if is_apk:
+            t = APK_TARGETS[cpu]
+            dest = apk_bin_path(cpu, "mihomo")
+        else:
+            t = APK_TARGETS["mipsel" if arch == "mipsel" else "aarch64"]
+            dest = MIHOMO_BINARY_MIPSEL if arch == "mipsel" else MIHOMO_BINARY
+        fetch_mihomo(mihomo_ver, t["mihomo"], t["elf"], dest)
+        build_versions["mihomo"] = f"{mihomo_ver}-{args.revision}"
+
     if not build_versions and not os.path.isdir(FEED_OUT):
-        die(f"nothing to build for {arch}: pass --version / --tpws-version / --nfqws2-version")
+        die(f"nothing to build for {arch}: pass --version / --tpws-version / "
+            "--nfqws2-version / --mihomo-version")
 
     label = ", ".join(f"{k} {v}" for k, v in build_versions.items()) or "(re-index only)"
     fmt = "apk" if is_apk else "opkg"
@@ -1050,6 +1131,8 @@ def main():
     ap.add_argument("--tpws-version", help="tpws-zapret (zapret) version to build, e.g. 72.12")
     ap.add_argument("--nfqws2-version", help=f"nfqws2 (zapret2) version to build, e.g. 1.0.1 "
                     f"(fetched from {ZAPRET2_REPO}@{ZAPRET2_REL})")
+    ap.add_argument("--mihomo-version", help="mihomo (MetaCubeX) version to build, e.g. 1.19.31 "
+                    "— сайдкар AmneziaWG; всегда качается из апстрима")
     ap.add_argument("--revision", default=DEFAULT_REVISION,
                     help=f"opkg package revision suffix (default {DEFAULT_REVISION})")
     ap.add_argument("--publish", action="store_true",
@@ -1071,6 +1154,7 @@ def main():
     sb_ver = parse_version(args.version, "version") if args.version else None
     tpws_ver = parse_version(args.tpws_version, "tpws-version") if args.tpws_version else None
     nfqws2_ver = parse_version(args.nfqws2_version, "nfqws2-version") if args.nfqws2_version else None
+    mihomo_ver = parse_version(args.mihomo_version, "mihomo-version") if args.mihomo_version else None
 
     arches = expand_arches(args.arch)
     overlays = {}
@@ -1078,7 +1162,7 @@ def main():
         # mipsel не умеет nfqws2 — на групповых сборках просто не передаём его туда,
         # иначе build_arch честно упал бы и увёл с собой весь прогон.
         nf = None if arch == "mipsel" else nfqws2_ver
-        name, path = build_arch(arch, args, sb_ver, tpws_ver, nf)
+        name, path = build_arch(arch, args, sb_ver, tpws_ver, nf, mihomo_ver)
         overlays[name] = path
 
     if args.publish:

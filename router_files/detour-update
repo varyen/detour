@@ -70,6 +70,7 @@ PACKAGE_NAME=detour
 SINGBOX_PKG=sing-box
 TPWS_PKG=tpws-zapret
 NFQWS2_PKG=nfqws2
+MIHOMO_PKG=mihomo   # сайдкар AmneziaWG (detour-awg); ставится по кнопке, не зависимость панели
 BINS_STATE_FILE=/var/state/detour-bins.json     # sing-box update state (panel reads this path)
 TPWS_STATE_FILE=/var/state/detour-tpws.json     # tpws-zapret update state (panel reads this path)
 NFQWS2_STATE_FILE=/var/state/detour-nfqws2.json # nfqws2 (zapret2) update state (panel reads this)
@@ -1035,6 +1036,37 @@ cmd_tpws_apply() {
     log "tpws-zapret now at $(tpws_installed_version)"
 }
 
+# ---- mihomo (сайдкар AmneziaWG) ----
+# Ставится/обновляется одной командой: тот же фидовый путь, что у tpws. После
+# установки сайдкар пересобирается — AWG-профили, добавленные до mihomo, сразу
+# начинают работать.
+cmd_mihomo_apply() {
+    local awg=/usr/sbin/detour-awg
+    [ "$KEENETIC" = 1 ] && awg=/opt/sbin/detour-awg
+    bypass_feed_available \
+        || die "mihomo: под архитектуру этого роутера сборки нет (apk-фид разложен по CPU-семействам)"
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    ensure_feed
+    if use_curl_feed; then
+        log "downloading + installing mihomo from the feed (curl)..."
+        feed_curl_install "$MIHOMO_PKG" || die "feed install of mihomo failed (feed unreachable?)"
+    else
+        log "$PKGM update + install/upgrade mihomo from the feed..."
+        opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
+        if pkg_is_installed "$MIHOMO_PKG"; then
+            pkg_upgrade "$MIHOMO_PKG" 2>&1 \
+                || pkg_install "$MIHOMO_PKG" 2>&1 \
+                || die "upgrade of mihomo failed"
+        else
+            pkg_install "$MIHOMO_PKG" 2>&1 || die "install of mihomo failed"
+        fi
+    fi
+    [ -x "$awg" ] && "$awg" sync 2>&1
+    log "mihomo now at $(pkg_installed_version "$MIHOMO_PKG")"
+}
+
 # ---- nfqws2 / zapret2 (opkg feed) helpers ----
 # zapret2 ships as the `nfqws2` feed package (aarch64, OpenWrt only — KeeneticOS
 # lacks NFQUEUE so the binary is never shipped there). Mirrors the sing-box/tpws
@@ -1430,6 +1462,7 @@ case "$ACTION" in
     tpws-check)        cmd_tpws_check ;;
     tpws-apply)        cmd_tpws_apply ;;
     tpws-status)       cat "$TPWS_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
+    mihomo-apply)      cmd_mihomo_apply ;;
     nfqws2-check)      cmd_nfqws2_check ;;
     nfqws2-apply)      cmd_nfqws2_apply ;;
     nfqws2-status)     cat "$NFQWS2_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;

@@ -63,7 +63,7 @@ pub fn route() -> crate::render::DpiRoute {
 /// `FD_CLOEXEC`: tpws, запущенный при поднятом туннеле, держал бы его и после
 /// остановки, и в системе копились бы мёртвые tun-интерфейсы.
 #[cfg(unix)]
-fn close_inherited(c: &mut Command) {
+pub(crate) fn close_inherited(c: &mut Command) {
     // SAFETY: между fork и exec зовём только fcntl — он async-signal-safe.
     // Метим, а не закрываем: собственный канал std для ошибки exec и так
     // помечен и должен дожить до exec.

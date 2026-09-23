@@ -411,6 +411,18 @@ local function to_endpoint(ob)
   return ob
 end
 
+-- AmneziaWG живёт в сайдкаре mihomo (detour-awg): для sing-box это socks на
+-- его порт. Порта нет (сайдкар ещё не собирал профиль) → профиль пропускается.
+local function awg_socks(pdir, id)
+  local f = io.open(pdir .. "/../awg-ports", "r")
+  if not f then return nil end
+  for line in f:lines() do
+    local pid, port = line:match("^(%S+)%s+(%d+)")
+    if pid == id then f:close(); return { type = "socks", server = "127.0.0.1", server_port = tonumber(port), version = "5" } end
+  end
+  f:close()
+  return nil
+end
 local idf = io.open(idfile, "r")
 if idf then
   for id in idf:lines() do
@@ -427,6 +439,7 @@ if idf then
           if (ob.type == "hysteria" or ob.type == "hysteria2" or ob.type == "tuic")
              and type(ob.tls) == "table" then ob.tls.utls = nil end
           if ob.type == "wireguard" then ob = to_endpoint(ob) end
+          if ob and ob.type == "amneziawg" then ob = awg_socks(pdir, id) end
           -- ob == nil → профиль непредставим (битый wireguard); пропускаем ЕГО,
           -- а не весь чанк.
           if ob then
@@ -492,7 +505,22 @@ local h = io.open(pdir .. "/" .. id .. ".json", "r")
 if not h then os.exit(1) end
 local obj = cjson.decode(h:read("*a") or ""); h:close()
 if not (obj and obj.outbound) then os.exit(1) end
-local ob = obj.outbound; ob.tag = "vpn"
+-- AmneziaWG живёт в сайдкаре mihomo (detour-awg): для sing-box это socks на
+-- его порт. Порта нет (сайдкар ещё не собирал профиль) → профиль пропускается.
+local function awg_socks(pdir, id)
+  local f = io.open(pdir .. "/../awg-ports", "r")
+  if not f then return nil end
+  for line in f:lines() do
+    local pid, port = line:match("^(%S+)%s+(%d+)")
+    if pid == id then f:close(); return { type = "socks", server = "127.0.0.1", server_port = tonumber(port), version = "5" } end
+  end
+  f:close()
+  return nil
+end
+local ob = obj.outbound
+if ob.type == "amneziawg" then ob = awg_socks(pdir, id) end
+if not ob then os.exit(1) end
+ob.tag = "vpn"
 if (ob.type == "hysteria" or ob.type == "hysteria2" or ob.type == "tuic")
    and type(ob.tls) == "table" then ob.tls.utls = nil end
 local conf = {

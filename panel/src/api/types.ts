@@ -414,6 +414,15 @@ export interface CertStatus {
   log?: string;
 }
 
+/** Сайдкар mihomo для AmneziaWG-профилей (`awg_status`). */
+export interface AwgStatus {
+  installed: boolean;
+  version: string;
+  running: boolean;
+  platform: string;
+  profiles: { id: string; port: number }[];
+}
+
 export interface WarpStatus {
   ok: boolean;
   supported: boolean;

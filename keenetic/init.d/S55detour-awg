@@ -1,0 +1,39 @@
+#!/opt/bin/sh
+# Detour / Keenetic — сайдкар mihomo для AmneziaWG-профилей (см. /opt/sbin/detour-awg).
+# Без AWG-профилей или без mihomo `start` ничего не делает.
+
+export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+
+PROG=/opt/sbin/detour-awg
+BIN=/opt/bin/mihomo
+PIDF=/opt/var/run/detour-awg.pid
+LOG=/opt/var/log/detour-awg.log
+NAME=detour-awg
+
+running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; }
+
+start() {
+    [ -x "$PROG" ] && [ -x "$BIN" ] || { echo "$NAME: mihomo not installed — not starting"; exit 0; }
+    "$PROG" render >/dev/null 2>&1 || { echo "$NAME: no AWG profiles — not starting"; exit 0; }
+    running && { echo "$NAME already running (pid $(cat "$PIDF"))"; exit 0; }
+    rm -f "$PIDF"
+    mkdir -p /opt/var/run /opt/var/log
+    # лог обрезается на каждом старте: /opt/var/log живёт на USB, но расти вечно ему незачем
+    : > "$LOG"
+    echo "Starting $NAME ..."
+    start-stop-daemon -S -q -b -m -p "$PIDF" -x /opt/bin/sh -- -c "exec $PROG run >>$LOG 2>&1"
+}
+
+stop() {
+    echo "Stopping $NAME ..."
+    start-stop-daemon -K -q -p "$PIDF" 2>/dev/null
+    rm -f "$PIDF"
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; sleep 1; start ;;
+    status)  running && echo "$NAME running (pid $(cat "$PIDF"))" || echo "$NAME stopped" ;;
+    *) echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

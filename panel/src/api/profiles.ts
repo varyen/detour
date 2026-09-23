@@ -1,5 +1,6 @@
 import { requestJson, requestJsonTolerant } from "./client";
 import type {
+  AwgStatus,
   Chain,
   ChainsResponse,
   GeoStatus,
@@ -160,6 +161,13 @@ export const subscriptions = {
       "subscription_refresh_all",
       { method: "POST", timeoutMs: 600_000 },
     ),
+};
+
+export const awg = {
+  status: () => requestJsonTolerant<AwgStatus>("awg_status"),
+  /** Установка mihomo из фида уходит в фон; ход — в apply_log. */
+  install: () =>
+    requestJson<{ ok: boolean; status: string }>("awg_install", { method: "POST" }),
 };
 
 export const warp = {

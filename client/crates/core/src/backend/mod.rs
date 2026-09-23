@@ -16,6 +16,7 @@ use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
 
+use crate::awg::Sidecar;
 use crate::dpi::Dpi;
 use crate::engine::Engine;
 use crate::ipc::{Request, Response};
@@ -37,6 +38,7 @@ pub const PLATFORM: &str = "linux";
 
 const CLASH_PORT: u16 = 19090;
 const CLASH_SECRET: &str = "run/clash.secret";
+const AWG_CONFIG: &str = "run/mihomo.json";
 
 /// Запускать ли движок после пересборки.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -59,6 +61,8 @@ pub struct Backend {
     store: Store,
     engine: Engine,
     dpi: Dpi,
+    /// Сайдкар mihomo для AmneziaWG-профилей (sing-box их не умеет).
+    awg: Sidecar,
     apply_lock: Mutex<()>,
     /// Одно обновление подписок за раз: плановое и ручное не должны
     /// одновременно переписывать одни и те же профили.
@@ -104,6 +108,7 @@ impl Backend {
         };
         let engine = Engine::new(&data, data.join("run"), data.join(store::SINGBOX_STDERR));
         let dpi = Dpi::new(&data, data.join("logs/dpi.log"));
+        let awg = Sidecar::new(&data, data.join("run/mihomo"), data.join("logs/mihomo.log"));
         // Старый бинарник, отодвинутый обновлением, пока служба работала на нём.
         let _ = std::fs::remove_file(engine.local_binary().with_extension("old"));
         let (jobs, job_rx) = mpsc::unbounded_channel();
@@ -111,6 +116,7 @@ impl Backend {
             store,
             engine,
             dpi,
+            awg,
             apply_lock: Mutex::new(()),
             subs_lock: Mutex::new(()),
             health_lock: Mutex::new(()),
@@ -170,6 +176,7 @@ impl Backend {
 
     pub async fn shutdown(&self) {
         self.engine.stop().await;
+        self.awg.stop().await;
         self.dpi.stop().await;
         self.killswitch(false);
     }
@@ -269,6 +276,7 @@ impl Backend {
                 self.set_want_vpn(false);
                 self.killswitch(false);
                 self.engine.stop().await;
+                self.awg.stop().await;
                 ok()
             }
             "singbox_enable" | "singbox_disable" => {
@@ -324,6 +332,9 @@ impl Backend {
             "keepalive_status" => self.keepalive_status(),
             "keepalive_check" => self.keepalive_check().await,
             "offload_status" | "swap_status" | "warp_status" => Response::json(&json!({ "supported": false })),
+            "awg_status" => self.awg_status().await,
+            // mihomo приезжает внутри приложения и обновляется вместе с ним
+            "awg_install" => Response::error("mihomo входит в состав приложения — переустановите Detour"),
 
             _ => Response::error("not_supported"),
         })
@@ -357,6 +368,14 @@ impl Backend {
             .check(&staged_cfg)
             .await
             .map_err(|e| anyhow!("failed to render config: {e}"))?;
+        if !staged.awg.is_empty() {
+            let cfg = staging.join("mihomo.json");
+            store::write_atomic(&cfg, &serde_json::to_vec_pretty(&crate::awg::config(&staged.awg)?)?)?;
+            self.awg
+                .check(&cfg)
+                .await
+                .map_err(|e| anyhow!("AmneziaWG: {e}"))?;
+        }
 
         let rules_dir = self.store.path(store::RULESETS);
         let live = self.render_to(&settings, &hops, &log, &rules_dir)?;
@@ -384,6 +403,15 @@ impl Backend {
             // упирается в диалог разрешения, и поднять туннель должен сторож,
             // когда человек согласится.
             self.set_want_vpn(true);
+            // Сайдкар — до sing-box: иначе первые соединения в AWG-профиль
+            // упрутся в закрытый порт.
+            if live.awg.is_empty() {
+                self.awg.stop().await;
+            } else {
+                let cfg = self.store.path(AWG_CONFIG);
+                store::write_atomic(&cfg, &serde_json::to_vec_pretty(&crate::awg::config(&live.awg)?)?)?;
+                self.awg.start(&cfg).await?;
+            }
             self.engine.start(&self.store.path(store::CONFIG)).await?;
         }
         Ok(())
@@ -407,6 +435,28 @@ impl Backend {
                 tun: self.tun_enabled(),
             },
         )
+    }
+
+    async fn awg_status(&self) -> Response {
+        let pid = self.awg.pid().await;
+        let profiles: Vec<Value> = std::fs::read(self.store.path(AWG_CONFIG))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|c| c.get("listeners").and_then(Value::as_array).cloned())
+            .unwrap_or_default()
+            .iter()
+            .map(|l| json!({
+                "id": l["name"].as_str().unwrap_or("").trim_start_matches("in-"),
+                "port": l["port"],
+            }))
+            .collect();
+        Response::json(&json!({
+            "installed": self.awg.present(),
+            "version": self.awg.version().await.unwrap_or_default(),
+            "running": pid.is_some(),
+            "platform": PLATFORM,
+            "profiles": profiles,
+        }))
     }
 
     fn write_rendered(&self, r: &render::Rendered, config: &Path) -> Result<()> {

@@ -28,6 +28,7 @@ import { useCommandStore } from "@/stores/commands";
 import {
   buildShareLink,
   draftFromProfile,
+  isWgType,
   profileFromDraft,
   wireguardConfFromOutbound,
 } from "@/components/profiles/uri";
@@ -160,7 +161,7 @@ async function copyRowLink(r: ProfileRow) {
   try {
     const raw = await profilesApi.get(r.id);
     const draft = draftFromProfile(raw);
-    const wg = draft.type === "wireguard";
+    const wg = isWgType(draft.type);
     /* Для wireguard читаем сам outbound: WARP-профили лежат в формате
        sing-box 1.13 (peers[]), а форма таких полей не знает. */
     const outbound = (raw.outbound ?? {}) as Record<string, unknown>;
@@ -855,7 +856,7 @@ onBeforeUnmount(() => unregister?.());
       </UiButton>
       <UiButton :busy="busy === 'open'" @click="editRow(rowItem)">Править</UiButton>
       <UiButton :busy="busy === 'copy'" @click="copyRowLink(rowItem)">
-        {{ rowItem.type === "wireguard" ? "Скопировать конфиг" : "Скопировать ссылку" }}
+        {{ rowItem.type === "wireguard" || rowItem.type === "amneziawg" ? "Скопировать конфиг" : "Скопировать ссылку" }}
       </UiButton>
       <UiButton variant="danger" :busy="busy === 'del'" @click="removeRow(rowItem)">
         Удалить

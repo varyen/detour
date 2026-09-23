@@ -76,3 +76,6 @@ landing/raw-video/
 /client/app/gen/android/.idea/
 /panel/dist-client/
 .clauder/
+
+# AWG test stand: downloaded mihomo binary
+tools/awg-stand/.cache/

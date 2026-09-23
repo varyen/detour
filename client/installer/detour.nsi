@@ -53,6 +53,8 @@ Function ${un}StopDetour
   Pop $0
   nsExec::ExecToLog 'taskkill /f /im winws2.exe'
   Pop $0
+  nsExec::ExecToLog 'taskkill /f /im mihomo.exe'
+  Pop $0
   Sleep 800
 FunctionEnd
 !macroend
@@ -77,6 +79,8 @@ Section "Detour" SecMain
   File "${STAGE}\detour-svc.exe"
   File "${STAGE}\detour-app.exe"
   File "${STAGE}\sing-box.exe"
+  ; Сайдкар AmneziaWG: sing-box этот протокол не умеет.
+  File "${STAGE}\mihomo.exe"
   ; Движок обхода DPI кладётся, только если он был при сборке: Defender метит
   ; WinDivert, поэтому сборка без него — норма, а поставить его можно из
   ; приложения («Журнал» → «Обновления» → winws2).
@@ -148,6 +152,7 @@ Section "Uninstall"
   Delete "$INSTDIR\detour-svc.exe"
   Delete "$INSTDIR\detour-app.exe"
   Delete "$INSTDIR\sing-box.exe"
+  Delete "$INSTDIR\mihomo.exe"
   Delete "$INSTDIR\winws2.exe"
   Delete "$INSTDIR\cygwin1.dll"
   Delete "$INSTDIR\WinDivert.dll"

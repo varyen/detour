@@ -1,6 +1,6 @@
 # Сборка установщика Detour для Windows.
 #   pwsh client/installer/build.ps1 -SingBox <sing-box.exe> [-Zapret <zapret2.zip|каталог>]
-#                                   [-CertThumbprint <отпечаток>] [-Out <каталог>]
+#                                   [-Mihomo <mihomo.exe>] [-CertThumbprint <отпечаток>] [-Out <каталог>]
 # Собирает панель, службу и интерфейс, складывает всё в staging и зовёт makensis.
 # Без -Zapret архив zapret2 скачивается с GitHub (Defender метит его трояном —
 # на рабочей машине лучше передавать уже скачанный файл).
@@ -8,6 +8,9 @@ param(
   [Parameter(Mandatory)] [string] $SingBox,
   [string] $Zapret,
   [string] $ZapretVersion = "1.0.5.2",
+  # mihomo — сайдкар AmneziaWG. Без -Mihomo качается релиз MetaCubeX/mihomo.
+  [string] $Mihomo,
+  [string] $MihomoVersion = "1.19.31",
   [string] $CertThumbprint,
   # Без движка обхода DPI: на машине с Defender архив zapret2 не распаковать,
   # а поставить winws2 можно потом из самого приложения.
@@ -42,6 +45,22 @@ Pop-Location
 Copy-Item (Join-Path $client 'target\release\detour-svc.exe') $stage
 Copy-Item (Join-Path $client 'target\release\detour-app.exe') $stage
 Copy-Item $SingBox (Join-Path $stage 'sing-box.exe')
+
+Write-Host "== mihomo (сайдкар AmneziaWG)"
+if (-not $Mihomo) {
+  $zip = Join-Path $stage '_mihomo.zip'
+  # amd64-v1 — без требований к AVX, как и сборка для роутеров
+  $url = "https://github.com/MetaCubeX/mihomo/releases/download/v$MihomoVersion/mihomo-windows-amd64-v1-v$MihomoVersion.zip"
+  Write-Host "   качаю $url"
+  & curl.exe -sfL --max-time 600 -o $zip $url
+  if ($LASTEXITCODE) { throw "не скачался mihomo" }
+  $mx = Join-Path $stage '_mihomo'
+  Expand-Archive $zip $mx -Force
+  $Mihomo = (Get-ChildItem $mx -Recurse -Filter '*.exe' | Select-Object -First 1).FullName
+  if (-not $Mihomo) { throw "в архиве mihomo нет exe" }
+}
+Copy-Item $Mihomo (Join-Path $stage 'mihomo.exe')
+Remove-Item -Recurse -Force (Join-Path $stage '_mihomo'), (Join-Path $stage '_mihomo.zip') -ErrorAction SilentlyContinue
 # Загрузчик WebView2 (~2 МБ) едет внутри установщика: без среды окно не откроется,
 # а в песочнице и на урезанных сборках Windows её нет.
 & curl.exe -sfL --max-time 120 -o (Join-Path $stage 'MicrosoftEdgeWebview2Setup.exe') 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'

@@ -15,6 +15,9 @@ Safety:
     logs a note, because a sing-box minor can break the 1.13.x config schema and
     needs a human (bump the feed once by hand to move the pin forward).
   * tpws (bol-van/zapret) and nfqws2 (bol-van/zapret2) auto-bump to latest.
+  * mihomo (MetaCubeX/mihomo, сайдкар AmneziaWG) — тоже до latest и во ВСЕХ
+    каталогах. Передаётся в каждый прогон build_feed: каталог пересобирается
+    целиком, и прогон без --mihomo-version выбросил бы mihomo из фида.
   * If the feed's Packages can't be read, it refuses to guess and exits non-zero
     (never publishes from an unknown baseline).
 
@@ -48,6 +51,7 @@ SINGBOX_REPO = "SagerNet/sing-box"
 APK_REF_ARCH = "apk-x86_64"
 ZAPRET_REPO = "bol-van/zapret"
 ZAPRET2_REPO = "bol-van/zapret2"
+MIHOMO_REPO = "MetaCubeX/mihomo"
 
 
 def _token():
@@ -174,10 +178,13 @@ def main():
     sb_best, sb_any = latest_in_minor(SINGBOX_REPO, sb_pin)
     tpws_latest = latest_release_tag(ZAPRET_REPO)
     nfq_latest = latest_release_tag(ZAPRET2_REPO)
+    mih_latest = latest_release_tag(MIHOMO_REPO)
+    cur_mih = feed.get("mihomo")
 
     sb_t = sb_best if (sb_best and vtuple(sb_best) > vtuple(cur_sb)) else cur_sb
     tpws_t = tpws_latest if (tpws_latest and vtuple(tpws_latest) > vtuple(cur_tpws)) else cur_tpws
     nfq_t = nfq_latest if (nfq_latest and vtuple(nfq_latest) > vtuple(cur_nfq)) else cur_nfq
+    mih_t = mih_latest if (mih_latest and (not cur_mih or vtuple(mih_latest) > vtuple(cur_mih))) else cur_mih
 
     print(f"sing-box : feed {cur_sb} | pin {sb_pin}.x | latest-in-pin {sb_best} -> {sb_t}")
     if sb_any and vtuple(sb_any) > vtuple(sb_t):
@@ -185,13 +192,17 @@ def main():
               f"pin — bump the feed by hand once to move the pin (config schema risk).")
     print(f"tpws     : feed {cur_tpws} | latest {tpws_latest} -> {tpws_t}")
     print(f"nfqws2   : feed {cur_nfq} | latest {nfq_latest} -> {nfq_t}  (opkg: aarch64 only)")
+    print(f"mihomo   : feed {cur_mih or '-'} | latest {mih_latest} -> {mih_t}  (all arches)")
 
     # aarch64 republishes if any of its three packages move; mipsel republishes if its
     # sing-box/tpws lag the targets (covers both an upstream bump AND seeding a fresh
     # or drifted mipsel feed). Targets are shared so the two arches stay in lockstep.
-    aarch64_changed = (sb_t != cur_sb or tpws_t != cur_tpws or nfq_t != cur_nfq)
-    mips_changed = (sb_t != mips.get("sing-box") or tpws_t != mips.get("tpws-zapret"))
-    apk_changed = (tpws_t != apkfeed.get("tpws-zapret") or nfq_t != apkfeed.get("nfqws2"))
+    aarch64_changed = (sb_t != cur_sb or tpws_t != cur_tpws or nfq_t != cur_nfq
+                       or mih_t != cur_mih)
+    mips_changed = (sb_t != mips.get("sing-box") or tpws_t != mips.get("tpws-zapret")
+                    or mih_t != mips.get("mihomo"))
+    apk_changed = (tpws_t != apkfeed.get("tpws-zapret") or nfq_t != apkfeed.get("nfqws2")
+                   or mih_t != apkfeed.get("mihomo"))
     cur_mips_sb, cur_mips_tpws = mips.get("sing-box", "-"), mips.get("tpws-zapret", "-")
     print(f"mipsel   : feed sing-box {cur_mips_sb} / tpws {cur_mips_tpws} "
           f"-> {sb_t} / {tpws_t}  (changed={mips_changed})")
@@ -219,8 +230,9 @@ def main():
         runs.append(["--arch", "apk-all",
                      "--tpws-version", tpws_t, "--nfqws2-version", nfq_t])
 
+    mih_args = ["--mihomo-version", mih_t] if mih_t else []
     for extra in runs:
-        cmd = [sys.executable, os.path.join(HERE, "build_feed.py"), *extra]
+        cmd = [sys.executable, os.path.join(HERE, "build_feed.py"), *extra, *mih_args]
         if not args.dry_run:
             cmd.append("--publish")
         print("RUN:", " ".join(cmd))

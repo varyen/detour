@@ -23,7 +23,8 @@ param(
   [string] $Work = (Join-Path ([IO.Path]::GetTempPath()) "detour-android"),
   [string] $SingBoxVersion = "1.13.21",
   [string] $GoVersion = "1.24.7",
-  [string] $ZapretVersion = "72.13"
+  [string] $ZapretVersion = "72.13",
+  [string] $MihomoVersion = "1.19.31"
 )
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
@@ -86,6 +87,21 @@ if (-not (Test-Path "$jni\arm64-v8a\libtpws.so")) {
   foreach ($pair in @(@('android-arm64', 'arm64-v8a'), @('android-x86_64', 'x86_64'))) {
     $bin = Get-ChildItem $x -Recurse -Directory | Where-Object { $_.Name -eq $pair[0] } | Select-Object -First 1
     if ($bin) { Copy-Item (Join-Path $bin.FullName 'tpws') "$jni\$($pair[1])\libtpws.so" -Force }
+  }
+}
+
+# --- 2b. mihomo — сайдкар AmneziaWG, тоже из jniLibs (`libmihomo.so`) ---
+if (-not (Test-Path "$jni\arm64-v8a\libmihomo.so")) {
+  Write-Host "== mihomo $MihomoVersion"
+  foreach ($pair in @(@('android-arm64-v8', 'arm64-v8a'), @('android-amd64', 'x86_64'))) {
+    $gz = Join-Path $Work "mihomo-$($pair[0]).gz"
+    & curl.exe -sfL --max-time 600 -o $gz "https://github.com/MetaCubeX/mihomo/releases/download/v$MihomoVersion/mihomo-$($pair[0])-v$MihomoVersion.gz"
+    if ($LASTEXITCODE) { throw "не скачался mihomo $($pair[0])" }
+    $in = [IO.File]::OpenRead($gz)
+    $out = [IO.File]::Create("$jni\$($pair[1])\libmihomo.so")
+    $z = New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)
+    $z.CopyTo($out)
+    $z.Dispose(); $out.Dispose(); $in.Dispose()
   }
 }
 

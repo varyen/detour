@@ -33,6 +33,13 @@ pub extern "system" fn Java_io_github_varyen_detour_DetourBridge_nativeInit(
     if let Ok(path) = env.get_string(&dpi_binary) {
         let path: String = path.into();
         if !path.is_empty() {
+            // mihomo (сайдкар AmneziaWG) лежит там же, в nativeLibraryDir
+            if let Some(dir) = std::path::Path::new(&path).parent() {
+                let mihomo = dir.join("libmihomo.so");
+                if mihomo.is_file() {
+                    std::env::set_var("DETOUR_MIHOMO_BIN", mihomo);
+                }
+            }
             std::env::set_var("DETOUR_DPI_BIN", path);
         }
     }

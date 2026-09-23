@@ -129,6 +129,10 @@ FILES = [
     # fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-warp"), "opt/sbin/detour-warp", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-meter"), "opt/sbin/detour-meter", 0o755, True),
+    # AmneziaWG через сайдкар mihomo (shared source, /opt шим). mihomo — пакет
+    # mipsel-фида, ставится по кнопке. ⚠ НЕ проверено на живом Keenetic.
+    (os.path.join(ROUTER_FILES, "detour-awg"), "opt/sbin/detour-awg", 0o755, True),
+    (os.path.join(HERE, "init.d", "S55detour-awg"), "opt/etc/init.d/S55detour-awg", 0o755, False),
     # Публикация LAN-сервисов наружу (shared source, /opt shim): HTTPS-реверс-прокси
     # через lighttpd mod_proxy + DNAT через ndm/netfilter.d. fix_shebang → /opt/bin/sh.
     # ⚠ НЕ проверено на живом Keenetic — см. keenetic/README.md.
@@ -302,6 +306,7 @@ chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-boots
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\
+    /opt/sbin/detour-awg /opt/etc/init.d/S55detour-awg \\
     /opt/etc/lighttpd/conf.d/detour-ssl-helper.sh /opt/etc/lighttpd/conf.d/detour-portmap-helper.sh \\
     /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
 # Swap file is NO LONGER created automatically — the operator creates it on demand
@@ -385,6 +390,8 @@ fi
 # this is a no-op until the operator enables it in the panel; rc.unslung also
 # boot-starts it via S91. On upgrade restart re-loads the new script.
 /opt/etc/init.d/S91detour-logbridge restart 2>/dev/null
+# AmneziaWG-сайдкар: no-op без mihomo и без AWG-профилей.
+/opt/etc/init.d/S55detour-awg restart 2>/dev/null
 echo ""
 echo "detour-keenetic {version} installed."
 echo "  Panel:  http://<router-ip>:8080/detour/"
@@ -415,6 +422,7 @@ echo "=== detour-keenetic prerm start pid=$$ args:$* ==="
 [ -x /opt/etc/init.d/S90detour-cron ] && /opt/etc/init.d/S90detour-cron stop 2>/dev/null
 # Stop the syslog log-bridge so its tail|logger followers don't linger across the swap.
 [ -x /opt/etc/init.d/S91detour-logbridge ] && /opt/etc/init.d/S91detour-logbridge stop 2>/dev/null
+[ -x /opt/etc/init.d/S55detour-awg ] && /opt/etc/init.d/S55detour-awg stop 2>/dev/null
 # Stop the bypass-managed engine (tpws + its rules) WITHOUT changing the persisted
 # mode — the new postinst's `detour-bypass boot` re-applies it. Falls back to S53.
 [ -x /opt/sbin/detour-bypass ] && /opt/sbin/detour-bypass stop 2>/dev/null

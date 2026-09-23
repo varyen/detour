@@ -31,6 +31,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/client/target/release/detour-app" "$APP/Contents/MacOS/Detour"
 cp "$ROOT/client/target/release/detour-svc" "$APP/Contents/MacOS/detour-svc"
 cp "$SINGBOX" "$APP/Contents/MacOS/sing-box"
+# mihomo — сайдкар AmneziaWG (sing-box этот протокол не умеет)
+MIHOMO_VERSION=${MIHOMO_VERSION:-1.19.31}
+case "$(uname -m)" in arm64) MARCH=arm64 ;; *) MARCH=amd64-v1 ;; esac
+curl -sfL --max-time 600 \
+    "https://github.com/MetaCubeX/mihomo/releases/download/v$MIHOMO_VERSION/mihomo-darwin-$MARCH-v$MIHOMO_VERSION.gz" \
+    | gunzip > "$APP/Contents/MacOS/mihomo"
+chmod 0755 "$APP/Contents/MacOS/mihomo"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -88,6 +88,9 @@ PORTMAP_BIN="/usr/sbin/detour-portmap"      # публикация внутре�
 WANLINK_BIN="/usr/sbin/detour-wan-link"     # WAN PHY/link-speed monitor — warns on 100M negotiation (not offload-related)
 WANPIN_BIN="/usr/sbin/detour-wanpin"        # reply-routing по аплинкам — ответ уходит тем каналом, которым пришёл запрос
 WARP_BIN="/usr/sbin/detour-warp"            # Cloudflare WARP (последний хоп цепочки) — backs the warp_* actions
+AWG_BIN="/usr/sbin/detour-awg"              # AmneziaWG через сайдкар mihomo — backs the awg_* actions
+AWG_PORTS="/etc/sing-box/awg-ports"         # id AWG-профиля → порт socks-listener'а mihomo (пишет detour-awg)
+AWG_CONF="/var/etc/detour-awg/config.yaml"  # конфиг сайдкара (tmpfs, пересобирается detour-awg)
 METER_BIN="/usr/sbin/detour-meter"          # счётчики трафика по лентам — backs the traffic_counters action
 TRAFFICLOG_BIN="/usr/sbin/detour-trafficlog" # временной ряд трафика (cron) — backs the traffic_series action
 WARP_STATE="/var/state/detour-warp.json"    # ход регистрации WARP (пишет detour-warp; CGI её детачит)
@@ -213,6 +216,9 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     WANLINK_BIN="$OPT/sbin/detour-wan-link"
     WANPIN_BIN="$OPT/sbin/detour-wanpin"
     WARP_BIN="$OPT/sbin/detour-warp"
+    AWG_BIN="$OPT/sbin/detour-awg"
+    AWG_PORTS="$OPT/etc/sing-box/awg-ports"
+    AWG_CONF="$OPT/var/run/detour-awg/config.yaml"
     WARP_STATE="$OPT/var/state/detour-warp.json"
     METER_BIN="$OPT/sbin/detour-meter"
     TRAFFICLOG_BIN="$OPT/sbin/detour-trafficlog"
@@ -520,8 +526,18 @@ strip_quic_utls() {
     printf '%s\n' "$line"
 }
 
+is_awg_profile() {
+    grep -q '"type"[[:space:]]*:[[:space:]]*"amneziawg"' "$1" 2>/dev/null
+}
+
+# AmneziaWG sing-box не понимает: вместо профиля — socks на порт сайдкара mihomo
+# (detour-awg), который и держит AWG-туннель.
 extract_profile_outbound() {
     local profile_file="$1"
+    if is_awg_profile "$profile_file"; then
+        "$AWG_BIN" outbound "$(basename "$profile_file" .json)"
+        return
+    fi
     awk '
     BEGIN { depth=0; capture=0; buf="" }
     {
@@ -652,7 +668,9 @@ collect_upstream_ips() {
         for cf in "$SINGBOX_CONFIG_DIR"/config-*.json; do
             [ -f "$cf" ] && sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cf" 2>/dev/null
         done
-    } | \
+        # AWG-узлы в конфиге sing-box видны как 127.0.0.1 — настоящие адреса у сайдкара
+        [ -f "$AWG_CONF" ] && tr ',' '\n' < "$AWG_CONF" | sed -n 's/^"server":"\([^"]*\)".*/\1/p'
+    } | grep -vx '127\.0\.0\.1' | \
     while IFS= read -r host; do
         [ -n "$host" ] || continue
         if echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -1107,6 +1125,7 @@ emit_route_chain() { # $1=hops CSV, $2=final tag, $3=tag prefix
         [ -n "$payload" ] || return 1
         ptype=$(profile_type "$pfile")
         if [ "$i" -eq "$total" ]; then tag="$final"; else tag="${prefix}_$i"; fi
+        [ -n "$detour" ] && is_awg_profile "$pfile" && return 1
         payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
         if [ "$ptype" = "wireguard" ]; then
             payload=$(translate_wireguard_profile "$payload")
@@ -1203,7 +1222,9 @@ compute_route_extras() {
             payload=$(extract_profile_outbound "$SINGBOX_PROFILES_DIR/$target.json")
             [ -n "$payload" ] || continue
             detour=""
-            [ "$via_chain" = "1" ] && detour="proxy"
+            # «через цепочку» для AWG невозможно (socks на 127.0.0.1) — цель идёт
+            # напрямую в свой AWG-туннель
+            [ "$via_chain" = "1" ] && ! is_awg_profile "$SINGBOX_PROFILES_DIR/$target.json" && detour="proxy"
             payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
             if [ "$ptype" = "wireguard" ]; then
                 payload=$(translate_wireguard_profile "$payload")
@@ -1397,6 +1418,11 @@ render_chain_config() {
             tag="proxy"
         fi
 
+        # socks на 127.0.0.1 через предыдущий хоп ушёл бы на удалённую сторону —
+        # AWG-профиль может стоять только первым звеном цепочки.
+        if [ -n "$detour" ] && is_awg_profile "$pfile"; then
+            return 1
+        fi
         payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
 
         if [ "$ptype" = "wireguard" ]; then
@@ -1579,12 +1605,28 @@ chain_missing_profiles() {
     printf '%s' "$miss"
 }
 
+# AWG-профили (id через пробел), стоящие в цепочке НЕ первыми.
+chain_misplaced_awg() {
+    local csv pname old_ifs n=0 bad=""
+    csv=$(normalize_profile_list "$1")
+    old_ifs="$IFS"; IFS=','; set -- $csv; IFS="$old_ifs"
+    for pname in "$@"; do
+        [ -n "$pname" ] || continue
+        n=$((n + 1))
+        [ "$n" -gt 1 ] && is_awg_profile "$SINGBOX_PROFILES_DIR/$pname.json" && bad="${bad:+$bad }$pname"
+    done
+    printf '%s' "$bad"
+}
+
 # $1 = chain CSV that failed to render, $2 = generic fallback reason. Names the
 # missing profile(s) when that is why the render failed.
 render_fail_reason() {
     local miss; miss=$(chain_missing_profiles "$1")
+    local awg; awg=$(chain_misplaced_awg "$1")
     if [ -n "$miss" ]; then
         printf 'профиль недоступен: %s (активный профиль удалён — выберите другой)' "$miss"
+    elif [ -n "$awg" ]; then
+        printf 'AmneziaWG-профиль %s может быть только первым звеном цепочки' "$awg"
     else
         printf '%s' "$2"
     fi
@@ -1602,6 +1644,11 @@ build_config() {
 
     commit_list=""
     keep_targets=""
+
+    # Сайдкар AmneziaWG должен быть поднят до того, как sing-box начнёт в него слать.
+    if [ -s "$AWG_PORTS" ] && [ -x "$AWG_BIN" ]; then
+        "$AWG_BIN" sync >/dev/null 2>&1
+    fi
 
     # Запрет торрентов — свойство ЦЕПОЧКИ, а не только выходного узла: трафик несёт
     # каждый хоп, поэтому хватает ОДНОГО профиля без явного разрешения. Список
@@ -1647,7 +1694,8 @@ build_config() {
             if [ -n "$thops" ]; then
                 # именованная цепочка задаёт порядок сама (см. compute_route_extras)
                 target_chain="$thops"
-            elif [ "$(route_map_bool_option "$target" via_chain 0)" = "1" ]; then
+            elif [ "$(route_map_bool_option "$target" via_chain 0)" = "1" ] \
+                 && ! is_awg_profile "$SINGBOX_PROFILES_DIR/$target.json"; then
                 target_chain=$(route_target_chain "$chain" "$target")
             else
                 target_chain="$target"
@@ -2554,7 +2602,7 @@ ping_check)
             # panel shows "42 ms" instead of a bare tick for servers that drop ICMP.
             # TCP types only (UDP-based wireguard/hysteria2/tuic have no handshake).
             case "$PTYPE" in
-                wireguard|hysteria2|tuic) : ;;
+                wireguard|amneziawg|hysteria2|tuic) : ;;
                 *)
                     TR=$(tcp_probe "$PSRV" "$PPORT"); TRC=$?
                     if [ "$TRC" = "0" ]; then
@@ -3693,6 +3741,16 @@ profile_save)
         fi
     fi
     echo "$POST_DATA" > "$PS_FILE"
+    # AWG-профиль — выдать порт и пересобрать сайдкар. Профиль, переставший быть
+    # AWG, тоже проходит через sync: так освобождается его порт.
+    if is_awg_profile "$PS_FILE" || grep -q "^$P_ID " "$AWG_PORTS" 2>/dev/null; then
+        AWG_ERR=$("$AWG_BIN" sync 2>&1 >/dev/null)
+        AWG_RC=$?
+        if [ "$AWG_RC" != 0 ] && [ "$AWG_RC" != 3 ]; then
+            json_err "профиль сохранён, но сайдкар AmneziaWG его не принял: $(printf '%s' "$AWG_ERR" | json_escape)"
+            exit 0
+        fi
+    fi
     # Профиль мог быть уже В РАБОТЕ — хопом активной цепочки или целью маршрута.
     # Раньше правка ложилась только в файл: панель показывала новый сервер, а
     # трафик шёл по старому до переподключения. Пересобираем, как chain_save.
@@ -3733,6 +3791,7 @@ profile_delete)
     PFILE="$SINGBOX_PROFILES_DIR/$PNAME.json"
     if [ ! -f "$PFILE" ]; then json_err "profile not found"; exit 0; fi
     rm -f "$PFILE"
+    grep -q "^$PNAME " "$AWG_PORTS" 2>/dev/null && "$AWG_BIN" sync >/dev/null 2>&1
     json_ok
     ;;
 
@@ -4667,6 +4726,23 @@ cert_issue_dns)
 # Регистрация ходит на api.cloudflareclient.com через временный sing-box на активной
 # цепочке (из РФ CF-API напрямую молчит) и занимает 15-40 с — поэтому она детачится,
 # а панель опрашивает warp_status, как с выпуском сертификата.
+# ==================== AmneziaWG (сайдкар mihomo) ====================
+# AWG-профили работают через отдельный mihomo (detour-awg). mihomo — не зависимость
+# панели: ~57 МБ ставятся только тем, кому нужен AWG, кнопкой awg_install.
+awg_status)
+    if [ -x "$AWG_BIN" ]; then
+        "$AWG_BIN" status
+    else
+        printf '{"installed":false,"version":"","running":false,"platform":"%s","profiles":[]}\n' "$PLATFORM"
+    fi
+    ;;
+
+awg_install)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    start_apply "\"$UPDATE_BIN\" mihomo-apply"
+    ;;
+
 warp_status)
     if [ -x "$WARP_BIN" ]; then
         "$WARP_BIN" status

@@ -203,6 +203,11 @@ pub async fn run(engine: &Engine, run_dir: &Path, targets: Vec<Target>, opts: &O
 
     let mut prepared = Vec::new();
     for (i, t) in targets.iter().enumerate() {
+        // AmneziaWG живёт в сайдкаре mihomo, отдельный экземпляр для проб ему
+        // не поднять: без вердикта, а не «лежит».
+        if crate::awg::is_awg(&t.outbound) {
+            continue;
+        }
         match render::prepare(t.outbound.clone(), &format!("h{i}"), None) {
             Ok(hop) => prepared.push(Prepared { index: i, hop }),
             Err(_) => {

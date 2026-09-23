@@ -9,6 +9,10 @@
    вырезает его при рендере конфига, но записывать заведомо ядовитое поле в
    профиль всё равно незачем — форма для этих типов отпечаток не спрашивает. */
 
+import { awgFromText, awgToText, isWgType, parseConf } from "./awg";
+
+export { isWgType };
+
 export type ProtoType =
   | "trojan"
   | "vless"
@@ -17,6 +21,7 @@ export type ProtoType =
   | "hysteria2"
   | "tuic"
   | "wireguard"
+  | "amneziawg"
   | "socks"
   | "http";
 
@@ -28,6 +33,7 @@ export const PROTO_TYPES: { value: ProtoType; label: string }[] = [
   { value: "hysteria2", label: "Hysteria2" },
   { value: "tuic", label: "TUIC" },
   { value: "wireguard", label: "WireGuard" },
+  { value: "amneziawg", label: "AmneziaWG" },
   { value: "socks", label: "SOCKS" },
   { value: "http", label: "HTTP-прокси" },
 ];
@@ -86,6 +92,10 @@ export interface ProfileDraft {
   allowedIps: string;
   mtu: string;
   reserved: string;
+  /** amneziawg: параметры обфускации строками «Jc = 4» — как в .conf Amnezia */
+  awg: string;
+  /** amneziawg: PersistentKeepalive, с */
+  keepalive: string;
   routingMode: "" | "proxy-list" | "all-except";
   /** Исходная ссылка, если профиль заводили из неё. */
   uri: string;
@@ -127,6 +137,8 @@ export function emptyDraft(): ProfileDraft {
     allowedIps: "0.0.0.0/0",
     mtu: "",
     reserved: "",
+    awg: "",
+    keepalive: "",
     routingMode: "",
     uri: "",
   };
@@ -195,7 +207,7 @@ export function inferType(outbound: Record<string, unknown>): string {
 
 export function outboundFromDraft(d: ProfileDraft): Record<string, unknown> {
   const o: Record<string, unknown> = { type: d.type, tag: "proxy" };
-  if (d.type !== "wireguard") {
+  if (!isWgType(d.type)) {
     o.server = d.server.trim();
     const p = num(d.port);
     if (p) o.server_port = p;
@@ -241,7 +253,8 @@ export function outboundFromDraft(d: ProfileDraft): Record<string, unknown> {
       if (d.password) o.password = d.password;
       if (d.path.trim()) o.path = d.path.trim();
       break;
-    case "wireguard": {
+    case "wireguard":
+    case "amneziawg": {
       o.server = d.server.trim();
       const p = num(d.port);
       if (p) o.server_port = p;
@@ -256,14 +269,19 @@ export function outboundFromDraft(d: ProfileDraft): Record<string, unknown> {
       const res = list(d.reserved)
         .map((x) => Number(x))
         .filter((x) => Number.isFinite(x));
-      if (res.length === 3) o.reserved = res;
+      if (res.length === 3 && d.type === "wireguard") o.reserved = res;
+      if (d.type === "amneziawg") {
+        const awg = awgFromText(d.awg);
+        if (Object.keys(awg).length) o.amnezia = awg;
+        if (num(d.keepalive)) o.persistent_keepalive_interval = num(d.keepalive);
+      }
       break;
     }
   }
 
   /* TLS. hysteria2/tuic всегда шифрованы, но отпечаток utls им противопоказан. */
   const wantsTls = d.type === "hysteria2" || d.type === "tuic" ? true : d.tls;
-  if (wantsTls && d.type !== "wireguard" && d.type !== "socks") {
+  if (wantsTls && !isWgType(d.type) && d.type !== "socks") {
     const tls: Record<string, unknown> = { enabled: true };
     if (d.sni.trim()) tls.server_name = d.sni.trim();
     const alpn = list(d.alpn);
@@ -371,7 +389,7 @@ export function draftFromProfile(p: Record<string, unknown>): ProfileDraft {
     d.path = str(o.path);
   }
 
-  if (d.type === "wireguard") {
+  if (isWgType(d.type)) {
     d.privateKey = str(o.private_key);
     d.peerPublicKey = str(o.peer_public_key);
     d.presharedKey = str(o.pre_shared_key);
@@ -379,6 +397,8 @@ export function draftFromProfile(p: Record<string, unknown>): ProfileDraft {
     d.allowedIps = list(o.allowed_ips).join("\n");
     d.mtu = str(o.mtu);
     d.reserved = list(o.reserved).join(",");
+    d.awg = awgToText(obj(o.amnezia));
+    d.keepalive = str(o.persistent_keepalive_interval);
   }
   return d;
 }
@@ -640,6 +660,31 @@ export function parseShareLink(raw: string): ProfileDraft | null {
   return d;
 }
 
+/**
+ * Конфиг WireGuard/AmneziaWG (.conf от wg-quick или клиента Amnezia) → черновик.
+ * Есть хоть один параметр обфускации — профиль становится amneziawg.
+ */
+export function parseWgConf(text: string): ProfileDraft | null {
+  const c = parseConf(text);
+  if (!c) return null;
+  const d = emptyDraft();
+  d.type = c.awg ? "amneziawg" : "wireguard";
+  d.tls = false;
+  d.server = c.host;
+  d.port = c.port || "51820";
+  d.privateKey = c.privateKey;
+  d.peerPublicKey = c.publicKey;
+  d.presharedKey = c.presharedKey;
+  d.localAddress = c.addresses.join("\n");
+  d.allowedIps = (c.allowedIps.length ? c.allowedIps : ["0.0.0.0/0"]).join("\n");
+  d.mtu = c.mtu;
+  d.awg = c.awg;
+  if (d.type === "amneziawg") d.keepalive = c.keepalive;
+  d.name = c.host;
+  d.id = slugify(d.name || "wg");
+  return d;
+}
+
 /* ======================= сборка ссылки =======================
 
    Обратная операция к parseShareLink: из профиля собираем ту самую ссылку,
@@ -729,6 +774,9 @@ export function wireguardConfFromOutbound(o: Record<string, unknown>): string | 
   const lines = ["[Interface]", `PrivateKey = ${priv}`];
   if (addrs.length) lines.push(`Address = ${addrs.join(", ")}`);
   if (num(o.mtu)) lines.push(`MTU = ${str(o.mtu)}`);
+  /* AmneziaWG: параметры обфускации живут в [Interface] — так их ждёт клиент Amnezia. */
+  const awg = awgToText(obj(o.amnezia));
+  if (awg) lines.push(...awg.split("\n"));
   lines.push("", "[Peer]", `PublicKey = ${pub}`);
   if (psk) lines.push(`PresharedKey = ${psk}`);
   lines.push(`AllowedIPs = ${allowed.length ? allowed.join(", ") : "0.0.0.0/0"}`);
@@ -756,7 +804,7 @@ export function buildWireguardConf(d: ProfileDraft): string | null {
  * (wireguard — для него buildWireguardConf).
  */
 export function buildShareLink(d: ProfileDraft): string | null {
-  if (d.type === "wireguard") return null;
+  if (isWgType(d.type)) return null;
   if (!d.server.trim()) return null;
   const hp = hostPort(d);
   const label = frag(d.name);

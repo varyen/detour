@@ -1,3 +1,4 @@
+pub mod awg;
 pub mod backend;
 pub mod chains;
 pub mod dpi;

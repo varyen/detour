@@ -7,8 +7,14 @@
    Обратный путь тоже есть: кнопка рядом собирает из полей ссылку для
    стороннего клиента (у wireguard — .conf, ссылок для него не бывает) и кладёт
    её в буфер. Текст показываем всегда: без HTTPS буфер обмена браузеру
-   недоступен, и выделить руками — единственный оставшийся способ. */
+   недоступен, и выделить руками — единственный оставшийся способ.
+
+   WireGuard и AmneziaWG заводятся из .conf (вставить текст или выбрать файл)
+   и из ключа Amnezia vpn://. AmneziaWG на роутере работает через сайдкар
+   mihomo — если его нет, форма предлагает поставить. */
 import { computed, nextTick, ref, watch } from "vue";
+import { awg as awgApi, poll } from "@/api";
+import type { AwgStatus } from "@/api";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import UiButton from "@/components/UiButton.vue";
 import PField from "@/components/profiles/PField.vue";
@@ -19,9 +25,12 @@ import {
   buildShareLink,
   buildWireguardConf,
   emptyDraft,
+  isWgType,
   parseShareLink,
+  parseWgConf,
   slugify,
 } from "@/components/profiles/uri";
+import { confFromAmneziaKey } from "@/components/profiles/awg";
 import type { ProfileDraft } from "@/components/profiles/uri";
 import { copyText } from "@/lib/clipboard";
 
@@ -76,7 +85,49 @@ watch(
 const type = computed(() => d.value.type);
 const isV2ray = computed(() => ["vless", "vmess", "trojan"].includes(type.value));
 const isProxy = computed(() => type.value === "socks" || type.value === "http");
-const isWg = computed(() => type.value === "wireguard");
+const isWg = computed(() => isWgType(type.value));
+const isAwg = computed(() => type.value === "amneziawg");
+
+/* Состояние сайдкара mihomo: без него AWG-профиль сохранится, но работать не будет. */
+const awgState = ref<AwgStatus | null>(null);
+const awgInstalling = ref(false);
+const awgNote = ref("");
+const onRouter = computed(() => ["openwrt", "keenetic"].includes(awgState.value?.platform ?? ""));
+async function loadAwgState() {
+  try {
+    awgState.value = await awgApi.status();
+  } catch {
+    awgState.value = null;
+  }
+}
+watch(
+  () => [props.open, isAwg.value] as const,
+  ([open, awg]) => {
+    if (open && awg && !awgState.value) void loadAwgState();
+  },
+  { immediate: true },
+);
+async function installMihomo() {
+  awgInstalling.value = true;
+  awgNote.value = "Ставлю mihomo из фида — это ~20 МБ загрузки, до пары минут…";
+  try {
+    await awgApi.install();
+    const st = await poll(() => awgApi.status(), {
+      done: (v) => !!v?.installed,
+      intervalMs: 4000,
+      timeoutMs: 300_000,
+    });
+    awgState.value = st;
+    if (!st) throw new Error("роутер не ответил");
+    awgNote.value = st.installed
+      ? `mihomo ${st.version} установлен`
+      : "Установка не завершилась — подробности в журнале обновлений";
+  } catch (e) {
+    awgNote.value = `Не удалось установить mihomo: ${(e as Error).message}`;
+  } finally {
+    awgInstalling.value = false;
+  }
+}
 const needsUuid = computed(() => ["vless", "vmess", "tuic"].includes(type.value));
 const needsPassword = computed(() =>
   ["trojan", "shadowsocks", "hysteria2", "tuic"].includes(type.value),
@@ -89,10 +140,24 @@ const showFingerprint = computed(
 
 const title = computed(() => (isNew.value ? "Новый профиль" : `Профиль: ${d.value.name}`));
 
-function applyLink() {
-  const parsed = parseShareLink(link.value);
+const VPN_KEY = /^vpn:\/\//i;
+
+async function parseInput(text: string): Promise<ProfileDraft | null> {
+  const t = text.trim();
+  if (VPN_KEY.test(t)) {
+    const conf = await confFromAmneziaKey(t);
+    return conf ? parseWgConf(conf) : null;
+  }
+  if (/\[Interface\]/i.test(t)) return parseWgConf(t);
+  return parseShareLink(t);
+}
+
+async function applyLink() {
+  const parsed = await parseInput(link.value);
   if (!parsed) {
-    linkNote.value = "Не понял ссылку. Поддерживаются vless://, trojan://, vmess://, ss://, hysteria2://, tuic://, socks5://, http://";
+    linkNote.value = VPN_KEY.test(link.value.trim())
+      ? "Не удалось разобрать ключ vpn:// — в нём нет конфигурации WireGuard/AmneziaWG. Выгрузите из клиента Amnezia файл .conf"
+      : "Не понял ссылку. Поддерживаются vless://, trojan://, vmess://, ss://, hysteria2://, tuic://, socks5://, http://, конфиг .conf WireGuard/AmneziaWG и ключ vpn://";
     return;
   }
   /* Имя, группу и область маршрутизации, если они уже заданы, ссылка не
@@ -107,11 +172,30 @@ function applyLink() {
   if (!d.value.name) d.value.name = parsed.server;
   if (isNew.value && !idTouched.value) d.value.id = slugify(d.value.name);
   linkNote.value = `Разобрано: ${parsed.type}, ${parsed.server}:${parsed.port}`;
+  link.value = "";
+}
+
+const fileEl = ref<HTMLInputElement | null>(null);
+async function pickFile(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const f = input.files?.[0];
+  if (!f) return;
+  link.value = await f.text();
+  input.value = "";
+  await applyLink();
+}
+/** Многострочный .conf в однострочное поле не влезет — растим поле по тексту. */
+const linkRows = computed(() => Math.min(10, Math.max(1, link.value.split("\n").length)));
+function linkEnter(e: KeyboardEvent) {
+  if (e.shiftKey || link.value.includes("\n")) return;
+  e.preventDefault();
+  void applyLink();
 }
 
 const canSave = computed(() => {
   if (!d.value.name.trim()) return false;
-  if (isWg.value) return !!d.value.privateKey.trim() && !!d.value.peerPublicKey.trim();
+  if (isWg.value)
+    return !!d.value.privateKey.trim() && !!d.value.peerPublicKey.trim() && !!d.value.server.trim();
   return !!d.value.server.trim();
 });
 
@@ -151,15 +235,17 @@ async function copyShare() {
   <DrawerSheet :open="open" :title="title" wide @close="emit('close')">
     <template #sticky>
       <div class="linkrow">
-        <input
+        <textarea
           v-model="link"
-          type="text"
+          :rows="linkRows"
           spellcheck="false"
-          placeholder="Вставьте ссылку: vless://…, trojan://…, ss://…, hysteria2://…"
-          aria-label="Ссылка на сервер"
-          @keydown.enter.prevent="applyLink"
-        />
+          placeholder="Ссылка vless://…, .conf WireGuard/AmneziaWG или vpn://"
+          aria-label="Ссылка или конфиг"
+          @keydown.enter="linkEnter"
+        ></textarea>
         <UiButton :disabled="!link.trim()" @click="applyLink">Разобрать</UiButton>
+        <UiButton title="Загрузить .conf WireGuard/AmneziaWG" @click="fileEl?.click()">Файл…</UiButton>
+        <input ref="fileEl" type="file" accept=".conf,.txt,text/plain" hidden @change="pickFile" />
         <UiButton :disabled="!shareText" :title="`${shareLabel} для стороннего клиента`" @click="copyShare">
           {{ shareLabel }}
         </UiButton>
@@ -291,9 +377,48 @@ async function copyShare() {
         <PField label="Allowed IPs" hint="По одному на строку" wide>
           <textarea v-model="d.allowedIps" rows="2" spellcheck="false" placeholder="0.0.0.0/0"></textarea>
         </PField>
-        <PField label="Reserved" hint="Три числа через запятую, если требует сервер">
+        <PField v-if="!isAwg" label="Reserved" hint="Три числа через запятую, если требует сервер">
           <input v-model="d.reserved" type="text" spellcheck="false" placeholder="0,0,0" />
         </PField>
+        <template v-if="isAwg">
+          <PField label="Persistent keepalive, с" hint="Пусто — выключен">
+            <input v-model="d.keepalive" type="text" inputmode="numeric" placeholder="25" />
+          </PField>
+          <PField
+            label="Параметры AmneziaWG"
+            hint="Строки из [Interface] конфига Amnezia: Jc, Jmin, Jmax, S1–S4, H1–H4, I1–I5; для AWG 1.5 — J1–J3, Itime; для AWG 3 — HeaderProtectionKey и др."
+            wide
+          >
+            <textarea
+              v-model="d.awg"
+              rows="8"
+              spellcheck="false"
+              class="mono"
+              placeholder="Jc = 4&#10;Jmin = 40&#10;Jmax = 70&#10;S1 = 15&#10;S2 = 21&#10;H1 = 1234567&#10;H2 = 2345678&#10;H3 = 3456789&#10;H4 = 4567890"
+            ></textarea>
+          </PField>
+          <div class="awgstate" role="status">
+            <p v-if="awgState && !awgState.installed && awgState.platform === 'ios'" class="warn">
+              На iOS AmneziaWG пока недоступен: система не даёт запустить mihomo рядом с туннелем.
+            </p>
+            <p v-else-if="awgState && !awgState.installed && !onRouter" class="warn">
+              В этой сборке приложения нет mihomo, через который работает AmneziaWG, —
+              переустановите Detour свежим установщиком.
+            </p>
+            <template v-else-if="awgState && !awgState.installed">
+              <p class="warn">
+                AmneziaWG на роутере работает через mihomo, а он пока не установлен
+                (~57 МБ). Профиль сохранится, но подключиться к нему не выйдет.
+              </p>
+              <UiButton :busy="awgInstalling" @click="installMihomo">Установить mihomo</UiButton>
+            </template>
+            <p v-else-if="awgState" class="note">
+              mihomo {{ awgState.version }} — {{ awgState.running ? "работает" : "запустится при сохранении" }}.
+              AmneziaWG-профиль в цепочке может стоять только первым звеном.
+            </p>
+            <p v-if="awgNote" class="note">{{ awgNote }}</p>
+          </div>
+        </template>
       </template>
 
       <template v-if="showTls">
@@ -396,8 +521,11 @@ async function copyShare() {
   gap: 8px;
   align-items: center;
 }
-.linkrow input {
-  flex: 1 1 auto;
+.linkrow textarea {
+  flex: 1 1 260px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.4;
   min-width: 0;
   border: 1px solid var(--line-2);
   border-radius: var(--radius-sm);
@@ -408,7 +536,7 @@ async function copyShare() {
   min-height: 44px;
   outline: none;
 }
-.linkrow input:focus {
+.linkrow textarea:focus {
   border-color: var(--accent);
 }
 .note {
@@ -435,6 +563,20 @@ async function copyShare() {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+.awgstate {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.awgstate .warn {
+  width: 100%;
 }
 .pair {
   display: flex;

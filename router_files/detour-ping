@@ -142,7 +142,7 @@ probe_one() {
             # ICMP filtered → TCP handshake gives reachability AND a real latency
             # number (so ICMP-dropping servers show "42 ms", not a bare tick).
             case "$ptype" in
-                wireguard|hysteria2|tuic) : ;;
+                wireguard|amneziawg|hysteria2|tuic) : ;;
                 *)
                     tr=$(tcp_probe "$server" "$port")
                     if [ $? -eq 0 ]; then

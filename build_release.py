@@ -145,6 +145,10 @@ PANEL_FILES = [
     # Cloudflare WARP: регистрирует бесплатное устройство и кладёт его обычным
     # wireguard-профилем (последний хоп цепочки → выход из дата-центра в CF).
     (("router_files", "detour-warp"), "usr/sbin/detour-warp", 0o755),
+    # AmneziaWG: сайдкар mihomo (сам mihomo — отдельный пакет фида, ставится по
+    # кнопке; без него detour-awg и init-скрипт — no-op).
+    (("router_files", "detour-awg"), "usr/sbin/detour-awg", 0o755),
+    (("router_files", "detour-awg.initd"), "etc/init.d/detour-awg", 0o755),
     (("router_files", "detour-meter"), "usr/sbin/detour-meter", 0o755),
     (("router_files", "detour-offload"), "usr/sbin/detour-offload", 0o755),
     # Публикация LAN-сервисов наружу (HTTPS-реверс-прокси на nginx / DNAT через uci).
@@ -461,6 +465,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/detour-rulist /usr/sbin/detour-torrent \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
+    /usr/sbin/detour-awg /etc/init.d/detour-awg \\
     /www/cgi-bin/detour-api 2>/dev/null
 
 # 2b) Seed the health-check target list on first install (preserved on upgrade
@@ -562,6 +567,9 @@ fi
 # script on upgrade and re-starts only if the (keeplist-preserved) setting is on.
 /etc/init.d/detour-logbridge enable >/dev/null 2>&1
 /etc/init.d/detour-logbridge restart >/dev/null 2>&1
+# AmneziaWG-сайдкар: no-op без mihomo и без AWG-профилей.
+/etc/init.d/detour-awg enable >/dev/null 2>&1
+/etc/init.d/detour-awg restart >/dev/null 2>&1
 
 # 3f) Seed the HW-offload watchdog config on first install only (keeplist-preserved, so
 # a user's later choice survives upgrades). Default: auto-recover a wedged QCA accelerator.
@@ -659,6 +667,7 @@ echo "=== detour prerm start pid=$$ args:$* ==="
 /etc/init.d/sing-box stop >/dev/null 2>&1
 # Stop the syslog log-bridge (tail|logger followers) so they don't linger.
 [ -x /etc/init.d/detour-logbridge ] && /etc/init.d/detour-logbridge stop >/dev/null 2>&1
+[ -x /etc/init.d/detour-awg ] && /etc/init.d/detour-awg stop >/dev/null 2>&1
 # Stop the bypass engine (nfqws2/tpws + its firewall) WITHOUT changing the
 # persisted mode — postinst re-applies it. Falls back to a direct tpws stop.
 [ -x /usr/sbin/detour-bypass ] && /usr/sbin/detour-bypass stop >/dev/null 2>&1

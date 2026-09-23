@@ -1,0 +1,14 @@
+FROM golang:1.25-alpine AS build
+ARG AWG_TAG
+RUN apk add --no-cache git make \
+ && git clone --depth 1 -b "$AWG_TAG" https://github.com/amnezia-vpn/amneziawg-go /src
+WORKDIR /src
+RUN CGO_ENABLED=0 go build -trimpath -o /amneziawg-go .
+
+FROM alpine:3.20
+RUN apk add --no-cache iproute2 socat busybox-extras iptables
+COPY --from=build /amneziawg-go /usr/bin/amneziawg-go
+ARG AWG_TAG
+ENV AWG_TAG=$AWG_TAG
+COPY server.sh /server.sh
+ENTRYPOINT ["sh", "/server.sh"]
