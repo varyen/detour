@@ -742,6 +742,7 @@ local function parse_body_into_profiles(body, sub)
 
     local profiles = {}
     local seen_ids = {}
+    local owners = profile_owners()
     local skipped = 0
     local bypass_domains = {}
     local bypass_seen = {}
@@ -766,7 +767,11 @@ local function parse_body_into_profiles(body, sub)
         local base = make_profile_id(label)
         local id = base
         local suf = 2
-        while seen_ids[id] do
+        -- Файл с таким id, но из другой подписки или заведённый руками —
+        -- чужой: перезаписать его значило бы молча подменить чужой профиль.
+        -- Суффикс стабилен между обновлениями: тот же узел снова упрётся в
+        -- чужой файл и снова получит свой _N.
+        while seen_ids[id] or (owners[id] ~= nil and owners[id] ~= group) do
             id = base:sub(1, 60) .. "_" .. suf
             suf = suf + 1
         end
@@ -840,6 +845,32 @@ local function parse_body_into_profiles(body, sub)
     end
 
     return profiles, bypass_domains, skipped, source_kind
+end
+
+-- Группа каждого уже лежащего профиля: id → group ("" у заведённых руками).
+function profile_owners()
+    local owners = {}
+    local p = io.popen("ls " .. PROFILES .. "/*.json 2>/dev/null")
+    if not p then return owners end
+    for path in p:lines() do
+        local raw = read_all(path)
+        local prof = raw and cjson.decode(raw)
+        local id = path:match("([^/]+)%.json$")
+        if id then
+            owners[id] = (type(prof) == "table" and type(prof.group) == "string") and prof.group or ""
+        end
+    end
+    p:close()
+    return owners
+end
+
+-- В ссылке подписки обычно сидит личный токен: в журнал — только схема и хост.
+local function mask_url(url)
+    local scheme, rest = (url or ""):match("^([%w+.-]+)://(.*)$")
+    if not scheme then return "…" end
+    local host = rest:match("^([^/?#]*)") or ""
+    host = host:match("@(.*)$") or host
+    return scheme .. "://" .. host .. "/…"
 end
 
 -- ===== refresh ONE subscription =====
@@ -1031,7 +1062,7 @@ local last_state = { ok = true, ts = now, runs = {} }
 for _, sub in ipairs(subs) do
     if due_for_refresh(sub, now) then
         log(string.format("refreshing %s (group=%q, url=%s)",
-            sub.id, sub.group or "", sub.url))
+            sub.id, sub.group or "", mask_url(sub.url)))
         local ok, payload = refresh_subscription(sub)
         persist_outcome(sub, ok, payload)
         processed = processed + 1

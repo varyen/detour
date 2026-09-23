@@ -400,6 +400,43 @@ sanitize_name() {
     echo "$1" | tr -cd 'a-zA-Z0-9_-' | head -c 64
 }
 
+# Тип профиля — верхнеуровневый `type`, иначе `outbound.type`. json_val тут
+# не годится: cjson пишет ключи в произвольном порядке, а sed берёт последнее
+# вхождение, и vless-ws читался как «ws» (transport.type). Один файл — те же
+# правила, что у всех, через profile_types_all.
+profile_type() {
+    local t
+    t=$(profile_types_all "$1" | cut -f2)
+    [ -n "$t" ] || t=$(json_val "type" "$1")
+    printf '%s' "$t"
+}
+
+# «id<TAB>тип» на строку по каждому переданному файлу (по умолчанию — все
+# профили): для списка профилей один запуск Lua вместо запуска на файл.
+profile_types_all() {
+    [ $# -gt 0 ] || set -- "$SINGBOX_PROFILES_DIR"/*.json
+    lua - "$PLATFORM" "$@" 2>/dev/null <<'LUA'
+if arg[1] == "keenetic" then
+    package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
+end
+local ok, cjson = pcall(require, "cjson.safe")
+if not ok or not cjson then os.exit(1) end
+for i = 2, #arg do
+    local path = arg[i]
+    local f = io.open(path, "rb")
+    if f then
+        local obj = cjson.decode(f:read("*a") or "")
+        f:close()
+        local t = type(obj) == "table" and obj.type or nil
+        if (type(t) ~= "string" or t == "") and type(obj) == "table" and type(obj.outbound) == "table" then
+            t = obj.outbound.type
+        end
+        io.write(path:match("([^/]+)%.json$") or "", "\t", type(t) == "string" and t or "", "\n")
+    end
+end
+LUA
+}
+
 # Read a JSON string value by key (simple sed parser for flat JSON)
 json_val() {
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1
@@ -506,7 +543,43 @@ extract_profile_outbound() {
     }' "$profile_file" | strip_quic_utls
 }
 
+# WireGuard в sing-box 1.13 — только endpoint с peers[]. Плоская запись (так её
+# отдают ссылки wireguard:// и старая форма: server/server_port/peer_public_key
+# на верхнем уровне) переводится в неё так же, как `to_endpoint` в detour-health.
+# Одно переименование ключей давало два "address" и endpoint без пира, и
+# sing-box отвергал весь конфиг.
 translate_wireguard_profile() {
+    local out
+    out=$(lua - "$PLATFORM" "$1" 2>/dev/null <<'LUA'
+if arg[1] == "keenetic" then
+    package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
+end
+local ok, cjson = pcall(require, "cjson.safe")
+if not ok or not cjson then os.exit(1) end
+local ob = cjson.decode(arg[2] or "")
+if type(ob) ~= "table" then os.exit(1) end
+if ob.local_address and not ob.address then ob.address = ob.local_address end
+ob.local_address = nil
+if type(ob.address) == "string" then ob.address = { ob.address } end
+if not ob.peers and ob.server then
+    ob.peers = { {
+        address = ob.server, port = ob.server_port,
+        public_key = ob.peer_public_key, pre_shared_key = ob.pre_shared_key,
+        reserved = ob.reserved, allowed_ips = { "0.0.0.0/0", "::/0" },
+    } }
+    ob.server, ob.server_port, ob.peer_public_key = nil, nil, nil
+    ob.pre_shared_key, ob.reserved = nil, nil
+end
+ob.system_interface, ob.interface_name, ob.gso, ob.network = nil, nil, nil, nil
+if type(ob.peers) ~= "table" or #ob.peers == 0 then os.exit(1) end
+io.write(cjson.encode(ob))
+LUA
+) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+    translate_wireguard_profile_sed "$1"
+}
+
+# Запасной путь без Lua: годится для записей, где пиры уже лежат в peers[].
+translate_wireguard_profile_sed() {
     local endpoint_json="$1"
     local line
 
@@ -1032,7 +1105,7 @@ emit_route_chain() { # $1=hops CSV, $2=final tag, $3=tag prefix
         [ -f "$pfile" ] || return 1
         payload=$(extract_profile_outbound "$pfile")
         [ -n "$payload" ] || return 1
-        ptype=$(json_val "type" "$pfile")
+        ptype=$(profile_type "$pfile")
         if [ "$i" -eq "$total" ]; then tag="$final"; else tag="${prefix}_$i"; fi
         payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
         if [ "$ptype" = "wireguard" ]; then
@@ -1098,11 +1171,11 @@ compute_route_extras() {
             tag="out_$target"
             # host_override решается по ПОСЛЕДНЕМУ хопу — именно он дозванивается
             # до сайта, и только ему важно имя хоста вместо уже готового IP.
-            ptype=$(json_val "type" "$SINGBOX_PROFILES_DIR/$(get_last_csv_item "$thops").json")
+            ptype=$(profile_type "$SINGBOX_PROFILES_DIR/$(get_last_csv_item "$thops").json")
         else
             via_chain=$(route_map_bool_option "$target" via_chain 0)
             tag=$(route_tag_for "$target" "$chain")
-            ptype=$(json_val "type" "$SINGBOX_PROFILES_DIR/$target.json")
+            ptype=$(profile_type "$SINGBOX_PROFILES_DIR/$target.json")
         fi
         host_override=0
         case "$ptype" in
@@ -1221,7 +1294,7 @@ compute_intercept_inbounds() { # $1 = active chain CSV
             csv_contains "$sel" "$target" || continue
             pfile="$SINGBOX_PROFILES_DIR/$target.json"
             [ -f "$pfile" ] || continue
-            ptype=$(json_val "type" "$pfile")
+            ptype=$(profile_type "$pfile")
             case "$ptype" in
                 socks|socks4|socks4a|socks5|http|http-proxy|https-proxy) ;;
                 *) continue ;;
@@ -1316,7 +1389,7 @@ render_chain_config() {
         [ -f "$pfile" ] || return 1
         payload=$(extract_profile_outbound "$pfile")
         [ -n "$payload" ] || return 1
-        ptype=$(json_val "type" "$pfile")
+        ptype=$(profile_type "$pfile")
 
         if [ "$idx" -lt "$total" ]; then
             tag="chain_$idx"
@@ -2160,7 +2233,7 @@ status)
     # when no typed profile is active (e.g. bare "default") — panel hides the tag.
     SB_TYPE=""
     [ -f "$SINGBOX_PROFILES_DIR/$SB_PROFILE.json" ] && \
-        SB_TYPE=$(json_val "type" "$SINGBOX_PROFILES_DIR/$SB_PROFILE.json")
+        SB_TYPE=$(profile_type "$SINGBOX_PROFILES_DIR/$SB_PROFILE.json")
     SB_MODE=$(get_singbox_mode)
     SB_ROUTE_TARGETS=$(route_map_targets | grep -c . 2>/dev/null)
     [ -z "$SB_ROUTE_TARGETS" ] && SB_ROUTE_TARGETS=0
@@ -2367,7 +2440,7 @@ self_intercept)
             _pf="$SINGBOX_PROFILES_DIR/$_t.json"
             [ -f "$_pf" ] || continue
             route_map_targets | grep -qx "$_t" || continue
-            case "$(json_val "type" "$_pf")" in
+            case "$(profile_type "$_pf")" in
                 socks|socks4|socks4a|socks5|http|http-proxy|https-proxy) ;;
                 *) continue ;;
             esac
@@ -2397,7 +2470,7 @@ self_intercept)
         for _t in $(route_map_targets); do
             _pf="$SINGBOX_PROFILES_DIR/$_t.json"
             [ -f "$_pf" ] || continue
-            case "$(json_val "type" "$_pf")" in
+            case "$(profile_type "$_pf")" in
                 socks|socks4|socks4a|socks5|http|http-proxy|https-proxy)
                     ELIG="${ELIG:+$ELIG,}$_t" ;;
             esac
@@ -2459,7 +2532,7 @@ ping_check)
     NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
     PSRV=$(json_val "server" "$PFILE")
     PPORT=$(numeric_json_val "server_port" "$PFILE")
-    PTYPE=$(json_val "type" "$PFILE")
+    PTYPE=$(profile_type "$PFILE")
     # wireguard/WARP: ключа "server" нет, узел лежит в peers[].address (см. detour-ping).
     if [ -z "$PSRV" ] && [ "$PTYPE" = "wireguard" ]; then
         PSRV=$(sed -n 's/.*"address"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PFILE" 2>/dev/null | head -1)
@@ -3401,10 +3474,12 @@ LUA
     rm -f "$PL_TMP"
     printf '{"profiles":['
     FIRST=1
+    PTYPES=$(profile_types_all)
     for f in "$SINGBOX_PROFILES_DIR"/*.json; do
         [ -f "$f" ] || continue
         PNAME=$(basename "$f" .json)
-        PTYPE=$(json_val "type" "$f")
+        PTYPE=$(printf '%s\n' "$PTYPES" | awk -F '\t' -v k="$PNAME" '$1 == k { print $2; exit }')
+        [ -n "$PTYPE" ] || PTYPE=$(json_val "type" "$f")
         PDESC=$(json_val "name" "$f")
         PGROUP=$(json_val "group" "$f")
         PRMODE=$(json_val "routing_mode" "$f")
@@ -3618,6 +3693,27 @@ profile_save)
         fi
     fi
     echo "$POST_DATA" > "$PS_FILE"
+    # Профиль мог быть уже В РАБОТЕ — хопом активной цепочки или целью маршрута.
+    # Раньше правка ложилась только в файл: панель показывала новый сервер, а
+    # трафик шёл по старому до переподключения. Пересобираем, как chain_save.
+    PS_CHAIN=$(get_active_chain)
+    case ",$PS_CHAIN," in
+        *",$P_ID,"*) PS_APPLY=1 ;;
+        *) route_map_targets | grep -qx "$P_ID" && PS_APPLY=1 || PS_APPLY="" ;;
+    esac
+    if [ -n "$PS_APPLY" ] && [ -n "$PS_CHAIN" ]; then
+        SBMODE=$(get_singbox_mode)
+        BUILD_ERR=$(build_config "$SBMODE" "$PS_CHAIN")
+        if [ $? -ne 0 ]; then
+            json_err "профиль сохранён, но конфиг не собрался: $(printf '%s' "$BUILD_ERR" | json_escape)"
+            exit 0
+        fi
+        write_settings "$PS_CHAIN" "$(resolve_routing_mode_for_chain "$PS_CHAIN")" \
+            "$(collect_upstream_ips)" "$SBMODE"
+        # Сменился только апстрим — хватает быстрого reconfigure (fail-closed).
+        $SINGBOX_INITD reconfigure >/dev/null 2>&1
+        sleep 3
+    fi
     json_ok
     ;;
 

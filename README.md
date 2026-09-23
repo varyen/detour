@@ -5,7 +5,7 @@
 > **zapret-tpws** (DPI-bypass) — с самообновлением по подписанным релизам
 > (`.ipk` для opkg, `.apk` для OpenWrt 25.12+).
 
-**Версия:** [`1.57.0`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
+**Версия:** [`1.58.1`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 
