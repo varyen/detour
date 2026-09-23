@@ -192,10 +192,22 @@ LUA
 
 have_bin() { [ -x "$BIN" ]; }
 
+sidecar_off() {
+    case "$(cat "$ETC/sing-box/engine" 2>/dev/null)" in mihomo|singbox) return 0 ;; esac
+    return 1
+}
+
 svc() { [ -x "$INITD" ] && "$INITD" "$1" >/dev/null 2>&1; }
 
 # 0 = есть конфиг (новый или прежний), 3 = AWG-профилей нет
 do_sync() {
+    # В движке mihomo AWG-профили живут в основном конфиге — сайдкар не нужен
+    # сайдкар нужен только гибриду: в «mihomo» AWG в основном конфиге, в «singbox» его нет
+    if sidecar_off; then
+        rm -f "$CONF"
+        svc stop
+        return 3
+    fi
     tmp="$CONF.new"
     awg_lua render "$tmp"
     rc=$?
@@ -235,6 +247,7 @@ case "$1" in
         ;;
     render)
         # только конфиг, без управления сервисом — для init-скриптов
+        sidecar_off && { rm -f "$CONF"; exit 3; }
         awg_lua render "$CONF.new" && mv "$CONF.new" "$CONF" || { rm -f "$CONF.new"; exit 3; }
         ;;
     port)

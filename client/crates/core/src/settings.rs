@@ -137,4 +137,39 @@ impl Settings {
     pub fn allvpn(&self) -> bool {
         self.flag("allvpn", false)
     }
+
+    /// Режим движка: singbox | hybrid | mihomo — те же значения, что на роутере.
+    /// На телефонах есть только sing-box (libbox), поэтому там всегда гибрид.
+    pub fn engine_mode(&self) -> EngineMode {
+        if !crate::engine::MIHOMO_ENGINE_SUPPORTED {
+            return EngineMode::Hybrid;
+        }
+        match self.get("engine_mode").as_deref() {
+            Some("singbox") => EngineMode::Singbox,
+            Some("mihomo") => EngineMode::Mihomo,
+            _ => EngineMode::Hybrid,
+        }
+    }
+
+    /// В режиме mihomo цепочка с запретом торрентов идёт через sing-box.
+    pub fn engine_torrent_singbox(&self) -> bool {
+        self.flag("engine_torrent_singbox", true)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EngineMode {
+    Singbox,
+    Hybrid,
+    Mihomo,
+}
+
+impl EngineMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EngineMode::Singbox => "singbox",
+            EngineMode::Hybrid => "hybrid",
+            EngineMode::Mihomo => "mihomo",
+        }
+    }
 }

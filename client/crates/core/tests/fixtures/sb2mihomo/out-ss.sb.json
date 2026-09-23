@@ -1,0 +1,31 @@
+{
+ "log": {
+  "level": "error"
+ },
+ "inbounds": [
+  {
+   "type": "mixed",
+   "tag": "mixed-in",
+   "listen": "127.0.0.1",
+   "listen_port": 19482
+  }
+ ],
+ "outbounds": [
+  {
+   "type": "shadowsocks",
+   "server": "vpn.example.com",
+   "server_port": 8388,
+   "method": "2022-blake3-aes-128-gcm",
+   "password": "AAAAAAAAAAAAAAAAAAAAAA==",
+   "udp_over_tcp": true,
+   "tag": "proxy"
+  },
+  {
+   "type": "direct",
+   "tag": "direct"
+  }
+ ],
+ "route": {
+  "final": "proxy"
+ }
+}

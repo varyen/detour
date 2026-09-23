@@ -65,6 +65,7 @@ VERSION_FILE="/etc/detour/version"
 UPDATE_STATE="/var/state/detour-update.json"
 BINS_STATE="/var/state/detour-bins.json"   # sing-box update state (written by detour-update bins-check)
 TPWS_STATE="/var/state/detour-tpws.json"   # tpws-zapret update state (written by detour-update tpws-check)
+MIHOMO_STATE="/var/state/detour-mihomo.json" # mihomo update state (written by detour-update mihomo-check)
 NFQWS2_STATE="/var/state/detour-nfqws2.json" # nfqws2 (zapret2) update state (written by detour-update nfqws2-check)
 PING_DB="/tmp/detour-ping.db"               # per-profile latency cache (TSV in tmpfs; cleared on reboot)
 HEALTH_DB="/tmp/detour-health.db"           # per-profile FUNCTIONAL check cache (TSV; written by detour-health)
@@ -91,6 +92,13 @@ WARP_BIN="/usr/sbin/detour-warp"            # Cloudflare WARP (последни�
 AWG_BIN="/usr/sbin/detour-awg"              # AmneziaWG через сайдкар mihomo — backs the awg_* actions
 AWG_PORTS="/etc/sing-box/awg-ports"         # id AWG-профиля → порт socks-listener'а mihomo (пишет detour-awg)
 AWG_CONF="/var/etc/detour-awg/config.yaml"  # конфиг сайдкара (tmpfs, пересобирается detour-awg)
+# Режим «mihomo»: тот же рендер, что для sing-box, переводится sb2mihomo.lua и
+# запускается mihomo на тех же портах. Какой движок сейчас в работе — ENGINE_FILE.
+MIHOMO_BIN="/usr/bin/mihomo"
+MIHOMO_CONF="/etc/sing-box/mihomo.json"
+MIHOMO_RUNDIR="/var/etc/detour-engine"
+ENGINE_FILE="/etc/sing-box/engine"
+SB2MIHOMO="/usr/share/detour/sb2mihomo.lua"
 METER_BIN="/usr/sbin/detour-meter"          # счётчики трафика по лентам — backs the traffic_counters action
 TRAFFICLOG_BIN="/usr/sbin/detour-trafficlog" # временной ряд трафика (cron) — backs the traffic_series action
 WARP_STATE="/var/state/detour-warp.json"    # ход регистрации WARP (пишет detour-warp; CGI её детачит)
@@ -191,6 +199,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     UPDATE_STATE="$OPT/var/state/detour-update.json"
     BINS_STATE="$OPT/var/state/detour-bins.json"
     TPWS_STATE="$OPT/var/state/detour-tpws.json"
+    MIHOMO_STATE="$OPT/var/state/detour-mihomo.json"
     NFQWS2_STATE="$OPT/var/state/detour-nfqws2.json"
     AUTH_FILE="$OPT/etc/detour.auth"
     DETOUR_DIR="$OPT/etc/detour"
@@ -219,6 +228,11 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     AWG_BIN="$OPT/sbin/detour-awg"
     AWG_PORTS="$OPT/etc/sing-box/awg-ports"
     AWG_CONF="$OPT/var/run/detour-awg/config.yaml"
+    MIHOMO_BIN="$OPT/bin/mihomo"
+    MIHOMO_CONF="$OPT/etc/sing-box/mihomo.json"
+    MIHOMO_RUNDIR="$OPT/var/run/detour-engine"
+    ENGINE_FILE="$OPT/etc/sing-box/engine"
+    SB2MIHOMO="$OPT/share/detour/sb2mihomo.lua"
     WARP_STATE="$OPT/var/state/detour-warp.json"
     METER_BIN="$OPT/sbin/detour-meter"
     TRAFFICLOG_BIN="$OPT/sbin/detour-trafficlog"
@@ -530,11 +544,45 @@ is_awg_profile() {
     grep -q '"type"[[:space:]]*:[[:space:]]*"amneziawg"' "$1" 2>/dev/null
 }
 
+# Режим движков (настройка engine_mode):
+#   singbox — только sing-box, AmneziaWG недоступен;
+#   hybrid  — sing-box для всего, AmneziaWG через сайдкар mihomo (по умолчанию);
+#   mihomo  — всё через mihomo. Если на цепочке действует запрет торрентов и
+#             включён engine_torrent_singbox, цепочка идёт как в hybrid: запрет
+#             торрентов на уровне потока умеет только sing-box.
+get_engine_mode() {
+    local m=${ENGINE_MODE_OVERRIDE:-$(get_settings_val engine_mode)}
+    case "$m" in singbox|hybrid|mihomo) printf '%s' "$m" ;; *) printf 'hybrid' ;; esac
+}
+engine_torrent_singbox() {
+    local v=${ENGINE_TORRENT_SB_OVERRIDE:-$(get_settings_val engine_torrent_singbox)}
+    [ "$v" != "0" ]
+}
+# Движок, на котором сейчас собран и запущен конфиг (пишет build_config).
+current_engine() {
+    local e; e=$(cat "$ENGINE_FILE" 2>/dev/null)
+    case "$e" in mihomo) printf 'mihomo' ;; *) printf 'singbox' ;; esac
+}
+# То же, но с различием «чистый sing-box / гибрид» — для панели.
+current_engine_detail() {
+    local e; e=$(cat "$ENGINE_FILE" 2>/dev/null)
+    case "$e" in mihomo|singbox) printf '%s' "$e" ;; *) printf 'hybrid' ;; esac
+}
+engine_pid() {
+    if [ "$(current_engine)" = mihomo ]; then
+        pgrep -f "$MIHOMO_BIN -d $MIHOMO_RUNDIR" 2>/dev/null | head -1
+    else
+        pgrep -f "$SINGBOX_BIN run" 2>/dev/null | head -1
+    fi
+}
+
 # AmneziaWG sing-box не понимает: вместо профиля — socks на порт сайдкара mihomo
 # (detour-awg), который и держит AWG-туннель.
 extract_profile_outbound() {
     local profile_file="$1"
-    if is_awg_profile "$profile_file"; then
+    # В движке mihomo AmneziaWG — обычный исходящий: отдаём профиль как есть,
+    # sb2mihomo переведёт его в wireguard + amnezia-wg-option.
+    if is_awg_profile "$profile_file" && [ "$AWG_INLINE" != 1 ]; then
         "$AWG_BIN" outbound "$(basename "$profile_file" .json)"
         return
     fi
@@ -744,6 +792,10 @@ write_settings() {
     # UDP через VPN (off|list|all). Preserve-or-override like the flags above; the
     # udp_vpn action sets UDP_VPN_MODE_OVERRIDE before calling us. Migrates the legacy
     # discord_voice_vpn=1 flag → "list" on the first rewrite.
+    local engine_mode_v engine_tsb
+    engine_mode_v=$(get_engine_mode)
+    engine_tsb=1; engine_torrent_singbox || engine_tsb=0
+
     local udp_vpn_mode
     udp_vpn_mode=${UDP_VPN_MODE_OVERRIDE:-$(get_settings_val "udp_vpn_mode")}
     case "$udp_vpn_mode" in
@@ -768,7 +820,9 @@ write_settings() {
   "log_to_syslog_singbox": "$log_syslog_sb",
     "self_intercept": "$self_intercept",
     "self_intercept_full": "$self_intercept_full",
-    "udp_vpn_mode": "$udp_vpn_mode"
+    "udp_vpn_mode": "$udp_vpn_mode",
+    "engine_mode": "$engine_mode_v",
+    "engine_torrent_singbox": "$engine_tsb"
 }
 EOF
 }
@@ -1125,7 +1179,7 @@ emit_route_chain() { # $1=hops CSV, $2=final tag, $3=tag prefix
         [ -n "$payload" ] || return 1
         ptype=$(profile_type "$pfile")
         if [ "$i" -eq "$total" ]; then tag="$final"; else tag="${prefix}_$i"; fi
-        [ -n "$detour" ] && is_awg_profile "$pfile" && return 1
+        [ -n "$detour" ] && [ "$AWG_INLINE" != 1 ] && is_awg_profile "$pfile" && return 1
         payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
         if [ "$ptype" = "wireguard" ]; then
             payload=$(translate_wireguard_profile "$payload")
@@ -1224,7 +1278,9 @@ compute_route_extras() {
             detour=""
             # «через цепочку» для AWG невозможно (socks на 127.0.0.1) — цель идёт
             # напрямую в свой AWG-туннель
-            [ "$via_chain" = "1" ] && ! is_awg_profile "$SINGBOX_PROFILES_DIR/$target.json" && detour="proxy"
+            if [ "$via_chain" = "1" ] && { [ "$AWG_INLINE" = 1 ] || ! is_awg_profile "$SINGBOX_PROFILES_DIR/$target.json"; }; then
+                detour="proxy"
+            fi
             payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
             if [ "$ptype" = "wireguard" ]; then
                 payload=$(translate_wireguard_profile "$payload")
@@ -1420,7 +1476,7 @@ render_chain_config() {
 
         # socks на 127.0.0.1 через предыдущий хоп ушёл бы на удалённую сторону —
         # AWG-профиль может стоять только первым звеном цепочки.
-        if [ -n "$detour" ] && is_awg_profile "$pfile"; then
+        if [ -n "$detour" ] && [ "$AWG_INLINE" != 1 ] && is_awg_profile "$pfile"; then
             return 1
         fi
         payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
@@ -1632,6 +1688,47 @@ render_fail_reason() {
     fi
 }
 
+# Движок mihomo: тот же рендер (одиночный режим — у mihomo отдельные входы на
+# цели маршрутов и так живут в одном процессе), затем перевод sb2mihomo.lua и
+# проверка `mihomo -t`. Живой конфиг sing-box не трогаем — вернуться на него
+# можно без пересборки.
+build_config_mihomo() {
+    local chain="$1" tmp_sb tmp_mh err
+    tmp_sb="${MIHOMO_CONF}.sb.$$"
+    tmp_mh="${MIHOMO_CONF}.tmp.$$"
+    AWG_INLINE=1
+    compute_route_extras "$chain"
+    compute_intercept_inbounds "$chain"
+    local route_rules rule_prefix rule_tail
+    route_rules="$RX_RULES"
+    if [ -n "$IX_RULES" ]; then
+        rule_prefix='    "rules": [{"action":"sniff"},'
+        if [ -n "$route_rules" ]; then
+            rule_tail=${route_rules#"$rule_prefix"}
+            route_rules="$rule_prefix$IX_RULES,$rule_tail"
+        else
+            route_rules="$rule_prefix$IX_RULES],
+"
+        fi
+    fi
+    if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$route_rules" 12345 redirect "$RX_INBOUNDS$IX_INBOUNDS" > "$tmp_sb"; then
+        rm -f "$tmp_sb"; render_fail_reason "$chain" "failed to render config (bad chain?)"; echo; return 1
+    fi
+    if ! err=$(lua "$SB2MIHOMO" "$tmp_sb" "$tmp_mh" 2>&1); then
+        rm -f "$tmp_sb" "$tmp_mh"; echo "перевод конфига для mihomo: $err"; return 1
+    fi
+    rm -f "$tmp_sb"
+    mkdir -p "$MIHOMO_RUNDIR"
+    if ! err=$("$MIHOMO_BIN" -t -d "$MIHOMO_RUNDIR" -f "$tmp_mh" 2>&1); then
+        rm -f "$tmp_mh"; echo "mihomo отверг конфиг: $(printf '%s' "$err" | tail -3)"; return 1
+    fi
+    mv "$tmp_mh" "$MIHOMO_CONF"
+    echo mihomo > "$ENGINE_FILE"
+    # сайдкар больше не нужен: AWG-профили в основном конфиге
+    [ -x "$AWG_BIN" ] && "$AWG_BIN" sync >/dev/null 2>&1
+    return 0
+}
+
 # Build all sing-box config(s) for the given mode + chain. Writes to temp files,
 # validates EVERY config with `sing-box check`, then commits atomically. On any
 # failure prints a reason to stdout, returns 1, and leaves live configs intact.
@@ -1645,10 +1742,10 @@ build_config() {
     commit_list=""
     keep_targets=""
 
-    # Сайдкар AmneziaWG должен быть поднят до того, как sing-box начнёт в него слать.
-    if [ -s "$AWG_PORTS" ] && [ -x "$AWG_BIN" ]; then
-        "$AWG_BIN" sync >/dev/null 2>&1
-    fi
+    # Какой движок соберёт этот конфиг. Считается до сайдкара: в движке mihomo
+    # сайдкар не нужен, AWG-профили идут в основной конфиг.
+    local engine_mode eff_engine
+    engine_mode=$(get_engine_mode)
 
     # Запрет торрентов — свойство ЦЕПОЧКИ, а не только выходного узла: трафик несёт
     # каждый хоп, поэтому хватает ОДНОГО профиля без явного разрешения. Список
@@ -1665,6 +1762,34 @@ build_config() {
         grep -qxF "$_tid" "$TORRENT_ALLOW" 2>/dev/null || TORRENT_REJECT=1
     done
     IFS=$_oifs
+
+    eff_engine=singbox
+    if [ "$engine_mode" = mihomo ]; then
+        if [ "$TORRENT_REJECT" = 1 ] && engine_torrent_singbox; then
+            eff_engine=singbox   # запрет торрентов на цепочке — как в гибриде
+        else
+            eff_engine=mihomo
+        fi
+    fi
+    if [ "$eff_engine" = mihomo ] && [ ! -x "$MIHOMO_BIN" ]; then
+        echo "режим «mihomo»: mihomo не установлен — поставьте его в «Журнал → Обновления»"
+        return 1
+    fi
+    if [ "$engine_mode" = singbox ]; then
+        local _awg_used=""
+        for _tid in $(printf '%s' "$chain" | tr ',' ' ') $(route_map_targets); do
+            is_awg_profile "$SINGBOX_PROFILES_DIR/$_tid.json" && _awg_used="$_tid"
+        done
+        if [ -n "$_awg_used" ]; then
+            echo "AmneziaWG-профиль $_awg_used недоступен в режиме «только sing-box» — выберите гибрид или mihomo"
+            return 1
+        fi
+    fi
+    if [ "$eff_engine" = mihomo ]; then
+        build_config_mihomo "$chain"
+        return $?
+    fi
+    AWG_INLINE=0
 
     if [ "$mode" = "multi" ]; then
         # Smart-intercept is single-mode only; drop any stale map so the initd
@@ -1745,6 +1870,12 @@ build_config() {
         src="${pair%%:*}"; dst="${pair#*:}"
         mv "$src" "$dst"
     done
+    # singbox — чистый sing-box, hybrid — плюс сайдкар AmneziaWG (mihomo в
+    # режиме «mihomo», откатившемся из-за запрета торрентов, — тоже гибрид).
+    if [ "$engine_mode" = singbox ]; then echo singbox > "$ENGINE_FILE"; else echo hybrid > "$ENGINE_FILE"; fi
+    # Сайдкар поднимаем после рендера: порты AWG-профилей выдаются в нём. Init
+    # перезапускает sing-box уже после возврата — к этому моменту сайдкар готов.
+    [ -x "$AWG_BIN" ] && "$AWG_BIN" sync >/dev/null 2>&1
     # Drop per-target configs no longer referenced.
     for tmp_t in "$SINGBOX_CONFIG_DIR"/config-*.json; do
         [ -f "$tmp_t" ] || continue
@@ -1939,7 +2070,26 @@ if [ "$1" = "chain-save" ]; then
     echo "chain-save: $2"
     exit 0
 fi
+# Временный экземпляр движка по готовому конфигу sing-box (render-mixed,
+# проверки, подписки, WARP). В движке mihomo конфиг сначала переводится.
+#   engine-check <conf>              — проверить
+#   engine-run   <conf> <dir>        — exec движка (зовут с &, PID тот же)
+if [ "$1" = "engine-check" ] || [ "$1" = "engine-run" ]; then
+    _conf="$2"; _dir="${3:-/tmp/detour-engine.$$}"
+    [ -s "$_conf" ] || { echo "$1: нет конфига $_conf" >&2; exit 1; }
+    if [ "$(current_engine)" = mihomo ]; then
+        _mh="$_conf.mihomo"
+        lua "$SB2MIHOMO" "$_conf" "$_mh" || exit 1
+        mkdir -p "$_dir"
+        [ "$1" = engine-check ] && exec "$MIHOMO_BIN" -t -d "$_dir" -f "$_mh"
+        exec "$MIHOMO_BIN" -d "$_dir" -f "$_mh"
+    fi
+    [ "$1" = engine-check ] && exec "$SINGBOX_BIN" check -c "$_conf"
+    exec "$SINGBOX_BIN" run -c "$_conf" -D "$_dir"
+fi
 if [ "$1" = "render-mixed" ]; then
+    # в движке mihomo AWG-профиль идёт в конфиг как есть (сайдкара нет)
+    [ "$(current_engine)" = mihomo ] && AWG_INLINE=1
     # Печатает конфиг sing-box с mixed-инбаундом для заданной цепочки ($2; пусто =
     # активная) на порту $3. Нужен detour-warp: регистрация WARP и проверка цепочки
     # ходят наружу через временный экземпляр, а рендер цепочек должен остаться в
@@ -1967,9 +2117,10 @@ if [ "$1" = "egress-ip-refresh" ]; then
         rm -rf "$EGRESS_IP_LOCK" "$_conf" "$_data" 2>/dev/null
     }
     trap _cleanup_egress EXIT INT TERM HUP
+    [ "$(current_engine)" = mihomo ] && AWG_INLINE=1
     if ! render_chain_config "$CHAIN" "" "" "" "$_port" mixed > "$_conf"; then exit 1; fi
-    "$SINGBOX_BIN" check -c "$_conf" >/dev/null 2>&1 || exit 1
-    "$SINGBOX_BIN" run -c "$_conf" -D "$_data" > "$EGRESS_IP_LOG" 2>&1 &
+    "$0" engine-check "$_conf" "$_data" >/dev/null 2>&1 || exit 1
+    "$0" engine-run "$_conf" "$_data" > "$EGRESS_IP_LOG" 2>&1 &
     _sbpid=$!
     _tries=0
     _ip=""
@@ -2204,13 +2355,13 @@ check_auth)
     ;;
 
 status)
-    SB_PID=$(pgrep -f "$SINGBOX_BIN" 2>/dev/null | head -1)
+    SB_PID=$(engine_pid)
     SB_RUNNING="false"
     SB_PORT=""
     SB_ENABLED="false"
     if [ -n "$SB_PID" ]; then
         SB_RUNNING="true"
-        SB_PORT=$(netstat -tlnp 2>/dev/null | grep "$SB_PID/sing-box" | awk '{print $4}' | sed 's/.*://' | head -1)
+        SB_PORT=$(netstat -tlnp 2>/dev/null | grep "$SB_PID/" | awk '{print $4}' | sed 's/.*://' | head -1)
     fi
     read_autostart singbox /etc/rc.d/S99sing-box SB_ENABLED
 
@@ -2324,6 +2475,8 @@ status)
     [ -x "$NFQWS_BIN" ] && NFQWS_BIN_VER=$("$NFQWS_BIN" --version 2>/dev/null | awk 'NR==1{print $3}')
     [ -z "$NFQWS_BIN_VER" ] && NFQWS_BIN_VER="?"
     NFQWS_BIN_PRESENT=false; [ -x "$NFQWS_BIN" ] && NFQWS_BIN_PRESENT=true
+    MIHOMO_BIN_VER=$(pkg_ver mihomo)
+    MIHOMO_BIN_PRESENT=false; [ -n "$MIHOMO_BIN_VER" ] && MIHOMO_BIN_PRESENT=true
     # zapret2 capability: OpenWrt only (KeeneticOS lacks NFQUEUE; no mipsel feed).
     # The panel uses this to show the zapret2 chip as «н/д» where unsupported.
     NFQWS_SUPPORTED=true; [ "$PLATFORM" = keenetic ] && NFQWS_SUPPORTED=false
@@ -2356,7 +2509,9 @@ status)
     "tpws_version": "$TPWS_BIN_VER",
     "nfqws2_present": $NFQWS_BIN_PRESENT,
     "nfqws2_version": "$NFQWS_BIN_VER",
-    "nfqws2_supported": $NFQWS_SUPPORTED
+    "nfqws2_supported": $NFQWS_SUPPORTED,
+    "mihomo_present": $MIHOMO_BIN_PRESENT,
+    "mihomo_version": "$MIHOMO_BIN_VER"
   },
   "singbox": {
     "running": $SB_RUNNING,
@@ -3100,11 +3255,17 @@ updates_overview)
     SB_CUR=$(feed_cur "$BINS_STATE");     SB_AV=$(feed_avail "$BINS_STATE");     SB_CHK=$(st_check "$BINS_STATE")
     TPWS_CUR=$(feed_cur "$TPWS_STATE");   TPWS_AV=$(feed_avail "$TPWS_STATE");   TPWS_CHK=$(st_check "$TPWS_STATE")
     NFQWS2_CUR=$(feed_cur "$NFQWS2_STATE"); NFQWS2_AV=$(feed_avail "$NFQWS2_STATE"); NFQWS2_CHK=$(st_check "$NFQWS2_STATE")
-    printf '{"panel":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","changelog_b64":"%s"},"singbox":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"tpws":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"nfqws2":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"}}\n' \
+    # mihomo: «доступно обновление» только если он вообще стоит — иначе это не
+    # обновление, а установка, и чип в шапке мигать не должен.
+    MH_CUR=$(feed_cur "$MIHOMO_STATE"); MH_AV=$(feed_avail "$MIHOMO_STATE"); MH_CHK=$(st_check "$MIHOMO_STATE")
+    MH_UPD=false; [ -n "$MH_CUR" ] && MH_UPD=$(feed_upd "$MIHOMO_STATE")
+    MH_UPV=$(up_ver "$MIHOMO_STATE"); MH_UPN=false; [ -n "$MH_CUR" ] && MH_UPN=$(up_new "$MIHOMO_STATE"); MH_LOG=$(up_log "$MIHOMO_STATE")
+    printf '{"panel":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","changelog_b64":"%s"},"singbox":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"tpws":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"nfqws2":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"},"mihomo":{"update_available":%s,"available_version":"%s","current_version":"%s","last_check":"%s","upstream":"%s","upstream_newer":%s,"changelog_b64":"%s"}}\n' \
         "$P_UPD" "$P_AVAIL" "$P_CUR" "$P_CHK" "$P_LOG" \
         "$SB_UPD" "$SB_AV" "$SB_CUR" "$SB_CHK" "$SB_UPV" "$SB_UPN" "$SB_LOG" \
         "$TPWS_UPD" "$TPWS_AV" "$TPWS_CUR" "$TPWS_CHK" "$TPWS_UPV" "$TPWS_UPN" "$TPWS_LOG" \
-        "$NFQWS2_UPD" "$NFQWS2_AV" "$NFQWS2_CUR" "$NFQWS2_CHK" "$NFQWS2_UPV" "$NFQWS2_UPN" "$NFQWS2_LOG"
+        "$NFQWS2_UPD" "$NFQWS2_AV" "$NFQWS2_CUR" "$NFQWS2_CHK" "$NFQWS2_UPV" "$NFQWS2_UPN" "$NFQWS2_LOG" \
+        "$MH_UPD" "$MH_AV" "$MH_CUR" "$MH_CHK" "$MH_UPV" "$MH_UPN" "$MH_LOG"
     ;;
 
 # ==================== DPI-BYPASS ENGINE SWITCH (zapret | zapret2 | off) ====================
@@ -3375,7 +3536,7 @@ traffic_series)
 
 allvpn_on)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    SB_PID=$(pgrep -f "$SINGBOX_BIN" 2>/dev/null | head -1)
+    SB_PID=$(engine_pid)
     if [ -z "$SB_PID" ]; then json_err "sing-box is not running"; exit 0; fi
     UPSTREAM_IPS=$(get_upstream_ips)
     iptables -t nat -N SINGBOX_ALLVPN 2>/dev/null
@@ -4726,6 +4887,43 @@ cert_issue_dns)
 # Регистрация ходит на api.cloudflareclient.com через временный sing-box на активной
 # цепочке (из РФ CF-API напрямую молчит) и занимает 15-40 с — поэтому она детачится,
 # а панель опрашивает warp_status, как с выпуском сертификата.
+# ==================== ДВИЖОК: sing-box / гибрид / mihomo ====================
+# GET → {mode, torrent_singbox, effective, singbox_installed, mihomo_installed}
+# POST {"mode":"singbox|hybrid|mihomo","torrent_singbox":true|false} → пересборка
+# и перезапуск: сменился процесс, быстрого reconfigure тут недостаточно.
+engine_config)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        NEW=$(printf '%s' "$POST_DATA" | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\(singbox\|hybrid\|mihomo\)".*/\1/p' | head -1)
+        [ -n "$NEW" ] || NEW=$(get_engine_mode)
+        TSB=$(printf '%s' "$POST_DATA" | sed -n 's/.*"torrent_singbox"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' | head -1)
+        export ENGINE_MODE_OVERRIDE="$NEW"
+        case "$TSB" in true) export ENGINE_TORRENT_SB_OVERRIDE=1 ;; false) export ENGINE_TORRENT_SB_OVERRIDE=0 ;; esac
+        ACHAIN=$(get_active_chain)
+        SBMODE=$(get_singbox_mode)
+        # «работает ли» — до пересборки: после неё engine_pid смотрит уже на новый движок
+        WAS_RUNNING="$(engine_pid)"
+        if [ -n "$ACHAIN" ]; then
+            BUILD_ERR=$(build_config "$SBMODE" "$ACHAIN")
+            if [ $? -ne 0 ]; then
+                json_err "режим не применён: $(printf '%s' "$BUILD_ERR" | json_escape)"; exit 0
+            fi
+        fi
+        write_settings "$ACHAIN" "$(get_routing_mode)" "$(collect_upstream_ips)" "$SBMODE"
+        if [ -n "$ACHAIN" ] && [ -n "$WAS_RUNNING" ]; then
+            $SINGBOX_INITD restart >/dev/null 2>&1
+            sleep 3
+        fi
+        json_ok
+    else
+        EM=$(get_engine_mode)
+        ETS=true; engine_torrent_singbox || ETS=false
+        SBI=false; [ -x "$SINGBOX_BIN" ] && SBI=true
+        MHI=false; [ -x "$MIHOMO_BIN" ] && MHI=true
+        printf '{"mode":"%s","torrent_singbox":%s,"effective":"%s","singbox_installed":%s,"mihomo_installed":%s}\n' \
+            "$EM" "$ETS" "$(current_engine_detail)" "$SBI" "$MHI"
+    fi
+    ;;
+
 # ==================== AmneziaWG (сайдкар mihomo) ====================
 # AWG-профили работают через отдельный mihomo (detour-awg). mihomo — не зависимость
 # панели: ~57 МБ ставятся только тем, кому нужен AWG, кнопкой awg_install.
@@ -4737,10 +4935,28 @@ awg_status)
     fi
     ;;
 
-awg_install)
+awg_install|mihomo_update_apply)
+    # Установка и обновление — одна команда: mihomo-apply ставит пакет, если его
+    # нет, и обновляет, если есть. Detached + live log (apply_log).
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
     start_apply "\"$UPDATE_BIN\" mihomo-apply"
+    ;;
+
+mihomo_update_status)
+    if [ -f "$MIHOMO_STATE" ]; then cat "$MIHOMO_STATE"
+    else echo '{"status":"unknown","message":"no mihomo state yet"}'; fi
+    ;;
+
+mihomo_update_check)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    if OUT=$("$UPDATE_BIN" mihomo-check 2>&1); then
+        if [ -f "$MIHOMO_STATE" ]; then cat "$MIHOMO_STATE"
+        else printf '{"status":"error","message":"%s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"; fi
+    else
+        printf '{"status":"error","message":"проверка не удалась: %s"}' "$(printf '%s' "$OUT" | tail -5 | json_escape)"
+    fi
     ;;
 
 warp_status)

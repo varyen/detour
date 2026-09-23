@@ -1,0 +1,51 @@
+{
+ "log": {
+  "level": "error"
+ },
+ "inbounds": [
+  {
+   "type": "mixed",
+   "tag": "mixed-in",
+   "listen": "127.0.0.1",
+   "listen_port": 19482
+  }
+ ],
+ "outbounds": [
+  {
+   "type": "amneziawg",
+   "server": "awg.example.com",
+   "server_port": 51820,
+   "private_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+   "peer_public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+   "local_address": [
+    "10.8.0.2/32"
+   ],
+   "persistent_keepalive_interval": 25,
+   "amnezia": {
+    "version": 3,
+    "jc": 4,
+    "jmin": "40",
+    "jmax": 70,
+    "s1": 16,
+    "s2": 24,
+    "s3": 20,
+    "s4": 14,
+    "h1": "100-200",
+    "h2": "300-400",
+    "h3": "500-600",
+    "h4": "700-800",
+    "i1": "<b 0xc2><r 32>",
+    "header-protection-key": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+    "random-trailers": "1"
+   },
+   "tag": "proxy"
+  },
+  {
+   "type": "direct",
+   "tag": "direct"
+  }
+ ],
+ "route": {
+  "final": "proxy"
+ }
+}

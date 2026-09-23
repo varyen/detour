@@ -419,12 +419,14 @@ const CH_CHECK: Record<Channel, () => Promise<UpdateChannelState>> = {
   singbox: () => diag.binsCheck(),
   tpws: () => diag.tpwsCheck(),
   nfqws2: () => diag.nfqws2Check(),
+  mihomo: () => diag.mihomoCheck(),
 };
 const CH_APPLY: Record<Channel, () => Promise<unknown>> = {
   panel: () => diag.panelUpdateApply(),
   singbox: () => diag.binsApply(),
   tpws: () => diag.tpwsApply(),
   nfqws2: () => diag.nfqws2Apply(),
+  mihomo: () => diag.mihomoApply(),
 };
 
 /* Сводка обновлений — общая с «Обзором»: на главной по ней рисуется плашка
@@ -1258,6 +1260,19 @@ onBeforeUnmount(() => {
         @check="checkChannel('nfqws2')"
         @apply="applyChannel('nfqws2')"
         @changelog="showChangelog('nfqws2')"
+      />
+      <!-- В клиенте mihomo едет внутри установщика и обновляется вместе с ним. -->
+      <UpdateRow
+        v-if="!status.isClient"
+        title="mihomo (AmneziaWG)"
+        :state="upd?.mihomo ?? null"
+        :installed="status.data?.binaries?.mihomo_version"
+        :busy-check="updBusy === 'check:mihomo'"
+        :busy-apply="updBusy === 'apply:mihomo'"
+        note="Нужен только для AmneziaWG-профилей. Пакет берётся из нашего фида (~20 МБ загрузки)."
+        @check="checkChannel('mihomo')"
+        @apply="applyChannel('mihomo')"
+        @changelog="showChangelog('mihomo')"
       />
 
       <SwitchToggle

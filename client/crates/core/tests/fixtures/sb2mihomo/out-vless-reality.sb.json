@@ -1,0 +1,39 @@
+{
+ "log": {
+  "level": "error"
+ },
+ "inbounds": [
+  {
+   "type": "mixed",
+   "tag": "mixed-in",
+   "listen": "127.0.0.1",
+   "listen_port": 19482
+  }
+ ],
+ "outbounds": [
+  {
+   "type": "vless",
+   "server": "vpn.example.com",
+   "server_port": 443,
+   "uuid": "00000000-0000-4000-8000-000000000001",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "www.example.com",
+    "reality": {
+     "enabled": true,
+     "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+     "short_id": "0123abcd"
+    }
+   },
+   "tag": "proxy"
+  },
+  {
+   "type": "direct",
+   "tag": "direct"
+  }
+ ],
+ "route": {
+  "final": "proxy"
+ }
+}

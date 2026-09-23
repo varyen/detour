@@ -46,6 +46,9 @@ pub struct Params<'a> {
     /// (`DETOUR_DEV_NO_TUN`): вместо туннеля вход `dev-in`, чей трафик идёт
     /// по тем же правилам, что шёл бы из TUN.
     pub tun: bool,
+    /// Движок mihomo: AmneziaWG-профили идут в конфиг как есть (их переведёт
+    /// `mihomo::convert`), сайдкар не нужен и ограничения «первым звеном» нет.
+    pub awg_inline: bool,
 }
 
 pub const DEV_PORT: u16 = 18282;
@@ -70,11 +73,20 @@ pub enum Hop {
     Endpoint(Value),
 }
 
-fn hop(store: &Store, id: &str, tag: &str, detour: Option<&str>, awg: &mut Sidecars) -> Result<Hop> {
+fn hop(store: &Store, id: &str, tag: &str, detour: Option<&str>, awg: &mut Sidecars, inline: bool) -> Result<Hop> {
     let profile = profiles::load(store, id).ok_or_else(|| anyhow!("профиль {id} не найден"))?;
     let mut ob = profiles::outbound(&profile)
         .cloned()
         .ok_or_else(|| anyhow!("у профиля {id} нет параметров подключения"))?;
+    if awg::is_awg(&ob) && inline {
+        let o = ob.as_object_mut().ok_or_else(|| anyhow!("outbound не объект"))?;
+        o.insert("tag".into(), json!(tag));
+        match detour {
+            Some(d) => o.insert("detour".into(), json!(d)),
+            None => o.remove("detour"),
+        };
+        return Ok(Hop::Outbound(ob));
+    }
     if awg::is_awg(&ob) {
         if !awg::SUPPORTED {
             bail!("профиль {id}: AmneziaWG на этой платформе недоступен");
@@ -186,7 +198,7 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
     for (i, id) in p.chain.iter().enumerate() {
         let tag = if i + 1 == n { "proxy".to_owned() } else { format!("chain_{}", i + 1) };
         let detour = (i > 0).then(|| format!("chain_{i}"));
-        let h = hop(store, id, &tag, detour.as_deref(), &mut b.awg)?;
+        let h = hop(store, id, &tag, detour.as_deref(), &mut b.awg, p.awg_inline)?;
         b.push(h);
     }
 
@@ -213,7 +225,7 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
         rules.push(json!({ "protocol": ["bittorrent"], "network": ["tcp"], "action": "reject" }));
     }
 
-    route_targets(store, p.chain, &mut b, &mut rules)?;
+    route_targets(store, p.chain, &mut b, &mut rules, p.awg_inline)?;
 
     // Сам mihomo ходит к AWG-серверу наружу, и без этого правила его UDP
     // вернулся бы в TUN и дальше в тот же socks — петля. На Android петлю
@@ -381,7 +393,7 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
 
 /// Карта маршрутов. Цель — профиль или цепочка; пропавшая цель не уходит в
 /// `final`, а режется (fail-closed, как «мёртвый» порт 12499 на роутере).
-fn route_targets(store: &Store, active: &[String], b: &mut Builder, rules: &mut Vec<Value>) -> Result<()> {
+fn route_targets(store: &Store, active: &[String], b: &mut Builder, rules: &mut Vec<Value>, inline: bool) -> Result<()> {
     let sections = lists::parse_route_map(&store.read_text(store::ROUTE_MAP));
     let chains = ChainStore::load(store);
     let mut n = 0usize;
@@ -406,7 +418,7 @@ fn route_targets(store: &Store, active: &[String], b: &mut Builder, rules: &mut 
             for (i, id) in c.hops.iter().enumerate() {
                 let tag = if i + 1 == last { format!("out_{}", c.id) } else { format!("rc{n}_{}", i + 1) };
                 let detour = (i > 0).then(|| format!("rc{n}_{i}"));
-                let h = hop(store, id, &tag, detour.as_deref(), &mut b.awg)?;
+                let h = hop(store, id, &tag, detour.as_deref(), &mut b.awg, inline)?;
                 b.push(h);
             }
             (format!("out_{}", c.id), c.hops.last().cloned().unwrap_or_default())
@@ -419,8 +431,8 @@ fn route_targets(store: &Store, active: &[String], b: &mut Builder, rules: &mut 
             let target_awg = profiles::load(store, &sec.target)
                 .and_then(|p| profiles::outbound(&p).map(awg::is_awg))
                 .unwrap_or(false);
-            let detour = (sec.via_chain && !target_awg).then_some("proxy");
-            let h = hop(store, &sec.target, &tag, detour, &mut b.awg)?;
+            let detour = (sec.via_chain && (inline || !target_awg)).then_some("proxy");
+            let h = hop(store, &sec.target, &tag, detour, &mut b.awg, inline)?;
             b.push(h);
             (tag, sec.target.clone())
         };
@@ -498,7 +510,7 @@ mod tests {
     }
 
     fn params<'a>(chain: &'a [String], dir: &'a Path) -> Params<'a> {
-        Params { chain, log_path: dir, ruleset_dir: dir, clash_port: 19090, clash_secret: "s", dpi: DpiRoute::Off, tun: true }
+        Params { chain, log_path: dir, ruleset_dir: dir, clash_port: 19090, clash_secret: "s", dpi: DpiRoute::Off, tun: true, awg_inline: false }
     }
 
     #[test]

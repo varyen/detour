@@ -1,0 +1,48 @@
+{
+ "allow-lan": true,
+ "dns": {
+  "enable": false
+ },
+ "ipv6": true,
+ "listeners": [
+  {
+   "listen": "127.0.0.1",
+   "name": "mixed-in",
+   "port": 19482,
+   "type": "mixed",
+   "udp": true
+  }
+ ],
+ "log-level": "error",
+ "mode": "rule",
+ "profile": {
+  "store-fake-ip": false,
+  "store-selected": false
+ },
+ "proxies": [
+  {
+   "alpn": [
+    "h2",
+    "http/1.1"
+   ],
+   "down": "200 Mbps",
+   "name": "proxy",
+   "obfs": "salamander",
+   "obfs-password": "ob",
+   "password": "pw",
+   "port": 443,
+   "ports": "20000-30000",
+   "server": "vpn.example.com",
+   "skip-cert-verify": true,
+   "sni": "vpn.example.com",
+   "type": "hysteria2",
+   "udp": true,
+   "up": "50 Mbps"
+  }
+ ],
+ "rules": [
+  "MATCH,proxy"
+ ],
+ "tcp-concurrent": false,
+ "unified-delay": true
+}

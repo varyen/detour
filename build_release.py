@@ -149,6 +149,8 @@ PANEL_FILES = [
     # кнопке; без него detour-awg и init-скрипт — no-op).
     (("router_files", "detour-awg"), "usr/sbin/detour-awg", 0o755),
     (("router_files", "detour-awg.initd"), "etc/init.d/detour-awg", 0o755),
+    # Перевод конфига sing-box → mihomo для режима движка «mihomo».
+    (("router_files", "sb2mihomo.lua"), "usr/share/detour/sb2mihomo.lua", 0o644),
     (("router_files", "detour-meter"), "usr/sbin/detour-meter", 0o755),
     (("router_files", "detour-offload"), "usr/sbin/detour-offload", 0o755),
     # Публикация LAN-сервисов наружу (HTTPS-реверс-прокси на nginx / DNAT через uci).

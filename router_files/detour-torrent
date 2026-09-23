@@ -44,9 +44,10 @@
 #               peers from.
 #   UDP tracker BEP-15 connect carries the fixed protocol id 0x41727101980.
 #   TCP peer    the plaintext BEP-3 handshake "\x13BitTorrent protocol". nft can
-#               only match at a fixed offset, so we cover the two TCP header
-#               lengths that occur in practice (doff 5 = no options, doff 8 =
-#               timestamps). Layer 1 covers the rest for tunnelled traffic.
+#               only match at a fixed offset, so there is one rule per possible
+#               TCP header length (doff 5…15). That makes this layer complete for
+#               plaintext handshakes on its own — the «mihomo» engine relies on
+#               it, since mihomo has no BitTorrent sniffer.
 #
 # KNOWN BLIND SPOT (documented, not silently ignored): MSE/PE encryption over
 # plain TCP has no plaintext marker at all and is not matched here. It is not a
@@ -165,6 +166,17 @@ nft_install() {
     _ifs=${_ifs%, }
     [ -z "$_ifs" ] && _ifs="\"$LAN_IF\""
 
+    # Рукопожатие BEP-3 — первые байты TCP-данных, но их смещение зависит от
+    # длины заголовка (doff 5…15 слов). По правилу на каждую длину: так открытое
+    # рукопожатие ловится целиком и без sing-box (режим движка «mihomo»).
+    _bt=""
+    _d=5
+    while [ "$_d" -le 15 ]; do
+        _bt="$_bt        tcp doff $_d @th,$((_d * 32)),64 0x13426974546f7272 counter jump verdict comment \"bt-handshake\"
+"
+        _d=$((_d + 1))
+    done
+
     nft delete table inet "$TABLE" 2>/dev/null
     nft -f - <<NFT 2>>"$LOG" || return 1
 table inet $TABLE {
@@ -192,8 +204,7 @@ table inet $TABLE {
         udp length >= 24 @th,64,64 0x0000041727101980 counter jump verdict comment "udp-tracker"
         udp length >= 24 @th,64,64 0x64313a6164323a69 counter jump verdict comment "dht-query"
         udp length >= 24 @th,64,64 0x64313a7264323a69 counter jump verdict comment "dht-reply"
-        tcp doff 5 @th,160,64 0x13426974546f7272 counter jump verdict comment "bt-handshake"
-        tcp doff 8 @th,256,64 0x13426974546f7272 counter jump verdict comment "bt-handshake"
+$_bt
     }
 }
 NFT

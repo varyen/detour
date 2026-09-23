@@ -144,6 +144,21 @@ def main():
         code = via_vpn()
         check("запрос через VPN (AWG 3) проходит", code == "204", code)
 
+        # режим движка mihomo: тот же профиль уже без сайдкара, трафик через mihomo
+        r = call("engine_config", body={"mode": "mihomo", "torrent_singbox": False})
+        check("клиент: переключение на mihomo", isinstance(r, dict) and r.get("ok"), r)
+        ec = call("engine_config")
+        check("клиент: в работе mihomo", isinstance(ec, dict) and ec.get("effective") == "mihomo", ec)
+        st = call("awg_status")
+        check("клиент: сайдкар в режиме mihomo не нужен", not st.get("running"), st)
+        time.sleep(1)
+        code = via_vpn()
+        check("клиент mihomo: запрос через AWG 3 проходит", code == "204", code)
+        r = call("engine_config", body={"mode": "singbox"})
+        check("клиент: «только sing-box» с AWG-профилем — отказ",
+              isinstance(r, dict) and not r.get("ok") and "AmneziaWG" in str(r), r)
+        call("engine_config", body={"mode": "hybrid"})
+
         stand.sh("docker", "stop", sname, check=False)
         time.sleep(1)
         code = via_vpn("https://www.google.com/generate_204")

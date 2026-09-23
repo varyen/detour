@@ -1,0 +1,51 @@
+{
+ "allow-lan": true,
+ "dns": {
+  "enable": false
+ },
+ "ipv6": true,
+ "listeners": [
+  {
+   "listen": "127.0.0.1",
+   "name": "mixed-in",
+   "port": 19482,
+   "type": "mixed",
+   "udp": true
+  }
+ ],
+ "log-level": "error",
+ "mode": "rule",
+ "profile": {
+  "store-fake-ip": false,
+  "store-selected": false
+ },
+ "proxies": [
+  {
+   "alterId": 0,
+   "cipher": "aes-128-gcm",
+   "http-opts": {
+    "headers": {
+     "Host": [
+      "b.example.com"
+     ]
+    },
+    "path": [
+     "/p"
+    ]
+   },
+   "name": "proxy",
+   "network": "http",
+   "port": 80,
+   "server": "vpn.example.com",
+   "tls": false,
+   "type": "vmess",
+   "udp": true,
+   "uuid": "00000000-0000-4000-8000-000000000001"
+  }
+ ],
+ "rules": [
+  "MATCH,proxy"
+ ],
+ "tcp-concurrent": false,
+ "unified-delay": true
+}

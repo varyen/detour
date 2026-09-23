@@ -2,6 +2,8 @@ import { requestJson, requestJsonTolerant } from "./client";
 import type {
   CertDnsStatus,
   CertStatus,
+  EngineConfig,
+  EngineMode,
   OffloadStatus,
   PortmapEntry,
   PortmapStatus,
@@ -71,6 +73,14 @@ export const services = {
     requestJson<{ ok: boolean; sent: number }>("push_test", {
       method: "POST",
       timeoutMs: 45_000,
+    }),
+
+  /* --- движок: sing-box / гибрид / mihomo --- */
+  engineConfig: () => requestJsonTolerant<EngineConfig>("engine_config"),
+  engineSet: (mode: EngineMode, torrentSingbox: boolean) =>
+    requestJson<{ ok: boolean }>("engine_config", {
+      body: { mode, torrent_singbox: torrentSingbox },
+      timeoutMs: 120_000,
     }),
 
   /* --- аппаратный офлоад (возможность определяется не платформой) --- */

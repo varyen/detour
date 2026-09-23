@@ -13,8 +13,8 @@
    и из ключа Amnezia vpn://. AmneziaWG на роутере работает через сайдкар
    mihomo — если его нет, форма предлагает поставить. */
 import { computed, nextTick, ref, watch } from "vue";
-import { awg as awgApi, poll } from "@/api";
-import type { AwgStatus } from "@/api";
+import { awg as awgApi, poll, services } from "@/api";
+import type { AwgStatus, EngineConfig } from "@/api";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import UiButton from "@/components/UiButton.vue";
 import PField from "@/components/profiles/PField.vue";
@@ -93,11 +93,19 @@ const awgState = ref<AwgStatus | null>(null);
 const awgInstalling = ref(false);
 const awgNote = ref("");
 const onRouter = computed(() => ["openwrt", "keenetic"].includes(awgState.value?.platform ?? ""));
+const engineCfg = ref<EngineConfig | null>(null);
 async function loadAwgState() {
   try {
     awgState.value = await awgApi.status();
   } catch {
     awgState.value = null;
+  }
+  if (onRouter.value) {
+    try {
+      engineCfg.value = await services.engineConfig();
+    } catch {
+      engineCfg.value = null;
+    }
   }
 }
 watch(
@@ -412,9 +420,14 @@ async function copyShare() {
               </p>
               <UiButton :busy="awgInstalling" @click="installMihomo">Установить mihomo</UiButton>
             </template>
+            <p v-else-if="engineCfg?.mode === 'singbox'" class="warn">
+              Выбран движок «sing-box» — в нём AmneziaWG недоступен. Смените режим в
+              «Сервисы → Движок VPN» на гибрид или mihomo.
+            </p>
             <p v-else-if="awgState" class="note">
-              mihomo {{ awgState.version }} — {{ awgState.running ? "работает" : "запустится при сохранении" }}.
-              AmneziaWG-профиль в цепочке может стоять только первым звеном.
+              mihomo {{ awgState.version }}.
+              <template v-if="engineCfg?.mode === 'mihomo'">Движок mihomo: профиль может стоять в любом звене цепочки.</template>
+              <template v-else>Гибрид: AmneziaWG-профиль в цепочке может стоять только первым звеном.</template>
             </p>
             <p v-if="awgNote" class="note">{{ awgNote }}</p>
           </div>

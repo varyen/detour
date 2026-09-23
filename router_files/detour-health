@@ -413,6 +413,13 @@ end
 
 -- AmneziaWG живёт в сайдкаре mihomo (detour-awg): для sing-box это socks на
 -- его порт. Порта нет (сайдкар ещё не собирал профиль) → профиль пропускается.
+-- какой движок сейчас в работе (пишет detour-api build_config)
+ENGINE_MIHOMO = (function()
+  local f = io.open(pdir .. "/../engine", "r")
+  if not f then return false end
+  local e = (f:read("*l") or ""); f:close()
+  return e == "mihomo"
+end)()
 local function awg_socks(pdir, id)
   local f = io.open(pdir .. "/../awg-ports", "r")
   if not f then return nil end
@@ -439,7 +446,8 @@ if idf then
           if (ob.type == "hysteria" or ob.type == "hysteria2" or ob.type == "tuic")
              and type(ob.tls) == "table" then ob.tls.utls = nil end
           if ob.type == "wireguard" then ob = to_endpoint(ob) end
-          if ob and ob.type == "amneziawg" then ob = awg_socks(pdir, id) end
+          -- в движке mihomo сайдкара нет: AWG идёт в конфиг как есть, его переведёт sb2mihomo
+          if ob and ob.type == "amneziawg" and not ENGINE_MIHOMO then ob = awg_socks(pdir, id) end
           -- ob == nil → профиль непредставим (битый wireguard); пропускаем ЕГО,
           -- а не весь чанк.
           if ob then
@@ -474,7 +482,7 @@ LUA
 
 start_sb() { # builds nothing; starts $SB_CONF, waits for clash. 0=up 1=failed
     rm -rf "$SB_DATA"; mkdir -p "$SB_DATA"
-    "$SINGBOX_BIN" run -c "$SB_CONF" -D "$SB_DATA" >"$SB_LOG" 2>&1 &
+    "$API_BIN" engine-run "$SB_CONF" "$SB_DATA" >"$SB_LOG" 2>&1 &
     SBPID=$!
     i=0
     while [ "$i" -lt "$SB_WAIT" ]; do
@@ -507,6 +515,13 @@ local obj = cjson.decode(h:read("*a") or ""); h:close()
 if not (obj and obj.outbound) then os.exit(1) end
 -- AmneziaWG живёт в сайдкаре mihomo (detour-awg): для sing-box это socks на
 -- его порт. Порта нет (сайдкар ещё не собирал профиль) → профиль пропускается.
+-- какой движок сейчас в работе (пишет detour-api build_config)
+ENGINE_MIHOMO = (function()
+  local f = io.open(pdir .. "/../engine", "r")
+  if not f then return false end
+  local e = (f:read("*l") or ""); f:close()
+  return e == "mihomo"
+end)()
 local function awg_socks(pdir, id)
   local f = io.open(pdir .. "/../awg-ports", "r")
   if not f then return nil end
@@ -518,7 +533,7 @@ local function awg_socks(pdir, id)
   return nil
 end
 local ob = obj.outbound
-if ob.type == "amneziawg" then ob = awg_socks(pdir, id) end
+if ob.type == "amneziawg" and not ENGINE_MIHOMO then ob = awg_socks(pdir, id) end
 if not ob then os.exit(1) end
 ob.tag = "vpn"
 if (ob.type == "hysteria" or ob.type == "hysteria2" or ob.type == "tuic")

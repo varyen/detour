@@ -125,8 +125,17 @@ pub fn proxy(name: &str, ob: &Value) -> Result<Value> {
     if let Some(k) = ob.get("persistent_keepalive_interval").and_then(num) {
         p.insert("persistent-keepalive".into(), json!(k));
     }
+    if let Some(opt) = ob.get("amnezia").and_then(option) {
+        p.insert("amnezia-wg-option".into(), opt);
+    }
+
+    Ok(Value::Object(p))
+}
+
+/// `outbound.amnezia` профиля → `amnezia-wg-option` mihomo (ключи, числа, флаги).
+pub fn option(src: &Value) -> Option<Value> {
     let mut opt = Map::new();
-    if let Some(src) = ob.get("amnezia").and_then(Value::as_object) {
+    if let Some(src) = src.as_object() {
         for k in KEYS {
             let v = src.get(k).or_else(|| src.get(&k.replace('-', "_")));
             let Some(v) = v.filter(|v| !v.is_null() && v.as_str() != Some("")) else { continue };
@@ -146,10 +155,7 @@ pub fn proxy(name: &str, ob: &Value) -> Result<Value> {
             opt.insert(k.into(), v);
         }
     }
-    if !opt.is_empty() {
-        p.insert("amnezia-wg-option".into(), Value::Object(opt));
-    }
-    Ok(Value::Object(p))
+    (!opt.is_empty()).then_some(Value::Object(opt))
 }
 
 /// Конфиг mihomo: по listener'у на профиль, всё прочее отвергается.

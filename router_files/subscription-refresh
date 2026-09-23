@@ -195,7 +195,7 @@ local function vpn_proxy_url()
     end
     VPN.started = true
     if CLI.no_vpn then return nil end
-    if not file_exists(API_BIN) or not file_exists(SINGBOX_BIN) then return nil end
+    if not file_exists(API_BIN) then return nil end
     -- Another run already holds the port: don't fight over it, just go direct.
     if vpn_live_pid() then return nil end
     -- Leftovers from a run that was killed mid-flight (the pid above is dead).
@@ -205,11 +205,14 @@ local function vpn_proxy_url()
         shell_quote(API_BIN), VPN_PORT, shell_quote(VPN_CONF)))
     local conf = read_all(VPN_CONF)
     if not conf or conf == "" then vpn_proxy_down(); return nil end
-    if not sh_ok(shell_quote(SINGBOX_BIN) .. " check -c " .. shell_quote(VPN_CONF)) then
+    -- движок (sing-box или mihomo) выбирает detour-api: engine-run переводит
+    -- конфиг сам, если сейчас в работе mihomo
+    if not sh_ok(shell_quote(API_BIN) .. " engine-check " .. shell_quote(VPN_CONF) .. " "
+                 .. shell_quote(VPN_DATA)) then
         vpn_proxy_down(); return nil
     end
-    os.execute(string.format("%s run -c %s -D %s > %s 2>&1 & echo $! > %s",
-        shell_quote(SINGBOX_BIN), shell_quote(VPN_CONF), shell_quote(VPN_DATA),
+    os.execute(string.format("%s engine-run %s %s > %s 2>&1 & echo $! > %s",
+        shell_quote(API_BIN), shell_quote(VPN_CONF), shell_quote(VPN_DATA),
         shell_quote(VPN_LOG), shell_quote(VPN_PID)))
     os.execute("sleep 2")
     local pid = (read_all(VPN_PID) or ""):match("%d+")

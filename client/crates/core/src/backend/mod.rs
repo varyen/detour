@@ -22,7 +22,7 @@ use crate::engine::Engine;
 use crate::ipc::{Request, Response};
 use crate::lists;
 use crate::render::{self, Params};
-use crate::settings::Settings;
+use crate::settings::{EngineMode, Settings};
 use crate::store::{self, Store};
 
 #[cfg(target_os = "windows")]
@@ -39,6 +39,10 @@ pub const PLATFORM: &str = "linux";
 const CLASH_PORT: u16 = 19090;
 const CLASH_SECRET: &str = "run/clash.secret";
 const AWG_CONFIG: &str = "run/mihomo.json";
+/// Конфиг движка mihomo (перевод живого конфига sing-box).
+const ENGINE_MIHOMO_CONFIG: &str = "run/engine-mihomo.json";
+/// Какой движок собран сейчас: singbox | hybrid | mihomo.
+const ENGINE_EFFECTIVE: &str = "run/engine.effective";
 
 /// Запускать ли движок после пересборки.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -333,6 +337,7 @@ impl Backend {
             "keepalive_check" => self.keepalive_check().await,
             "offload_status" | "swap_status" | "warp_status" => Response::json(&json!({ "supported": false })),
             "awg_status" => self.awg_status().await,
+            "engine_config" => self.engine_config(req, body()?).await?,
             // mihomo приезжает внутри приложения и обновляется вместе с ним
             "awg_install" => Response::error("mihomo входит в состав приложения — переустановите Detour"),
 
@@ -358,16 +363,26 @@ impl Backend {
             bail!("no active profile");
         }
 
+        let eff = self.effective_engine(&settings, &hops)?;
+        let inline = eff == EngineMode::Mihomo;
         let log = self.store.path(store::SINGBOX_LOG);
         let staging = self.store.path(store::STAGING);
         let _ = std::fs::remove_dir_all(&staging);
-        let staged = self.render_to(&settings, &hops, &log, &staging.join("rules"))?;
+        let staged = self.render_to(&settings, &hops, &log, &staging.join("rules"), inline)?;
         let staged_cfg = staging.join("config.json");
         self.write_rendered(&staged, &staged_cfg)?;
-        self.engine
-            .check(&staged_cfg)
-            .await
-            .map_err(|e| anyhow!("failed to render config: {e}"))?;
+        if inline {
+            // движок mihomo: проверяем перевод, sing-box этот конфиг не запускает
+            let cfg = staging.join("engine-mihomo.json");
+            let conf = crate::mihomo::convert(&staged.config, Some(&staged.rulesets))?;
+            store::write_atomic(&cfg, &crate::mihomo::encode(&conf))?;
+            self.engine.check_mihomo(&cfg).await.map_err(|e| anyhow!("mihomo отверг конфиг: {e}"))?;
+        } else {
+            self.engine
+                .check(&staged_cfg)
+                .await
+                .map_err(|e| anyhow!("failed to render config: {e}"))?;
+        }
         if !staged.awg.is_empty() {
             let cfg = staging.join("mihomo.json");
             store::write_atomic(&cfg, &serde_json::to_vec_pretty(&crate::awg::config(&staged.awg)?)?)?;
@@ -378,8 +393,13 @@ impl Backend {
         }
 
         let rules_dir = self.store.path(store::RULESETS);
-        let live = self.render_to(&settings, &hops, &log, &rules_dir)?;
+        let live = self.render_to(&settings, &hops, &log, &rules_dir, inline)?;
         self.write_rendered(&live, &self.store.path(store::CONFIG))?;
+        if inline {
+            let conf = crate::mihomo::convert(&live.config, Some(&live.rulesets))?;
+            store::write_atomic(&self.store.path(ENGINE_MIHOMO_CONFIG), &crate::mihomo::encode(&conf))?;
+        }
+        self.store.write_text(ENGINE_EFFECTIVE, eff.as_str())?;
         prune(&rules_dir, &live);
         settings.save(&self.store)?;
         let _ = std::fs::remove_dir_all(&staging);
@@ -412,12 +432,83 @@ impl Backend {
                 store::write_atomic(&cfg, &serde_json::to_vec_pretty(&crate::awg::config(&live.awg)?)?)?;
                 self.awg.start(&cfg).await?;
             }
-            self.engine.start(&self.store.path(store::CONFIG)).await?;
+            if inline {
+                self.engine.start_mihomo(&self.store.path(ENGINE_MIHOMO_CONFIG)).await?;
+            } else {
+                self.engine.start(&self.store.path(store::CONFIG)).await?;
+            }
         }
         Ok(())
     }
 
-    fn render_to(&self, settings: &Settings, hops: &[String], log: &Path, rules: &Path) -> Result<render::Rendered> {
+    /// Каким движком собирать: режим из настроек плюс откат mihomo → гибрид,
+    /// если на цепочке запрещены торренты (распознать их внутри потока умеет
+    /// только sing-box). «Только sing-box» отказывает AWG-профилям.
+    fn effective_engine(&self, settings: &Settings, hops: &[String]) -> Result<EngineMode> {
+        let mode = settings.engine_mode();
+        let awg_ids: Vec<String> = hops
+            .iter()
+            .cloned()
+            .chain(lists::parse_route_map(&self.store.read_text(store::ROUTE_MAP)).into_iter().map(|s| s.target))
+            .filter(|id| {
+                crate::profiles::load(&self.store, id)
+                    .and_then(|p| crate::profiles::outbound(&p).map(crate::awg::is_awg))
+                    .unwrap_or(false)
+            })
+            .collect();
+        match mode {
+            EngineMode::Singbox => {
+                if let Some(id) = awg_ids.first() {
+                    bail!("AmneziaWG-профиль {id} недоступен в режиме «только sing-box» — выберите гибрид или mihomo");
+                }
+                Ok(EngineMode::Singbox)
+            }
+            EngineMode::Hybrid => Ok(EngineMode::Hybrid),
+            EngineMode::Mihomo => {
+                let allow = lists::parse_id_list(&self.store.read_text(store::TORRENT_ALLOW));
+                let torrent_block = hops.iter().any(|h| !allow.contains(h));
+                if torrent_block && settings.engine_torrent_singbox() {
+                    return Ok(EngineMode::Hybrid);
+                }
+                if !self.engine.mihomo_binary().is_file() {
+                    bail!("режим «mihomo»: mihomo не найден ({})", self.engine.mihomo_binary().display());
+                }
+                Ok(EngineMode::Mihomo)
+            }
+        }
+    }
+
+    async fn engine_config(&self, req: &Request, body: String) -> Result<Response> {
+        if req.body.is_some() {
+            let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            let mut settings = Settings::load(&self.store);
+            if let Some(m) = v.get("mode").and_then(Value::as_str).filter(|m| ["singbox", "hybrid", "mihomo"].contains(m)) {
+                settings.set("engine_mode", m);
+            }
+            if let Some(t) = v.get("torrent_singbox").and_then(Value::as_bool) {
+                settings.set("engine_torrent_singbox", if t { "1" } else { "0" });
+            }
+            settings.save(&self.store)?;
+            if !settings.active_chain().is_empty() {
+                if let Err(e) = self.apply(None, Start::IfRunning).await {
+                    return Ok(Response::error(&format!("режим не применён: {e:#}")));
+                }
+            }
+            return Ok(Response::json(&json!({ "ok": true })));
+        }
+        let settings = Settings::load(&self.store);
+        let eff = self.store.read_text(ENGINE_EFFECTIVE).trim().to_owned();
+        Ok(Response::json(&json!({
+            "mode": settings.engine_mode().as_str(),
+            "torrent_singbox": settings.engine_torrent_singbox(),
+            "effective": if eff.is_empty() { "hybrid".to_owned() } else { eff },
+            "singbox_installed": self.engine.present(),
+            "mihomo_installed": self.engine.mihomo_binary().is_file(),
+            "supported": crate::engine::MIHOMO_ENGINE_SUPPORTED,
+        })))
+    }
+
+    fn render_to(&self, settings: &Settings, hops: &[String], log: &Path, rules: &Path, inline: bool) -> Result<render::Rendered> {
         render::render(
             &self.store,
             settings,
@@ -433,6 +524,7 @@ impl Backend {
                     render::DpiRoute::Off
                 },
                 tun: self.tun_enabled(),
+                awg_inline: inline,
             },
         )
     }

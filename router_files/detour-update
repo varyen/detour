@@ -74,12 +74,14 @@ MIHOMO_PKG=mihomo   # сайдкар AmneziaWG (detour-awg); ставится п
 BINS_STATE_FILE=/var/state/detour-bins.json     # sing-box update state (panel reads this path)
 TPWS_STATE_FILE=/var/state/detour-tpws.json     # tpws-zapret update state (panel reads this path)
 NFQWS2_STATE_FILE=/var/state/detour-nfqws2.json # nfqws2 (zapret2) update state (panel reads this)
+MIHOMO_STATE_FILE=/var/state/detour-mihomo.json # mihomo (сайдкар AmneziaWG) update state (panel reads this)
 # Upstream project repos — the "a newer version is out on GitHub" signal, checked
 # INDEPENDENTLY of our opkg feed. Detection only: install still goes through the
 # feed (so opkg keeps the version registry / postinst / sysupgrade keeplist). The
 # panel lights an amber chip when upstream > installed but the feed isn't bumped yet.
 SINGBOX_UPSTREAM_REPO="SagerNet/sing-box"
 TPWS_UPSTREAM_REPO="bol-van/zapret"
+MIHOMO_UPSTREAM_REPO="MetaCubeX/mihomo"
 NFQWS2_UPSTREAM_REPO="bol-van/zapret2"
 PUSH_BIN=/usr/sbin/detour-push                  # Web Push sender — alert when a new panel version appears
 NOTIFIED_FILE=/var/state/detour-update-notified # last panel version we pushed about (dedup the 6h cron)
@@ -128,6 +130,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     BINS_STATE_FILE=/opt/var/state/detour-bins.json
     TPWS_STATE_FILE=/opt/var/state/detour-tpws.json
     NFQWS2_STATE_FILE=/opt/var/state/detour-nfqws2.json
+    MIHOMO_STATE_FILE=/opt/var/state/detour-mihomo.json
     PUSH_BIN=/opt/sbin/detour-push
     NOTIFIED_FILE=/opt/var/state/detour-update-notified
     PACKAGE_NAME=detour-keenetic
@@ -1064,7 +1067,52 @@ cmd_mihomo_apply() {
         fi
     fi
     [ -x "$awg" ] && "$awg" sync 2>&1
+    cmd_mihomo_check >/dev/null 2>&1 || true
     log "mihomo now at $(pkg_installed_version "$MIHOMO_PKG")"
+}
+
+write_mihomo_state() {
+    local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" changelog="${5:-}" now
+    now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+    mkdir -p "$(dirname "$MIHOMO_STATE_FILE")"
+    cat > "$MIHOMO_STATE_FILE" <<EOF
+{"current":"$cur","available":"$avail","upstream":"$upstream","upstream_newer":$upnew,"asset":"$MIHOMO_PKG","last_check":"$now","changelog_b64":"$changelog"}
+EOF
+}
+
+# Та же схема, что у tpws: версия в фиде + свежий релиз на GitHub. Не
+# установлен — current пустой: строка в панели тогда предлагает поставить.
+cmd_mihomo_check() {
+    if ! bypass_feed_available; then
+        write_mihomo_state "n/a" "n/a"
+        return 0
+    fi
+    log "checking the feed for mihomo..."
+    ensure_feed
+    local cur avail upstream upnew tag_output changelog
+    cur=$(pkg_installed_version "$MIHOMO_PKG")
+    if use_curl_feed; then
+        avail=$(feed_available_version "$MIHOMO_PKG")
+    else
+        pkg_index_update >/dev/null 2>&1 || log "WARNING: $PKGM update failed (feed unreachable?)"
+        if [ -n "$cur" ]; then
+            avail=$(pkg_upgrade_version "$MIHOMO_PKG"); [ -n "$avail" ] || avail="$cur"
+        else
+            avail=$(feed_available_version "$MIHOMO_PKG")
+        fi
+    fi
+    [ -n "$avail" ] || avail="${cur:-?}"
+    tag_output=$(gh_latest_tag "$MIHOMO_UPSTREAM_REPO") && {
+        upstream=$(printf '%s\n' "$tag_output" | sed -n 1p)
+        changelog=$(printf '%s\n' "$tag_output" | sed -n 2p)
+    } || {
+        upstream=$(prev_field "$MIHOMO_STATE_FILE" upstream)
+        changelog=$(prev_field "$MIHOMO_STATE_FILE" "\bchangelog_b64\b" 1)
+    }
+    upnew=false
+    [ -n "$upstream" ] && [ "$avail" != "?" ] && version_gt "$upstream" "${avail%-*}" && upnew=true
+    write_mihomo_state "$cur" "$avail" "$upstream" "$upnew" "$changelog"
+    log "mihomo: installed ${cur:-none}, feed $avail, upstream ${upstream:-?}"
 }
 
 # ---- nfqws2 / zapret2 (opkg feed) helpers ----
@@ -1172,6 +1220,8 @@ cmd_check_all() {
     ( cmd_bins_check )   || log "check-all: sing-box check failed"
     ( cmd_tpws_check )   || log "check-all: tpws check failed"
     ( cmd_nfqws2_check ) || log "check-all: nfqws2 check failed"
+    # mihomo — только если стоит: без AWG-профилей его нет и ходить в GitHub незачем
+    if pkg_is_installed "$MIHOMO_PKG"; then ( cmd_mihomo_check ) || log "check-all: mihomo check failed"; fi
     return 0
 }
 
@@ -1463,6 +1513,8 @@ case "$ACTION" in
     tpws-apply)        cmd_tpws_apply ;;
     tpws-status)       cat "$TPWS_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
     mihomo-apply)      cmd_mihomo_apply ;;
+    mihomo-check)      cmd_mihomo_check ;;
+    mihomo-status)     cat "$MIHOMO_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
     nfqws2-check)      cmd_nfqws2_check ;;
     nfqws2-apply)      cmd_nfqws2_apply ;;
     nfqws2-status)     cat "$NFQWS2_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;

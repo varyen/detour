@@ -75,9 +75,12 @@ pub struct Meter {
 fn lane_of(c: &Value) -> Lane {
     let first = c.get("chains").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str).unwrap_or("");
     let rule = c.get("rule").and_then(Value::as_str).unwrap_or("");
-    match first {
-        "direct" if rule.contains("dpi") => Lane::Bypass,
-        "direct" | "" => Lane::Direct,
+    // mihomo пишет «DIRECT» и кладёт имя rule-set'а в rulePayload («set-dpi»)
+    let payload = c.get("rulePayload").and_then(Value::as_str).unwrap_or("");
+    let direct = first.is_empty() || first.eq_ignore_ascii_case("direct");
+    match (direct, rule.contains("dpi") || payload.contains("dpi")) {
+        (true, true) => Lane::Bypass,
+        (true, false) => Lane::Direct,
         _ => Lane::Vpn,
     }
 }

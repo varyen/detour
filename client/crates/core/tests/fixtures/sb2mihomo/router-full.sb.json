@@ -1,0 +1,298 @@
+{
+ "log": {
+  "level": "warn",
+  "output": "/var/log/sing-box.log",
+  "timestamp": true
+ },
+ "inbounds": [
+  {
+   "type": "redirect",
+   "tag": "redirect-in",
+   "listen": "::",
+   "listen_port": 12345
+  },
+  {
+   "type": "redirect",
+   "tag": "in_rt_1",
+   "listen": "::",
+   "listen_port": 12401
+  },
+  {
+   "type": "tproxy",
+   "tag": "in_rt_udp_1",
+   "listen": "::",
+   "listen_port": 12501,
+   "network": "udp"
+  },
+  {
+   "type": "socks",
+   "tag": "in_ix_px",
+   "listen": "::",
+   "listen_port": 12371,
+   "users": [
+    {
+     "username": "u",
+     "password": "p"
+    }
+   ]
+  },
+  {
+   "type": "http",
+   "tag": "in_ix_hx",
+   "listen": "::",
+   "listen_port": 12372
+  },
+  {
+   "type": "tproxy",
+   "tag": "tproxy-udp",
+   "listen": "::",
+   "listen_port": 12350,
+   "network": "udp"
+  }
+ ],
+ "endpoints": [
+  {
+   "type": "wireguard",
+   "tag": "out_wg",
+   "address": [
+    "10.0.0.2/32"
+   ],
+   "private_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+   "mtu": 1420,
+   "peers": [
+    {
+     "address": "wg1.example.com",
+     "port": 51820,
+     "public_key": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+     "allowed_ips": [
+      "0.0.0.0/0"
+     ],
+     "reserved": [
+      0,
+      0,
+      1
+     ]
+    },
+    {
+     "address": "wg2.example.com",
+     "port": 51821,
+     "public_key": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+     "allowed_ips": [
+      "10.9.0.0/16"
+     ]
+    }
+   ]
+  }
+ ],
+ "outbounds": [
+  {
+   "type": "vless",
+   "server": "vpn.example.com",
+   "server_port": 443,
+   "uuid": "00000000-0000-4000-8000-000000000001",
+   "tls": {
+    "enabled": true,
+    "server_name": "vpn.example.com",
+    "insecure": true,
+    "alpn": [
+     "h2",
+     "http/1.1"
+    ],
+    "utls": {
+     "enabled": true,
+     "fingerprint": "firefox"
+    }
+   },
+   "transport": {
+    "type": "ws",
+    "path": "/ws",
+    "headers": {
+     "Host": "cdn.example.com"
+    },
+    "max_early_data": 2048,
+    "early_data_header_name": "Sec-WebSocket-Protocol"
+   },
+   "tag": "chain_1"
+  },
+  {
+   "type": "trojan",
+   "server": "vpn.example.com",
+   "server_port": 443,
+   "password": "pw",
+   "tls": {
+    "enabled": true,
+    "server_name": "vpn.example.com",
+    "insecure": true,
+    "alpn": [
+     "h2",
+     "http/1.1"
+    ],
+    "utls": {
+     "enabled": true,
+     "fingerprint": "firefox"
+    }
+   },
+   "tag": "proxy",
+   "detour": "chain_1"
+  },
+  {
+   "type": "amneziawg",
+   "server": "awg.example.com",
+   "server_port": 51820,
+   "private_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+   "peer_public_key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+   "local_address": [
+    "10.8.0.2/32"
+   ],
+   "persistent_keepalive_interval": 25,
+   "amnezia": {
+    "version": 3,
+    "jc": 4,
+    "jmin": "40",
+    "jmax": 70,
+    "s1": 16,
+    "s2": 24,
+    "s3": 20,
+    "s4": 14,
+    "h1": "100-200",
+    "h2": "300-400",
+    "h3": "500-600",
+    "h4": "700-800",
+    "i1": "<b 0xc2><r 32>",
+    "header-protection-key": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+    "random-trailers": "1"
+   },
+   "tag": "out_awg"
+  },
+  {
+   "type": "socks",
+   "server": "proxy.example.com",
+   "server_port": 1080,
+   "version": "5",
+   "username": "u",
+   "password": "p",
+   "tag": "out_px"
+  },
+  {
+   "type": "direct",
+   "tag": "direct"
+  },
+  {
+   "type": "block",
+   "tag": "block"
+  }
+ ],
+ "route": {
+  "rules": [
+   {
+    "action": "sniff"
+   },
+   {
+    "protocol": [
+     "bittorrent"
+    ],
+    "network": [
+     "tcp"
+    ],
+    "action": "reject"
+   },
+   {
+    "action": "route",
+    "domain": [
+     "api.example.com"
+    ],
+    "outbound": "out_px",
+    "override_address": "api.example.com"
+   },
+   {
+    "action": "route",
+    "domain_suffix": [
+     "a.example.com",
+     "b.example.com"
+    ],
+    "outbound": "out_awg"
+   },
+   {
+    "action": "route",
+    "domain_suffix": [
+     "site0.example.com",
+     "site1.example.com",
+     "site2.example.com",
+     "site3.example.com",
+     "site4.example.com",
+     "site5.example.com",
+     "site6.example.com",
+     "site7.example.com",
+     "site8.example.com",
+     "site9.example.com",
+     "site10.example.com",
+     "site11.example.com"
+    ],
+    "outbound": "out_wg"
+   },
+   {
+    "action": "route",
+    "ip_cidr": [
+     "203.0.113.0/24",
+     "198.51.100.7",
+     "2001:db8::/32"
+    ],
+    "outbound": "out_awg"
+   },
+   {
+    "action": "route",
+    "ip_cidr": [
+     "192.0.2.0",
+     "192.0.2.1",
+     "192.0.2.2",
+     "192.0.2.3",
+     "192.0.2.4",
+     "192.0.2.5",
+     "192.0.2.6",
+     "192.0.2.7",
+     "192.0.2.8",
+     "192.0.2.9"
+    ],
+    "outbound": "out_wg"
+   },
+   {
+    "action": "route",
+    "inbound": [
+     "in_rt_1",
+     "in_rt_udp_1"
+    ],
+    "outbound": "out_awg"
+   },
+   {
+    "action": "route",
+    "inbound": [
+     "in_ix_px"
+    ],
+    "outbound": "direct"
+   },
+   {
+    "action": "reject",
+    "domain_suffix": [
+     "blocked.example.com"
+    ]
+   },
+   {
+    "network": [
+     "udp"
+    ],
+    "port_range": [
+     "27000:27100",
+     "3478:"
+    ],
+    "outbound": "proxy"
+   }
+  ],
+  "final": "proxy"
+ },
+ "experimental": {
+  "clash_api": {
+   "external_controller": "127.0.0.1:19390",
+   "secret": "s3"
+  }
+ }
+}

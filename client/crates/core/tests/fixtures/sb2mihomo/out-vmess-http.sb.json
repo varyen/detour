@@ -1,0 +1,38 @@
+{
+ "log": {
+  "level": "error"
+ },
+ "inbounds": [
+  {
+   "type": "mixed",
+   "tag": "mixed-in",
+   "listen": "127.0.0.1",
+   "listen_port": 19482
+  }
+ ],
+ "outbounds": [
+  {
+   "type": "vmess",
+   "server": "vpn.example.com",
+   "server_port": 80,
+   "uuid": "00000000-0000-4000-8000-000000000001",
+   "security": "aes-128-gcm",
+   "alter_id": 0,
+   "transport": {
+    "type": "http",
+    "path": "/p",
+    "host": [
+     "b.example.com"
+    ]
+   },
+   "tag": "proxy"
+  },
+  {
+   "type": "direct",
+   "tag": "direct"
+  }
+ ],
+ "route": {
+  "final": "proxy"
+ }
+}

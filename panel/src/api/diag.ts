@@ -151,4 +151,10 @@ export const diag = {
     requestJson<UpdateChannelState>("nfqws2_update_check", { method: "POST", timeoutMs: 120_000 }),
   nfqws2Apply: () =>
     requestJson<{ ok: boolean }>("nfqws2_update_apply", { method: "POST" }),
+  mihomoStatus: () => requestJsonTolerant<UpdateChannelState>("mihomo_update_status"),
+  mihomoCheck: () =>
+    requestJson<UpdateChannelState>("mihomo_update_check", { method: "POST", timeoutMs: 120_000 }),
+  /** Ставит mihomo, если его нет, и обновляет, если есть. */
+  mihomoApply: () =>
+    requestJson<{ ok: boolean }>("mihomo_update_apply", { method: "POST" }),
 };

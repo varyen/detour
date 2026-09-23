@@ -7,16 +7,17 @@ import type { UpdateChannelState, UpdatesOverview } from "@/api";
    состояние живут здесь: «Обзор» показывает, что обновиться есть чем, а
    «Журнал» — чем именно и кнопками. Раньше сводку читал только «Журнал», и
    главная страница молчала о вышедшей версии вовсе. */
-export type UpdateChannel = "panel" | "singbox" | "tpws" | "nfqws2";
+export type UpdateChannel = "panel" | "singbox" | "tpws" | "nfqws2" | "mihomo";
 
 export const CHANNEL_TITLE: Record<UpdateChannel, string> = {
   panel: "Панель",
   singbox: "sing-box",
   tpws: "tpws (обход DPI)",
   nfqws2: __CLIENT__ ? "winws2 (обход DPI)" : "nfqws2 (zapret2)",
+  mihomo: "mihomo (AmneziaWG)",
 };
 
-export const CHANNELS: UpdateChannel[] = ["panel", "singbox", "tpws", "nfqws2"];
+export const CHANNELS: UpdateChannel[] = ["panel", "singbox", "tpws", "nfqws2", "mihomo"];
 
 export interface HotChannel {
   key: UpdateChannel;

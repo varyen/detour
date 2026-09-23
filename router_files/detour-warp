@@ -35,6 +35,7 @@ PROFILES=/etc/sing-box/profiles
 CHAINS=/etc/sing-box/chains.json
 SETTINGS=/etc/sing-box/settings.json
 SINGBOX_BIN=/usr/bin/sing-box
+MIHOMO_BIN=/usr/bin/mihomo
 API_BIN=/www/cgi-bin/detour-api
 STATE=/var/state/detour-warp.json
 LOG=/var/log/detour-warp.log
@@ -50,6 +51,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     CHAINS=/opt/etc/sing-box/chains.json
     SETTINGS=/opt/etc/sing-box/settings.json
     SINGBOX_BIN=/opt/bin/sing-box
+    MIHOMO_BIN=/opt/bin/mihomo
     API_BIN=/opt/share/www/cgi-bin/detour-api
     STATE=/opt/var/state/detour-warp.json
     LOG=/opt/var/log/detour-warp.log
@@ -102,13 +104,12 @@ cleanup() {
 # $1 = цепочка CSV ("" = активная). Поднимает прокси на 127.0.0.1:$PROXY_PORT.
 proxy_up() {
     [ -x "$API_BIN" ] || return 1
-    [ -x "$SINGBOX_BIN" ] || return 1
     SBCONF="/tmp/detour-warp.conf.$$"
     SBDATA="/tmp/detour-warp.data.$$"
     "$API_BIN" render-mixed "$1" "$PROXY_PORT" > "$SBCONF" 2>/dev/null || return 1
     [ -s "$SBCONF" ] || return 1
-    "$SINGBOX_BIN" check -c "$SBCONF" >/dev/null 2>&1 || return 1
-    "$SINGBOX_BIN" run -c "$SBCONF" -D "$SBDATA" >/tmp/detour-warp-sb.log 2>&1 &
+    "$API_BIN" engine-check "$SBCONF" "$SBDATA" >/dev/null 2>&1 || return 1
+    "$API_BIN" engine-run "$SBCONF" "$SBDATA" >/tmp/detour-warp-sb.log 2>&1 &
     SBPID=$!
     # Инбаунд поднимается практически мгновенно; даём ему фору и проверяем, что
     # процесс жив (битый профиль в цепочке → мгновенный exit).
@@ -194,13 +195,15 @@ cmd_register() {
     log "register: id=$WID via='$VIA' platform=$PLATFORM"
 
     command -v curl >/dev/null 2>&1 || die "нужен curl"
-    [ -x "$SINGBOX_BIN" ] || die "sing-box не установлен"
     lua -e 'require("cjson.safe")' 2>/dev/null || die "нужен lua-cjson"
 
-    KP=$("$SINGBOX_BIN" generate wg-keypair 2>/dev/null)
+    # ключи умеют генерировать оба движка, формат вывода у них одинаковый
+    KP=""
+    [ -x "$SINGBOX_BIN" ] && KP=$("$SINGBOX_BIN" generate wg-keypair 2>/dev/null)
+    [ -z "$KP" ] && [ -x "$MIHOMO_BIN" ] && KP=$("$MIHOMO_BIN" generate wg-keypair 2>/dev/null)
     PRIV=$(printf '%s' "$KP" | awk '/PrivateKey/{print $2}')
     PUB=$(printf '%s' "$KP" | awk '/PublicKey/{print $2}')
-    [ -n "$PRIV" ] && [ -n "$PUB" ] || die "sing-box generate wg-keypair не сработал"
+    [ -n "$PRIV" ] && [ -n "$PUB" ] || die "не удалось сгенерировать ключи WireGuard (нет ни sing-box, ни mihomo)"
 
     TOS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null)
     [ -n "$TOS" ] || TOS="2024-01-01T00:00:00.000Z"

@@ -7,6 +7,7 @@ pub mod geo;
 pub mod ids;
 pub mod ipc;
 pub mod lists;
+pub mod mihomo;
 pub mod paths;
 pub mod ping;
 pub mod probe;

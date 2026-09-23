@@ -45,9 +45,15 @@ pub mod tunnel {
     }
 }
 
+/// Движок mihomo целиком (не сайдкар) — только там, где процессы можно
+/// запускать самим: на телефонах sing-box вкомпилирован библиотекой.
+pub const MIHOMO_ENGINE_SUPPORTED: bool = !cfg!(any(target_os = "android", target_os = "ios"));
+
 pub struct Engine {
     /// Скачанное обновлением — побеждает поставленное установщиком.
     local: PathBuf,
+    /// mihomo для режима движка «mihomo» — тот же бинарник, что у сайдкара AWG.
+    mihomo: PathBuf,
     bundled: Option<PathBuf>,
     workdir: PathBuf,
     stderr_log: PathBuf,
@@ -64,8 +70,10 @@ impl Engine {
                 .and_then(|e| e.parent().map(|d| d.join(EXE)))
                 .filter(|p| p.exists()),
         };
+        let mihomo = crate::awg::Sidecar::new(data, workdir.clone(), stderr_log.clone()).binary();
         Self {
             local: data.join("bin").join(EXE),
+            mihomo,
             bundled,
             workdir,
             stderr_log,
@@ -209,6 +217,71 @@ impl Engine {
         *self.child.lock().await = Some(child);
         Ok(pid)
         }
+    }
+
+    pub fn mihomo_binary(&self) -> &Path {
+        &self.mihomo
+    }
+
+    /// Режим движка «mihomo»: тот же слот процесса, что у sing-box, поэтому
+    /// pid()/stop() и всё, что на них опирается (сторож, счётчики), работают
+    /// одинаково для обоих движков.
+    pub async fn start_mihomo(&self, config: &Path) -> Result<u32> {
+        if !MIHOMO_ENGINE_SUPPORTED {
+            bail!("движок mihomo на этой платформе недоступен");
+        }
+        self.stop().await;
+        if !self.mihomo.is_file() {
+            bail!("mihomo не найден: {}", self.mihomo.display());
+        }
+        let dir = self.workdir.join("mihomo-engine");
+        std::fs::create_dir_all(&dir)?;
+        if let Some(d) = self.stderr_log.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(&self.stderr_log)?;
+        let mut c = self.command_for(&self.mihomo, &dir);
+        let mut child = c
+            .arg("-d")
+            .arg(&dir)
+            .arg("-f")
+            .arg(config)
+            .stdout(Stdio::from(log.try_clone()?))
+            .stderr(log)
+            .kill_on_drop(true)
+            .spawn()
+            .context("не удалось запустить mihomo")?;
+        let pid = child.id().unwrap_or(0);
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        if let Ok(Some(status)) = child.try_wait() {
+            bail!("mihomo завершился сразу ({status}): {}", self.stderr_tail(8));
+        }
+        *self.child.lock().await = Some(child);
+        Ok(pid)
+    }
+
+    /// `mihomo -t` — проверка перевода до того, как трогать живой движок.
+    pub async fn check_mihomo(&self, config: &Path) -> Result<(), String> {
+        if !self.mihomo.is_file() {
+            return Err(format!("mihomo не найден: {}", self.mihomo.display()));
+        }
+        let dir = self.workdir.join("mihomo-check");
+        let _ = std::fs::create_dir_all(&dir);
+        let out = self
+            .command_for(&self.mihomo, &dir)
+            .arg("-t")
+            .arg("-d")
+            .arg(&dir)
+            .arg("-f")
+            .arg(config)
+            .output()
+            .await
+            .map_err(|e| format!("не удалось запустить mihomo: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        Err(text.lines().filter(|l| l.contains("level=error") || l.contains("failed")).collect::<Vec<_>>().join(" | "))
     }
 
     /// Отдельный процесс для проб (проверка профилей): свой конфиг, свой

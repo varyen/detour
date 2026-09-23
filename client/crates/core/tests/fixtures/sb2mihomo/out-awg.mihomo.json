@@ -1,0 +1,61 @@
+{
+ "allow-lan": true,
+ "dns": {
+  "enable": false
+ },
+ "ipv6": true,
+ "listeners": [
+  {
+   "listen": "127.0.0.1",
+   "name": "mixed-in",
+   "port": 19482,
+   "type": "mixed",
+   "udp": true
+  }
+ ],
+ "log-level": "error",
+ "mode": "rule",
+ "profile": {
+  "store-fake-ip": false,
+  "store-selected": false
+ },
+ "proxies": [
+  {
+   "allowed-ips": [
+    "0.0.0.0/0",
+    "::/0"
+   ],
+   "amnezia-wg-option": {
+    "h1": "100-200",
+    "h2": "300-400",
+    "h3": "500-600",
+    "h4": "700-800",
+    "header-protection-key": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+    "i1": "<b 0xc2><r 32>",
+    "jc": 4,
+    "jmax": 70,
+    "jmin": 40,
+    "random-trailers": true,
+    "s1": 16,
+    "s2": 24,
+    "s3": 20,
+    "s4": 14,
+    "version": 3
+   },
+   "ip": "10.8.0.2",
+   "name": "proxy",
+   "persistent-keepalive": 25,
+   "port": 51820,
+   "private-key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+   "public-key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+   "server": "awg.example.com",
+   "type": "wireguard",
+   "udp": true
+  }
+ ],
+ "rules": [
+  "MATCH,proxy"
+ ],
+ "tcp-concurrent": false,
+ "unified-delay": true
+}

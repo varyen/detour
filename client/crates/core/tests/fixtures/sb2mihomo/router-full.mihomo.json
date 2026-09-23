@@ -1,0 +1,256 @@
+{
+ "allow-lan": true,
+ "dns": {
+  "enable": false
+ },
+ "external-controller": "127.0.0.1:19390",
+ "ipv6": true,
+ "listeners": [
+  {
+   "listen": "0.0.0.0",
+   "name": "redirect-in",
+   "port": 12345,
+   "type": "redir"
+  },
+  {
+   "listen": "0.0.0.0",
+   "name": "in_rt_1",
+   "port": 12401,
+   "type": "redir"
+  },
+  {
+   "listen": "0.0.0.0",
+   "name": "in_rt_udp_1",
+   "port": 12501,
+   "type": "tproxy",
+   "udp": true
+  },
+  {
+   "listen": "0.0.0.0",
+   "name": "in_ix_px",
+   "port": 12371,
+   "type": "socks",
+   "udp": true,
+   "users": [
+    {
+     "password": "p",
+     "username": "u"
+    }
+   ]
+  },
+  {
+   "listen": "0.0.0.0",
+   "name": "in_ix_hx",
+   "port": 12372,
+   "type": "http"
+  },
+  {
+   "listen": "0.0.0.0",
+   "name": "tproxy-udp",
+   "port": 12350,
+   "type": "tproxy",
+   "udp": true
+  }
+ ],
+ "log-level": "warning",
+ "mode": "rule",
+ "profile": {
+  "store-fake-ip": false,
+  "store-selected": false
+ },
+ "proxies": [
+  {
+   "alpn": [
+    "h2",
+    "http/1.1"
+   ],
+   "client-fingerprint": "firefox",
+   "name": "chain_1",
+   "network": "ws",
+   "port": 443,
+   "server": "vpn.example.com",
+   "servername": "vpn.example.com",
+   "skip-cert-verify": true,
+   "tls": true,
+   "type": "vless",
+   "udp": true,
+   "uuid": "00000000-0000-4000-8000-000000000001",
+   "ws-opts": {
+    "early-data-header-name": "Sec-WebSocket-Protocol",
+    "headers": {
+     "Host": "cdn.example.com"
+    },
+    "max-early-data": 2048,
+    "path": "/ws"
+   }
+  },
+  {
+   "alpn": [
+    "h2",
+    "http/1.1"
+   ],
+   "client-fingerprint": "firefox",
+   "dialer-proxy": "chain_1",
+   "name": "proxy",
+   "password": "pw",
+   "port": 443,
+   "server": "vpn.example.com",
+   "skip-cert-verify": true,
+   "sni": "vpn.example.com",
+   "type": "trojan",
+   "udp": true
+  },
+  {
+   "allowed-ips": [
+    "0.0.0.0/0",
+    "::/0"
+   ],
+   "amnezia-wg-option": {
+    "h1": "100-200",
+    "h2": "300-400",
+    "h3": "500-600",
+    "h4": "700-800",
+    "header-protection-key": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ=",
+    "i1": "<b 0xc2><r 32>",
+    "jc": 4,
+    "jmax": 70,
+    "jmin": 40,
+    "random-trailers": true,
+    "s1": 16,
+    "s2": 24,
+    "s3": 20,
+    "s4": 14,
+    "version": 3
+   },
+   "ip": "10.8.0.2",
+   "name": "out_awg",
+   "persistent-keepalive": 25,
+   "port": 51820,
+   "private-key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+   "public-key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+   "server": "awg.example.com",
+   "type": "wireguard",
+   "udp": true
+  },
+  {
+   "name": "out_px",
+   "password": "p",
+   "port": 1080,
+   "server": "proxy.example.com",
+   "type": "socks5",
+   "udp": true,
+   "username": "u"
+  },
+  {
+   "ip": "10.0.0.2",
+   "mtu": 1420,
+   "name": "out_wg",
+   "peers": [
+    {
+     "allowed-ips": [
+      "0.0.0.0/0"
+     ],
+     "port": 51820,
+     "public-key": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+     "reserved": [
+      0,
+      0,
+      1
+     ],
+     "server": "wg1.example.com"
+    },
+    {
+     "allowed-ips": [
+      "10.9.0.0/16"
+     ],
+     "port": 51821,
+     "public-key": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+     "server": "wg2.example.com"
+    }
+   ],
+   "private-key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+   "type": "wireguard",
+   "udp": true
+  }
+ ],
+ "rule-providers": {
+  "rs1": {
+   "behavior": "domain",
+   "payload": [
+    "+.site0.example.com",
+    "+.site1.example.com",
+    "+.site2.example.com",
+    "+.site3.example.com",
+    "+.site4.example.com",
+    "+.site5.example.com",
+    "+.site6.example.com",
+    "+.site7.example.com",
+    "+.site8.example.com",
+    "+.site9.example.com",
+    "+.site10.example.com",
+    "+.site11.example.com"
+   ],
+   "type": "inline"
+  },
+  "rs2": {
+   "behavior": "ipcidr",
+   "payload": [
+    "192.0.2.0/32",
+    "192.0.2.1/32",
+    "192.0.2.2/32",
+    "192.0.2.3/32",
+    "192.0.2.4/32",
+    "192.0.2.5/32",
+    "192.0.2.6/32",
+    "192.0.2.7/32",
+    "192.0.2.8/32",
+    "192.0.2.9/32"
+   ],
+   "type": "inline"
+  }
+ },
+ "rules": [
+  "DOMAIN,api.example.com,out_px",
+  "DOMAIN-SUFFIX,a.example.com,out_awg",
+  "DOMAIN-SUFFIX,b.example.com,out_awg",
+  "RULE-SET,rs1,out_wg",
+  "IP-CIDR,203.0.113.0/24,out_awg,no-resolve",
+  "IP-CIDR,198.51.100.7/32,out_awg,no-resolve",
+  "IP-CIDR6,2001:db8::/32,out_awg,no-resolve",
+  "RULE-SET,rs2,out_wg,no-resolve",
+  "IN-NAME,in_rt_1,out_awg",
+  "IN-NAME,in_rt_udp_1,out_awg",
+  "IN-NAME,in_ix_px,DIRECT",
+  "DOMAIN-SUFFIX,blocked.example.com,REJECT",
+  "AND,((NETWORK,UDP),(DST-PORT,27000-27100/3478-65535)),proxy",
+  "MATCH,proxy"
+ ],
+ "secret": "s3",
+ "sniffer": {
+  "enable": true,
+  "override-destination": true,
+  "parse-pure-ip": true,
+  "sniff": {
+   "HTTP": {
+    "override-destination": true,
+    "ports": [
+     80,
+     "8080-8880"
+    ]
+   },
+   "QUIC": {
+    "ports": [
+     443
+    ]
+   },
+   "TLS": {
+    "ports": [
+     443,
+     8443
+    ]
+   }
+  }
+ },
+ "tcp-concurrent": false,
+ "unified-delay": true
+}

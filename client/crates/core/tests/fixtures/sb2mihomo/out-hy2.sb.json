@@ -1,0 +1,51 @@
+{
+ "log": {
+  "level": "error"
+ },
+ "inbounds": [
+  {
+   "type": "mixed",
+   "tag": "mixed-in",
+   "listen": "127.0.0.1",
+   "listen_port": 19482
+  }
+ ],
+ "outbounds": [
+  {
+   "type": "hysteria2",
+   "server": "vpn.example.com",
+   "server_port": 443,
+   "password": "pw",
+   "obfs": {
+    "type": "salamander",
+    "password": "ob"
+   },
+   "up_mbps": 50,
+   "down_mbps": 200,
+   "server_ports": [
+    "20000:30000"
+   ],
+   "tls": {
+    "enabled": true,
+    "server_name": "vpn.example.com",
+    "insecure": true,
+    "alpn": [
+     "h2",
+     "http/1.1"
+    ],
+    "utls": {
+     "enabled": true,
+     "fingerprint": "firefox"
+    }
+   },
+   "tag": "proxy"
+  },
+  {
+   "type": "direct",
+   "tag": "direct"
+  }
+ ],
+ "route": {
+  "final": "proxy"
+ }
+}

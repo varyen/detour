@@ -17,6 +17,9 @@ export interface Binaries {
   nfqws2_present?: boolean;
   nfqws2_version?: string;
   nfqws2_supported?: boolean;
+  /** mihomo — сайдкар AmneziaWG; ставится по кнопке, поэтому может отсутствовать. */
+  mihomo_present?: boolean;
+  mihomo_version?: string;
 }
 
 export interface SingboxStatus {
@@ -313,6 +316,7 @@ export interface UpdatesOverview {
   singbox?: UpdateChannelState;
   tpws?: UpdateChannelState;
   nfqws2?: UpdateChannelState;
+  mihomo?: UpdateChannelState;
 }
 
 export interface ApplyLogResponse {
@@ -412,6 +416,21 @@ export interface CertStatus {
   running?: boolean;
   error?: string;
   log?: string;
+}
+
+/** Какой движок держит трафик (`engine_config`). */
+export type EngineMode = "singbox" | "hybrid" | "mihomo";
+export interface EngineConfig {
+  /** Выбранный режим. */
+  mode: EngineMode;
+  /** В режиме mihomo цепочка с запретом торрентов идёт через sing-box. */
+  torrent_singbox: boolean;
+  /** Что работает прямо сейчас: mihomo мог откатиться в гибрид из-за торрентов. */
+  effective: EngineMode;
+  singbox_installed: boolean;
+  mihomo_installed: boolean;
+  /** Клиент на телефоне: движок только sing-box, переключателя нет. */
+  supported?: boolean;
 }
 
 /** Сайдкар mihomo для AmneziaWG-профилей (`awg_status`). */

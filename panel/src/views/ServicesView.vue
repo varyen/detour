@@ -18,7 +18,7 @@ import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
 import { overview, poll, services } from "@/api";
-import type { LanClient, SwapStatus } from "@/api";
+import type { EngineConfig, EngineMode, LanClient, SwapStatus } from "@/api";
 import { useStatusStore } from "@/stores/status";
 import { useSessionStore } from "@/stores/session";
 import { useToastStore } from "@/stores/toast";
@@ -133,6 +133,7 @@ interface PortmapExternal {
 /* ---------------- состояние экрана ---------------- */
 
 const open = reactive<Record<string, boolean>>({
+  engine: false,
   portmap: false,
   cert: false,
   push: false,
@@ -163,6 +164,7 @@ const pushCfg = ref<PushCfg | null>(null);
 const pushSub = ref<PushSubscription | null>(null);
 const pushPerm = ref<NotificationPermission>("default");
 const offload = ref<OffloadState | null>(null);
+const engine = ref<EngineConfig | null>(null);
 const swap = ref<SwapStatus | null>(null);
 
 const secureContext = ref(true);
@@ -204,6 +206,10 @@ async function loadPush() {
   await refreshPushSub();
 }
 
+async function loadEngine() {
+  engine.value = await services.engineConfig();
+}
+
 async function loadOffload() {
   offload.value = wide<OffloadState | null>(await services.offloadStatus());
 }
@@ -224,12 +230,17 @@ async function loadClients() {
 async function loadAll() {
   secureContext.value = window.isSecureContext;
   if ("Notification" in window) pushPerm.value = Notification.permission;
-  if (status.isClient) return;
+  if (status.isClient) {
+    // в клиенте из сервисов есть только движок (и то не на телефонах)
+    await Promise.allSettled([loadEngine()]);
+    return;
+  }
   await Promise.allSettled([
     loadPortmap(),
     loadCert(),
     loadPush(),
     loadOffload(),
+    loadEngine(),
     loadSwap(),
     loadClients(),
   ]);
@@ -531,6 +542,47 @@ async function pushTest() {
 }
 
 /* ---------------- аппаратное ускорение ---------------- */
+
+/* ---------------- движок ---------------- */
+
+const ENGINE_TITLE: Record<EngineMode, string> = {
+  singbox: "sing-box",
+  hybrid: "sing-box + mihomo для AmneziaWG",
+  mihomo: "mihomo",
+};
+
+const engineMode = computed({
+  get: () => engine.value?.mode ?? "hybrid",
+  set: (m: EngineMode) => void setEngine(m, engine.value?.torrent_singbox ?? true),
+});
+const engineTorrent = computed({
+  get: () => engine.value?.torrent_singbox ?? true,
+  set: (v: boolean) => void setEngine(engine.value?.mode ?? "hybrid", v),
+});
+/** Выбран mihomo, а в работе гибрид — значит, откатился из-за запрета торрентов. */
+const engineFellBack = computed(
+  () => engine.value?.mode === "mihomo" && engine.value?.effective !== "mihomo",
+);
+const engineSummary = computed(() => {
+  const e = engine.value;
+  if (!e) return "";
+  const now = ENGINE_TITLE[e.effective] ?? e.effective;
+  return engineFellBack.value ? `сейчас ${now}: на цепочке запрещены торренты` : `в работе ${now}`;
+});
+
+async function setEngine(mode: EngineMode, torrentSingbox: boolean) {
+  busy.value = "engine";
+  try {
+    await services.engineSet(mode, torrentSingbox);
+    await loadEngine();
+    toast.ok(`Движок: ${ENGINE_TITLE[engine.value?.effective ?? mode]}`);
+  } catch (e) {
+    toast.fromError(e, "Не удалось сменить движок");
+    await loadEngine();
+  } finally {
+    busy.value = "";
+  }
+}
 
 const offloadSupported = computed(() => offload.value?.supported === true);
 
@@ -1050,6 +1102,61 @@ onBeforeUnmount(() => unregister?.());
       </div>
     </ServicePanel>
 
+    <!-- ===== движок ===== -->
+    <ServicePanel
+      v-if="engine && engine.supported !== false"
+      id="svc-engine"
+      v-model:open="open.engine"
+      title="Движок VPN"
+      :summary="engineSummary"
+      :chip="engine.effective === 'mihomo' ? 'mihomo' : 'sing-box'"
+      :tone="engineFellBack ? 'warn' : undefined"
+    >
+      <p class="lead">
+        Через какую программу идёт трафик VPN. Маршруты, списки сайтов, цепочки и
+        проверки одинаково работают в любом режиме — меняется только сам движок.
+      </p>
+
+      <SegmentedControl
+        v-model="engineMode"
+        label="Режим"
+        :busy="busy === 'engine'"
+        :options="[
+          { value: 'singbox', label: 'sing-box' },
+          { value: 'hybrid', label: 'Гибрид' },
+          { value: 'mihomo', label: 'mihomo', disabled: !engine.mihomo_installed },
+        ]"
+      />
+      <ul class="modes">
+        <li><b>sing-box</b> — как раньше. AmneziaWG-профили недоступны.</li>
+        <li>
+          <b>Гибрид</b> — sing-box для всего, AmneziaWG через mihomo рядом с ним.
+          AmneziaWG-профиль может быть только первым звеном цепочки.
+        </li>
+        <li>
+          <b>mihomo</b> — всё через mihomo: AmneziaWG в любом звене цепочки.
+          Торренты режет только файрвол: открытое рукопожатие, uTP, DHT и
+          трекеры он ловит, зашифрованный поток — нет.
+        </li>
+      </ul>
+      <p v-if="!engine.mihomo_installed" class="note faint">
+        <template v-if="status.isClient">mihomo нет в этой сборке — переустановите Detour свежим установщиком.</template>
+        <template v-else>mihomo не установлен — поставьте его в «Журнал → Обновления».</template>
+      </p>
+
+      <SwitchToggle
+        v-if="engine.mode === 'mihomo'"
+        v-model="engineTorrent"
+        class="flat"
+        label="Цепочки с запретом торрентов — через sing-box"
+        :busy="busy === 'engine'"
+        hint="sing-box режет торренты ещё и внутри потока. Если на активной цепочке торренты запрещены, она пойдёт как в гибриде"
+      />
+      <p v-if="engineFellBack" class="note warn">
+        Сейчас в работе гибрид: на активной цепочке торренты запрещены.
+      </p>
+    </ServicePanel>
+
     <!-- ===== аппаратное ускорение ===== -->
     <ServicePanel
       v-if="offloadSupported"
@@ -1321,6 +1428,26 @@ onBeforeUnmount(() => unregister?.());
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* ---- движок ---- */
+.modes {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--dim);
+}
+/* корень SwitchToggle — тоже .row: без этого он получил бы рамку и колонку
+   строки проброса ниже */
+.row.flat {
+  flex-direction: row;
+  border: 0;
+  padding: 0;
+}
+.row.flat :deep(.text small) {
+  font-family: inherit;
 }
 
 /* ---- строка проброса ---- */

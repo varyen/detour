@@ -1,0 +1,51 @@
+{
+ "allow-lan": true,
+ "dns": {
+  "enable": false
+ },
+ "ipv6": true,
+ "listeners": [
+  {
+   "listen": "127.0.0.1",
+   "name": "mixed-in",
+   "port": 19482,
+   "type": "mixed",
+   "udp": true
+  }
+ ],
+ "log-level": "error",
+ "mode": "rule",
+ "profile": {
+  "store-fake-ip": false,
+  "store-selected": false
+ },
+ "proxies": [
+  {
+   "allowed-ips": [
+    "0.0.0.0/0",
+    "::/0"
+   ],
+   "ip": "10.0.0.2",
+   "ipv6": "fd00::2",
+   "mtu": 1280,
+   "name": "proxy",
+   "port": 51820,
+   "pre-shared-key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+   "private-key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+   "public-key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+   "reserved": [
+    1,
+    2,
+    3
+   ],
+   "server": "wg.example.com",
+   "type": "wireguard",
+   "udp": true
+  }
+ ],
+ "rules": [
+  "MATCH,proxy"
+ ],
+ "tcp-concurrent": false,
+ "unified-delay": true
+}
