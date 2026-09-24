@@ -134,6 +134,7 @@ FILES = [
     (os.path.join(ROUTER_FILES, "detour-awg"), "opt/sbin/detour-awg", 0o755, True),
     (os.path.join(HERE, "init.d", "S55detour-awg"), "opt/etc/init.d/S55detour-awg", 0o755, False),
     (os.path.join(ROUTER_FILES, "sb2mihomo.lua"), "opt/share/detour/sb2mihomo.lua", 0o644, False),
+    (os.path.join(ROUTER_FILES, "detour-backup.lua"), "opt/share/detour/detour-backup.lua", 0o644, False),
     # Публикация LAN-сервисов наружу (shared source, /opt shim): HTTPS-реверс-прокси
     # через lighttpd mod_proxy + DNAT через ndm/netfilter.d. fix_shebang → /opt/bin/sh.
     # ⚠ НЕ проверено на живом Keenetic — см. keenetic/README.md.

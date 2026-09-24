@@ -110,6 +110,8 @@ def main():
     cp_in(os.path.join(RF, "detour-awg"), "/usr/sbin/detour-awg")
     cp_in(os.path.join(RF, "detour-awg.initd"), "/etc/init.d/detour-awg")
     cp_in(os.path.join(RF, "detour-health"), "/usr/sbin/detour-health")
+    sh_in("mkdir -p /usr/share/detour")
+    cp_in(os.path.join(RF, "detour-backup.lua"), "/usr/share/detour/detour-backup.lua", "0644")
     cp_in(singbox, "/usr/bin/sing-box")
     cp_in(mihomo, "/usr/bin/mihomo")
     sh_in("/etc/init.d/detour-awg enable")
@@ -211,6 +213,21 @@ def main():
     time.sleep(1)
     st = sh_in("/usr/sbin/detour-awg status")
     check("без AWG-профилей сайдкар остановлен", '"running":false' in st, st)
+
+    # 7. полная резервная копия через CGI: выгрузить, потерять профиль, вернуть
+    out = sh_in(cgi.format(n=0, m="GET", a="backup_export") + " | grep '^{' > /tmp/full.json; "
+                "lua -e 'local d=require(\"cjson\").decode(io.open(\"/tmp/full.json\"):read(\"*a\")); "
+                "print(d and d.kind, d and #d.profiles)'")
+    check("CGI backup_export: полная копия с профилями", out.strip().startswith("full") and
+          int(out.split()[-1] or 0) >= 1, out)
+    sh_in("rm -f /etc/sing-box/profiles/vl.json")
+    n = sh_in("wc -c < /tmp/full.json").strip()
+    out = sh_in(cgi.format(n=n, m="POST", a="panel_import_config") + " < /tmp/full.json")
+    check("CGI panel_import_config полной копии", '"ok":true' in out.replace(" ", ""), out[-400:])
+    check("профиль вернулся из копии", sh_in("test -f /etc/sing-box/profiles/vl.json && echo yes") == "yes")
+    out = sh_in("printf '%s' '{\"auth\":\"root:x\"}' > /tmp/evil.json; " +
+                cgi.format(n=17, m="POST", a="panel_import_config") + " < /tmp/evil.json")
+    check("CGI отвергает ключ auth", "forbidden key" in out, out[-300:])
 
     if a.ui:
         # Стенд для панели: uhttpd с CGI и собранной Vue-панелью, AWG-профиль

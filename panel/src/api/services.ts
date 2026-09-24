@@ -108,8 +108,11 @@ export const services = {
 
   /* --- резервная копия настроек панели --- */
   exportConfig: () => requestJson<Record<string, unknown>>("panel_export_config"),
+  /** Полная копия: профили, подписки, цепочки, все списки, роутерные файлы. */
+  exportFull: () => requestJson<Record<string, unknown>>("backup_export", { timeoutMs: 60_000 }),
+  /** Принимает и настройки (v1), и полную копию (v2), и копию из приложения. */
   importConfig: (envelope: unknown) =>
-    requestJson<{ ok: boolean }>("panel_import_config", {
+    requestJson<{ ok: boolean; warning?: string; skipped?: string[] }>("panel_import_config", {
       body: envelope,
       timeoutMs: 120_000,
     }),

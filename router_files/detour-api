@@ -99,6 +99,7 @@ MIHOMO_CONF="/etc/sing-box/mihomo.json"
 MIHOMO_RUNDIR="/var/etc/detour-engine"
 ENGINE_FILE="/etc/sing-box/engine"
 SB2MIHOMO="/usr/share/detour/sb2mihomo.lua"
+BACKUP_LUA="/usr/share/detour/detour-backup.lua"   # полная резервная копия (backup_export / panel_import_config)
 METER_BIN="/usr/sbin/detour-meter"          # счётчики трафика по лентам — backs the traffic_counters action
 TRAFFICLOG_BIN="/usr/sbin/detour-trafficlog" # временной ряд трафика (cron) — backs the traffic_series action
 WARP_STATE="/var/state/detour-warp.json"    # ход регистрации WARP (пишет detour-warp; CGI её детачит)
@@ -233,6 +234,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     MIHOMO_RUNDIR="$OPT/var/run/detour-engine"
     ENGINE_FILE="$OPT/etc/sing-box/engine"
     SB2MIHOMO="$OPT/share/detour/sb2mihomo.lua"
+    BACKUP_LUA="$OPT/share/detour/detour-backup.lua"
     WARP_STATE="$OPT/var/state/detour-warp.json"
     METER_BIN="$OPT/sbin/detour-meter"
     TRAFFICLOG_BIN="$OPT/sbin/detour-trafficlog"
@@ -4587,94 +4589,43 @@ panel_export_config)
     printf '"}'
     ;;
 
+backup_export)
+    # Полная копия: профили, цепочки, подписки, настройки, все списки и
+    # роутерные файлы (проброс, сертификат, WAN, push). Формат — надмножество
+    # panel_export_config, его же понимает импорт приложения.
+    lua "$BACKUP_LUA" export "$SINGBOX_CONFIG_DIR" "$DETOUR_DIR" "$ZAPRET_CONF" "$ZAPRET_DOMAINS" \
+        "$(cat "$DETOUR_DIR/version" 2>/dev/null)" "$PLATFORM" || json_err "backup export failed"
+    ;;
+
 panel_import_config)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
-    # Use Lua + cjson to safely parse and write each section. Plain sed can't
-    # handle nested JSON or multi-MB domain lists reliably.
+    # И старая копия (v1: настройки и списки), и полная (v2), и копия из
+    # приложения. Разбор и запись — detour-backup.lua: пишет только по своему
+    # списку путей, ключи панели (auth, токен GitHub) отвергает.
     IMPORT_TMP=$(mktemp)
     printf '%s' "$POST_DATA" > "$IMPORT_TMP"
-    if ! lua - "$IMPORT_TMP" <<'LUA'
-local cjson = require("cjson.safe")
-local f = io.open(arg[1], "r"); if not f then os.exit(1) end
-local raw = f:read("*a"); f:close()
-local doc = cjson.decode(raw)
-if not doc or type(doc) ~= "table" then os.exit(2) end
-
--- Hard rejection list. These keys ARE NOT processed by this endpoint and
--- MUST NEVER be — they would let a forged config file overwrite panel auth
--- or the GitHub token. Use panel_change_password / deploy_router.py instead.
-local FORBIDDEN = {
-    auth=true, password=true, passwd=true, panel_user=true, panel_password=true,
-    update_conf=true, gh_token=true, gh_owner=true, gh_repo=true,
-}
-for k in pairs(doc) do
-    if FORBIDDEN[k] then
-        io.stderr:write("FORBIDDEN_KEY:" .. k .. "\n")
-        os.exit(3)
-    end
-end
-
-local function atomic_write(path, body, mode)
-    if body == nil then return end
-    local tmp = path .. ".import.tmp"
-    local w = io.open(tmp, "w"); if not w then return end
-    w:write(body); w:close()
-    if mode then os.execute("chmod " .. mode .. " " .. tmp) end
-    os.rename(tmp, path)
-end
-
-if type(doc.settings) == "table" then
-    atomic_write("/etc/sing-box/settings.json", cjson.encode(doc.settings), "0644")
-end
-if type(doc.subscription) == "table" and next(doc.subscription) then
-    os.execute("mkdir -p /etc/detour")
-    atomic_write("/etc/detour/subscription.json", cjson.encode(doc.subscription), "0600")
-end
-if type(doc.proxy_domains) == "string" and #doc.proxy_domains > 0 then
-    atomic_write("/etc/sing-box/proxy-domains.list", doc.proxy_domains, "0644")
-end
-if type(doc.whitelist_domains) == "string" and #doc.whitelist_domains > 0 then
-    atomic_write("/etc/sing-box/whitelist-domains.list", doc.whitelist_domains, "0644")
-end
-if type(doc.zapret_conf) == "string" and #doc.zapret_conf > 0 then
-    atomic_write("/etc/zapret-tpws.conf", doc.zapret_conf, "0644")
-end
-if type(doc.zapret_domains) == "string" and #doc.zapret_domains > 0 then
-    os.execute("mkdir -p /etc/zapret-tpws")
-    atomic_write("/etc/zapret-tpws/domains.list", doc.zapret_domains, "0644")
-end
-os.exit(0)
-LUA
-    then
-        # Lua exit codes:  3 = forbidden key seen, 2 = invalid JSON, 1 = io error.
-        IMPORT_EC=$?
-        IMPORT_BAD_KEY=$(lua - "$IMPORT_TMP" 2>&1 >/dev/null <<'LUA' || true
-local cjson = require("cjson.safe")
-local f = io.open(arg[1], "r"); if not f then os.exit() end
-local doc = cjson.decode(f:read("*a")) or {}
-local FORBIDDEN = {
-    auth=true, password=true, passwd=true, panel_user=true, panel_password=true,
-    update_conf=true, gh_token=true, gh_owner=true, gh_repo=true,
-}
-if type(doc) == "table" then
-    for k in pairs(doc) do if FORBIDDEN[k] then io.stderr:write(k); break end end
-end
-LUA
-)
-        rm -f "$IMPORT_TMP"
-        if [ -n "$IMPORT_BAD_KEY" ]; then
-            json_err "forbidden key in config: $IMPORT_BAD_KEY (panel auth / GH token cannot be set via this endpoint — use the Change-password modal or deploy_router.py)"
-        elif [ "$IMPORT_EC" = "2" ]; then
-            json_err "config is not a valid JSON object"
-        else
-            json_err "config import failed (exit $IMPORT_EC)"
-        fi
+    IMPORT_OUT=$(lua "$BACKUP_LUA" import "$IMPORT_TMP" "$SINGBOX_CONFIG_DIR" "$DETOUR_DIR" "$ZAPRET_CONF" "$ZAPRET_DOMAINS")
+    IMPORT_EC=$?
+    rm -f "$IMPORT_TMP"
+    if [ "$IMPORT_EC" != 0 ]; then
+        if [ -n "$IMPORT_OUT" ]; then printf '%s' "$IMPORT_OUT"; else json_err "config import failed (exit $IMPORT_EC)"; fi
         exit 0
     fi
-    rm -f "$IMPORT_TMP"
-    # Restart services so the new domain lists + settings take effect.
-    $SINGBOX_INITD restart >/dev/null 2>&1 &
-    json_ok
+    IMPORT_WARN=""
+    ACHAIN=$(get_active_chain)
+    if [ -n "$ACHAIN" ]; then
+        BUILD_ERR=$(build_config "$(get_singbox_mode)" "$ACHAIN") || \
+            IMPORT_WARN="настройки восстановлены, но конфиг не собрался: $BUILD_ERR"
+    fi
+    [ -x "$AWG_BIN" ] && "$AWG_BIN" sync >/dev/null 2>&1
+    [ -x "$PORTMAP_BIN" ] && [ -s "$DETOUR_DIR/portmap.conf" ] && "$PORTMAP_BIN" apply >/dev/null 2>&1
+    # Перезапуск в фоне: ответ должен уйти раньше, чем VPN на секунды пропадёт.
+    ( sleep 1; $SINGBOX_INITD restart; $ZAPRET_INITD restart ) >/dev/null 2>&1 &
+    if [ -n "$IMPORT_WARN" ]; then
+        printf '{"ok":true,"warning":"%s","result":%s}' "$(printf '%s' "$IMPORT_WARN" | json_escape)" "$IMPORT_OUT"
+    else
+        printf '%s' "$IMPORT_OUT"
+    fi
     ;;
 
 panel_change_password)

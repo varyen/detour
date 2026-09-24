@@ -263,6 +263,7 @@ impl Backend {
             "subscription_refresh_one" => self.subscription_refresh_one(req).await,
             "subscription_refresh_all" => self.subscription_refresh_all().await,
             "panel_export_config" => self.export_config(),
+            "backup_export" => self.export_full(),
             "panel_import_config" => self.import_config(body()?).await?,
 
             "rulist_status" => self.rulist_status(),

@@ -26,8 +26,9 @@ const ROUTER_TEXTS: [(&str, &str); 3] = [
 ];
 
 /// Клиентские разделы: присутствие ключа — это значение, в том числе пустое.
-const CLIENT_TEXTS: [(&str, &str); 7] = [
+const CLIENT_TEXTS: [(&str, &str); 8] = [
     ("route_map", store::ROUTE_MAP),
+    ("health_urls", store::HEALTH_URLS),
     ("udp_vpn_list", store::UDP_VPN),
     ("egress_blocklist", store::EGRESS_BLOCK),
     ("ru_subnets_exclude", store::RU_EXCLUDE),
@@ -55,6 +56,21 @@ impl Backend {
         Response::json(&doc)
     }
 
+    /// Полная копия (v2): то же, что настройки, плюс все VPN-профили. Формат
+    /// общий с роутером (`backup_export`) — копию можно переносить в обе стороны.
+    pub(super) fn export_full(&self) -> Response {
+        let Response { body, .. } = self.export_config();
+        let mut doc: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+        doc["version"] = json!(2);
+        doc["kind"] = json!("full");
+        let list: Vec<Value> = profiles::list_ids(&self.store)
+            .iter()
+            .filter_map(|id| profiles::load(&self.store, id))
+            .collect();
+        doc["profiles"] = json!(list);
+        Response::json(&doc)
+    }
+
     pub(super) async fn import_config(&self, body: String) -> Result<Response> {
         let Value::Object(doc) = parse_body(&body).map_err(|_| anyhow!("config is not a valid JSON object"))? else {
             bail!("config is not a valid JSON object");
@@ -63,6 +79,18 @@ impl Backend {
             bail!("forbidden key in config: {k} — учётные данные панели из файла не переносятся");
         }
         let s = &self.store;
+        let full = doc.get("kind").and_then(Value::as_str) == Some("full");
+
+        // Профили раньше настроек: активная цепочка из копии ссылается на них.
+        let mut skipped = Vec::new();
+        let mut restored = 0usize;
+        for p in doc.get("profiles").and_then(Value::as_array).cloned().unwrap_or_default() {
+            let id = p.get("id").and_then(Value::as_str).unwrap_or("?").to_owned();
+            match profiles::save(s, p) {
+                Ok(_) => restored += 1,
+                Err(e) => skipped.push(format!("профиль {id}: {e}")),
+            }
+        }
 
         if let Some(Value::Object(imported)) = doc.get("settings") {
             let current = Settings::load(s);
@@ -81,8 +109,10 @@ impl Backend {
             Settings::load_from(next).save(s)?;
         }
 
+        // В полной копии пустой список — тоже значение; в старой пустая строка
+        // ничего не стирала, так и оставляем.
         for (key, rel) in ROUTER_TEXTS {
-            if let Some(t) = doc.get(key).and_then(Value::as_str).filter(|t| !t.trim().is_empty()) {
+            if let Some(t) = doc.get(key).and_then(Value::as_str).filter(|t| full || !t.trim().is_empty()) {
                 s.write_text(rel, t)?;
             }
         }
@@ -93,8 +123,10 @@ impl Backend {
         }
 
         if let Some(chains) = doc.get("chains").filter(|c| c.is_object()) {
-            let parsed: ChainStore = serde_json::from_value(chains.clone()).map_err(|_| anyhow!("chains: неверный формат"))?;
-            parsed.save(s)?;
+            match serde_json::from_value::<ChainStore>(chains.clone()) {
+                Ok(parsed) => parsed.save(s)?,
+                Err(_) => skipped.push("цепочки: неверный формат".to_owned()),
+            }
         }
 
         let mut subs: Vec<Value> = doc.get("subscriptions").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -108,15 +140,19 @@ impl Backend {
                 }
             }
         }
-        let mut skipped = Vec::new();
+        let mut skipped_subs = Vec::new();
         for v in subs {
             let id = v.get("id").and_then(Value::as_str).unwrap_or("?").to_owned();
             if let Err(e) = sub::save(s, v) {
-                skipped.push(format!("{id}: {e}"));
+                skipped_subs.push(format!("{id}: {e}"));
             }
         }
 
-        let mut resp = json!({ "ok": true });
+        let mut resp = json!({ "ok": true, "profiles": restored });
+        if !skipped.is_empty() {
+            resp["skipped"] = json!(skipped);
+        }
+        let skipped = skipped_subs;
         if !Settings::load(s).active_chain().is_empty() {
             if let Err(e) = self.apply(None, Start::IfRunning).await {
                 resp["warning"] = json!(format!("настройки восстановлены, но конфиг не собрался: {e:#}"));

@@ -23,6 +23,7 @@ import { useStatusStore } from "@/stores/status";
 import { useSessionStore } from "@/stores/session";
 import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
+import { useProfilesStore } from "@/stores/profiles";
 import { fmtAgo, fmtDate, fmtInt } from "@/lib/format";
 import { useFocusTarget } from "@/lib/deeplink";
 import { getRegistration, swSupported } from "@/pwa";
@@ -30,6 +31,7 @@ import { getRegistration, swSupported } from "@/pwa";
 const status = useStatusStore();
 const session = useSessionStore();
 const toast = useToastStore();
+const profilesStore = useProfilesStore();
 const commands = useCommandStore();
 
 /* Роутер отдаёт больше полей, чем описано в общем контракте (он один на все
@@ -693,21 +695,24 @@ async function removeSwap() {
 
 /* ---------------- резервная копия ---------------- */
 
+function saveJson(data: unknown, name: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${name}-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 async function exportConfig() {
   busy.value = "export";
   try {
-    const data = await services.exportConfig();
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `detour-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    saveJson(await services.exportConfig(), "detour");
     toast.ok("Копия сохранена на устройство");
   } catch (e) {
     toast.fromError(e, "Не удалось выгрузить настройки");
@@ -716,59 +721,69 @@ async function exportConfig() {
   }
 }
 
-/* Разделы, которые роутер действительно умеет восстанавливать. Всё прочее в
-   файле он молча пропустит, поэтому и обещать этого не нужно: показываем ровно
-   то, что будет перезаписано. */
+/* Полная копия: профили, подписки, цепочки, маршруты, все списки и роутерные
+   настройки. Её же принимает приложение на Windows, macOS и Android. */
+async function exportFull() {
+  busy.value = "export-full";
+  try {
+    saveJson(await services.exportFull(), "detour-full");
+    toast.ok("Полная копия сохранена на устройство");
+  } catch (e) {
+    toast.fromError(e, "Не удалось выгрузить полную копию");
+  } finally {
+    busy.value = "";
+  }
+}
+
+/* Разделы, которые здесь действительно восстановятся. Всё прочее в файле
+   молча пропускается, поэтому и обещать этого не нужно: показываем ровно то,
+   что будет перезаписано. */
 const SECTION_LABELS: Record<string, string> = {
+  profiles: "VPN-профили",
   settings: "настройки панели",
   subscription: "подписка на профили",
+  subscriptions: "подписки",
+  chains: "цепочки",
+  route_map: "отдельные маршруты",
   proxy_domains: "список доменов для VPN",
   whitelist_domains: "список исключений",
   zapret_conf: "параметры обхода DPI",
   zapret_domains: "домены для обхода DPI",
-  subscriptions: "подписки",
-  chains: "цепочки",
-  route_map: "отдельные маршруты",
   udp_vpn_list: "список UDP через VPN",
+  health_urls: "цели проверки доступности",
   egress_blocklist: "запрещённые адреса",
   ru_subnets_exclude: "исключения из российских адресов",
   autoswitch_exclude: "профили вне автопереключения",
   speedcheck_exclude: "профили без замера скорости",
   torrent_allow: "профили с разрешёнными торрентами",
+  router_files: "роутерные настройки: проброс, сертификат, WAN, уведомления",
 };
 
-/* Эти разделы восстанавливает только приложение, и для него сам ключ — уже
-   значение: пустой список в копии очищает список здесь. Роутер их пропускает. */
-const CLIENT_SECTIONS = [
-  "subscriptions",
-  "chains",
-  "route_map",
-  "udp_vpn_list",
-  "egress_blocklist",
-  "ru_subnets_exclude",
-  "autoswitch_exclude",
-  "speedcheck_exclude",
-  "torrent_allow",
-];
+/* Только роутеру: у приложения нет ни tpws-параметров, ни проброса портов. */
+const ROUTER_ONLY = ["zapret_conf", "router_files"];
 
 function sectionsOf(doc: Record<string, unknown>): string[] {
   const client = status.isClient;
+  const full = doc.kind === "full";
   const hasSubs = Array.isArray(doc.subscriptions) && doc.subscriptions.length > 0;
   return Object.keys(SECTION_LABELS).filter((k) => {
     const v = doc[k];
-    if (CLIENT_SECTIONS.includes(k)) {
-      if (!client) return false;
-      return Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null;
-    }
-    /* Параметры tpws приложению не нужны, а старая одиночная подписка
-       берётся, только если списка подписок в копии нет. */
-    if (client && k === "zapret_conf") return false;
-    if (client && k === "subscription" && hasSubs) return false;
-    if (typeof v === "string") return v.length > 0;
-    /* Пустой объект подписки роутер тоже не пишет — не обещаем его. */
+    if (client && ROUTER_ONLY.includes(k)) return false;
+    /* Старая одиночная подписка берётся, только если списка подписок нет. */
+    if (k === "subscription" && hasSubs) return false;
+    if (Array.isArray(v)) return v.length > 0;
+    /* В полной копии пустой список — тоже значение: он очистит список здесь.
+       В старой копии пустая строка ничего не стирает. */
+    if (typeof v === "string") return full || v.length > 0;
     if (v && typeof v === "object") return Object.keys(v).length > 0;
     return false;
   });
+}
+
+function sectionLabel(k: string): string {
+  const v = importDoc.value?.[k];
+  const n = Array.isArray(v) ? v.length : k === "router_files" && v && typeof v === "object" ? Object.keys(v).length : 0;
+  return n ? `${SECTION_LABELS[k]} (${n})` : SECTION_LABELS[k];
 }
 
 function resetImport() {
@@ -812,9 +827,11 @@ async function importConfig() {
   if (!doc) return;
   busy.value = "import";
   try {
-    await services.importConfig(doc);
+    const res = await services.importConfig(doc);
     resetImport();
-    toast.ok("Настройки восстановлены");
+    if (res.warning) toast.push(res.warning, "info", 8000);
+    else toast.ok("Настройки восстановлены");
+    void profilesStore.load();
     void status.refresh(true);
   } catch (e) {
     toast.fromError(e, "Не удалось восстановить настройки");
@@ -871,6 +888,13 @@ onMounted(async () => {
       keywords: "offload скорость",
       available: () => offloadSupported.value,
       run: () => void kickOffload(),
+    },
+    {
+      id: "svc:export-full",
+      title: "Скачать полную резервную копию",
+      group: "сервисы",
+      keywords: "бэкап экспорт профили подписки перенос",
+      run: () => void exportFull(),
     },
     {
       id: "svc:export",
@@ -1295,12 +1319,19 @@ onBeforeUnmount(() => unregister?.());
       id="svc-backup"
       v-model:open="open.backup"
       title="Резервная копия настроек"
-      summary="Списки доменов, правила обхода и настройки панели одним файлом"
+      summary="Настройки или всё сразу — профили, подписки, маршруты — одним файлом"
     >
       <p class="lead">
-        В копию попадают настройки панели, списки доменов и параметры обхода. Пароль
-        от панели и VPN-профили в неё не входят: профили выгружаются отдельно, а
-        пароль восстановлением не меняется.
+        <b>Настройки</b> — параметры панели, списки доменов и обхода.
+        <b>Полная копия</b> — ещё и VPN-профили, подписки, цепочки, отдельные
+        маршруты, все списки<template v-if="!status.isClient">, проброс портов,
+        сертификат, WAN и уведомления</template>. Её же принимает приложение на
+        Windows, macOS и Android. Пароль от панели не входит ни в одну копию и
+        восстановлением не меняется.
+      </p>
+      <p class="note warn">
+        В полной копии лежат пароли и ключи VPN-профилей<template v-if="!status.isClient">
+        и ключ API DNS-провайдера</template> — храните файл как пароль.
       </p>
 
       <input
@@ -1321,7 +1352,7 @@ onBeforeUnmount(() => unregister?.());
         </p>
         <ul class="sections">
           <li v-for="s in importSections" :key="s">
-            {{ SECTION_LABELS[s] }} <span class="raw">{{ s }}</span>
+            {{ sectionLabel(s) }} <span class="raw">{{ s }}</span>
           </li>
         </ul>
         <p class="note faint">
@@ -1333,8 +1364,11 @@ onBeforeUnmount(() => unregister?.());
       </template>
 
       <div class="actions">
-        <UiButton variant="primary" :busy="busy === 'export'" @click="exportConfig">
-          Скачать копию
+        <UiButton variant="primary" :busy="busy === 'export-full'" @click="exportFull">
+          Скачать полную копию
+        </UiButton>
+        <UiButton :busy="busy === 'export'" @click="exportConfig">
+          Только настройки
         </UiButton>
         <template v-if="confirmImport">
           <UiButton variant="danger" :busy="busy === 'import'" @click="importConfig">
