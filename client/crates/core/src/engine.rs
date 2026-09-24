@@ -302,6 +302,24 @@ impl Engine {
             .context("не удалось запустить sing-box для проверки")
     }
 
+    /// Временный mihomo для проб AmneziaWG — sing-box его не поднимет.
+    pub fn spawn_aux_mihomo(&self, config: &Path, dir: &Path) -> Result<Child> {
+        if !self.mihomo.is_file() {
+            bail!("mihomo не найден: {}", self.mihomo.display());
+        }
+        std::fs::create_dir_all(dir)?;
+        self.command_for(&self.mihomo, dir)
+            .arg("-d")
+            .arg(dir)
+            .arg("-f")
+            .arg(config)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("не удалось запустить mihomo для проверки")
+    }
+
     pub async fn stop(&self) {
         #[cfg(any(target_os = "android", target_os = "ios"))]
         if let Some(t) = tunnel::get() {

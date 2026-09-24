@@ -228,9 +228,10 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
     route_targets(store, p.chain, &mut b, &mut rules, p.awg_inline)?;
 
     // Сам mihomo ходит к AWG-серверу наружу, и без этого правила его UDP
-    // вернулся бы в TUN и дальше в тот же socks — петля. На Android петлю
-    // режет исключение приложения из VpnService.
-    if !b.awg.is_empty() && !cfg!(any(target_os = "android", target_os = "ios")) {
+    // вернулся бы в TUN и дальше в тот же socks — петля. Правило нужно и без
+    // AWG в цепочке: временный mihomo проверки профилей должен ходить мимо
+    // текущего VPN. На Android петлю режет исключение приложения из VpnService.
+    if !cfg!(any(target_os = "android", target_os = "ios")) {
         rules.insert(3, json!({ "process_name": [awg::EXE], "outbound": "direct" }));
     }
 
