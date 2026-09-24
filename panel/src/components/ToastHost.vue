@@ -26,7 +26,7 @@ const toast = useToastStore();
   left: 50%;
   transform: translateX(-50%);
   /* На телефоне тосты не должны нырять под нижний таб-бар. */
-  bottom: calc(18px + env(safe-area-inset-bottom));
+  bottom: calc(18px + var(--sa-bottom));
   z-index: 70;
   display: flex;
   flex-direction: column;
@@ -38,7 +38,7 @@ const toast = useToastStore();
 }
 @media (max-width: 860px) {
   .host {
-    bottom: calc(var(--tabbar) + 14px + env(safe-area-inset-bottom));
+    bottom: calc(var(--tabbar) + 14px + var(--sa-bottom));
   }
 }
 .toast {

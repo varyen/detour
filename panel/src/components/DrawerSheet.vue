@@ -124,7 +124,7 @@ header h2 {
 }
 footer {
   border-top: 1px solid var(--line);
-  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  padding: 12px 16px calc(12px + var(--sa-bottom));
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
@@ -142,7 +142,7 @@ footer {
     border-left: 0;
     border-top: 1px solid var(--line);
     border-radius: 18px 18px 0 0;
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: var(--sa-bottom);
   }
   header {
     padding-top: 10px;

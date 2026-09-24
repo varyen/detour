@@ -1117,7 +1117,7 @@ onBeforeUnmount(() => unregister?.());
 @media (max-width: 860px) {
   /* Нижний бар разделов не должен перекрывать панель массовых действий. */
   .bulk {
-    bottom: calc(var(--tabbar) + 12px + env(safe-area-inset-bottom));
+    bottom: calc(var(--tabbar) + 12px + var(--sa-bottom));
   }
 }
 </style>

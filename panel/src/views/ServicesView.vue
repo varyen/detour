@@ -1103,6 +1103,31 @@ onBeforeUnmount(() => unregister?.());
     </ServicePanel>
 
     <!-- ===== движок ===== -->
+    <!-- Телефон: движок один (sing-box внутри приложения), но mihomo для
+         AmneziaWG рядом есть — показать, что он на месте и какой версии. -->
+    <ServicePanel
+      v-if="engine && engine.supported === false"
+      id="svc-engine"
+      v-model:open="open.engine"
+      title="Движок VPN"
+      :summary="engine.mihomo_installed ? `sing-box · AmneziaWG через mihomo ${engine.mihomo_version ?? ''}`.trim() : 'sing-box'"
+      chip="sing-box"
+    >
+      <p class="lead">
+        На телефоне весь трафик идёт через sing-box, встроенный в приложение, —
+        переключать движок здесь не нужно.
+      </p>
+      <p v-if="engine.awg_supported === false" class="note faint">
+        AmneziaWG на этой платформе недоступен: система не даёт запустить mihomo рядом с туннелем.
+      </p>
+      <p v-else-if="engine.mihomo_installed" class="note">
+        AmneziaWG-профили работают через mihomo{{ engine.mihomo_version ? ` ${engine.mihomo_version}` : "" }},
+        он входит в приложение. Такой профиль может быть только первым звеном цепочки.
+      </p>
+      <p v-else class="note faint">
+        mihomo нет в этой сборке — AmneziaWG-профили работать не будут. Переустановите Detour свежей версией.
+      </p>
+    </ServicePanel>
     <ServicePanel
       v-if="engine && engine.supported !== false"
       id="svc-engine"

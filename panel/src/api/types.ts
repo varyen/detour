@@ -431,6 +431,10 @@ export interface EngineConfig {
   mihomo_installed: boolean;
   /** Клиент на телефоне: движок только sing-box, переключателя нет. */
   supported?: boolean;
+  /** Версия mihomo — сайдкара AmneziaWG (клиент). */
+  mihomo_version?: string | null;
+  /** AmneziaWG вообще доступен (на iOS нет). */
+  awg_supported?: boolean;
 }
 
 /** Сайдкар mihomo для AmneziaWG-профилей (`awg_status`). */

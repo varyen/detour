@@ -94,7 +94,7 @@ async function submit() {
   min-height: 100dvh;
   display: grid;
   place-items: center;
-  padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+  padding: 24px 16px calc(24px + var(--sa-bottom));
 }
 .card {
   width: min(400px, 100%);

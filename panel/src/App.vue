@@ -23,6 +23,7 @@ const route = useRoute();
 const router = useRouter();
 const { theme, toggle: toggleTheme } = useTheme();
 
+const isClientApp = __CLIENT__;
 const title = computed(() => (route.meta.title as string) ?? "Обзор");
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -85,12 +86,17 @@ onMounted(async () => {
       keywords: "светлая тёмная",
       run: () => toggleTheme(),
     },
-    {
-      id: "app:logout",
-      title: "Выйти из панели",
-      group: "система",
-      run: () => void session.logout(),
-    },
+    /* В приложении входа нет — служба доверяет своему UI, выходить некуда. */
+    ...(__CLIENT__
+      ? []
+      : [
+          {
+            id: "app:logout",
+            title: "Выйти из панели",
+            group: "система",
+            run: () => void session.logout(),
+          },
+        ]),
   ]);
 
   /* Профили в палитре — не постоянными командами, а по мере набора: их сотня, и
@@ -176,6 +182,7 @@ session.$subscribe((_m, s) => {
           <SectionIcon :name="theme === 'dark' ? 'sun' : 'moon'" :size="17" />
         </button>
         <button
+          v-if="!isClientApp"
           class="icon-btn"
           type="button"
           aria-label="Выйти"
@@ -290,7 +297,7 @@ session.$subscribe((_m, s) => {
 
 /* ---- основная колонка ---- */
 .main {
-  padding: 18px clamp(14px, 2.6vw, 34px) 60px;
+  padding: calc(18px + var(--sa-top)) clamp(14px, 2.6vw, 34px) 60px;
   min-width: 0;
 }
 .top {
@@ -367,7 +374,8 @@ session.$subscribe((_m, s) => {
     display: none;
   }
   .main {
-    padding: 14px 14px calc(var(--tabbar) + 28px + env(safe-area-inset-bottom));
+    padding: calc(14px + var(--sa-top)) calc(14px + var(--sa-right)) calc(var(--tabbar) + 28px + var(--sa-bottom))
+      calc(14px + var(--sa-left));
   }
   .top {
     gap: 10px;
@@ -409,8 +417,8 @@ session.$subscribe((_m, s) => {
     display: grid;
     grid-auto-flow: column;
     grid-auto-columns: 1fr;
-    height: calc(var(--tabbar) + env(safe-area-inset-bottom));
-    padding-bottom: env(safe-area-inset-bottom);
+    height: calc(var(--tabbar) + var(--sa-bottom));
+    padding-bottom: var(--sa-bottom);
     border-top: 1px solid var(--line);
     background: color-mix(in srgb, var(--ground) 92%, transparent);
     backdrop-filter: blur(14px);

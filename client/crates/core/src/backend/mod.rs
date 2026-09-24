@@ -504,6 +504,8 @@ impl Backend {
             "effective": if eff.is_empty() { "hybrid".to_owned() } else { eff },
             "singbox_installed": self.engine.present(),
             "mihomo_installed": self.engine.mihomo_binary().is_file(),
+            "mihomo_version": self.awg.version().await,
+            "awg_supported": crate::awg::SUPPORTED,
             "supported": crate::engine::MIHOMO_ENGINE_SUPPORTED,
         })))
     }
@@ -595,6 +597,8 @@ impl Backend {
                 "nfqws2_present": cfg!(windows) && self.dpi.present(),
                 "nfqws2_supported": cfg!(windows) && self.dpi.supported(),
                 "nfqws2_version": if cfg!(windows) { dpi_version } else { None },
+                "mihomo_present": self.awg.present(),
+                "mihomo_version": self.awg.version().await,
             },
             "singbox": {
                 "running": pid.is_some(),

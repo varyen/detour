@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "detour-app"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "detour-core",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "detour-core"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "detour-svc"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

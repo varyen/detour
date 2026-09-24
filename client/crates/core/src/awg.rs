@@ -189,6 +189,7 @@ pub struct Sidecar {
     workdir: PathBuf,
     log: PathBuf,
     child: Mutex<Option<Child>>,
+    version: Mutex<Option<(PathBuf, std::time::SystemTime, String)>>,
 }
 
 impl Sidecar {
@@ -202,7 +203,7 @@ impl Sidecar {
                 .and_then(|e| e.parent().map(|d| d.join(EXE)))
                 .filter(|p| p.exists()),
         };
-        Self { local: data.join("bin").join(EXE), bundled, workdir, log, child: Mutex::new(None) }
+        Self { local: data.join("bin").join(EXE), bundled, workdir, log, child: Mutex::new(None), version: Mutex::new(None) }
     }
 
     pub fn binary(&self) -> PathBuf {
@@ -226,15 +227,29 @@ impl Sidecar {
         c
     }
 
-    /// «Mihomo Meta v1.19.31 windows amd64 …» → «1.19.31».
+    /// «Mihomo Meta v1.19.31 windows amd64 …» → «1.19.31». Кэш по mtime:
+    /// статус опрашивается постоянно, а запуск 60-мегабайтного бинарника не бесплатен.
     pub async fn version(&self) -> Option<String> {
         if !self.present() {
             return None;
         }
+        let bin = self.binary();
+        let mtime = std::fs::metadata(&bin).and_then(|m| m.modified()).ok()?;
+        let mut cache = self.version.lock().await;
+        if let Some((p, t, v)) = cache.as_ref() {
+            if *p == bin && *t == mtime {
+                return Some(v.clone());
+            }
+        }
+        // Рабочий каталог появляется с первым стартом сайдкара, а без него
+        // запуск с current_dir падает ещё до exec.
+        let _ = std::fs::create_dir_all(&self.workdir);
         let out = self.command().arg("-v").stdout(Stdio::piped()).output().await.ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         let w = text.split_whitespace().find(|w| w.starts_with('v') && w[1..].starts_with(|c: char| c.is_ascii_digit()))?;
-        Some(w.trim_start_matches('v').to_owned())
+        let v = w.trim_start_matches('v').to_owned();
+        *cache = Some((bin, mtime, v.clone()));
+        Some(v)
     }
 
     pub async fn check(&self, config: &Path) -> Result<(), String> {

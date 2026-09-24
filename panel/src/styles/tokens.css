@@ -5,7 +5,14 @@
    стороны. Компоненты обращаются ТОЛЬКО к токенам, чтобы не дублировать
    палитру внутри медиазапросов. */
 :root {
-  --mono: ui-monospace, "Cascadia Mono", SFMono-Regular, Consolas,
+  /* Отступы от системных полос. Android-приложение перекрывает их настоящими
+     значениями: WebView до Chromium 136 env() под edge-to-edge не отдаёт. */
+  --sa-top: env(safe-area-inset-top, 0px);
+  --sa-bottom: env(safe-area-inset-bottom, 0px);
+  --sa-left: env(safe-area-inset-left, 0px);
+  --sa-right: env(safe-area-inset-right, 0px);
+
+  --mono:ui-monospace, "Cascadia Mono", SFMono-Regular, Consolas,
     "Liberation Mono", monospace;
   --sans: system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 

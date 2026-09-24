@@ -5,6 +5,12 @@ import { router } from "./router";
 import "./styles/tokens.css";
 import "./styles/base.css";
 import { registerPanelSW } from "./pwa";
+import { installNativeBridge, nativeTheme } from "./native";
+
+if (__CLIENT__) {
+  installNativeBridge();
+  nativeTheme(document.documentElement.dataset.theme !== "light");
+}
 
 createApp(App).use(createPinia()).use(router).mount("#app");
 

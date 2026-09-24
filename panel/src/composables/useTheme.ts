@@ -1,4 +1,5 @@
 import { ref } from "vue";
+import { nativeTheme } from "@/native";
 
 export type Theme = "light" | "dark";
 
@@ -17,6 +18,7 @@ export function useTheme() {
     } catch {
       /* приватный режим — тема просто не запомнится */
     }
+    nativeTheme(t === "dark");
     /* Строка адреса браузера на телефоне красится в цвет фона. */
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) {
