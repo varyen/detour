@@ -157,4 +157,7 @@ export const diag = {
   /** Ставит mihomo, если его нет, и обновляет, если есть. */
   mihomoApply: () =>
     requestJson<{ ok: boolean }>("mihomo_update_apply", { method: "POST" }),
+  /** Роутер откажет, пока есть AWG-профили или выбран движок mihomo. */
+  mihomoRemove: () =>
+    requestJson<{ ok: boolean }>("mihomo_remove", { method: "POST" }),
 };

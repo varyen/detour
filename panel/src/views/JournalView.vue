@@ -576,7 +576,7 @@ async function followPanelStatus(preVersion: string, title: string) {
 }
 
 /** Живой хвост отсоединённой установки: единственный способ узнать её исход. */
-async function followApply(title: string, panelish: boolean) {
+async function followApply(title: string, panelish: boolean, okText = "обновление установлено") {
   /* Версия ДО установки — по её смене фолбэк отличает свежий «applied» в
      state-файле от того, что остался с прошлого обновления. */
   const preVersion = String(status.data?.version ?? "").trim();
@@ -599,7 +599,7 @@ async function followApply(title: string, panelish: boolean) {
       applyNote.value = panelish
         ? "Готово. Обновите страницу, чтобы открылась новая версия панели."
         : "Готово.";
-      toast.ok(`${title}: обновление установлено`);
+      toast.ok(`${title}: ${okText}`);
     } else if (r?.done === true && rc !== null) {
       applyNote.value = `Установка завершилась с кодом ${rc}. Что именно не получилось — видно в журнале.`;
       toast.error(`${title}: установка не удалась`);
@@ -627,6 +627,48 @@ async function followApply(title: string, panelish: boolean) {
     void loadUpdates();
     void status.refresh(true);
   }
+}
+
+/* mihomo ставится по кнопке и так же удаляется: он нужен только AWG-профилям,
+   а на Keenetic 57 МБ на флеше — заметная доля. */
+const mihomoInstalled = computed(() => status.data?.binaries?.mihomo_present === true);
+
+async function installMihomo() {
+  if (!ask("Установить mihomo (~20 МБ загрузки, ~57 МБ на диске)? Он нужен только для AmneziaWG-профилей.")) return;
+  updBusy.value = "apply:mihomo";
+  applyText.value = "";
+  applyNote.value = "";
+  applyRunning.value = true;
+  applyOpen.value = true;
+  try {
+    await diag.mihomoApply();
+  } catch (e) {
+    applyRunning.value = false;
+    updBusy.value = "";
+    applyNote.value = e instanceof Error ? e.message : "Не удалось запустить установку";
+    toast.fromError(e, "Не удалось запустить установку");
+    return;
+  }
+  await followApply(CH_TITLE.mihomo, false, "установлен");
+}
+
+async function removeMihomo() {
+  if (!ask("Удалить mihomo? AmneziaWG-профили без него работать не смогут.")) return;
+  updBusy.value = "remove:mihomo";
+  applyText.value = "";
+  applyNote.value = "";
+  try {
+    await diag.mihomoRemove();
+  } catch (e) {
+    /* Отказ роутера (есть AWG-профили, движок mihomo) — не ошибка установки,
+       журнал под него открывать незачем. */
+    updBusy.value = "";
+    toast.fromError(e, "mihomo не удалён");
+    return;
+  }
+  applyRunning.value = true;
+  applyOpen.value = true;
+  await followApply(CH_TITLE.mihomo, false, "удалён");
 }
 
 async function applyChannel(ch: Channel) {
@@ -1267,11 +1309,19 @@ onBeforeUnmount(() => {
         title="mihomo (AmneziaWG)"
         :state="upd?.mihomo ?? null"
         :installed="status.data?.binaries?.mihomo_version"
+        :missing="!mihomoInstalled"
+        removable
         :busy-check="updBusy === 'check:mihomo'"
         :busy-apply="updBusy === 'apply:mihomo'"
-        note="Нужен только для AmneziaWG-профилей. Пакет берётся из нашего фида (~20 МБ загрузки)."
+        :busy-remove="updBusy === 'remove:mihomo'"
+        :note="
+          mihomoInstalled
+            ? 'Нужен только для AmneziaWG-профилей. Удалить можно, когда AWG-профилей не осталось и движок не «mihomo».'
+            : 'Нужен только для AmneziaWG-профилей: без него их не создать. ~20 МБ загрузки, ~57 МБ на диске.'
+        "
         @check="checkChannel('mihomo')"
-        @apply="applyChannel('mihomo')"
+        @apply="mihomoInstalled ? applyChannel('mihomo') : installMihomo()"
+        @remove="removeMihomo"
         @changelog="showChangelog('mihomo')"
       />
 

@@ -44,6 +44,9 @@
 #   nfqws2-check           — opkg-check whether a newer nfqws2 (zapret2) is in the feed
 #   nfqws2-apply           — opkg update + upgrade nfqws2 from the feed
 #   nfqws2-status          — print the nfqws2 (zapret2) update state file
+#   mihomo-apply           — install or upgrade mihomo (AmneziaWG sidecar) from the feed
+#   mihomo-check           — check the feed for a newer mihomo
+#   mihomo-remove          — stop the AWG sidecar and remove mihomo
 #   rollback               — re-install the previous panel .ipk from backup
 #   status                 — print panel state file
 #   selftest               — usign / opkg / pinned-key sanity check
@@ -1071,6 +1074,24 @@ cmd_mihomo_apply() {
     log "mihomo now at $(pkg_installed_version "$MIHOMO_PKG")"
 }
 
+# Удаление. Проверки «нет AWG-профилей и движок не mihomo» делает detour-api
+# до запуска: без них цепочка с AWG-хопом осталась бы без выхода.
+cmd_mihomo_remove() {
+    local initd=/etc/init.d/detour-awg
+    [ "$KEENETIC" = 1 ] && initd=/opt/etc/init.d/S55detour-awg
+    pkg_is_installed "$MIHOMO_PKG" || { log "mihomo is not installed — nothing to remove"; return 0; }
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    [ -x "$initd" ] && "$initd" stop 2>&1
+    log "removing mihomo..."
+    pkg_remove "$MIHOMO_PKG" 2>&1 || die "remove of mihomo failed"
+    write_mihomo_state "" "$(prev_field "$MIHOMO_STATE_FILE" available)" \
+        "$(prev_field "$MIHOMO_STATE_FILE" upstream)" false \
+        "$(prev_field "$MIHOMO_STATE_FILE" "\bchangelog_b64\b" 1)"
+    log "mihomo removed"
+}
+
 write_mihomo_state() {
     local cur="$1" avail="$2" upstream="${3:-}" upnew="${4:-false}" changelog="${5:-}" now
     now=$(date -u "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
@@ -1514,6 +1535,7 @@ case "$ACTION" in
     tpws-status)       cat "$TPWS_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
     mihomo-apply)      cmd_mihomo_apply ;;
     mihomo-check)      cmd_mihomo_check ;;
+    mihomo-remove)     cmd_mihomo_remove ;;
     mihomo-status)     cat "$MIHOMO_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
     nfqws2-check)      cmd_nfqws2_check ;;
     nfqws2-apply)      cmd_nfqws2_apply ;;
@@ -1522,7 +1544,7 @@ case "$ACTION" in
     status)            cmd_status ;;
     selftest)          cmd_selftest ;;
     help|--help|-h)
-        sed -n '2,34p' "$0"
+        sed -n '2,60p' "$0"
         ;;
     *) echo "unknown subcommand: $ACTION" >&2
        echo "try: $0 help" >&2

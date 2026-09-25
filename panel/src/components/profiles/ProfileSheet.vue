@@ -200,8 +200,19 @@ function linkEnter(e: KeyboardEvent) {
   void applyLink();
 }
 
+/* Новый AWG-профиль без mihomo роутер не примет: в цепочке он стал бы выходом
+   в никуда. Правку профиля, который уже был AWG, роутер пропускает — и мы. */
+const awgBlocked = computed(
+  () =>
+    isAwg.value &&
+    onRouter.value &&
+    !awgState.value?.installed &&
+    props.draft?.type !== "amneziawg",
+);
+
 const canSave = computed(() => {
   if (!d.value.name.trim()) return false;
+  if (awgBlocked.value) return false;
   if (isWg.value)
     return !!d.value.privateKey.trim() && !!d.value.peerPublicKey.trim() && !!d.value.server.trim();
   return !!d.value.server.trim();
@@ -415,8 +426,9 @@ async function copyShare() {
             </p>
             <template v-else-if="awgState && !awgState.installed">
               <p class="warn">
-                AmneziaWG на роутере работает через mihomo, а он пока не установлен
-                (~57 МБ). Профиль сохранится, но подключиться к нему не выйдет.
+                AmneziaWG на роутере работает через mihomo, а он не установлен
+                (~57 МБ на диске). Пока его нет, профиль не сохранить. Проверьте, что
+                на роутере хватит места.
               </p>
               <UiButton :busy="awgInstalling" @click="installMihomo">Установить mihomo</UiButton>
             </template>
@@ -522,7 +534,8 @@ async function copyShare() {
         Сохранить
       </UiButton>
       <UiButton @click="emit('close')">Отмена</UiButton>
-      <span v-if="!canSave" class="hint">Заполните имя и адрес сервера</span>
+      <span v-if="awgBlocked" class="hint">Сначала установите mihomo</span>
+      <span v-else-if="!canSave" class="hint">Заполните имя и адрес сервера</span>
     </template>
   </DrawerSheet>
 </template>

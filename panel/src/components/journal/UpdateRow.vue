@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/* Одна линия обновления: панель, sing-box, tpws, nfqws2 — у всех одинаковый
+/* Одна линия обновления: панель, sing-box, tpws, nfqws2, mihomo — у всех одинаковый
    набор полей ({current,available,upstream}) и одинаковые действия, поэтому
    строка общая. */
 import { computed } from "vue";
@@ -16,9 +16,14 @@ const props = defineProps<{
   busyApply?: boolean;
   applyLabel?: string;
   note?: string;
+  /** Пакет не стоит вовсе (mihomo ставится по кнопке): «Установить» доступна всегда. */
+  missing?: boolean;
+  /** Показать «Удалить», когда пакет стоит. */
+  removable?: boolean;
+  busyRemove?: boolean;
 }>();
 
-const emit = defineEmits<{ check: []; apply: []; changelog: [] }>();
+const emit = defineEmits<{ check: []; apply: []; remove: []; changelog: [] }>();
 
 /* Имена полей у state-файлов обновлятора и у сводки разные (current/available
    против current_version/available_version) — читаем оба, иначе после ручной
@@ -29,7 +34,7 @@ const current = computed(
 const available = computed(
   () => props.state?.available_version || props.state?.available || "",
 );
-const has = computed(() => props.state?.update_available === true);
+const has = computed(() => !props.missing && props.state?.update_available === true);
 
 /* last_check — строка ISO-8601 («2026-08-10T15:00:14Z»), а fmtAgo ждёт unix-
    секунды. Раньше здесь читалось поле `checked`, которого в ответах CGI нет
@@ -50,15 +55,19 @@ const hasChangelog = computed(() => !!props.state?.changelog_b64);
 <template>
   <div class="row">
     <div class="info">
-      <p class="nm">{{ title }}</p>
+      <p class="nm">
+        {{ title }}
+        <span v-if="missing" class="badge off">не установлен</span>
+        <span v-else-if="removable" class="badge on">установлен</span>
+      </p>
       <p class="ver num">
-        <span>сейчас {{ current || "неизвестно" }}</span>
+        <span v-if="!missing">сейчас {{ current || "неизвестно" }}</span>
         <span v-if="available && available !== current">в источнике {{ available }}</span>
         <span v-if="checked">проверяли {{ checked }}</span>
       </p>
       <p v-if="has" class="chip ok">Есть обновление</p>
-      <p v-else-if="state" class="chip">Установлена свежая версия</p>
-      <p v-if="state?.upstream_newer" class="chip warn">
+      <p v-else-if="state && !missing" class="chip">Установлена свежая версия</p>
+      <p v-if="state?.upstream_newer && !missing" class="chip warn">
         У разработчика вышла {{ state?.upstream }} — в источнике её пока нет
       </p>
       <p v-if="state?.error" class="chip bad">{{ state.error }}</p>
@@ -69,11 +78,19 @@ const hasChangelog = computed(() => !!props.state?.changelog_b64);
       <UiButton :busy="busyCheck" @click="emit('check')">Проверить</UiButton>
       <UiButton
         variant="primary"
-        :disabled="!has"
+        :disabled="!has && !missing"
         :busy="busyApply"
         @click="emit('apply')"
       >
-        {{ applyLabel ?? "Установить" }}
+        {{ missing ? "Установить" : applyLabel ?? "Установить" }}
+      </UiButton>
+      <UiButton
+        v-if="removable && !missing"
+        variant="danger"
+        :busy="busyRemove"
+        @click="emit('remove')"
+      >
+        Удалить
       </UiButton>
       <UiButton v-if="hasChangelog" @click="emit('changelog')">Что нового</UiButton>
     </div>
@@ -109,6 +126,23 @@ const hasChangelog = computed(() => !!props.state?.changelog_b64);
   display: flex;
   flex-wrap: wrap;
   gap: 2px 12px;
+}
+.badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: 2px;
+}
+.badge.on {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.badge.off {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
 }
 .chip {
   font-size: 12.5px;

@@ -1786,6 +1786,15 @@ build_config() {
             echo "AmneziaWG-профиль $_awg_used недоступен в режиме «только sing-box» — выберите гибрид или mihomo"
             return 1
         fi
+    elif [ ! -x "$MIHOMO_BIN" ]; then
+        # Гибрид без mihomo: AWG-хоп превратился бы в socks на мёртвый порт, и
+        # весь трафик цепочки ушёл бы в никуда. Отказываем — прежний конфиг цел.
+        for _tid in $(printf '%s' "$chain" | tr ',' ' '); do
+            if is_awg_profile "$SINGBOX_PROFILES_DIR/$_tid.json"; then
+                echo "AmneziaWG-профиль $_tid требует mihomo, а он не установлен — поставьте его в «Журнал → Обновления»"
+                return 1
+            fi
+        done
     fi
     if [ "$eff_engine" = mihomo ]; then
         build_config_mihomo "$chain"
@@ -3903,6 +3912,14 @@ profile_save)
             exit 0
         fi
     fi
+    # Новый AmneziaWG-профиль без mihomo работать не может: в гибриде он
+    # становится socks на порт, который никто не слушает. Правку уже
+    # существующего AWG-профиля пропускаем — его и так надо как-то чинить.
+    if printf '%s' "$POST_DATA" | grep -q '"type"[[:space:]]*:[[:space:]]*"amneziawg"' \
+       && [ ! -x "$MIHOMO_BIN" ] && ! is_awg_profile "$PS_FILE"; then
+        json_err "AmneziaWG работает через mihomo, а он не установлен. Поставьте его в «Журнал → Обновления» и сохраните профиль снова"
+        exit 0
+    fi
     echo "$POST_DATA" > "$PS_FILE"
     # AWG-профиль — выдать порт и пересобрать сайдкар. Профиль, переставший быть
     # AWG, тоже проходит через sync: так освобождается его порт.
@@ -4892,6 +4909,28 @@ awg_install|mihomo_update_apply)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
     start_apply "\"$UPDATE_BIN\" mihomo-apply"
+    ;;
+
+mihomo_remove)
+    # Удалять можно только то, на что ничего не опирается: AWG-профиль без
+    # mihomo — цепочка в никуда, а движок «mihomo» просто не соберётся.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    if [ "$(get_engine_mode)" = mihomo ]; then
+        json_err "выбран движок «mihomo» — сначала переключите «Сервисы → Движок VPN» на гибрид или sing-box"
+        exit 0
+    fi
+    MR_AWG=""
+    for f in "$SINGBOX_PROFILES_DIR"/*.json; do
+        is_awg_profile "$f" || continue
+        MR_ID=$(basename "$f" .json)
+        MR_AWG="${MR_AWG:+$MR_AWG, }$MR_ID"
+    done
+    if [ -n "$MR_AWG" ]; then
+        json_err "есть AmneziaWG-профили ($(printf '%s' "$MR_AWG" | json_escape)) — удалите их, затем mihomo"
+        exit 0
+    fi
+    start_apply "\"$UPDATE_BIN\" mihomo-remove"
     ;;
 
 mihomo_update_status)
