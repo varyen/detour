@@ -1,0 +1,30 @@
+Package: mihomo
+Version: 1.19.31
+Architecture: noarch
+Installed-Size: 63504541
+Description: mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar for AmneziaWG profiles (sing-box has no AmneziaWG).
+Filename: mihomo_1.19.31_noarch.apk
+Size: 20093823
+MD5Sum: d8d6859094ee163588f75f347a9f6429
+SHA256sum: f6b00ff0d141914550ba57c278240d7474ec8d8a6ef7ede0bd42e612c006ca10
+
+Package: nfqws2
+Version: 1.0.5.2
+Architecture: noarch
+Installed-Size: 516300
+Description: zapret2 nfqws2 NFQUEUE DPI-bypass engine + LuaJIT desync scripts (bol-van/zapret2). Optional — used by zapret2 mode.
+Filename: nfqws2_1.0.5.2_noarch.apk
+Size: 388568
+MD5Sum: 5735bf8c91aadb88f452564ce13bcdb2
+SHA256sum: 6d74280b56706ebfc9f47873e1abd1a1feda41f13de4df3e0536626104929d4b
+
+Package: tpws-zapret
+Version: 72.13
+Architecture: noarch
+Installed-Size: 127024
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build — zapret is in no opkg feed.
+Filename: tpws-zapret_72.13_noarch.apk
+Size: 126483
+MD5Sum: 263f2a4540b145f207639d44f4800b6c
+SHA256sum: 04637f95ba8b8733e6c463179f78e51c557aab16fd7e37a7f5bf21b9ee4ae8ba
+

@@ -1,0 +1,45 @@
+Package: mihomo
+Version: 1.19.31-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 63504541
+Description: mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar for AmneziaWG profiles (sing-box has no AmneziaWG). Keenetic/Entware (mipsel soft-float). (1.19.31-1)
+Filename: mihomo_1.19.31-1_all.ipk
+Size: 20065466
+MD5Sum: 25d70a60f7de3814ed636498aa77db34
+SHA256sum: 4bdfcfc14fb3ffcba54b535c05119427c5cd5910fed1ebe2bdfe8b34029e3f22
+
+Package: sing-box
+Version: 1.14.2-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 102186900
+Description: sing-box universal proxy platform. Detour feed build for Keenetic/Entware (mipsel soft-float, musl-static). (1.14.2-1)
+Filename: sing-box_1.14.2-1_all.ipk
+Size: 29671533
+MD5Sum: 8f3f24e48fb2c751bc804c02eb1bed20
+SHA256sum: c16bf9f7201187db7015f0790abc2932ddb39e65adb24662285a7cd51ff53fc5
+
+Package: tpws-zapret
+Version: 72.13-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 127024
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build for Keenetic/Entware (mipsel). (72.13-1)
+Filename: tpws-zapret_72.13-1_all.ipk
+Size: 126771
+MD5Sum: d146f1048a71b96f67d119a4abc599b4
+SHA256sum: 36f3c8df44bd38775311f2c1db4ab6fe75a38d841e9acfb3095ddf68cd04d5de
+
