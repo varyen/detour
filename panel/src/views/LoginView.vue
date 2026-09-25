@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { useSessionStore } from "@/stores/session";
 
 const session = useSessionStore();
+const logo = `${import.meta.env.BASE_URL}icons/favicon.svg`;
 
 const user = ref("");
 const pass = ref("");
@@ -31,10 +32,7 @@ async function submit() {
   <div class="wrap">
     <form class="card" @submit.prevent="submit">
       <div class="brand">
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-          <rect x="3" y="11" width="18" height="11" rx="2" />
-          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-        </svg>
+        <img :src="logo" width="28" height="28" alt="" aria-hidden="true" />
         <span>Detour</span>
       </div>
 
