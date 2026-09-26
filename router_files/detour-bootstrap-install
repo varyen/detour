@@ -117,11 +117,22 @@ done
 need_iptables=0
 [ "$PLATFORM" = keenetic ] || command -v iptables >/dev/null 2>&1 || need_iptables=1
 
+# AmneziaWG-профили без mihomo не поднимаются, а он не зависимость панели.
+# Профили уже есть при переустановке панели; решение «ставить или нет» (движок
+# «singbox» AWG выключает) принимает detour-update mihomo-ensure.
+PROFILES_DIR=/etc/sing-box/profiles
+[ "$PLATFORM" = keenetic ] && PROFILES_DIR=/opt/etc/sing-box/profiles
+need_mihomo=0
+if grep -qs '"type"[[:space:]]*:[[:space:]]*"amneziawg"' "$PROFILES_DIR"/*.json    && ! pkg_installed mihomo; then
+    need_mihomo=1
+fi
+
 need_bootstrap=0
 feed_present || need_bootstrap=1
 pkg_installed sing-box || need_bootstrap=1
 pkg_installed tpws-zapret || need_bootstrap=1
 [ "$need_iptables" = 1 ] && need_bootstrap=1
+[ "$need_mihomo" = 1 ] && need_bootstrap=1
 
 if [ "$need_bootstrap" != "1" ]; then
     log "bootstrap decision: feed_present=$(feed_present && echo yes || echo no) sing-box=$(pkg_installed sing-box && echo yes || echo no) tpws=$(pkg_installed tpws-zapret && echo yes || echo no)"
@@ -156,10 +167,20 @@ run_cmd "$UPDATE_BIN" bins-apply || log "WARNING: bins-apply failed"
 dump_file "$FEED_CONF"
 # На apk tpws-zapret берётся curl'ом из нашего apk-фида (feed/apk-<семейство>).
 run_cmd "$UPDATE_BIN" tpws-apply || log "WARNING: tpws-apply failed"
+need_restart=0
+if [ "$need_mihomo" = 1 ]; then
+    run_cmd "$UPDATE_BIN" mihomo-ensure || log "WARNING: mihomo-ensure failed — AmneziaWG-профили не поднимутся, пока не встанет mihomo"
+    pkg_installed mihomo && need_restart=1
+fi
 # sing-box мог стартовать до появления iptables — тогда правила перехвата не
-# встали; перезапуск их ставит.
-if [ "$need_iptables" = 1 ] && command -v iptables >/dev/null 2>&1 && [ -x /etc/init.d/sing-box ]; then
-    run_cmd /etc/init.d/sing-box restart
+# встали; перезапуск их ставит. После mihomo — чтобы AWG-хоп цепочки ожил.
+[ "$need_iptables" = 1 ] && command -v iptables >/dev/null 2>&1 && need_restart=1
+if [ "$need_restart" = 1 ]; then
+    if [ "$PLATFORM" = keenetic ]; then
+        [ -x /opt/etc/init.d/S52detour-singbox ] && run_cmd /opt/etc/init.d/S52detour-singbox restart
+    else
+        [ -x /etc/init.d/sing-box ] && run_cmd /etc/init.d/sing-box restart
+    fi
 fi
 dump_runtime_state
 

@@ -4638,6 +4638,14 @@ panel_import_config)
     [ -x "$PORTMAP_BIN" ] && [ -s "$DETOUR_DIR/portmap.conf" ] && "$PORTMAP_BIN" apply >/dev/null 2>&1
     # Перезапуск в фоне: ответ должен уйти раньше, чем VPN на секунды пропадёт.
     ( sleep 1; $SINGBOX_INITD restart; $ZAPRET_INITD restart ) >/dev/null 2>&1 &
+    # Копия с AmneziaWG-профилями на роутер без mihomo: без него они молча не
+    # поднимаются. Ставим в фоне (~20 МБ качать), затем перезапуск sing-box.
+    if [ ! -x "$MIHOMO_BIN" ] && [ -x "$UPDATE_BIN" ] && [ "$(get_engine_mode)" != singbox ] \
+       && grep -qs '"type"[[:space:]]*:[[:space:]]*"amneziawg"' "$SINGBOX_PROFILES_DIR"/*.json; then
+        : > "$APPLY_LOG" 2>/dev/null
+        detach_bg "$APPLY_LOG" "sleep 3; \"$UPDATE_BIN\" mihomo-ensure && $SINGBOX_INITD restart; echo \"$APPLY_DONE_MARK rc=\$?\""
+        IMPORT_WARN="${IMPORT_WARN:+$IMPORT_WARN; }AmneziaWG-профили заработают после установки mihomo — она идёт в фоне, ход виден в «Журнал → Обновления»"
+    fi
     if [ -n "$IMPORT_WARN" ]; then
         printf '{"ok":true,"warning":"%s","result":%s}' "$(printf '%s' "$IMPORT_WARN" | json_escape)" "$IMPORT_OUT"
     else

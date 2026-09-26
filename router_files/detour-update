@@ -47,6 +47,7 @@
 #   mihomo-apply           — install or upgrade mihomo (AmneziaWG sidecar) from the feed
 #   mihomo-check           — check the feed for a newer mihomo
 #   mihomo-remove          — stop the AWG sidecar and remove mihomo
+#   mihomo-ensure          — поставить mihomo, если есть AWG-профили и движок не «singbox»
 #   netfilter-ensure       — поставить iptables-nft (+tproxy), если iptables нет вовсе
 #   rollback              — re-install the previous panel .ipk from backup
 #   status                 — print panel state file
@@ -1098,6 +1099,38 @@ cmd_mihomo_apply() {
     log "mihomo now at $(pkg_installed_version "$MIHOMO_PKG")"
 }
 
+# mihomo по умолчанию не стоит, а AmneziaWG без него не работает. Ставим сами,
+# когда AWG-профили уже есть (переустановка панели, импорт копии) — иначе они
+# молча не поднимаются. В движке «singbox» AWG выключен сознательно — не ставим.
+awg_profiles_present() {
+    local dir=/etc/sing-box/profiles
+    [ "$KEENETIC" = 1 ] && dir=/opt/etc/sing-box/profiles
+    grep -qs '"type"[[:space:]]*:[[:space:]]*"amneziawg"' "$dir"/*.json
+}
+
+cmd_mihomo_ensure() {
+    local settings=/etc/sing-box/settings.json
+    [ "$KEENETIC" = 1 ] && settings=/opt/etc/sing-box/settings.json
+    if pkg_is_installed "$MIHOMO_PKG"; then
+        log "mihomo уже стоит — ставить нечего"; return 0
+    fi
+    awg_profiles_present || { log "AmneziaWG-профилей нет — mihomo не нужен"; return 0; }
+    if grep -qs '"engine_mode"[[:space:]]*:[[:space:]]*"singbox"' "$settings"; then
+        log "движок «singbox»: AmneziaWG выключен — mihomo не ставлю"; return 0
+    fi
+    # Бинарник mihomo ~57 МБ. Автоматом не забиваем флеш под завязку: на
+    # переполненном overlay у роутера перестают сохраняться настройки. Кнопка в
+    # «Обновлениях» по-прежнему ставит без этой проверки — там решает человек.
+    local target=/usr/bin free_kb need_kb=61440
+    [ "$KEENETIC" = 1 ] && target=/opt/bin
+    free_kb=$(df -kP "$target" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$free_kb" ] && [ "$free_kb" -lt "$need_kb" ]; then
+        die "mihomo для AmneziaWG нужен, но места мало: свободно $((free_kb / 1024)) МБ, нужно ~$((need_kb / 1024)) МБ. Освободите место и поставьте mihomo в «Журнал → Обновления»"
+    fi
+    log "есть AmneziaWG-профили, а mihomo нет — ставлю (свободно $((${free_kb:-0} / 1024)) МБ)"
+    cmd_mihomo_apply
+}
+
 # Удаление. Проверки «нет AWG-профилей и движок не mihomo» делает detour-api
 # до запуска: без них цепочка с AWG-хопом осталась бы без выхода.
 cmd_mihomo_remove() {
@@ -1561,6 +1594,7 @@ case "$ACTION" in
     mihomo-check)      cmd_mihomo_check ;;
     mihomo-remove)     cmd_mihomo_remove ;;
     netfilter-ensure)  cmd_netfilter_ensure ;;
+    mihomo-ensure)     cmd_mihomo_ensure ;;
     mihomo-status)     cat "$MIHOMO_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
     nfqws2-check)      cmd_nfqws2_check ;;
     nfqws2-apply)      cmd_nfqws2_apply ;;
