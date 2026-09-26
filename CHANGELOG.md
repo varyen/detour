@@ -5,7 +5,7 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [2.2.2] — 2026-09-26
 
 ### Добавлено
 - **mihomo ставится сам, когда есть AmneziaWG-профили.** Раньше AWG-профили
