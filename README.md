@@ -6,7 +6,7 @@
 > (`.ipk` для opkg, `.apk` для OpenWrt 25.12+). С версии 2.0 — ещё и клиент
 > для Windows, macOS и Android: та же панель, но без роутера.
 
-**Версия:** [`2.1.3`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
+**Версия:** [`2.1.4`](VERSION) · **История изменений:** [`CHANGELOG.md`](CHANGELOG.md)
 
 ---
 

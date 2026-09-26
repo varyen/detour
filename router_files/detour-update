@@ -47,7 +47,8 @@
 #   mihomo-apply           — install or upgrade mihomo (AmneziaWG sidecar) from the feed
 #   mihomo-check           — check the feed for a newer mihomo
 #   mihomo-remove          — stop the AWG sidecar and remove mihomo
-#   rollback               — re-install the previous panel .ipk from backup
+#   netfilter-ensure       — поставить iptables-nft (+tproxy), если iptables нет вовсе
+#   rollback              — re-install the previous panel .ipk from backup
 #   status                 — print panel state file
 #   selftest               — usign / opkg / pinned-key sanity check
 #
@@ -866,6 +867,29 @@ opkg_update_retry() {
     done
 }
 
+# Перехват трафика (sing-box.initd, detour-torrent) сделан на iptables, а чистая
+# OpenWrt 22.03+ идёт только с nftables — без iptables-nft панель встаёт, но
+# трафик молча идёт мимо VPN. На apk-прошивках это закрывает Depends пакета, на
+# opkg-прошивках — этот шаг (в Depends его не внести: на fw3 iptables-nft
+# конфликтует с legacy-iptables). Keenetic: iptables есть всегда.
+cmd_netfilter_ensure() {
+    [ "$KEENETIC" = 1 ] && return 0
+    if command -v iptables >/dev/null 2>&1; then
+        log "iptables: $(command -v iptables) — ставить нечего"
+        return 0
+    fi
+    command -v nft >/dev/null 2>&1 || die "нет ни iptables, ни nft — перехват трафика невозможен"
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    log "iptables нет — ставлю iptables-nft и iptables-mod-tproxy"
+    opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
+    pkg_install iptables-nft || die "не удалось поставить iptables-nft"
+    pkg_install iptables-mod-tproxy || log "WARNING: iptables-mod-tproxy не встал — UDP через VPN (TPROXY) будет недоступен"
+    command -v iptables >/dev/null 2>&1 || die "iptables-nft встал, но iptables не появился"
+    log "iptables: $(command -v iptables)"
+}
+
 cmd_bins_apply() {
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
@@ -1536,6 +1560,7 @@ case "$ACTION" in
     mihomo-apply)      cmd_mihomo_apply ;;
     mihomo-check)      cmd_mihomo_check ;;
     mihomo-remove)     cmd_mihomo_remove ;;
+    netfilter-ensure)  cmd_netfilter_ensure ;;
     mihomo-status)     cat "$MIHOMO_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
     nfqws2-check)      cmd_nfqws2_check ;;
     nfqws2-apply)      cmd_nfqws2_apply ;;

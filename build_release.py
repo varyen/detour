@@ -72,6 +72,11 @@ PACKAGE_ARCH = os.environ.get("DETOUR_ARCH", "all")
 # was not pre-seeded yet, and postinst then bootstraps that feed and installs the
 # runtime binaries in the background.
 DEPENDS = "lua, lua-cjson, curl, openssl-util, dnsmasq-full, kmod-ipt-ipset, ipset"
+# apk-прошивки (OpenWrt 25.12+) — всегда fw4 без iptables, а перехват трафика
+# сделан на нём. В opkg-Depends этого не внести: на fw3 iptables-nft конфликтует
+# с legacy-iptables, там недостающее ставит `detour-update netfilter-ensure`.
+# dnsmasq-full apk сам ставит вместо штатного dnsmasq (provides dnsmasq).
+APK_DEPENDS = DEPENDS + ", iptables-nft, iptables-mod-tproxy"
 
 MAINTAINER = "Maintainer <you@example.com>"
 DESCRIPTION = "Sing-box + zapret-tpws management panel for OpenWrt routers."
@@ -864,7 +869,7 @@ def build_apk(pkg_name, version, file_entries, out_dir):
         url="https://github.com/varyen/detour",
         license_="MIT",
         maintainer=MAINTAINER,
-        depends=apk_pkg.parse_depends(DEPENDS),
+        depends=apk_pkg.parse_depends(APK_DEPENDS),
         file_entries=[(resolve_source(p), dest, mode)
                       for p, dest, mode in file_entries],
         scripts={

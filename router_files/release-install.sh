@@ -69,7 +69,10 @@ else
     #   1) /etc/opkg/keys/ (full keyring scan via -P)
     #   2) /etc/detour/release.usign.pub (pinned single key)
     #   3) public key embedded in the package itself (TOFU first install).
-    if [ -d "$OPKG_KEYRING" ] && [ -n "$(ls -1 "$OPKG_KEYRING" 2>/dev/null)" ]; then
+    # Связка ключей на чистой OpenWrt не пуста — там ключи самого дистрибутива,
+    # а нашего нет; поэтому идём в неё, только если там лежит ключ этой подписи.
+    SIG_KEYID=$(usign -F -x "$SIG" 2>/dev/null)
+    if [ -n "$SIG_KEYID" ] && [ -f "$OPKG_KEYRING/$SIG_KEYID" ]; then
         usign -V -m "$IPK" -P "$OPKG_KEYRING" -x "$SIG" \
             || { echo "ERROR: usign verification failed against keyring" >&2; exit 1; }
         echo "[release-install] usign OK (keyring=$OPKG_KEYRING)"
