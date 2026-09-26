@@ -93,6 +93,25 @@ feed_present() {
     grep -qs "^src/gz $FEED_NAME " "$FEED_CONF" 2>/dev/null
 }
 
+# postinst зовёт нас в фоне, пока внешний `opkg install` панели ещё держит
+# блокировку. Тогда `opkg list-installed` падает (rc=255), и всё ниже решало
+# «sing-box не установлен», гоняло четыре `opkg update` в ту же блокировку и
+# писало «install of sing-box failed» на роутере, где всё давно стоит (home,
+# обновление 2.1.3 → 2.2.0). Ждём, пока менеджер отпустит базу.
+pkgm_ready() {
+    if [ "$PKGM" = apk ]; then apk info >/dev/null 2>&1; else opkg list-installed >/dev/null 2>&1; fi
+}
+_w=0
+while ! pkgm_ready; do
+    _w=$((_w + 1))
+    if [ "$_w" -gt 90 ]; then
+        log "skip: $PKGM занят дольше 3 минут — список пакетов не прочитать, решать вслепую не будем"
+        exit 0
+    fi
+    sleep 2
+done
+[ "$_w" -gt 0 ] && log "$PKGM освободился через ~$((_w * 2)) с"
+
 # Чистая OpenWrt 22.03+ приходит без iptables (только nftables), а перехват
 # трафика сделан на нём. На apk его приносит Depends пакета, на opkg — этот шаг.
 need_iptables=0
