@@ -462,6 +462,16 @@ fi
 # лил dist туда же напрямую — этих файлов opkg не знает и не тронет.
 rm -rf /www/detour-next
 
+# 1f) apk считает /etc защищённым путём: если init на диске отличается от того,
+# что записано за пакетом, свежий кладётся рядом как .apk-new, а старый остаётся.
+# Так на 2.1.4–2.2.0 оставался штатный init родного sing-box, затёрший наш
+# (sing-box не стартовал, трафик шёл мимо VPN). Наши init — код, не конфиг.
+for f in /etc/init.d/sing-box.apk-new /etc/init.d/zapret-tpws.apk-new /etc/init.d/detour-*.apk-new; do
+    [ -f "$f" ] || continue
+    mv -f "$f" "${{f%.apk-new}}"
+    logger -t detour "postinst: взят новый ${{f%.apk-new}} вместо изменённого"
+done
+
 # 2) Make sure shell scripts are executable (opkg honours data.tar.gz mode bits,
 # this is defence in depth).
 chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
@@ -870,6 +880,12 @@ def build_apk(pkg_name, version, file_entries, out_dir):
         license_="MIT",
         maintainer=MAINTAINER,
         depends=apk_pkg.parse_depends(APK_DEPENDS),
+        # Родной sing-box из фида OpenWrt несёт свой /etc/init.d/sing-box (UCI,
+        # enabled=0) по тому же пути, что и наш. Без replaces `apk add
+        # --force-overwrite sing-box` отбирал файл у панели: sing-box не стартовал,
+        # правил перехвата не было, трафик шёл мимо VPN. С replaces файл остаётся
+        # за detour и при установке sing-box после панели.
+        replaces=["sing-box"],
         file_entries=[(resolve_source(p), dest, mode)
                       for p, dest, mode in file_entries],
         scripts={
