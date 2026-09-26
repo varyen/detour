@@ -30,6 +30,7 @@ export interface DashTile {
 
 /** Каталог в порядке по умолчанию. Порядок здесь = порядок на чистой панели. */
 export const DASH_TILES: DashTile[] = [
+  { id: "power", title: "Подключиться", hint: "большая кнопка: подключить выбранный профиль или отключиться", span: 6 },
   { id: "flow", title: "Поток трафика", hint: "схема: куда уходит трафик и в каких долях", span: 3 },
   { id: "traffic", title: "Трафик", hint: "скорость приёма и передачи сейчас и графиком; доли по направлениям за сутки и месяц", span: 3 },
   { id: "connection", title: "Активное подключение", hint: "какой VPN включён, автозапуск, старт и стоп", span: 4 },
@@ -71,9 +72,11 @@ export const useDashboardStore = defineStore("dashboard", () => {
       /* Сохранённый порядок фильтруем по каталогу, а недостающие карточки
          дописываем на их место по умолчанию: иначе плитка, появившаяся в новой
          версии панели, не показалась бы никому, кто хоть раз менял состав. */
-      const known = (saved.order ?? []).filter((id) => IDS.includes(id));
-      const rest = IDS.filter((id) => !known.includes(id));
-      order.value = [...known, ...rest];
+      const next = (saved.order ?? []).filter((id) => IDS.includes(id));
+      IDS.forEach((id, i) => {
+        if (!next.includes(id)) next.splice(Math.min(i, next.length), 0, id);
+      });
+      order.value = next;
       hidden.value = (saved.hidden ?? []).filter((id) => IDS.includes(id));
       /* Ширины пришли позже порядка: у того, кто настраивал главную до этой
          версии, их в записи нет — берём каталожные, а не нули. Чужие id и

@@ -452,7 +452,7 @@ if [ ! -f /etc/detour/update.conf ]; then
 GH_OWNER=varyen
 GH_REPO=detour
 GH_TOKEN=
-AUTO_CHECK=0
+AUTO_CHECK=1
 CONF
     chmod 0600 /etc/detour/update.conf
 fi

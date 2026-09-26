@@ -42,8 +42,19 @@ vpn_ifaces() {
 }
 
 TYPE="${1:-$type}"     # iptables | ip6tables
-# Only touch IPv4. IPv6 transparent-proxy is out of scope for the port.
-[ "$TYPE" = "ip6tables" ] && exit 0
+# Перехват — только IPv4. Чтобы IPv6 не уводил трафик мимо VPN, пока прокси
+# включён, IPv6 из LAN наружу отбивается сразу: устройства без задержки уходят
+# на IPv4 (AAAA-записи им к тому же не отдаёт detour-dns, см. S50detour-dns).
+if [ "$TYPE" = "ip6tables" ]; then
+    for IIF in "$LAN_IF" $(vpn_ifaces); do
+        [ -n "$IIF" ] || continue
+        while ip6tables -C FORWARD -i "$IIF" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null; do
+            ip6tables -D FORWARD -i "$IIF" -j REJECT --reject-with icmp6-adm-prohibited
+        done
+        [ -f /opt/etc/detour/singbox.enabled ] &&             ip6tables -I FORWARD 1 -i "$IIF" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null
+    done
+    exit 0
+fi
 
 # Routing mode + upstream server IPs (loop guard for all-except) from settings.json.
 ROUTING_MODE=$(sed -n 's/.*"routing_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -1)

@@ -66,6 +66,10 @@ L "winws2 после установки: поддерживается=$($s.binar
 $null = Pipe 'profile_save' @{} '{"id":"main","name":"main","outbound":{"type":"socks","server":"127.0.0.1","server_port":18181,"version":"5"}}'
 $null = Pipe 'domains' @{} "speed.cloudflare.com`n"
 $null = Pipe 'zapret_domains' @{} "example.com`n"
+Start-Sleep 3
+# Обход включён по умолчанию, но с пустым списком не стартует: первые домены
+# должны поднять его сами, без нажатия.
+L "обход после первых доменов: работает=$((Pipe 'bypass_status').running)"
 $r = Pipe 'profile_activate' @{ name = 'main' }
 Start-Sleep 3
 L "VPN включён: $($r.ok) tun=$(tun)"
@@ -76,6 +80,22 @@ L "обход DPI: $($r.ok)$($r.error) режим=$($bs.mode) работает=$
 L "сайт из списка обхода: $(curlt 'https://example.com/')"
 $dl = Get-Content "$env:ProgramData\Detour\logs\dpi.log" -ErrorAction SilentlyContinue
 L "лог winws2: строк $($dl.Count), совпадений hostlist $(($dl | Select-String 'include hostlist check for .* : positive').Count), десинхронизаций $(($dl | Select-String ': desync').Count)"
+# Разбор, если сайт из списка обхода не открылся: подробности curl, тот же
+# сайт без движка обхода и в режиме «только список», и логи службы.
+L "curl -v: $((& curl.exe -sv -o NUL --max-time 20 'https://example.com/' 2>&1 | Select-Object -Last 6) -join ' | ')"
+$null = Pipe 'bypass_stop' @{} ''
+Start-Sleep 3
+L "без обхода DPI: $(curlt 'https://example.com/')"
+$null = Pipe 'settings' @{} '{"routing_mode":"proxy-list"}'
+Start-Sleep 4
+L "режим «только список», без обхода: $(curlt 'https://example.com/')"
+$null = Pipe 'bypass_set' @{ mode = 'zapret2' } ''
+Start-Sleep 3
+L "режим «только список», с обходом: $(curlt 'https://example.com/')"
+$null = Pipe 'settings' @{} '{"routing_mode":"all-except"}'
+Start-Sleep 4
+Copy-Item "$env:ProgramData\Detour\logs" "$out\logs" -Recurse -Force -ErrorAction SilentlyContinue
+Copy-Item "$env:ProgramData\Detour\run\config.json" "$out\config.json" -Force -ErrorAction SilentlyContinue
 
 # Kill-switch: гасим движок руками и смотрим, закрылся ли выход и поднял ли его сторож.
 $null = Pipe 'killswitch_set' @{ on = '1' } ''

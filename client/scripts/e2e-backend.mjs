@@ -40,7 +40,8 @@ expect("защита от потери параметров", trunc?.ok === fals
 let r = await call("profile_activate", { params: { name: "nl_1" } });
 expect("profile_activate nl_1 (check прошёл)", applied(r), r?.error);
 const cfg = await call("singbox_config");
-expect("конфиг: tun + proxy + final direct", cfg?.inbounds?.[0]?.type === "tun" && cfg?.outbounds?.[0]?.tag === "proxy" && cfg?.route?.final === "direct");
+// По умолчанию «всё, кроме исключений» (firstrun.rs), поэтому final — proxy.
+expect("конфиг: tun + proxy + final proxy", cfg?.inbounds?.[0]?.type === "tun" && cfg?.outbounds?.[0]?.tag === "proxy" && cfg?.route?.final === "proxy");
 
 r = await call("chain_save", { body: { id: "wg_hy", name: "WG→HY2", hops: ["wg_1", "de_hy"] } });
 expect("chain_save", r?.ok === true, r?.error);
@@ -88,7 +89,8 @@ r = await call("zapret_domains", { body: "dpi.example.com\n5.5.5.0/24\n" });
 expect("список доменов обхода сохранён", r?.ok === true, r?.error);
 let bs = await call("bypass_status");
 const hasWinws = bs?.zapret2_supported === true;
-expect("bypass_status: режим, автозапуск, стратегия", bs?.mode === "off" && bs?.autostart === 0 && String(bs?.strategy).includes("--lua-desync="),
+// Первый запуск включает обход и его автозапуск (firstrun.rs).
+expect("bypass_status: режим, автозапуск, стратегия", bs?.mode === "zapret2" && bs?.autostart === 1 && String(bs?.strategy).includes("--lua-desync="),
   `supported=${hasWinws} strategy=${String(bs?.strategy).slice(0, 40)}`);
 r = await call("bypass_set", { params: { mode: "zapret" }, body: "" });
 expect("режим zapret (tpws) отклонён", r?.ok === false, r?.error);
@@ -114,6 +116,65 @@ await call("killswitch_set", { params: { on: "0" }, body: "" });
 const st2 = await call("status");
 expect("status: движок обхода и его список", st2.zapret?.domains === 1 && st2.zapret?.ips === 1 && st2.binaries?.nfqws2_supported === hasWinws,
   `domains=${st2.zapret?.domains} ips=${st2.zapret?.ips} supported=${st2.binaries?.nfqws2_supported}`);
+
+// --- приоритетный hosts и шифрование DNS ---
+let hs = await call("hosts_status");
+expect("hosts_status: поддерживается, выключен, режим DNS есть", hs?.supported === true && hs?.enabled === false && hs?.secure_dns_mode === "auto", JSON.stringify(hs));
+r = await call("hosts_set", { body: { url: "ftp://hosts.example.com/h" } });
+expect("hosts_set: не-http ссылка отклонена", r?.ok === false, r?.error);
+r = await call("hosts_set", { body: { url: "http://127.0.0.1:9/hosts.txt" } });
+expect("hosts_set: ссылка сохранена", r?.url === "http://127.0.0.1:9/hosts.txt", JSON.stringify(r));
+r = await call("hosts_refresh", { body: "" });
+expect("hosts_refresh: ошибка загрузки — в поле error", r?.ok !== false && /загрузк/.test(r?.error ?? ""), r?.error);
+r = await call("hosts_upload", { body: "<!doctype html><html></html>" });
+expect("hosts_upload: html отклонён", r?.ok === false, r?.error);
+// whitelist содержит *.example.ru, а режим all-except — такое имя пропускается
+r = await call("hosts_upload", { body: "# hosts\n203.0.113.7 pinned.example.com www.pinned.example.com\n203.0.113.9 cdn.example.ru\n" });
+expect("hosts_upload: принят, защищённое имя пропущено", r?.count === 1 && r?.excluded === 1, JSON.stringify(r));
+r = await call("hosts_custom_save", { body: "203.0.113.20 mine.example.com" });
+expect("hosts_custom_save: запись добавлена", r?.count === 2, JSON.stringify(r));
+r = await call("hosts_custom_get");
+expect("hosts_custom_get", r?.custom?.includes("mine.example.com"), JSON.stringify(r));
+r = await call("hosts_set", { body: { enabled: true } });
+expect("hosts_set enabled (check прошёл)", r?.enabled === true && r?.applied === true, JSON.stringify(r));
+let hc = await call("singbox_config");
+let hsrv = (hc?.dns?.servers ?? []).find((s) => s.type === "hosts");
+expect("конфиг: hosts-сервер, DNS-правило первым, маршрут direct",
+  hsrv?.predefined?.["www.pinned.example.com"]?.[0] === "203.0.113.7" && hsrv?.predefined?.["mine.example.com"] && !hsrv?.predefined?.["cdn.example.ru"]
+  && hc?.dns?.rules?.[0]?.server === "hosts"
+  && hc?.route?.rules?.some((x) => x.rule_set?.[0] === "hosts-override" && x.outbound === "direct"),
+  JSON.stringify(hsrv?.predefined));
+r = await call("hosts_exclude", { body: { enabled: false } });
+expect("hosts_exclude off: защищённое имя вернулось", r?.excluded === 0 && r?.count === 3, JSON.stringify(r));
+r = await call("hosts_custom_toggle", { body: { enabled: false } });
+expect("hosts_custom_toggle off", r?.custom_enabled === false && r?.count === 2, JSON.stringify(r));
+r = await call("hosts_get");
+expect("hosts_get: без своих записей", r?.hosts?.includes("cdn.example.ru") && !r?.hosts?.includes("mine.example.com"));
+await call("hosts_custom_toggle", { body: { enabled: true } });
+await call("hosts_exclude", { body: { enabled: true } });
+
+r = await call("secure_dns_set", { body: { mode: "secure", list: "udp://203.0.113.53" } });
+expect("secure_dns_set: не DoH/DoT отклонён", r?.ok === false, r?.error);
+r = await call("secure_dns_set", { body: { mode: "secure", list: "https://dns.example.com/dns-query\nhttps://203.0.113.53/dns-query" } });
+expect("secure_dns_set secure (check прошёл)", applied(r), r?.error);
+hs = await call("hosts_status");
+expect("hosts_status: secure + список", hs?.secure_dns_mode === "secure" && hs?.secure_dns_list === "https://dns.example.com/dns-query https://203.0.113.53/dns-query", hs?.secure_dns_list);
+hc = await call("singbox_config");
+let local = (hc?.dns?.servers ?? []).find((s) => s.tag === "local");
+expect("конфиг: local — DoH с системным резолвером имени", local?.type === "https" && local?.server === "dns.example.com" && local?.domain_resolver === "system"
+  && hc?.dns?.servers?.some((s) => s.tag === "system" && s.type === "local"), JSON.stringify(local));
+r = await call("secure_dns_set", { body: { mode: "secure", list: "" } });
+hc = await call("singbox_config");
+local = (hc?.dns?.servers ?? []).find((s) => s.tag === "local");
+expect("пустой список — встроенный DoH по IP", applied(r) && local?.type === "https" && !local?.domain_resolver, JSON.stringify(local));
+r = await call("secure_dns_set", { body: { mode: "auto", list: "" } });
+hc = await call("singbox_config");
+local = (hc?.dns?.servers ?? []).find((s) => s.tag === "local");
+expect("secure_dns_set auto — снова системный", applied(r) && local?.type === "local", JSON.stringify(local));
+r = await call("hosts_set", { body: { enabled: false } });
+hc = await call("singbox_config");
+expect("hosts выключен — сервера и правил нет", r?.enabled === false && !(hc?.dns?.servers ?? []).some((s) => s.type === "hosts")
+  && !(hc?.route?.rules ?? []).some((x) => x.rule_set?.[0] === "hosts-override"));
 
 console.log(failures ? `\n${failures} FAIL` : "\nвсё зелёное");
 process.exit(failures ? 1 : 0);

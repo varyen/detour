@@ -225,6 +225,14 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
         rules.push(json!({ "protocol": ["bittorrent"], "network": ["tcp"], "action": "reject" }));
     }
 
+    // Приоритетный hosts: имена из списка резолвятся в заданные адреса и идут
+    // напрямую раньше карты маршрутов и режимов — на роутере они так же не
+    // попадают ни в один ipset. Имена точные, как `addn-hosts` у dnsmasq.
+    let pinned = crate::hosts::served(store);
+    if !pinned.is_empty() {
+        rules.push(json!({ "rule_set": ["hosts-override"], "outbound": "direct" }));
+    }
+
     route_targets(store, p.chain, &mut b, &mut rules, p.awg_inline)?;
 
     // Сам mihomo ходит к AWG-серверу наружу, и без этого правила его UDP
@@ -237,6 +245,12 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
 
     let mut rule_sets = Vec::new();
     let mut files = Vec::new();
+    if !pinned.is_empty() {
+        let names: Vec<&String> = pinned.keys().collect();
+        let path = p.ruleset_dir.join("hosts-override.json");
+        rule_sets.push(json!({ "type": "local", "tag": "hosts-override", "format": "source", "path": path }));
+        files.push((path, json!({ "version": 3, "rules": [{ "domain": names }] })));
+    }
     // Для DNS-правил — отдельный набор только из доменов: `ip_cidr` в DNS
     // сверяется с ответом, а не с запросом, и смысл списка поплыл бы.
     let mut add_set = |tag: &str, m: &Matchers| -> bool {
@@ -255,7 +269,9 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
         true
     };
 
-    if p.dpi != DpiRoute::Off && add_set("dpi", &lists::parse_list(&store.read_text(store::DPI_DOMAINS))) {
+    let dpi_list = lists::parse_list(&store.read_text(store::DPI_DOMAINS));
+    let dpi_on = p.dpi != DpiRoute::Off && add_set("dpi", &dpi_list);
+    if dpi_on {
         if let DpiRoute::Socks(port) = p.dpi {
             b.outbounds.push(json!({
                 "type": "socks", "tag": "dpi", "server": "127.0.0.1", "server_port": port, "version": "5",
@@ -303,6 +319,12 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
     }
 
     let mut dns_rules: Vec<Value> = Vec::new();
+    // Домены обхода идут мимо туннеля — и резолвиться должны мимо него: при
+    // «всё, кроме исключений» DNS по умолчанию уходит в туннель, и с упавшим
+    // или медленным VPN сайт из списка обхода не открывался вовсе.
+    if dpi_on && !dpi_list.domains.is_empty() {
+        dns_rules.push(json!({ "rule_set": ["dpi-dns"], "server": "local" }));
+    }
     let (final_out, dns_final) = if allvpn {
         ("proxy", "remote")
     } else if mode == RoutingMode::AllExcept {
@@ -356,14 +378,18 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
         route["rule_set"] = json!(rule_sets);
     }
 
+    let mut servers = vec![json!({ "type": "https", "tag": "remote", "server": REMOTE_DNS, "detour": "proxy" })];
+    servers.extend(local_dns(settings)?);
+    if !pinned.is_empty() {
+        servers.push(json!({ "type": "hosts", "tag": "hosts", "predefined": pinned }));
+        dns_rules.insert(0, json!({ "rule_set": ["hosts-override"], "server": "hosts" }));
+    }
+
     let mut config = json!({
         "log": { "level": "warn", "output": p.log_path, "timestamp": true },
         "dns": {
             "strategy": "ipv4_only",
-            "servers": [
-                { "type": "https", "tag": "remote", "server": REMOTE_DNS, "detour": "proxy" },
-                { "type": "local", "tag": "local" },
-            ],
+            "servers": servers,
             "rules": dns_rules,
             "final": dns_final,
         },
@@ -390,6 +416,23 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
         config["endpoints"] = json!(b.endpoints);
     }
     Ok(Rendered { config, rulesets: files, awg: b.awg })
+}
+
+/// Сервер `local` — прямой резолв (режим «напрямую», whitelist, имена
+/// VPN-серверов). С шифрованием DNS это DoH/DoT мимо туннеля; имя самого
+/// DoH-сервера резолвит системный DNS (`system`).
+fn local_dns(settings: &Settings) -> Result<Vec<Value>> {
+    if crate::hosts::secure_mode(settings) != "secure" {
+        return Ok(vec![json!({ "type": "local", "tag": "local" })]);
+    }
+    // У sing-box нет пула для одного правила: работает первый адрес.
+    let url = crate::hosts::secure_urls(settings).into_iter().next().unwrap_or_default();
+    let (mut srv, needs_resolver) = crate::hosts::secure_server(&url, "local")?;
+    if !needs_resolver {
+        return Ok(vec![srv]);
+    }
+    srv["domain_resolver"] = json!("system");
+    Ok(vec![srv, json!({ "type": "local", "tag": "system" })])
 }
 
 /// Карта маршрутов. Цель — профиль или цепочка; пропавшая цель не уходит в
@@ -565,6 +608,15 @@ mod tests {
         } else {
             assert!(own.unwrap() < dpi, "трафик самого tpws уходит напрямую до правила обхода");
         }
+
+        let mut all_except = Settings::default();
+        all_except.set("routing_mode", "all-except");
+        let r = render(&s, &all_except, &p).unwrap();
+        let dns = r.config["dns"]["rules"].as_array().unwrap();
+        assert!(
+            dns.iter().any(|x| x["rule_set"] == json!(["dpi-dns"]) && x["server"] == "local"),
+            "домены обхода резолвятся мимо туннеля и при «всё, кроме исключений»"
+        );
     }
 
     #[test]
@@ -606,6 +658,43 @@ mod tests {
         let wrong = vec!["b".to_owned(), "a".to_owned()];
         let err = render(&s, &Settings::default(), &params(&wrong, s.root())).err().unwrap();
         assert!(format!("{err:#}").contains("первым звеном"));
+    }
+
+    #[test]
+    fn pinned_hosts_and_secure_dns() {
+        let s = tmp_store("hosts");
+        put_profile(&s, "a", json!({ "type": "vless", "server": "vpn.example.com" }));
+        s.write_text(store::ROUTE_MAP, "// === route:a ===\npinned.example.com\n").unwrap();
+        let mut c = crate::hosts::load(&s);
+        c.enabled = true;
+        crate::hosts::set_raw(&s, &mut c, "203.0.113.7 pinned.example.com\n", false).unwrap();
+        crate::hosts::save(&s, &c).unwrap();
+        let mut st = Settings::default();
+        st.set("secure_dns_mode", "secure");
+        st.set("secure_dns_list", "https://dns.example.com/dns-query");
+        let chain = vec!["a".to_owned()];
+        let r = render(&s, &st, &params(&chain, s.root())).unwrap();
+
+        let dns = &r.config["dns"];
+        let servers = dns["servers"].as_array().unwrap();
+        let hosts = servers.iter().find(|x| x["type"] == "hosts").unwrap();
+        assert_eq!(hosts["predefined"]["pinned.example.com"], json!(["203.0.113.7"]));
+        assert_eq!(dns["rules"][0], json!({ "rule_set": ["hosts-override"], "server": "hosts" }));
+        let local = servers.iter().find(|x| x["tag"] == "local").unwrap();
+        assert_eq!(local["type"], "https");
+        assert_eq!(local["domain_resolver"], "system");
+        assert!(servers.iter().any(|x| x["tag"] == "system" && x["type"] == "local"));
+
+        let rules = r.config["route"]["rules"].as_array().unwrap();
+        let pin = rules.iter().position(|x| x["rule_set"] == json!(["hosts-override"])).unwrap();
+        assert_eq!(rules[pin]["outbound"], "direct");
+        let target = rules.iter().position(|x| x["domain_suffix"] == json!(["pinned.example.com"])).unwrap();
+        assert!(pin < target, "закреплённое имя идёт напрямую раньше карты маршрутов");
+        assert!(r.rulesets.iter().any(|(p, v)| p.ends_with("hosts-override.json") && v["rules"][0]["domain"] == json!(["pinned.example.com"])));
+
+        let m = crate::mihomo::convert(&r.config, Some(&r.rulesets)).unwrap();
+        assert_eq!(m["hosts"]["pinned.example.com"], json!(["203.0.113.7"]));
+        assert_eq!(m["dns"]["direct-nameserver"], json!(["https://dns.example.com/dns-query"]));
     }
 
     #[test]

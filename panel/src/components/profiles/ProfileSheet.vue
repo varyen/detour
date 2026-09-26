@@ -194,6 +194,17 @@ async function pickFile(ev: Event) {
 }
 /** Многострочный .conf в однострочное поле не влезет — растим поле по тексту. */
 const linkRows = computed(() => Math.min(10, Math.max(1, link.value.split("\n").length)));
+/* Вставили ссылку в пустое поле (или поверх выделенного целиком) — разбираем
+   сразу, без лишнего нажатия. Дописывание в середину текста не трогаем. */
+function linkPaste(e: ClipboardEvent) {
+  const el = e.target as HTMLTextAreaElement;
+  const whole = el.selectionStart === 0 && el.selectionEnd === el.value.length;
+  const text = e.clipboardData?.getData("text") ?? "";
+  if (!whole || !text.trim()) return;
+  e.preventDefault();
+  link.value = text;
+  void applyLink();
+}
 function linkEnter(e: KeyboardEvent) {
   if (e.shiftKey || link.value.includes("\n")) return;
   e.preventDefault();
@@ -253,14 +264,17 @@ async function copyShare() {
 <template>
   <DrawerSheet :open="open" :title="title" wide @close="emit('close')">
     <template #sticky>
+      <label class="linklbl" for="profile-link">Ссылка или конфиг VPN — вставьте сюда (Ctrl+V)</label>
       <div class="linkrow">
         <textarea
+          id="profile-link"
           v-model="link"
           :rows="linkRows"
           spellcheck="false"
           placeholder="Ссылка vless://…, .conf WireGuard/AmneziaWG или vpn://"
           aria-label="Ссылка или конфиг"
           @keydown.enter="linkEnter"
+          @paste="linkPaste"
         ></textarea>
         <UiButton :disabled="!link.trim()" @click="applyLink">Разобрать</UiButton>
         <UiButton title="Загрузить .conf WireGuard/AmneziaWG" @click="fileEl?.click()">Файл…</UiButton>
@@ -541,29 +555,45 @@ async function copyShare() {
 </template>
 
 <style scoped>
+.linklbl {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
 .linkrow {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
+/* Главный вход формы: сюда вставляют ссылку от VPN-сервиса, поэтому поле на
+   всю ширину, в три строки и выделено цветом, а кнопки — под ним. */
 .linkrow textarea {
-  flex: 1 1 260px;
+  flex: 1 1 100%;
   resize: vertical;
-  font-family: inherit;
-  line-height: 1.4;
+  font-family: var(--mono);
+  line-height: 1.45;
   min-width: 0;
-  border: 1px solid var(--line-2);
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 65%, var(--line-2));
   border-radius: var(--radius-sm);
-  background: var(--panel-2);
+  background: var(--accent-wash);
   color: var(--ink);
-  padding: 9px 11px;
+  padding: 12px 14px;
   font-size: 16px;
-  min-height: 44px;
+  min-height: 96px;
   outline: none;
+  overflow-wrap: anywhere;
+}
+.linkrow textarea::placeholder {
+  font-family: var(--sans);
+  color: var(--dim);
 }
 .linkrow textarea:focus {
+  border-style: solid;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 .note {
   font-size: 12px;

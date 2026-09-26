@@ -1303,7 +1303,23 @@ onBeforeUnmount(() => {
         @apply="applyChannel('nfqws2')"
         @changelog="showChangelog('nfqws2')"
       />
-      <!-- В клиенте mihomo едет внутри установщика и обновляется вместе с ним. -->
+      <!-- В клиенте mihomo едет внутри установщика и обновляется вместе с ним:
+           ставить нечего, но без строки его здесь ищут и не находят. -->
+      <div v-if="status.isClient && status.data?.platform !== 'ios'" class="bundled">
+        <p class="nm">
+          mihomo (AmneziaWG)
+          <span v-if="mihomoInstalled" class="badge on">входит в приложение</span>
+          <span v-else class="badge off">нет в этой сборке</span>
+        </p>
+        <p class="hint">
+          <template v-if="mihomoInstalled">
+            Сейчас {{ status.data?.binaries?.mihomo_version || "неизвестно" }}, обновляется вместе с Detour.
+            Отдельно ставить не нужно. Включить его движком —
+            <RouterLink :to="{ path: '/services', query: { focus: 'engine' } }">Сервисы → Движок VPN</RouterLink>.
+          </template>
+          <template v-else>Переустановите Detour свежим установщиком — mihomo приедет вместе с ним.</template>
+        </p>
+      </div>
       <UpdateRow
         v-if="!status.isClient"
         title="mihomo (AmneziaWG)"
@@ -1692,6 +1708,36 @@ onBeforeUnmount(() => {
   background: var(--panel-2);
   padding: 11px 12px;
   min-width: 0;
+}
+.bundled {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  padding: 11px 12px;
+}
+.bundled .nm {
+  font-size: 15px;
+  font-weight: 600;
+}
+.bundled .badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: 2px;
+}
+.bundled .badge.on {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.bundled .badge.off {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
 }
 .svc-name {
   font-size: 15px;

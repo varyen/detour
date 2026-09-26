@@ -144,19 +144,30 @@ impl Backend {
         Ok(Response::json(&json!({ "ok": true })))
     }
 
-    /// Домены DPI поменялись — движку нужен свежий hostlist.
+    /// Домены DPI поменялись — движку нужен свежий hostlist. Обход, включённый
+    /// при пустом списке (так стоит по умолчанию), не стартует: список пуст.
+    /// Первые домены должны его поднять, иначе режим «включён» ничего не делает.
     pub(super) async fn dpi_reload(&self) {
-        if self.dpi.pid().await.is_some() {
-            self.dpi.stop().await;
-            if self.dpi.start(&self.store, self.tun_enabled()).await.is_err() {
-                self.set_dpi_on(false);
+        let running = self.dpi.pid().await.is_some();
+        let wanted = mode_of(&crate::settings::Settings::load(&self.store)) == MODE;
+        if !running && !wanted {
+            return;
+        }
+        self.dpi.stop().await;
+        match self.dpi.start(&self.store, self.tun_enabled()).await {
+            Ok(_) => {
+                self.set_dpi_on(true);
+                if !running {
+                    self.sync_dpi_routing().await;
+                }
             }
+            Err(_) => self.set_dpi_on(false),
         }
     }
 
     /// Маршрутизация зависит от того, работает ли движок: пересобираем конфиг,
     /// но VPN, выключенный человеком, не поднимаем.
-    async fn sync_dpi_routing(&self) {
+    pub(super) async fn sync_dpi_routing(&self) {
         if !crate::settings::Settings::load(&self.store).active_chain().is_empty() {
             let _ = self.apply(None, Start::IfRunning).await;
         }

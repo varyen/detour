@@ -705,7 +705,17 @@ pub fn convert(sb: &Value, files: Option<&[(std::path::PathBuf, Value)]>) -> Res
 
     // DNS: у роутера его нет (dnsmasq), у клиента — перехват в TUN
     match sb.get("dns") {
-        Some(dns) if tun.is_some() || hijack => conf.insert("dns".into(), convert_dns(dns, &ctx)),
+        Some(dns) if tun.is_some() || hijack => {
+            // приоритетный hosts: у mihomo это верхний `hosts`, он главнее nameserver
+            for srv in list(dns.get("servers")) {
+                if s(&srv, "type").as_deref() == Some("hosts") {
+                    if let Some(p) = srv.get("predefined").filter(|p| p.is_object()) {
+                        conf.insert("hosts".into(), p.clone());
+                    }
+                }
+            }
+            conf.insert("dns".into(), convert_dns(dns, &ctx))
+        }
         _ => conf.insert("dns".into(), json!({ "enable": false })),
     };
     if let Some(t) = tun {
@@ -753,11 +763,35 @@ fn convert_dns(dns: &Value, ctx: &RuleCtx) -> Value {
     if remote.is_empty() {
         remote.push("https://1.1.1.1/dns-query#proxy".into());
     }
-    let local = json!(["system"]);
+    let mut local = json!(["system"]);
+    for srv in list(dns.get("servers")) {
+        if s(&srv, "tag").as_deref() != Some("local") {
+            continue;
+        }
+        // шифрование DNS: DoH/DoT мимо туннеля вместо системного
+        let host = s(&srv, "server").unwrap_or_default();
+        let host = if host.contains(':') { format!("[{host}]") } else { host };
+        let port = s(&srv, "server_port");
+        match s(&srv, "type").as_deref() {
+            Some("https") => {
+                let path = s(&srv, "path").unwrap_or_else(|| "/dns-query".into());
+                let port = port.map(|p| format!(":{p}")).unwrap_or_default();
+                local = json!([format!("https://{host}{port}{path}")]);
+            }
+            Some("tls") => {
+                let port = port.map(|p| format!(":{p}")).unwrap_or_default();
+                local = json!([format!("tls://{host}{port}")]);
+            }
+            _ => {}
+        }
+    }
     let pick = |tag: &str| if tag == "local" { local.clone() } else { json!(remote) };
     let mut policy = Map::new();
     for r in list(dns.get("rules")) {
         let Some(server) = s(&r, "server") else { continue };
+        if server == "hosts" {
+            continue;
+        }
         for t in strs(r.get("rule_set")) {
             if let Some(name) = ctx.rule_sets.get(&t) {
                 policy.insert(format!("rule-set:{name}"), pick(&server));
@@ -771,8 +805,8 @@ fn convert_dns(dns: &Value, ctx: &RuleCtx) -> Value {
         "enhanced-mode": "redir-host",
         "respect-rules": false,
         "nameserver": pick(&fin),
+        "direct-nameserver": local.clone(),
         "proxy-server-nameserver": local,
-        "direct-nameserver": ["system"],
     });
     if !policy.is_empty() {
         o["nameserver-policy"] = Value::Object(policy);

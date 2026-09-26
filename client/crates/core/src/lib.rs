@@ -4,6 +4,7 @@ pub mod chains;
 pub mod dpi;
 pub mod engine;
 pub mod geo;
+pub mod hosts;
 pub mod ids;
 pub mod ipc;
 pub mod lists;

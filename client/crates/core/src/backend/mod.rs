@@ -1,7 +1,9 @@
 mod bypass;
 mod config;
+mod firstrun;
 mod guard;
 mod health;
+mod hosts;
 mod maint;
 mod profiles;
 mod rules;
@@ -166,6 +168,7 @@ impl Backend {
         // Правило могло остаться от прошлой жизни службы (упала, не дойдя до
         // shutdown). Нужно ли оно сейчас, решит сторож первым же тиком.
         self.killswitch(false);
+        self.seed_defaults();
         self.dpi_boot().await;
         if !self.store.flag(store::AUTOSTART_SINGBOX) {
             return;
@@ -270,6 +273,10 @@ impl Backend {
             "rulist_set" => self.rulist_set(body()?).await?,
             "rulist_update" => self.rulist_update(body()?).await?,
             "rulist_exclude" => self.rulist_exclude(req, body()?).await?,
+            "hosts_status" | "hosts_set" | "hosts_refresh" | "hosts_exclude" | "hosts_get" | "hosts_upload"
+            | "hosts_custom_get" | "hosts_custom_save" | "hosts_custom_toggle" | "secure_dns_set" => {
+                self.hosts_action(req, body()?).await?
+            }
             "self_intercept" => Response::json(&json!({ "targets": [], "full_targets": [], "eligible": [], "mode": "single" })),
 
             "singbox_config" => self.singbox_config(req)?,

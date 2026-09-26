@@ -24,7 +24,7 @@ mod inproc {
         let backend = Arc::new(Backend::new(data)?);
         let _ = BACKEND.set(backend.clone());
         tauri::async_runtime::spawn(async move {
-            backend.boot().await;
+            // boot() — первым шагом run_background.
             backend.run_background().await;
         });
         Ok(())

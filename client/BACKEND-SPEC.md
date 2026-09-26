@@ -1024,7 +1024,34 @@ GET R — сырой `settings.json` (§1.2) или дефолт. POST B
 gl-dns-v2.@dns[0].mode`, `secure_manual_list`, `/etc/init.d/gl_dns boot` →
 `{"ok":true}`; пустой mode → `invalid mode` (`router_files/detour-api:3979-3998`).
 Чисто GL.iNet-функция; парное чтение — поля `secure_dns_mode`/`secure_dns_list`
-в `hosts_status` (`:3960-3977`). TUN: неприменимо.
+в `hosts_status` (`:3960-3977`).
+
+Клиент (`crates/core/src/hosts.rs`, `backend/hosts.rs`): режим `secure|auto`
+и список (через пробел) лежат в `settings.json` (`secure_dns_mode`,
+`secure_dns_list`); `hosts_status` отдаёт их всегда, так что блок в панели виден.
+Принимаются только `https://…` (DoH) и `tls://…` (DoT), иначе ошибка. В режиме
+`secure` DNS-сервер `local` (прямой резолв: режим «напрямую», whitelist,
+`default_domain_resolver`) — первый адрес списка, пустой список →
+`https://1.1.1.1/dns-query`; имя DoH-сервера резолвит `{"type":"local","tag":"system"}`
+через `domain_resolver`. DNS через туннель (`remote`) не меняется. mihomo:
+`direct-nameserver`/`proxy-server-nameserver`/политики `local` → этот адрес.
+
+**`hosts_*`** (клиент) — порт `detour-hosts`: `lists/hosts.json` (url, enabled,
+exclude_proxied, custom_enabled, count, bytes, excluded, updated, from_file,
+error), `lists/hosts-override.raw` (источник), `lists/hosts-custom.list`,
+`lists/hosts-override.list` (отдаваемое = фильтр(источник) + свои записи).
+Ответы — объект статуса роутера (`supported:true`, `applied`, `error`, плюс
+`secure_dns_*`); ошибка загрузки — в `error`, битый файл в `hosts_upload` —
+`{ok:false}`. Фильтр `exclude_proxied` — имя или его родитель в
+`proxy-domains.list` (`proxy-list`) / `whitelist-domains.list` (`all-except`).
+Рендер при `enabled`: rule-set `hosts-override` (`domain`, точные имена),
+DNS-сервер `{"type":"hosts","tag":"hosts","predefined":{имя:[IPv4…]}}`, первое
+DNS-правило `{"rule_set":["hosts-override"],"server":"hosts"}` и правило
+маршрута `{"rule_set":["hosts-override"],"outbound":"direct"}` перед картой
+маршрутов (IPv6-адреса отбрасываются: туннель только IPv4). Без sniff'а
+(голый IP без SNI/Host) имя не распознаётся — такой трафик идёт по общим
+правилам. Скачивание — через VPN службы, затем напрямую; плановое обновление —
+раз в 12 ч, если источник не загружен файлом. mihomo: верхний `hosts`.
 
 ### 4.2 Профили
 
@@ -1396,7 +1423,7 @@ panel_password, update_conf, gh_token, gh_owner, gh_repo`) → отказ
 | `iptables`, `conntrack` | `api/overview.ts:24`, `:35` → `JournalView.vue:384`, `:395` | Журнал → Файрвол | скрыть |
 | `keepalive_status/check` | `api/diag.ts:110`, `:112` → `JournalView.vue:855`, `:864` | Журнал → Проверка | можно оставить (TCP/ICMP-проба активного сервера) |
 | `panel_update_check/apply/status/sig/local` | `api/diag.ts:119-131` → `JournalView.vue:417-668`, `OverviewView.vue:353` | обновления панели | скрыть или заменить своим апдейтером |
-| `hosts_*` (9 шт.) | `api/rules.ts:97-117` → `RulesView.vue` | Правила → hosts | скрыть (или реализовать через sing-box `dns` hosts) |
+| `hosts_*` (9 шт.) | `api/rules.ts:97-117` → `RulesView.vue` | Правила → hosts | реализовано: DNS-сервер `hosts` + `direct` (§4.1, `secure_dns_set`) |
 | `portmap_*` (8 шт.) | `api/services.ts:16-32` | Сервисы → проброс | скрыть |
 | `cert_*` (7 шт.) | `api/services.ts:37-60` | Сервисы → сертификат | скрыть |
 | `push_config/subscribe/unsubscribe/test`, `push_message` (SW) | `api/services.ts:65-71`, `panel/src/sw.ts:38-98` | Сервисы → уведомления | скрыть либо оставить (Web Push работает и с Windows, но нужен HTTPS) |

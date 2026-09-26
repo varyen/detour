@@ -30,11 +30,19 @@ defineProps<{ title: string; span?: boolean }>();
 .tile.span {
   grid-column: span 2;
 }
+/* Глобальный .eyebrow — 10px бледной капителью: для подписей колонок годится,
+   а заголовок карточки в нём теряется. */
 .eyebrow {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0;
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
 }
 .actions {
   display: flex;

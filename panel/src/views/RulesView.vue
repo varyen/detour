@@ -178,7 +178,7 @@ const LISTS: Record<ListKey, ListDef> = {
     title: "Свои записи hosts",
     hint: "Свои пары «адрес — имя». Они не теряются при обновлении списка из источника.",
     placeholder: "# адрес и имя через пробел\n203.0.113.10 example.com\n203.0.113.11 www.example.com",
-    applyNote: "Записи применяются к DNS роутера сразу после сохранения.",
+    applyNote: `Записи применяются к DNS ${status.isClient ? "приложения" : "роутера"} сразу после сохранения.`,
     singleSave: true,
     load: async () => (await rules.hostsCustomGet()).custom ?? "",
     apply: async (t) => {
@@ -187,7 +187,7 @@ const LISTS: Record<ListKey, ListDef> = {
   },
   hostsView: {
     title: "Что сейчас в списке hosts",
-    hint: "Готовый список, который отдаёт DNS роутера. Только для просмотра.",
+    hint: `Готовый список, который отдаёт DNS ${status.isClient ? "приложения" : "роутера"}. Только для просмотра.`,
     readonly: true,
     load: async () => (await rules.hostsGet()).hosts ?? "",
     apply: async () => {},
@@ -431,7 +431,6 @@ const secureList = ref("");
 const fileEl = ref<HTMLInputElement | null>(null);
 
 async function loadHosts() {
-  if (status.isClient) return;
   try {
     const d = (await rules.hostsStatus()) as HostsFull | null;
     hosts.value = d;
@@ -609,7 +608,8 @@ const rulistSummary = computed(() => {
 
 const hostsSummary = computed(() => {
   const h = hosts.value;
-  if (!h || h.supported === false) return "не установлено на этом роутере";
+  if (!h || h.supported === false)
+    return `не установлено на этом ${status.isClient ? "устройстве" : "роутере"}`;
   if (!h.enabled) return "выключено";
   const parts = [`${fmtInt(asNum(h.count))} записей`];
   if (h.bytes) parts.push(fmtBytes(asNum(h.bytes)));
@@ -714,7 +714,7 @@ onMounted(async () => {
       title: "Обновить приоритетный hosts",
       group: "правила",
       keywords: "dns hosts",
-      available: () => !status.isClient && hosts.value?.supported !== false,
+      available: () => hosts.value?.supported !== false,
       run: () => void hostsRefresh(),
     },
   ]);
@@ -1066,7 +1066,6 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- 10. Приоритетный hosts + Secure DNS -->
     <RuleSection
-      v-if="!status.isClient"
       id="rule-hosts"
       title="Свой DNS-список и шифрование DNS"
       :summary="hostsSummary"
@@ -1075,12 +1074,13 @@ onBeforeUnmount(() => unregister?.());
       @toggle="toggle('hosts')"
     >
       <p class="hint">
-        Список «имя — адрес», который роутер отдаёт в первую очередь, минуя
-        обычный DNS. Такие сайты идут прямо на указанный адрес, не через туннель
-        и не через обход.
+        Список «имя — адрес», который {{ status.isClient ? "приложение" : "роутер" }}
+        отдаёт в первую очередь, минуя обычный DNS. Такие сайты идут прямо на
+        указанный адрес, не через туннель и не через обход.
       </p>
       <p v-if="hosts?.supported === false" class="warn">
-        Управление списком недоступно: на роутере нет нужного компонента.
+        Управление списком недоступно: на {{ status.isClient ? "этом устройстве" : "роутере" }}
+        нет нужного компонента.
       </p>
       <template v-else>
         <SwitchToggle
@@ -1155,7 +1155,11 @@ onBeforeUnmount(() => unregister?.());
           <SwitchToggle
             v-model="secureOn"
             label="Скрывать DNS-запросы от провайдера"
-            hint="Роутер сам обращается к зашифрованным DNS-серверам вместо провайдерских"
+            :hint="
+              status.isClient
+                ? 'Приложение само обращается к зашифрованному DNS-серверу вместо системного — для сайтов, которые идут мимо туннеля'
+                : 'Роутер сам обращается к зашифрованным DNS-серверам вместо провайдерских'
+            "
           />
           <textarea
             v-if="secureOn"
@@ -1167,7 +1171,11 @@ onBeforeUnmount(() => unregister?.());
             aria-label="Адреса зашифрованных DNS-серверов"
             placeholder="https://dns.example.com/dns-query"
           ></textarea>
-          <p class="hint">
+          <p v-if="status.isClient" class="hint">
+            Адрес вида https://… или tls://…, по одному в строке; работает
+            первый. Пусто — приложение возьмёт встроенный сервер.
+          </p>
+          <p v-else class="hint">
             По одному адресу в строке. Пусто — роутер возьмёт свои встроенные
             серверы.
           </p>

@@ -205,6 +205,15 @@ regen() {
     # the push channel rides the WAN when the active VPN is down). --no-reload: we are
     # about to (re)start dnsmasq ourselves, which loads the conf-dir. Best-effort.
     [ -x /opt/sbin/detour-push ] && /opt/sbin/detour-push bypass-apply --no-reload >/dev/null 2>&1
+
+    # Пока прокси включён, AAAA не отдаём: перехват только IPv4, а IPv6 наружу
+    # отбивает netfilter-хук. filter-AAAA есть с dnsmasq 2.87, незнакомая опция
+    # уронила бы dnsmasq — пишем её, только если сборка её знает.
+    if [ -f /opt/etc/detour/singbox.enabled ] && "$DNSMASQ_BIN" --help 2>/dev/null | grep -q -- '--filter-AAAA'; then
+        echo 'filter-AAAA' > "$DNSMASQ_CONF_DIR/singbox-noaaaa.conf"
+    else
+        rm -f "$DNSMASQ_CONF_DIR/singbox-noaaaa.conf"
+    fi
 }
 
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; }

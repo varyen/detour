@@ -342,6 +342,69 @@ close_port_lan() {
 
 # Instance mode: "single" (one process, route.rules) or "multi" (one process
 # per route target). Default single.
+# IPv6 мимо VPN. Весь перехват ниже — IPv4 (iptables/ipset). На GL.iNet IPv6 в
+# LAN по умолчанию выключен, а на обычной OpenWrt включён: сайты с AAAA-записью
+# (Google, YouTube, Cloudflare, «мой IP») шли по IPv6 напрямую, и включённый VPN
+# ничего не менял (Cudy WR3000S, 2026-09-26). Поэтому, пока sing-box работает,
+# dnsmasq не отдаёт AAAA, а IPv6 из LAN наружу отбивается сразу — устройства без
+# задержки переходят на IPv4, который уже перехвачен.
+V6_TABLE=detour_v6
+V6_CHAIN=DETOUR_V6
+V6_DNS_CONF=/tmp/dnsmasq.d/singbox-noaaaa.conf
+
+# filter-AAAA появился в dnsmasq 2.87; незнакомая опция в conf-dir роняет dnsmasq
+# целиком, поэтому пишем её, только если сборка её знает.
+v6_dns_up() {
+    if dnsmasq --help 2>/dev/null | grep -q -- '--filter-AAAA'; then
+        echo 'filter-AAAA' > "$V6_DNS_CONF"
+    else
+        rm -f "$V6_DNS_CONF"
+    fi
+}
+
+v6_guard_up() {
+    local i set=""
+    if has_nft; then
+        for i in br-lan $(vpn_redirect_ifaces); do
+            [ -n "$i" ] && set="$set${set:+, }\"$i\""
+        done
+        nft delete table inet $V6_TABLE 2>/dev/null
+        nft -f - <<EOF
+table inet $V6_TABLE {
+    chain forward {
+        type filter hook forward priority -5; policy accept;
+        iifname { $set } meta nfproto ipv6 reject with icmpx type admin-prohibited
+    }
+}
+EOF
+    elif command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -N $V6_CHAIN 2>/dev/null
+        ip6tables -F $V6_CHAIN
+        ip6tables -A $V6_CHAIN -j REJECT --reject-with icmp6-adm-prohibited
+        for i in br-lan $(vpn_redirect_ifaces); do
+            [ -n "$i" ] || continue
+            ip6tables -D FORWARD -i "$i" -j $V6_CHAIN 2>/dev/null
+            ip6tables -I FORWARD 1 -i "$i" -j $V6_CHAIN
+        done
+    fi
+}
+
+v6_guard_down() {
+    has_nft && nft delete table inet $V6_TABLE 2>/dev/null
+    # Без ip6tables-save (его нет на части fw3-прошивок): переходы в цепочку
+    # снимаем по номерам строк из -S, иначе -X не удалит цепочку, на которую
+    # ещё ссылаются.
+    if command -v ip6tables >/dev/null 2>&1; then
+        local n
+        while n=$(ip6tables -L FORWARD --line-numbers -n 2>/dev/null | awk -v c="$V6_CHAIN" '$2 == c {print $1; exit}') && [ -n "$n" ]; do
+            ip6tables -D FORWARD "$n" 2>/dev/null || break
+        done
+        ip6tables -F $V6_CHAIN 2>/dev/null
+        ip6tables -X $V6_CHAIN 2>/dev/null
+    fi
+    rm -f "$V6_DNS_CONF"
+}
+
 get_singbox_mode() {
     local m=""
     [ -f "$SETTINGS_FILE" ] && m=$(sed -n 's/.*"singbox_mode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS_FILE" | head -1)
@@ -861,6 +924,7 @@ start_service() {
         fi
     fi
 
+    v6_dns_up
     if [ "$FAST" != 1 ]; then
         /etc/init.d/dnsmasq restart
         wait_for_resolver
@@ -974,6 +1038,8 @@ start_service() {
     # UDP → VPN (TPROXY). Reconcile to the current mode; installed after the redirect
     # chains so the mangle TPROXY sits at PREROUTING top. ipset already populated above.
     udp_vpn_apply
+
+    v6_guard_up
 
     # Connections already pinned (conntrack) to the old route for IPs now in the
     # redirect/whitelist sets keep flowing the old way until the entry dies —
@@ -1120,6 +1186,9 @@ stop_service() {
             conntrack -D -p tcp --reply-port-src "$port" >/dev/null 2>&1
         done
     fi
+
+    # IPv6 снова открыт; конфиг filter-AAAA уходит вместе с перезапуском dnsmasq ниже.
+    v6_guard_down
 
     # Remove dnsmasq configs (default, route-map, all per-target sets)
     rm -f /tmp/dnsmasq.d/singbox-domains.conf

@@ -1,4 +1,4 @@
-import { requestJson, requestJsonTolerant } from "./client";
+import { ApiError, parseLoose, requestJson, requestJsonTolerant, requestText } from "./client";
 import type {
   ApplyLogResponse,
   HealthStatusResponse,
@@ -55,11 +55,16 @@ export const diag = {
 
   /* --- пинги --- */
   pingStatus: () => requestJson<PingStatusResponse>("ping_status"),
-  pingCheck: (id: string) =>
-    requestJson<PingResult & { id: string }>("ping_check", {
-      params: { id },
-      timeoutMs: 30_000,
-    }),
+  /* Не requestJson: у недоступного сервера ответ {"ok":false} без error — это
+     результат пинга, а не конверт ошибки. */
+  pingCheck: async (id: string) => {
+    const v = parseLoose<PingResult & { id: string; error?: string }>(
+      await requestText("ping_check", { params: { id }, timeoutMs: 30_000 }),
+    );
+    if (!v || typeof v !== "object") throw new ApiError("Пустой ответ ping_check");
+    if (v.error) throw new ApiError(v.error);
+    return v;
+  },
 
   /* --- функциональная проверка --- */
   healthStatus: () => requestJson<HealthStatusResponse>("health_status", { timeoutMs: 45_000 }),

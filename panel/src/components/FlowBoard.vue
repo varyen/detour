@@ -112,7 +112,7 @@ const lanes = computed(() => [
 <template>
   <section ref="board" class="board">
     <div class="head">
-      <span class="eyebrow">Поток трафика</span>
+      <h2 class="title">Поток трафика</h2>
       <span class="live">
         <i class="dot" :class="{ pulse: vpnUp }"></i>
         <template v-if="speed">{{ speed }}</template>
@@ -245,6 +245,12 @@ const lanes = computed(() => [
   align-items: baseline;
   gap: 12px;
   flex-wrap: wrap;
+}
+.title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--ink);
 }
 .live {
   display: inline-flex;

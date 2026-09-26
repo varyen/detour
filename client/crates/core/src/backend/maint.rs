@@ -74,7 +74,7 @@ impl Backend {
         Ok(self.rulist_reply())
     }
 
-    async fn reapply_quiet(&self) {
+    pub(super) async fn reapply_quiet(&self) {
         if Settings::load(&self.store).active_chain().is_empty() {
             return;
         }
@@ -254,6 +254,7 @@ impl Backend {
                 self.reapply_quiet().await;
             }
         }
+        self.hosts_maintenance().await;
         if self.autocheck_on() && crate::dpi::UPDATABLE && self.engine.present() {
             let st = updater::state(&self.store);
             let last = st
@@ -312,6 +313,7 @@ impl Backend {
         every(&self, 90, 120, |b| async move { b.health_tick(false).await });
         every(&self, 20, 120, |b| async move { b.ping_all().await });
         every(&self, 300, 3600, |b| async move { b.maintenance().await });
+        every(&self, 5, 3600, |b| async move { b.ensure_downloads().await });
         // Раз в секунду: соединение, открывшееся и закрывшееся между опросами,
         // в `/connections` не видно вовсе, и его байты приходится угадывать.
         every(&self, 1, 1, |b| async move { b.sample_traffic().await });

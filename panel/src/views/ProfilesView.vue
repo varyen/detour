@@ -7,7 +7,7 @@
    грузят своё состояние один раз, а по WARP ещё и решается, показывать ли
    вкладку вообще. */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import TileCard from "@/components/TileCard.vue";
 import UiButton from "@/components/UiButton.vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
@@ -44,6 +44,7 @@ const toast = useToastStore();
 const commands = useCommandStore();
 
 const route = useRoute();
+const router = useRouter();
 
 /* `#/profiles?sort=speed` — так «Сменить VPN» с «Обзора» приводит сразу к
    отсортированному по скорости списку. Чужое значение молча игнорируем: адрес
@@ -700,6 +701,12 @@ onMounted(async () => {
       },
     },
   ]);
+  /* `#/profiles?new=1` — большая кнопка «Подключиться» на «Обзоре», когда
+     профилей ещё нет: сразу форма со строкой для ссылки. */
+  if (route.query.new) {
+    addProfile();
+    void router.replace({ path: route.path, query: {} });
+  }
   await store.load();
   void store.loadProbes();
   void store.loadChains();

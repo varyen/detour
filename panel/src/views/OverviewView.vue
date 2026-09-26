@@ -12,6 +12,7 @@ import UplinksTile from "@/components/overview/UplinksTile.vue";
 import RoutingTile from "@/components/overview/RoutingTile.vue";
 import ServicesTile from "@/components/overview/ServicesTile.vue";
 import DashSlot from "@/components/overview/DashSlot.vue";
+import PowerTile from "@/components/overview/PowerTile.vue";
 import { EDIT_KEY } from "@/components/overview/dash-edit";
 import { useTileDrag } from "@/composables/useTileDrag";
 import { diag, overview, profiles as profilesApi } from "@/api";
@@ -618,6 +619,10 @@ onBeforeUnmount(() => {
   </div>
 
   <div ref="tilesEl" class="tiles" :class="{ editing }">
+    <DashSlot id="power">
+      <PowerTile />
+    </DashSlot>
+
     <DashSlot id="flow">
       <FlowBoard
         :direct="lanes?.direct ?? 0"

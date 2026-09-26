@@ -14,7 +14,11 @@ HOOK="/opt/etc/ndm/netfilter.d/50-detour.sh"
 DNS_SVC="/opt/etc/init.d/S50detour-dns"
 NAME="sing-box"
 
-apply_fw() { [ -x "$HOOK" ] && "$HOOK" iptables nat >/dev/null 2>&1; }
+apply_fw() {
+    [ -x "$HOOK" ] || return 0
+    "$HOOK" iptables nat >/dev/null 2>&1
+    "$HOOK" ip6tables filter >/dev/null 2>&1
+}
 # Domain→ipset DNS: run while EITHER proxy is enabled; stop when both are off.
 dns_up()   { [ -x "$DNS_SVC" ] && "$DNS_SVC" start  >/dev/null 2>&1; }
 dns_reload() { [ -x "$DNS_SVC" ] && "$DNS_SVC" reload >/dev/null 2>&1; }

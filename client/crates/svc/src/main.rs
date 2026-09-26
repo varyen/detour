@@ -97,8 +97,16 @@ pub async fn serve(
     mut stop: watch::Receiver<bool>,
     dev_http: Option<SocketAddr>,
 ) -> Result<()> {
-    let mut listener = ipc::Listener::bind()
-        .with_context(|| format!("не удалось открыть {}", ipc::ENDPOINT))?;
+    // Стенд с --dev-http обходится без канала: так рядом с уже запущенной
+    // службой (канал у неё) можно поднять второй экземпляр на другом порту.
+    let mut listener = match ipc::Listener::bind() {
+        Ok(l) => Some(l),
+        Err(e) if dev_http.is_some() => {
+            tracing::warn!(error = %e, endpoint = ipc::ENDPOINT, "канал занят — только dev-http");
+            None
+        }
+        Err(e) => return Err(e).with_context(|| format!("не удалось открыть {}", ipc::ENDPOINT)),
+    };
     tracing::info!(endpoint = ipc::ENDPOINT, data = %backend.data_dir().display(), "служба слушает");
 
     if let Some(addr) = dev_http {
@@ -108,7 +116,7 @@ pub async fn serve(
 
     loop {
         tokio::select! {
-            conn = listener.accept() => match conn {
+            conn = async { listener.as_mut().expect("guarded").accept().await }, if listener.is_some() => match conn {
                 Ok(conn) => {
                     let b = backend.clone();
                     tokio::spawn(async move {
