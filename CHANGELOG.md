@@ -5,7 +5,7 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [2.2.6] — 2026-09-28
 
 ### Исправлено
 - **Чистая OpenWrt: весь трафик шёл мимо VPN при работающем sing-box.** Цель
