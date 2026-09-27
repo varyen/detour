@@ -996,7 +996,8 @@ start_service() {
             done
         fi
         iptables -t nat -A SINGBOX_ALL -p tcp -m set --match-set $IPSET_WL dst -j RETURN
-        iptables -t nat -A SINGBOX_ALL -p tcp -j REDIRECT --to-ports 12345
+        iptables -t nat -A SINGBOX_ALL -p tcp -j REDIRECT --to-ports 12345 \
+            || logger -p daemon.err -t sing-box "REDIRECT не встал (нет kmod-ipt-nat?) — трафик пойдёт мимо VPN; detour-update netfilter-ensure"
         iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_ALL 2>/dev/null
         # Insert AFTER zapret-tpws's ZAPRET_REDIRECT if present (zapret must run first)
         ZL=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | awk '/ZAPRET_REDIRECT/ {print $1; exit}')

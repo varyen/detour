@@ -873,22 +873,43 @@ opkg_update_retry() {
 # трафик молча идёт мимо VPN. На apk-прошивках это закрывает Depends пакета, на
 # opkg-прошивках — этот шаг (в Depends его не внести: на fw3 iptables-nft
 # конфликтует с legacy-iptables). Keenetic: iptables есть всегда.
+# Цель REDIRECT (xt_REDIRECT) живёт в kmod-ipt-nat, которого на чистой OpenWrt
+# нет даже с iptables-nft: правило перенаправления молча не встаёт, цепочка
+# перехвата состоит из одних RETURN — и весь трафик идёт мимо VPN при
+# «работающем» sing-box (Cudy WR3000S, 2026-09-28).
+redirect_available() {
+    [ -d /sys/module/xt_REDIRECT ] && return 0
+    modprobe xt_REDIRECT 2>/dev/null
+    [ -d /sys/module/xt_REDIRECT ]
+}
+
 cmd_netfilter_ensure() {
     [ "$KEENETIC" = 1 ] && return 0
-    if command -v iptables >/dev/null 2>&1; then
-        log "iptables: $(command -v iptables) — ставить нечего"
+    local need_ipt=0 need_nat=0
+    command -v iptables >/dev/null 2>&1 || need_ipt=1
+    redirect_available || need_nat=1
+    if [ "$need_ipt" = 0 ] && [ "$need_nat" = 0 ]; then
+        log "iptables и REDIRECT на месте — ставить нечего"
         return 0
     fi
-    command -v nft >/dev/null 2>&1 || die "нет ни iptables, ни nft — перехват трафика невозможен"
+    [ "$need_ipt" = 1 ] && ! command -v nft >/dev/null 2>&1 \
+        && die "нет ни iptables, ни nft — перехват трафика невозможен"
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
-    log "iptables нет — ставлю iptables-nft и iptables-mod-tproxy"
     opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
-    pkg_install iptables-nft || die "не удалось поставить iptables-nft"
-    pkg_install iptables-mod-tproxy || log "WARNING: iptables-mod-tproxy не встал — UDP через VPN (TPROXY) будет недоступен"
-    command -v iptables >/dev/null 2>&1 || die "iptables-nft встал, но iptables не появился"
-    log "iptables: $(command -v iptables)"
+    if [ "$need_ipt" = 1 ]; then
+        log "iptables нет — ставлю iptables-nft и iptables-mod-tproxy"
+        pkg_install iptables-nft || die "не удалось поставить iptables-nft"
+        pkg_install iptables-mod-tproxy || log "WARNING: iptables-mod-tproxy не встал — UDP через VPN (TPROXY) будет недоступен"
+        command -v iptables >/dev/null 2>&1 || die "iptables-nft встал, но iptables не появился"
+    fi
+    if ! redirect_available; then
+        log "нет цели REDIRECT в ядре — ставлю kmod-ipt-nat"
+        pkg_install kmod-ipt-nat || die "не удалось поставить kmod-ipt-nat — трафик пойдёт мимо VPN"
+        redirect_available || die "kmod-ipt-nat встал, но xt_REDIRECT не загрузился"
+    fi
+    log "iptables: $(command -v iptables), REDIRECT: есть"
 }
 
 cmd_bins_apply() {

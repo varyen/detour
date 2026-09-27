@@ -115,7 +115,12 @@ done
 # Чистая OpenWrt 22.03+ приходит без iptables (только nftables), а перехват
 # трафика сделан на нём. На apk его приносит Depends пакета, на opkg — этот шаг.
 need_iptables=0
-[ "$PLATFORM" = keenetic ] || command -v iptables >/dev/null 2>&1 || need_iptables=1
+if [ "$PLATFORM" != keenetic ]; then
+    command -v iptables >/dev/null 2>&1 || need_iptables=1
+    # Цель REDIRECT (kmod-ipt-nat) — без неё перехват молча не работает.
+    [ -d /sys/module/xt_REDIRECT ] || modprobe xt_REDIRECT 2>/dev/null
+    [ -d /sys/module/xt_REDIRECT ] || need_iptables=1
+fi
 
 # AmneziaWG-профили без mihomo не поднимаются, а он не зависимость панели.
 # Профили уже есть при переустановке панели; решение «ставить или нет» (движок

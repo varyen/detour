@@ -76,7 +76,7 @@ DEPENDS = "lua, lua-cjson, curl, openssl-util, dnsmasq-full, kmod-ipt-ipset, ips
 # сделан на нём. В opkg-Depends этого не внести: на fw3 iptables-nft конфликтует
 # с legacy-iptables, там недостающее ставит `detour-update netfilter-ensure`.
 # dnsmasq-full apk сам ставит вместо штатного dnsmasq (provides dnsmasq).
-APK_DEPENDS = DEPENDS + ", iptables-nft, iptables-mod-tproxy"
+APK_DEPENDS = DEPENDS + ", iptables-nft, iptables-mod-tproxy, kmod-ipt-nat"
 
 MAINTAINER = "Maintainer <you@example.com>"
 DESCRIPTION = "Sing-box + zapret-tpws management panel for OpenWrt routers."
