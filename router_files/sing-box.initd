@@ -351,6 +351,34 @@ close_port_lan() {
 V6_TABLE=detour_v6
 V6_CHAIN=DETOUR_V6
 V6_DNS_CONF=/tmp/dnsmasq.d/singbox-noaaaa.conf
+DNS_VPN_CONF=/tmp/dnsmasq.d/singbox-dns-vpn.conf
+
+# DNS через VPN (настройка dns_via_vpn, вход dns-in в конфиге). dnsmasq уводим
+# на 127.0.0.1:5353 только когда sing-box уже слушает: до старта процесса init
+# сам перезапускает dnsmasq и прогревает списки доменов — с upstream на закрытом
+# порту это упёрлось бы в тайм-ауты. Поэтому в фоне, с ожиданием входа.
+dns_vpn_sync() {
+    if [ "$(cat "$ENGINE_FILE" 2>/dev/null)" != mihomo ] && grep -q '"dns-in"' "$CONF" 2>/dev/null; then
+        (
+            i=0
+            while [ "$i" -lt 30 ]; do
+                netstat -lnu 2>/dev/null | grep -q '127\.0\.0\.1:5353 ' && break
+                sleep 1; i=$((i + 1))
+            done
+            [ "$i" -lt 30 ] || exit 0
+            printf '%s\n' 'no-resolv' 'server=127.0.0.1#5353' > "$DNS_VPN_CONF.new"
+            if cmp -s "$DNS_VPN_CONF.new" "$DNS_VPN_CONF"; then
+                rm -f "$DNS_VPN_CONF.new"
+            else
+                mv "$DNS_VPN_CONF.new" "$DNS_VPN_CONF"
+                /etc/init.d/dnsmasq restart
+            fi
+        ) </dev/null >/dev/null 2>&1 &
+    elif [ -f "$DNS_VPN_CONF" ]; then
+        rm -f "$DNS_VPN_CONF"
+        /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    fi
+}
 
 # filter-AAAA появился в dnsmasq 2.87; незнакомая опция в conf-dir роняет dnsmasq
 # целиком, поэтому пишем её, только если сборка её знает.
@@ -926,6 +954,9 @@ start_service() {
 
     v6_dns_up
     if [ "$FAST" != 1 ]; then
+        # sing-box ещё не запущен — прогрев ниже шёл бы в закрытый :5353.
+        # dns_vpn_sync в конце старта вернёт upstream через VPN.
+        rm -f "$DNS_VPN_CONF"
         /etc/init.d/dnsmasq restart
         wait_for_resolver
         resolve_domains "$DOMAINS_FILE"
@@ -1061,6 +1092,7 @@ start_service() {
         procd_close_instance
         rm -f "$INST_TMP"
         [ -x "$TORRENT_BIN" ] && "$TORRENT_BIN" apply >/dev/null 2>&1
+        dns_vpn_sync
         return 0
     fi
 
@@ -1089,6 +1121,7 @@ start_service() {
     # (bounce на reconfigure), ничего не пересобираем — пересборка обнулила бы
     # счётчики, по которым detour-torrent tick понимает, что кто-то попался.
     [ -x "$TORRENT_BIN" ] && "$TORRENT_BIN" apply >/dev/null 2>&1
+    dns_vpn_sync
 }
 
 stop_service() {
@@ -1194,6 +1227,7 @@ stop_service() {
     rm -f /tmp/dnsmasq.d/singbox-domains.conf
     rm -f /tmp/dnsmasq.d/singbox-whitelist.conf
     rm -f /tmp/dnsmasq.d/singbox-push-bypass.conf   # whitelist ipset is destroyed below
+    rm -f "$DNS_VPN_CONF"                            # DNS снова напрямую, иначе резолв без VPN мёртв
     /etc/init.d/dnsmasq restart
 
     # Flush and destroy ipsets

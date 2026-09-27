@@ -230,7 +230,14 @@ start() {
     touch "$MARK"
     regen
     running && { echo "detour-dns already running"; apply_fw; return; }
-    echo "Starting detour-dns (dnsmasq :$DETOUR_DNS_PORT) ..."
+    # DNS через VPN: upstream — вход dns-in sing-box (127.0.0.1:5353), он шлёт
+    # запросы через активный VPN. S52 поднимает sing-box раньше нас.
+    UPSTREAM="$DETOUR_DNS_UPSTREAM"
+    if [ -f /opt/etc/detour/singbox.enabled ] \
+       && grep -q '"dns-in"' /opt/etc/sing-box/config.json 2>/dev/null; then
+        UPSTREAM="127.0.0.1#5353"
+    fi
+    echo "Starting detour-dns (dnsmasq :$DETOUR_DNS_PORT, upstream $UPSTREAM) ..."
     # Standalone instance: ignore the Entware system dnsmasq.conf, own pid/port,
     # wildcard-bind so iptables-REDIRECTed :53 packets (dst = br0 IP) reach it.
     "$DNSMASQ_BIN" \
@@ -240,7 +247,7 @@ start() {
         --conf-dir="$DNSMASQ_CONF_DIR" \
         --addn-hosts="$DNSMASQ_HOSTS_DIR" \
         --no-resolv --no-hosts \
-        --server="$DETOUR_DNS_UPSTREAM" \
+        --server="$UPSTREAM" \
         --cache-size=1000
     sleep 1
     apply_fw
@@ -274,8 +281,13 @@ case "$1" in
     start) start ;;
     stop) stop ;;
     restart) stop; sleep 1; start ;;
+    # upstream (DNS через VPN или напрямую) выбирается только при запуске
+    # dnsmasq, а stop при включённом прокси его не гасит — перезапуск насильно.
+    restart-daemon)
+        [ -f "$PIDF" ] && kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null
+        rm -f "$PIDF"; sleep 1; start ;;
     reload) reload ;;
     regen) regen ;;
     status) running && echo "detour-dns running (pid $(cat "$PIDF"))" || echo "detour-dns stopped" ;;
-    *) echo "usage: $0 {start|stop|restart|reload|regen|status}"; exit 1 ;;
+    *) echo "usage: $0 {start|stop|restart|restart-daemon|reload|regen|status}"; exit 1 ;;
 esac

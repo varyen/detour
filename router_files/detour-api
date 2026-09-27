@@ -809,6 +809,10 @@ write_settings() {
         *) [ "$(get_settings_val discord_voice_vpn)" = 1 ] && udp_vpn_mode=list || udp_vpn_mode=off ;;
     esac
 
+    local dns_via_vpn
+    dns_via_vpn=${DNS_VIA_VPN_OVERRIDE:-$(get_settings_val "dns_via_vpn")}
+    [ "$dns_via_vpn" = 1 ] || dns_via_vpn=0
+
     cat > "$SINGBOX_SETTINGS" <<EOF
 {
   "active_profile": "$active_profile",
@@ -828,7 +832,8 @@ write_settings() {
     "self_intercept_full": "$self_intercept_full",
     "udp_vpn_mode": "$udp_vpn_mode",
     "engine_mode": "$engine_mode_v",
-    "engine_torrent_singbox": "$engine_tsb"
+    "engine_torrent_singbox": "$engine_tsb",
+    "dns_via_vpn": "$dns_via_vpn"
 }
 EOF
 }
@@ -1442,6 +1447,16 @@ udp_vpn_mode_val() {
     case "$v" in off|list|all) echo "$v"; return ;; esac
     [ "$(get_settings_val discord_voice_vpn)" = 1 ] && echo list || echo off
 }
+# DNS через VPN: провайдер может подменять ответы для заблокированных сайтов, и
+# тогда sing-box честно везёт через VPN соединение к подменённому адресу —
+# сниффнутый домен адрес назначения не меняет (sniff_override_destination в
+# 1.13 убран без замены). Вход dns-in на 127.0.0.1:5353 отдаёт запросы dnsmasq
+# в route.final = активный VPN, к 1.1.1.1. dnsmasq переключает init, когда
+# вход уже слушает. В движке mihomo входа direct нет — там выключено.
+dns_via_vpn_val() {
+    [ "$(current_engine)" = mihomo ] && { echo 0; return; }
+    [ "${DNS_VIA_VPN_OVERRIDE:-$(get_settings_val dns_via_vpn)}" = 1 ] && echo 1 || echo 0
+}
 render_chain_config() {
     local chain_csv="$1"
     local extra_outbounds="$2"
@@ -1618,6 +1633,19 @@ render_chain_config() {
         }"
     fi
 
+    local dns_inbound=""
+    if [ "$listen_port" = 12345 ] && [ "$inbound_kind" != mixed ] && [ "$(dns_via_vpn_val)" = 1 ]; then
+        dns_inbound=",
+        {
+            \"type\": \"direct\",
+            \"tag\": \"dns-in\",
+            \"listen\": \"127.0.0.1\",
+            \"listen_port\": 5353,
+            \"override_address\": \"1.1.1.1\",
+            \"override_port\": 53
+        }"
+    fi
+
     # log: WARN, not "info" — at info sing-box emits a line per connection
     # (~40-50 MB/day). On Keenetic /var/log is tmpfs (~124 MB total): an info log
     # filled it in ~3 days and cascaded (curl/lighttpd/sessions/health all failed
@@ -1633,7 +1661,7 @@ render_chain_config() {
     "timestamp": true
   },
   "inbounds": [
-${inbound_block}${extra_inbounds}${udp_inbound}
+${inbound_block}${extra_inbounds}${udp_inbound}${dns_inbound}
   ],
 $(if [ -n "$endpoints_json" ]; then cat <<EOEP
     "endpoints": [
@@ -4176,6 +4204,39 @@ udp_vpn)
         SUP=true; [ "$PLATFORM" = keenetic ] && SUP=false
         LIST=""; [ -f "$UDP_VPN_LIST_FILE" ] && LIST=$(cat "$UDP_VPN_LIST_FILE" | json_escape)
         printf '{"mode":"%s","supported":%s,"list":"%s"}\n' "$MODE" "$SUP" "$LIST"
+    fi
+    ;;
+
+# DNS через VPN (обе платформы). POST {"enabled":0|1} → пересборка конфига и
+# рестарт; dnsmasq на новый upstream переключает init (Keenetic — S50detour-dns).
+dns_vpn)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        NEW=$(printf '%s' "$POST_DATA" | sed -n 's/.*"enabled"[[:space:]]*:[[:space:]]*\([01]\).*/\1/p' | head -1)
+        case "$NEW" in 0|1) ;; *) json_err "enabled must be 0/1"; exit 0 ;; esac
+        if [ "$NEW" = 1 ] && [ "$(current_engine)" = mihomo ]; then
+            json_err "в движке mihomo DNS через VPN недоступен — переключите движок на sing-box или гибрид"; exit 0
+        fi
+        export DNS_VIA_VPN_OVERRIDE="$NEW"
+        ACHAIN=$(get_active_chain)
+        SBMODE=$(get_singbox_mode)
+        if [ -n "$ACHAIN" ]; then
+            BUILD_ERR=$(build_config "$SBMODE" "$ACHAIN")
+            if [ $? -ne 0 ]; then
+                json_err "config build failed: $(printf '%s' "$BUILD_ERR" | json_escape)"; exit 0
+            fi
+        fi
+        write_settings "$ACHAIN" "$(get_routing_mode)" "$(collect_upstream_ips)" "$SBMODE"
+        if [ -n "$(engine_pid)" ]; then
+            $SINGBOX_INITD restart >/dev/null 2>&1
+            [ "$PLATFORM" = keenetic ] && [ -x "$OPT/etc/init.d/S50detour-dns" ] \
+                && "$OPT/etc/init.d/S50detour-dns" restart-daemon >/dev/null 2>&1
+            sleep 3
+        fi
+        json_ok
+    else
+        SUP=true; [ "$(current_engine)" = mihomo ] && SUP=false
+        printf '{"enabled":%s,"supported":%s}
+' "$( [ "$(get_settings_val dns_via_vpn)" = 1 ] && echo true || echo false)" "$SUP"
     fi
     ;;
 

@@ -23,7 +23,13 @@ apply_fw() {
 dns_up()   { [ -x "$DNS_SVC" ] && "$DNS_SVC" start  >/dev/null 2>&1; }
 dns_reload() { [ -x "$DNS_SVC" ] && "$DNS_SVC" reload >/dev/null 2>&1; }
 dns_down_if_idle() {
-    [ -f /opt/etc/detour/zapret.enabled ] && return
+    # zapret ещё работает — dnsmasq остаётся, но upstream с :5353 (DNS через VPN)
+    # надо вернуть на прямой, иначе DNS в сети умрёт вместе с sing-box.
+    if [ -f /opt/etc/detour/zapret.enabled ]; then
+        grep -q '"dns-in"' /opt/etc/sing-box/config.json 2>/dev/null \
+            && [ -x "$DNS_SVC" ] && "$DNS_SVC" restart-daemon >/dev/null 2>&1
+        return
+    fi
     [ -x "$DNS_SVC" ] && "$DNS_SVC" stop >/dev/null 2>&1
 }
 

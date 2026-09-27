@@ -364,6 +364,33 @@ const killswitchOn = computed({
     ),
 });
 
+/* DNS через VPN — только роутер: провайдер может подменять DNS-ответы для
+   заблокированных сайтов, и тогда соединение через VPN уходит к чужому адресу. */
+const dnsVpn = ref<{ enabled: boolean; supported: boolean } | null>(null);
+
+async function loadDnsVpn() {
+  if (status.isClient) return;
+  dnsVpn.value = await overview.dnsVpnGet().catch(() => null);
+}
+
+const dnsVpnOn = computed({
+  get: () => dnsVpn.value?.enabled === true,
+  set: (v: boolean) => void setDnsVpn(v),
+});
+
+async function setDnsVpn(on: boolean) {
+  busy.value = "dnsvpn";
+  try {
+    await overview.dnsVpnSet(on);
+    toast.ok(on ? "DNS идёт через VPN" : "DNS снова напрямую");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить DNS");
+  } finally {
+    busy.value = "";
+    await loadDnsVpn();
+  }
+}
+
 async function loadKillswitch() {
   if (!status.isClient) return;
   try {
@@ -445,6 +472,7 @@ async function loadExtras() {
     clients.value = clientList.value.length;
   }
   await loadKillswitch();
+  await loadDnsVpn();
   await loadTraffic();
   trafficTimer = window.setInterval(() => {
     if (document.visibilityState === "visible") void loadTraffic();
@@ -764,6 +792,19 @@ onBeforeUnmount(() => {
           </template>
           <template v-else>Игры и голос по UDP идут напрямую.</template>
         </p>
+      </div>
+      <div v-if="dnsVpn" class="udp">
+        <SwitchToggle
+          v-model="dnsVpnOn"
+          label="DNS через VPN"
+          :busy="busy === 'dnsvpn'"
+          :disabled="!dnsVpn.supported"
+          :hint="
+            dnsVpn.supported
+              ? 'Когда провайдер подменяет DNS для заблокированных сайтов — они открываются, только если спросить имя через VPN'
+              : 'В движке mihomo недоступно'
+          "
+        />
       </div>
     </TileCard>
     </DashSlot>

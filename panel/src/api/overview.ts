@@ -115,6 +115,12 @@ export const overview = {
       body: { mode },
       timeoutMs: RESTART_TIMEOUT,
     }),
+  dnsVpnGet: () => requestJson<{ enabled: boolean; supported: boolean }>("dns_vpn"),
+  dnsVpnSet: (enabled: boolean) =>
+    requestJson<{ ok: boolean }>("dns_vpn", {
+      body: { enabled: enabled ? 1 : 0 },
+      timeoutMs: RESTART_TIMEOUT,
+    }),
   udpVpnListGet: () => requestJson<{ list: string }>("udp_vpn_list"),
   udpVpnListSet: (list: string) =>
     requestJson<{ ok: boolean }>("udp_vpn_list", {
