@@ -212,6 +212,12 @@ ENABLED=$(jstr health_check_enabled "$SETTINGS")
 if [ "$BG" = "1" ] || [ "$MODE" = "active" ]; then
     case "$ENABLED" in 0|off|false|no) exit 0 ;; esac
 fi
+# VPN выключен руками — активный профиль не проверяем: временные экземпляры раз
+# в 30–60 с зря грузили роутер, панель по ним считала VPN включённым, а при
+# «недоступен» летел бы пуш о VPN, который человек сам выключил.
+if [ "$MODE" = "active" ] && [ -x "$API_BIN" ] && [ -z "$("$API_BIN" engine-pid 2>/dev/null)" ]; then
+    exit 0
+fi
 AUTOSWITCH=$(jstr health_auto_switch "$SETTINGS")
 
 # ---- Download-speed measurement (functional check + real throughput) ----------

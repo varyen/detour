@@ -574,7 +574,11 @@ engine_pid() {
     if [ "$(current_engine)" = mihomo ]; then
         pgrep -f "$MIHOMO_BIN -d $MIHOMO_RUNDIR" 2>/dev/null | head -1
     else
-        pgrep -f "$SINGBOX_BIN run" 2>/dev/null | head -1
+        # Только основной экземпляр. Временные (detour-health раз в 30–60 с,
+        # внешний IP, WARP, подписки) — тоже «sing-box run», но с другим -c; по
+        # общему шаблону после «Отключиться» панель видела их и считала VPN
+        # включённым.
+        pgrep -f "$SINGBOX_BIN run -c $SINGBOX_CONFIG" 2>/dev/null | head -1
     fi
 }
 
@@ -2097,6 +2101,12 @@ if [ "$1" = "engine-check" ] || [ "$1" = "engine-run" ]; then
     fi
     [ "$1" = engine-check ] && exec "$SINGBOX_BIN" check -c "$_conf"
     exec "$SINGBOX_BIN" run -c "$_conf" -D "$_dir"
+fi
+if [ "$1" = "engine-pid" ]; then
+    # PID основного экземпляра движка (пусто — VPN выключен). Одно правило на
+    # панель и detour-health, чтобы временные экземпляры не сходили за основной.
+    engine_pid
+    exit 0
 fi
 if [ "$1" = "render-mixed" ]; then
     # в движке mihomo AWG-профиль идёт в конфиг как есть (сайдкара нет)
