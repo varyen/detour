@@ -5,7 +5,7 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [2.2.7] — 2026-09-28
 
 ### Исправлено
 - **Модуль NFQUEUE для zapret2 нельзя было поставить из панели.** Подсказка в
