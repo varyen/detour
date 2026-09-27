@@ -177,6 +177,7 @@ local ROUTER_FILES = {
   "detour/nfqws2.strategy",
   "detour/offload.conf",
   "detour/portmap.conf",
+  "detour/devices.conf",
   "detour/cert.conf",
   "detour/dns-api.conf",
   "detour/hosts-custom.list",

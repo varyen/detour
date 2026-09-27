@@ -24,6 +24,10 @@ SETTINGS_FILE=/etc/sing-box/settings.json
 # into the matching local sing-box SOCKS inbound so a client hard-pinned to the same
 # proxy gets the panel's routing instead of a double-proxy wrap. Absent = feature off.
 INTERCEPT_MAP=/etc/sing-box/intercept.map
+# Правила устройств по MAC — «mac mode port udp_port», пишет detour-api при сборке
+# конфига (нумерацию портов целей задаёт он один).
+DEV_MAP=/etc/sing-box/devices.map
+DEV_CHAIN=SINGBOX_DEVICES
 # Блокировка торрентов на профилях, где провайдер их запрещает. Правила ставятся
 # ОТДЕЛЬНОЙ nft-таблицей (detour-torrent), а не здесь: они висят на prerouting
 # раньше nat REDIRECT и должны работать одинаково и для VPN-трафика, и для
@@ -391,16 +395,20 @@ v6_dns_up() {
 }
 
 v6_guard_up() {
-    local i set=""
+    local i set="" macs allow="" m
+    # устройства «мимо VPN» ходят напрямую — IPv6 им не режем
+    macs=$(direct_device_macs)
     if has_nft; then
         for i in br-lan $(vpn_redirect_ifaces); do
             [ -n "$i" ] && set="$set${set:+, }\"$i\""
         done
+        [ -n "$macs" ] && allow="ether saddr { $macs } accept"
         nft delete table inet $V6_TABLE 2>/dev/null
         nft -f - <<EOF
 table inet $V6_TABLE {
     chain forward {
         type filter hook forward priority -5; policy accept;
+        $allow
         iifname { $set } meta nfproto ipv6 reject with icmpx type admin-prohibited
     }
 }
@@ -408,6 +416,9 @@ EOF
     elif command -v ip6tables >/dev/null 2>&1; then
         ip6tables -N $V6_CHAIN 2>/dev/null
         ip6tables -F $V6_CHAIN
+        for m in $(printf '%s' "$macs" | tr -d ','); do
+            ip6tables -A $V6_CHAIN -m mac --mac-source "$m" -j RETURN
+        done
         ip6tables -A $V6_CHAIN -j REJECT --reject-with icmp6-adm-prohibited
         for i in br-lan $(vpn_redirect_ifaces); do
             [ -n "$i" ] || continue
@@ -631,6 +642,104 @@ teardown_intercept() {
     iptables -t nat -X SINGBOX_INTERCEPT 2>/dev/null
 }
 
+# ---- Устройства: «мимо VPN» / «через свой VPN или цепочку» ----
+# Переход в SINGBOX_DEVICES стоит ПЕРВЫМ в nat PREROUTING — выше «Все через VPN»
+# (оно тоже встаёт на первую позицию) и общего перехвата. Поэтому цепочка каждого
+# устройства сама повторяет то, что главнее правила устройства: zapret и
+# «Отдельные маршруты» роутера (их набор адресов → их порт), и только потом
+# решает за устройство. ACCEPT в nat — «больше ничего не перенаправлять».
+devices_down() {
+    local c
+    iptables -t nat -D PREROUTING -i br-lan -j $DEV_CHAIN 2>/dev/null
+    iptables -t nat -F $DEV_CHAIN 2>/dev/null
+    for c in $(iptables -t nat -S 2>/dev/null | awk '$1 == "-N" && $2 ~ /^SINGBOX_DEV_[0-9]+$/ { print $2 }'); do
+        iptables -t nat -F "$c"
+        iptables -t nat -X "$c"
+    done
+    iptables -t nat -X $DEV_CHAIN 2>/dev/null
+}
+
+# $1 — файл слотов маршрутов («N id port ipset …»), тот же, что для общего пути.
+devices_up() {
+    local slots="$1" mac mode port uport i c n id rport ipset rest ip OLD_IFS PROXY_IPS
+    devices_down
+    [ -s "$DEV_MAP" ] || return 0
+    iptables -t nat -N $DEV_CHAIN
+    PROXY_IPS=$(get_upstream_ips)
+    i=0
+    while read -r mac mode port uport; do
+        [ -n "$mac" ] || continue
+        i=$((i + 1)); c="SINGBOX_DEV_$i"
+        iptables -t nat -N "$c"
+        # zapret создаёт свою цепочку через -N/-F, пустая заготовка ему не мешает
+        iptables -t nat -N ZAPRET_REDIRECT 2>/dev/null
+        iptables -t nat -A "$c" -j ZAPRET_REDIRECT
+        if [ -s "$slots" ]; then
+            while read -r n id rport ipset rest; do
+                [ -n "$ipset" ] && iptables -t nat -A "$c" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$rport"
+            done < "$slots"
+        fi
+        ipset list -n 2>/dev/null | grep -qx "$ROUTE_DEAD_IPSET" && \
+            iptables -t nat -A "$c" -p tcp -m set --match-set "$ROUTE_DEAD_IPSET" dst -j REDIRECT --to-ports "$ROUTE_DEAD_PORT"
+        if [ "$mode" = vpn ] && [ "$port" != 0 ]; then
+            for ip in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8; do
+                iptables -t nat -A "$c" -d "$ip" -j ACCEPT
+            done
+            if [ -n "$PROXY_IPS" ]; then
+                OLD_IFS="$IFS"; IFS=','; set -- $PROXY_IPS; IFS="$OLD_IFS"
+                for ip in "$@"; do
+                    [ -n "$ip" ] && iptables -t nat -A "$c" -d "$ip" -j ACCEPT
+                done
+            fi
+            if [ "$ROUTING_MODE" = "all-except" ]; then
+                iptables -t nat -A "$c" -p tcp -m set --match-set $IPSET_WL dst -j ACCEPT
+                iptables -t nat -A "$c" -p tcp -j REDIRECT --to-ports "$port"
+            else
+                iptables -t nat -A "$c" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports "$port"
+            fi
+            open_port_lan "$port"
+        fi
+        iptables -t nat -A "$c" -j ACCEPT
+        iptables -t nat -A $DEV_CHAIN -m mac --mac-source "$mac" -j "$c" \
+            || logger -p daemon.err -t sing-box "правило устройства $mac не встало (нет xt_mac?)"
+    done < "$DEV_MAP"
+    iptables -t nat -I PREROUTING 1 -i br-lan -j $DEV_CHAIN
+}
+
+# UDP устройств — в цепочке UDP_VPN сразу после целей маршрутов: «мимо VPN» —
+# RETURN, «через X» — в tproxy-вход цели устройства (есть только при включённом
+# «UDP через VPN»).
+udp_device_rules() {
+    local mode="$1" mac dmode port uport m
+    [ -s "$DEV_MAP" ] || return 0
+    while read -r mac dmode port uport; do
+        [ -n "$mac" ] || continue
+        m="-m mac --mac-source $mac"
+        if [ "$dmode" = direct ]; then
+            iptables -t mangle -A "$UDP_VPN_CHAIN" $m -j RETURN
+        elif [ -n "$uport" ] && [ "$uport" != 0 ]; then
+            if [ "$mode" = all ]; then
+                iptables -t mangle -A "$UDP_VPN_CHAIN" $m -p udp --dport 53 -j RETURN
+                ipset list -n 2>/dev/null | grep -qx "$IPSET_WL" && \
+                    iptables -t mangle -A "$UDP_VPN_CHAIN" $m -m set --match-set "$IPSET_WL" dst -j RETURN
+                iptables -t mangle -A "$UDP_VPN_CHAIN" $m -p udp \
+                    -j TPROXY --on-ip 127.0.0.1 --on-port "$uport" --tproxy-mark "$UDP_VPN_MARK/$UDP_VPN_MARK"
+            else
+                ipset create "$UDP_VPN_IPSET" hash:net -exist
+                iptables -t mangle -A "$UDP_VPN_CHAIN" $m -p udp -m set --match-set "$UDP_VPN_IPSET" dst \
+                    -j TPROXY --on-ip 127.0.0.1 --on-port "$uport" --tproxy-mark "$UDP_VPN_MARK/$UDP_VPN_MARK"
+                iptables -t mangle -A "$UDP_VPN_CHAIN" $m -j RETURN
+            fi
+        fi
+    done < "$DEV_MAP"
+}
+
+# MAC устройств «мимо VPN» — через запятую, для исключения из блокировки IPv6.
+direct_device_macs() {
+    [ -s "$DEV_MAP" ] || return 0
+    awk '$2 == "direct" { printf "%s%s", (n++ ? ", " : ""), $1 }' "$DEV_MAP"
+}
+
 # ---- UDP через VPN (TPROXY) ----
 # Emit per-entry TPROXY rules for PORT (":8211", ":19294-19344") and HOST:PORT
 # ("1.2.3.4:8211", "1.2.3.0/24:27015") lines in $UDP_VPN_LIST. Plain IP/CIDR
@@ -740,6 +849,8 @@ udp_vpn_up() {
     # whitelist-RETURN, и у catch-all ниже. Без этого QUIC размеченного сайта
     # уходил в общий tproxy-инбаунд и дальше в route.final = основной VPN.
     udp_vpn_target_rules "$mode"
+    # Устройства — после целей маршрутов (маршруты главнее), до общих правил.
+    udp_device_rules "$mode"
 
     if [ "$mode" = all ]; then
         # Keep DNS direct/local so the panel's domain routing + ipset population
@@ -1063,6 +1174,9 @@ start_service() {
         fi
     done
 
+    # Устройства — наверх PREROUTING (см. devices_up), слоты маршрутов ещё на месте.
+    devices_up "$INST_TMP"
+
     # Self-proxy smart intercept (map file; single mode) — install last so its jump
     # sits above the routing chains for the intercepted proxy endpoints.
     setup_intercept
@@ -1173,6 +1287,7 @@ stop_service() {
     # Remove self-proxy smart-intercept chain + jumps (full teardown only; KEEPFW
     # restart keeps them so the daemon gap fails CLOSED, same as the other REDIRECTs).
     teardown_intercept
+    devices_down
 
     # UDP→VPN TPROXY: full teardown only. A KEEPFW restart returns above and keeps it
     # up, so the daemon gap fails CLOSED (tunneled UDP → dead :12350, refused). Also

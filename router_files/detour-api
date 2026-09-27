@@ -26,6 +26,13 @@ ROUTE_PORT_BASE=12400
 # То же для UDP-инбаундов целей маршрута (цель N → BASE+N, tproxy). Отдельная
 # база, потому что у цели два инбаунда: redirect для TCP и tproxy для UDP.
 ROUTE_UDP_PORT_BASE=12500
+# Устройства: правило «мимо VPN» или «через свой VPN/цепочку» по MAC. Входы целей
+# устройств — своя нумерация (12600+ занят сайдкаром AWG), чтобы не сдвигать слоты
+# маршрутов. Итог сборки — devices.map «mac mode port udp_port», его читает init:
+# нумерация живёт в одном месте, и слои не расходятся.
+DEV_PORT_BASE=12700
+DEV_UDP_PORT_BASE=12800
+DEVICES_MAP="/etc/sing-box/devices.map"
 SINGBOX_LOG="/var/log/sing-box.log"
 SINGBOX_INITD="/etc/init.d/sing-box"
 SINGBOX_SETTINGS="/etc/sing-box/settings.json"
@@ -174,6 +181,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_ROUTEMAP="$OPT/etc/sing-box/route-map.list"
     SINGBOX_CHAINS="$OPT/etc/sing-box/chains.json"
     SINGBOX_INTERCEPT_MAP="$OPT/etc/sing-box/intercept.map"
+    DEVICES_MAP="$OPT/etc/sing-box/devices.map"
     SINGBOX_LOG="$OPT/var/log/sing-box.log"
     SINGBOX_INITD="$OPT/etc/init.d/S52detour-singbox"
     SINGBOX_SETTINGS="$OPT/etc/sing-box/settings.json"
@@ -1355,6 +1363,113 @@ compute_route_extras() {
     fi
 }
 
+# Устройства из $DETOUR_DIR/devices.conf: «mac|mode|target|name», mode — direct
+# (мимо VPN) или vpn (через профиль или цепочку target). Печатает валидные строки
+# «mac|mode|target» с MAC в нижнем регистре.
+devices_conf_lines() {
+    [ -f "$DETOUR_DIR/devices.conf" ] || return 0
+    tr -d '\r' < "$DETOUR_DIR/devices.conf" | awk -F'|' '
+        $1 ~ /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]$/ && ($2 == "direct" || ($2 == "vpn" && $3 != "")) {
+            print tolower($1) "|" $2 "|" $3
+        }'
+}
+
+# Цели устройств «через VPN X»: вход in_dev_K (+ in_dev_udp_K) и правило «вход →
+# outbound X». Правило ставится В КОНЕЦ route.rules: доменные правила «Отдельных
+# маршрутов» стоят раньше и выигрывают — маршруты роутера главнее правила
+# устройства. Цель, которой больше нет, пропускается: устройство тогда идёт
+# общим путём (через основной VPN), а не напрямую. Дописывает RX_OB/RX_EP/
+# RX_INBOUNDS, заполняет DX_RULES и DX_MAP (текст devices.map).
+compute_device_extras() {
+    local udp_mode mac mode target k k_old tag thops payload ptype port uport seen inb
+    DX_RULES=""; DX_MAP=""
+    udp_mode=$(udp_vpn_mode_val)
+    k=0; seen=" "
+    devices_conf_lines > "/tmp/detour-devices.$$"
+    while IFS='|' read -r mac mode target; do
+        if [ "$mode" = direct ]; then
+            DX_MAP="$DX_MAP$mac direct 0 0
+"
+            continue
+        fi
+        # та же цель у нескольких устройств — один вход на всех
+        case "$seen" in
+            *" $target="*)
+                k_old=${seen#*" $target="}; k_old=${k_old%% *}
+                DX_MAP="$DX_MAP$mac vpn $((DEV_PORT_BASE + k_old)) $(dev_udp_port "$udp_mode" "$k_old")
+"
+                continue ;;
+        esac
+        thops=""
+        if [ ! -f "$SINGBOX_PROFILES_DIR/$target.json" ]; then
+            thops=$(chain_hops_csv "$target")
+            [ -n "$thops" ] || continue
+        fi
+        k=$((k + 1))
+        tag="dv_$k"
+        if [ -n "$thops" ]; then
+            emit_route_chain "$thops" "$tag" "dc$k" || { k=$((k - 1)); continue; }
+        else
+            payload=$(extract_profile_outbound "$SINGBOX_PROFILES_DIR/$target.json")
+            [ -n "$payload" ] || { k=$((k - 1)); continue; }
+            ptype=$(profile_type "$SINGBOX_PROFILES_DIR/$target.json")
+            payload=$(set_outbound_chain_fields "$payload" "$tag" "")
+            if [ "$ptype" = "wireguard" ]; then
+                payload=$(translate_wireguard_profile "$payload")
+                RX_EP="$RX_EP,
+    $payload"
+            else
+                RX_OB="$RX_OB,
+    $payload"
+            fi
+        fi
+        seen="$seen$target=$k "
+        port=$((DEV_PORT_BASE + k))
+        uport=$(dev_udp_port "$udp_mode" "$k")
+        RX_INBOUNDS="$RX_INBOUNDS,
+    {\"type\":\"redirect\",\"tag\":\"in_dev_$k\",\"listen\":\"::\",\"listen_port\":$port}"
+        inb="\"in_dev_$k\""
+        if [ "$uport" != 0 ]; then
+            RX_INBOUNDS="$RX_INBOUNDS,
+    {\"type\":\"tproxy\",\"tag\":\"in_dev_udp_$k\",\"listen\":\"::\",\"listen_port\":$uport,\"network\":\"udp\"}"
+            inb="$inb,\"in_dev_udp_$k\""
+        fi
+        DX_RULES="$DX_RULES${DX_RULES:+,}{\"action\":\"route\",\"inbound\":[$inb],\"outbound\":\"$tag\"}"
+        DX_MAP="$DX_MAP$mac vpn $port $uport
+"
+    done < "/tmp/detour-devices.$$"
+    rm -f "/tmp/detour-devices.$$"
+}
+
+# UDP-вход цели устройства есть, только когда «UDP через VPN» включён (иначе UDP
+# устройства и так идёт напрямую) и не на Keenetic (там нет TPROXY). 0 — нет входа.
+dev_udp_port() {
+    if [ "$PLATFORM" != keenetic ] && [ "$1" != off ]; then
+        echo $((DEV_UDP_PORT_BASE + $2))
+    else
+        echo 0
+    fi
+}
+
+# Правила устройств — в конец route.rules (после доменных правил маршрутов).
+# $1 — уже собранный блок правил или пусто.
+append_device_rules() {
+    local rr="$1" body
+    [ -n "$DX_RULES" ] || { printf '%s' "$rr"; return; }
+    if [ -n "$rr" ]; then
+        body=$(printf '%s' "$rr" | sed '$ s/],[[:space:]]*$//')
+        printf '%s,%s],\n' "$body" "$DX_RULES"
+    else
+        printf '    "rules": [{"action":"sniff"},%s],\n' "$DX_RULES"
+    fi
+}
+
+# Карта для init: только «мимо VPN» — в multi-режиме (там у целей свои процессы и
+# входа цели устройства нет; такое устройство идёт общим путём).
+write_devices_map() {
+    printf '%s' "$1" > "$DEVICES_MAP.tmp" && mv "$DEVICES_MAP.tmp" "$DEVICES_MAP"
+}
+
 # Self-proxy "smart intercept". For each SOCKS/HTTP route-map target the user opted
 # into (settings.json "self_intercept" CSV) emit a local SOCKS inbound that MIRRORS
 # that proxy's credentials and shares the config's global route.rules. sing-box.initd
@@ -1745,6 +1860,11 @@ build_config_mihomo() {
 "
         fi
     fi
+    compute_device_extras "$chain"
+    if [ -n "$DX_RULES" ]; then
+        route_rules="$(append_device_rules "$route_rules")
+"
+    fi
     if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$route_rules" 12345 redirect "$RX_INBOUNDS$IX_INBOUNDS" > "$tmp_sb"; then
         rm -f "$tmp_sb"; render_fail_reason "$chain" "failed to render config (bad chain?)"; echo; return 1
     fi
@@ -1757,6 +1877,7 @@ build_config_mihomo() {
         rm -f "$tmp_mh"; echo "mihomo отверг конфиг: $(printf '%s' "$err" | tail -3)"; return 1
     fi
     mv "$tmp_mh" "$MIHOMO_CONF"
+    write_devices_map "$DX_MAP"
     echo mihomo > "$ENGINE_FILE"
     # сайдкар больше не нужен: AWG-профили в основном конфиге
     [ -x "$AWG_BIN" ] && "$AWG_BIN" sync >/dev/null 2>&1
@@ -1898,6 +2019,11 @@ build_config() {
 "
             fi
         fi
+        compute_device_extras "$chain"
+        if [ -n "$DX_RULES" ]; then
+            route_rules="$(append_device_rules "$route_rules")
+"
+        fi
         if ! render_chain_config "$chain" "$RX_OB" "$RX_EP" "$route_rules" 12345 redirect "$RX_INBOUNDS$IX_INBOUNDS" > "$tmp_default"; then
             rm -f "$tmp_default"; render_fail_reason "$chain" "failed to render config (bad chain?)"; echo; return 1
         fi
@@ -1907,12 +2033,17 @@ build_config() {
         fi
         commit_list="$tmp_default:$SINGBOX_CONFIG"
     fi
+    # multi: у целей свои процессы, входа для цели устройства нет — в карту идут
+    # только «мимо VPN»; устройство «через X» там идёт общим путём.
+    [ "$mode" = multi ] && DX_MAP=$(devices_conf_lines | awk -F'|' '$2 == "direct" { print $1 " direct 0 0" }')
 
     # COMMIT — move temps into place.
     for pair in $commit_list; do
         src="${pair%%:*}"; dst="${pair#*:}"
         mv "$src" "$dst"
     done
+    write_devices_map "$DX_MAP${DX_MAP:+
+}"
     # singbox — чистый sing-box, hybrid — плюс сайдкар AmneziaWG (mihomo в
     # режиме «mihomo», откатившемся из-за запрета торрентов, — тоже гибрид).
     if [ "$engine_mode" = singbox ]; then echo singbox > "$ENGINE_FILE"; else echo hybrid > "$ENGINE_FILE"; fi
@@ -3618,6 +3749,12 @@ allvpn_on)
     iptables -t nat -A SINGBOX_ALLVPN -p tcp -j REDIRECT --to-ports 12345
     iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_ALLVPN 2>/dev/null
     iptables -t nat -I PREROUTING 1 -i $LAN_IF -j SINGBOX_ALLVPN
+    # Правила устройств обязаны остаться выше «Все через VPN»: иначе устройство
+    # «мимо VPN» ушло бы в туннель.
+    if iptables -t nat -S SINGBOX_DEVICES >/dev/null 2>&1; then
+        iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_DEVICES 2>/dev/null
+        iptables -t nat -I PREROUTING 1 -i $LAN_IF -j SINGBOX_DEVICES
+    fi
     # Force VPN road-warrior interfaces through the proxy too (same as LAN).
     for VIF in $(vpn_redirect_ifaces); do
         [ -n "$VIF" ] || continue
@@ -4270,6 +4407,39 @@ udp_vpn_list)
     else
         LIST=""; [ -f "$UDP_VPN_LIST_FILE" ] && LIST=$(cat "$UDP_VPN_LIST_FILE" | json_escape)
         printf '{"list":"%s"}\n' "$LIST"
+    fi
+    ;;
+
+# ==================== УСТРОЙСТВА ====================
+# Правила по MAC: «мимо VPN» или «через профиль/цепочку». POST — сырой текст,
+# строка «mac|mode|target|name»; невалидные строки отбрасываются. После записи —
+# пересборка конфига (входы целей устройств) и полный рестарт (правила firewall).
+# GET → {"devices":"<текст>","vpn_supported":bool}: «через X» работает только в
+# одиночном режиме sing-box (в multi цели маршрутов — отдельные процессы).
+devices)
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        mkdir -p "$DETOUR_DIR"
+        printf '%s\n' "$POST_DATA" | tr -d '\r' | awk -F'|' '
+            $1 ~ /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]$/ && ($2 == "direct" || ($2 == "vpn" && $3 ~ /^[A-Za-z0-9_.-]+$/)) {
+                name = $4; gsub(/[|\t]/, " ", name)
+                print tolower($1) "|" $2 "|" ($2 == "vpn" ? $3 : "") "|" name
+            }' > "$DETOUR_DIR/devices.conf.tmp" && mv "$DETOUR_DIR/devices.conf.tmp" "$DETOUR_DIR/devices.conf"
+        ACHAIN=$(get_active_chain)
+        if [ -n "$ACHAIN" ]; then
+            BUILD_ERR=$(build_config "$(get_singbox_mode)" "$ACHAIN")
+            if [ $? -ne 0 ]; then
+                json_err "правила сохранены, но конфиг не собрался: $(printf '%s' "$BUILD_ERR" | json_escape)"; exit 0
+            fi
+        fi
+        if [ -n "$(engine_pid)" ]; then
+            $SINGBOX_INITD restart >/dev/null 2>&1
+            sleep 2
+        fi
+        json_ok
+    else
+        DEV=""; [ -f "$DETOUR_DIR/devices.conf" ] && DEV=$(json_escape < "$DETOUR_DIR/devices.conf")
+        VSUP=true; [ "$(get_singbox_mode)" = multi ] && VSUP=false
+        printf '{"devices":"%s","vpn_supported":%s}\n' "$DEV" "$VSUP"
     fi
     ;;
 

@@ -115,6 +115,10 @@ export const overview = {
       body: { mode },
       timeoutMs: RESTART_TIMEOUT,
     }),
+  /** Правила устройств: текст «mac|mode|target|name» и поддержка «через X». */
+  devicesGet: () => requestJson<{ devices: string; vpn_supported: boolean }>("devices"),
+  devicesSet: (text: string) =>
+    requestJson<{ ok: boolean }>("devices", { body: text, timeoutMs: RESTART_TIMEOUT }),
   dnsVpnGet: () => requestJson<{ enabled: boolean; supported: boolean }>("dns_vpn"),
   dnsVpnSet: (enabled: boolean) =>
     requestJson<{ ok: boolean }>("dns_vpn", {

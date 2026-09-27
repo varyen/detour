@@ -51,8 +51,17 @@ if [ "$TYPE" = "ip6tables" ]; then
         while ip6tables -C FORWARD -i "$IIF" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null; do
             ip6tables -D FORWARD -i "$IIF" -j REJECT --reject-with icmp6-adm-prohibited
         done
-        [ -f /opt/etc/detour/singbox.enabled ] &&             ip6tables -I FORWARD 1 -i "$IIF" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null
+        [ -f /opt/etc/detour/singbox.enabled ] && \
+            ip6tables -I FORWARD 1 -i "$IIF" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null
     done
+    # Устройства «мимо VPN» ходят напрямую — IPv6 им не режем (ACCEPT выше REJECT).
+    ip6tables -S FORWARD 2>/dev/null | grep -- '--mac-source .* -m comment --comment detour-dev' | \
+        sed 's/^-A/-D/' | while IFS= read -r rule; do ip6tables $rule 2>/dev/null; done
+    if [ -f /opt/etc/detour/singbox.enabled ] && [ -s /opt/etc/sing-box/devices.map ]; then
+        awk '$2 == "direct" { print $1 }' /opt/etc/sing-box/devices.map | while read -r mac; do
+            ip6tables -I FORWARD 1 -m mac --mac-source "$mac" -m comment --comment detour-dev -j ACCEPT 2>/dev/null
+        done
+    fi
     exit 0
 fi
 
@@ -317,6 +326,62 @@ if [ -f "$ALLVPN_MARK" ] && [ -f /opt/etc/detour/singbox.enabled ]; then
 else
     iptables -t nat -F SINGBOX_ALLVPN 2>/dev/null
     iptables -t nat -X SINGBOX_ALLVPN 2>/dev/null
+fi
+
+# --- Устройства по MAC: «мимо VPN» / «через свой VPN или цепочку» ---
+# Карта «mac mode port udp_port» — от detour-api. Переход стоит ПЕРВЫМ (выше
+# «Все через VPN»), поэтому цепочка устройства сама повторяет то, что главнее
+# правила устройства: zapret и «Отдельные маршруты» роутера.
+DEV_MAP="/opt/etc/sing-box/devices.map"
+for IF in $IFACES; do
+    [ -n "$IF" ] || continue
+    while iptables -t nat -C PREROUTING -i "$IF" -j SINGBOX_DEVICES 2>/dev/null; do
+        iptables -t nat -D PREROUTING -i "$IF" -j SINGBOX_DEVICES
+    done
+done
+iptables -t nat -F SINGBOX_DEVICES 2>/dev/null
+for c in $(iptables -t nat -S 2>/dev/null | awk '$1 == "-N" && $2 ~ /^SINGBOX_DEV_[0-9]+$/ { print $2 }'); do
+    iptables -t nat -F "$c"; iptables -t nat -X "$c"
+done
+iptables -t nat -X SINGBOX_DEVICES 2>/dev/null
+if [ -f /opt/etc/detour/singbox.enabled ] && [ -s "$DEV_MAP" ]; then
+    iptables -t nat -N SINGBOX_DEVICES
+    i=0
+    while read -r mac mode port uport; do
+        [ -n "$mac" ] || continue
+        i=$((i + 1)); c="SINGBOX_DEV_$i"
+        iptables -t nat -N "$c"
+        [ -f /opt/etc/detour/zapret.enabled ] && \
+            iptables -t nat -A "$c" -p tcp -m set --match-set "$ZAPRET_IPSET" dst -j REDIRECT --to-ports "$ZAPRET_PORT"
+        route_map_slots > /tmp/detour-dev-slots.$$
+        while read -r n id rport ipset; do
+            [ -n "$ipset" ] && iptables -t nat -A "$c" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$rport"
+        done < /tmp/detour-dev-slots.$$
+        rm -f /tmp/detour-dev-slots.$$
+        if [ "$mode" = vpn ] && [ "$port" != 0 ]; then
+            for ip in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 100.64.0.0/10; do
+                iptables -t nat -A "$c" -d "$ip" -j ACCEPT
+            done
+            if [ -n "$UPSTREAM_IPS" ]; then
+                OLD_IFS="$IFS"; IFS=','; set -- $UPSTREAM_IPS; IFS="$OLD_IFS"
+                for ip in "$@"; do
+                    [ -n "$ip" ] && iptables -t nat -A "$c" -d "$ip" -j ACCEPT
+                done
+            fi
+            if [ "$ROUTING_MODE" = "all-except" ]; then
+                iptables -t nat -A "$c" -p tcp -m set --match-set "$WL_IPSET" dst -j ACCEPT 2>/dev/null
+                iptables -t nat -A "$c" -p tcp -j REDIRECT --to-ports "$port"
+            else
+                iptables -t nat -A "$c" -p tcp -m set --match-set "$SINGBOX_IPSET" dst -j REDIRECT --to-ports "$port"
+            fi
+        fi
+        iptables -t nat -A "$c" -j ACCEPT
+        iptables -t nat -A SINGBOX_DEVICES -m mac --mac-source "$mac" -j "$c"
+    done < "$DEV_MAP"
+    for IF in $IFACES; do
+        [ -n "$IF" ] || continue
+        iptables -t nat -I PREROUTING 1 -i "$IF" -j SINGBOX_DEVICES
+    done
 fi
 
 # --- filter INPUT: let the LAN reach the panel (lighttpd :PANEL_PORT) ---

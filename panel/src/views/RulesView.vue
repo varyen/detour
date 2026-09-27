@@ -7,11 +7,12 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import RuleSection from "@/components/rules/RuleSection.vue";
 import ListDrawer from "@/components/rules/ListDrawer.vue";
 import RouteMapEditor from "@/components/rules/RouteMapEditor.vue";
+import DeviceRulesEditor from "@/components/rules/DeviceRulesEditor.vue";
 import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
 import { overview, rules } from "@/api";
-import type { HostsStatus, RoutingMode, RulistStatus, SingboxMode } from "@/api";
+import type { HostsStatus, LanClient, RoutingMode, RulistStatus, SingboxMode } from "@/api";
 import { useStatusStore } from "@/stores/status";
 import { useProfilesStore } from "@/stores/profiles";
 import { useToastStore } from "@/stores/toast";
@@ -561,6 +562,64 @@ const routeCount = computed(() =>
     ? (listText.routemap.match(/^\s*\/\/\s*===\s*route:/gm) ?? []).length
     : asNum(sb.value?.route_targets),
 );
+/* ---------- устройства ---------- */
+const devicesText = ref("");
+const devicesLoaded = ref(false);
+const devicesVpn = ref(true);
+const devicesLoading = ref(false);
+const devicesBusy = ref(false);
+const openDevices = ref(false);
+const lanClients = ref<LanClient[]>([]);
+
+async function loadDevices(force = false) {
+  if (devicesLoaded.value && !force) return;
+  devicesLoading.value = true;
+  try {
+    const [d, c] = await Promise.all([
+      overview.devicesGet(),
+      overview.lanClients().catch(() => null),
+    ]);
+    devicesText.value = d.devices ?? "";
+    devicesVpn.value = d.vpn_supported !== false;
+    lanClients.value = c?.clients ?? [];
+    devicesLoaded.value = true;
+  } catch (e) {
+    toast.fromError(e, "Не удалось загрузить правила устройств");
+  } finally {
+    devicesLoading.value = false;
+  }
+}
+
+async function openDevicesEditor() {
+  openDevices.value = true;
+  await loadDevices(true);
+}
+
+async function saveDevices(text: string) {
+  devicesBusy.value = true;
+  try {
+    await overview.devicesSet(text);
+    devicesText.value = text;
+    openDevices.value = false;
+    toast.ok("Правила устройств применены");
+  } catch (e) {
+    toast.fromError(e, "Не удалось применить правила устройств");
+  } finally {
+    devicesBusy.value = false;
+  }
+}
+
+const devicesCount = computed(
+  () => devicesText.value.split("\n").filter((l) => /^[0-9a-f:]{17}\|/i.test(l)).length,
+);
+const devicesSummary = computed(() =>
+  !devicesLoaded.value
+    ? "свои правила для отдельных устройств"
+    : devicesCount.value
+      ? `${devicesCount.value} ${plural(devicesCount.value, ["устройство", "устройства", "устройств"])} со своим правилом`
+      : "у всех устройств общее правило",
+);
+
 const routeSummary = computed(() =>
   routeCount.value
     ? `${routeCount.value} ${plural(routeCount.value, ["отдельный маршрут", "отдельных маршрута", "отдельных маршрутов"])}`
@@ -648,6 +707,7 @@ async function onExpand(id: string) {
   else if (id === "whitelist") await ensureList("whitelist");
   else if (id === "zapret") await ensureList("zapret");
   else if (id === "routes") await ensureList("routemap");
+  else if (id === "devices") await loadDevices();
   else if (id === "udp") await ensureList("udp");
   else if (id === "egress") await ensureList("egress");
   else if (id === "rulist") await ensureList("ruexclude");
@@ -885,6 +945,26 @@ onBeforeUnmount(() => unregister?.());
         <UiButton :busy="listLoading === 'routemap'" @click="ensureList('routemap', true)">
           Перечитать
         </UiButton>
+      </div>
+    </RuleSection>
+
+    <!-- 5а. Устройства (только роутер: у приложения одно устройство — оно само) -->
+    <RuleSection
+      v-if="!status.isClient"
+      id="rule-devices"
+      title="Устройства"
+      :summary="devicesSummary"
+      :open="!!opened.devices"
+      @toggle="toggle('devices')"
+    >
+      <p class="hint">
+        Отдельное правило для устройства в сети: весь его трафик мимо VPN или
+        через выбранный VPN или цепочку. Сайты из «Отдельных маршрутов» всё
+        равно идут своим путём — маршруты роутера главнее.
+      </p>
+      <div class="row">
+        <UiButton variant="primary" @click="openDevicesEditor">Настроить устройства</UiButton>
+        <UiButton :busy="devicesLoading" @click="loadDevices(true)">Перечитать</UiButton>
       </div>
     </RuleSection>
 
@@ -1232,6 +1312,19 @@ onBeforeUnmount(() => unregister?.());
     :busy="listBusy === 'apply'"
     @close="openRoutes = false"
     @save="(text) => saveList('routemap', true, text)"
+  />
+
+  <DeviceRulesEditor
+    v-if="!status.isClient"
+    :open="openDevices"
+    :text="devicesText"
+    :targets="routeTargets"
+    :clients="lanClients"
+    :vpn-supported="devicesVpn"
+    :loading="devicesLoading"
+    :busy="devicesBusy"
+    @close="openDevices = false"
+    @save="saveDevices"
   />
 </template>
 
