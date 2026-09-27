@@ -3,7 +3,7 @@
    Всё остальное на «Обзоре» — подробности; этой кнопке достаточно выбранного
    профиля. Нет профиля — ведёт туда, где его заводят: в форму со строкой для
    ссылки, если профилей нет вовсе, и в список, если выбрать есть из чего. */
-import { computed, ref } from "vue";
+import { computed, ref, useId } from "vue";
 import { useRouter } from "vue-router";
 import { diag } from "@/api";
 import { useStatusStore } from "@/stores/status";
@@ -15,6 +15,12 @@ const profiles = useProfilesStore();
 const toast = useToastStore();
 const router = useRouter();
 const busy = ref(false);
+
+/* Орбита из символов фонового дождя — набор случайный, но один на всё время
+   жизни плитки, иначе строка мигала бы на каждой перерисовке. */
+const GLYPHS = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモ0123456789<>[]{}/*+-=$#@%&";
+const orbitText = Array.from({ length: 30 }, () => GLYPHS[(Math.random() * GLYPHS.length) | 0]).join("");
+const orbitId = `orbit-${useId()}`;
 
 const running = computed(() => status.singboxRunning);
 const chain = computed(() => status.activeChain);
@@ -88,26 +94,33 @@ async function press() {
       </p>
       <p class="cap">{{ caption }}</p>
     </div>
-    <button
-      class="go"
-      type="button"
-      :class="{ busy }"
-      :disabled="busy"
-      :aria-pressed="state === 'on'"
-      @click="press"
-    >
-      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-        <path d="M12 3v9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" />
-        <path
-          d="M6.3 7.2a8 8 0 1 0 11.4 0"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.4"
-          stroke-linecap="round"
-        />
-      </svg>
-      {{ busy ? (state === "on" ? "Отключаю…" : "Подключаю…") : label }}
-    </button>
+    <div class="knob">
+      <button
+        class="go"
+        type="button"
+        :class="{ busy }"
+        :disabled="busy"
+        :aria-pressed="state === 'on'"
+        :aria-label="busy ? (state === 'on' ? 'Отключаю…' : 'Подключаю…') : label"
+        @click="press"
+      >
+        <svg class="orbit" viewBox="0 0 156 156" aria-hidden="true">
+          <defs>
+            <path :id="orbitId" d="M78 78m-68 0a68 68 0 1 1 136 0a68 68 0 1 1-136 0" />
+          </defs>
+          <text><textPath :href="`#${orbitId}`">{{ orbitText }}</textPath></text>
+        </svg>
+        <svg class="ring" viewBox="0 0 128 128" aria-hidden="true">
+          <circle class="track" cx="64" cy="64" r="60" />
+          <circle class="arc" cx="64" cy="64" r="60" pathLength="360" />
+        </svg>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3v9" />
+          <path d="M6.3 7.2a8 8 0 1 0 11.4 0" />
+        </svg>
+      </button>
+      <span class="label">{{ busy ? (state === "on" ? "Отключаю…" : "Подключаю…") : label }}</span>
+    </div>
   </section>
 </template>
 
@@ -117,10 +130,11 @@ async function press() {
   border-radius: var(--radius);
   background: var(--panel);
   backdrop-filter: blur(10px);
-  padding: 16px;
+  padding: 16px 20px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: space-between;
   gap: 14px 20px;
   min-width: 0;
   height: 100%;
@@ -129,7 +143,7 @@ async function press() {
   border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
 }
 .info {
-  flex: 1 1 220px;
+  flex: 1 1 200px;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -161,51 +175,145 @@ async function press() {
   color: var(--dim);
   overflow-wrap: anywhere;
 }
-.go {
-  flex: 1 1 260px;
-  max-width: 100%;
-  min-height: 60px;
-  display: inline-flex;
+
+/* Круглая кнопка: символы дождя бегут по орбите, внутри кольцо-индикатор.
+   Включено — кольцо замкнуто и светится, орбита быстрее; подключение — по
+   кольцу бежит дуга. */
+.knob {
+  flex: none;
+  margin: 0 auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 10px;
-  border: 1px solid var(--accent);
-  border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-on);
-  font-size: 18px;
-  font-weight: 650;
-  padding: 0 28px;
-  cursor: pointer;
-  transition:
-    filter 0.15s,
-    background 0.15s;
+  gap: 16px;
 }
-.go:hover:not(:disabled) {
-  filter: brightness(1.08);
+.go {
+  --c: var(--accent);
+  position: relative;
+  width: 108px;
+  height: 108px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  padding: 0;
+  background: var(--panel);
+  color: var(--dim);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    box-shadow 0.3s,
+    color 0.2s,
+    transform 0.15s;
 }
 .on .go {
-  background: transparent;
-  color: var(--bad);
-  border-color: color-mix(in srgb, var(--bad) 60%, var(--line-2));
+  --c: var(--ok);
+  color: var(--ok);
+  box-shadow: 0 0 36px color-mix(in srgb, var(--ok) 28%, transparent);
 }
-.on .go:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--bad) 10%, transparent);
-  filter: none;
+.go.busy {
+  color: var(--accent);
+}
+.go:hover:not(:disabled) {
+  color: var(--c);
+}
+.go:active:not(:disabled) {
+  transform: scale(0.96);
 }
 .go:disabled {
   cursor: default;
 }
-.go.busy {
-  animation: pulse 1.1s ease-in-out infinite;
+.go:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 18px;
 }
-@keyframes pulse {
-  50% {
-    opacity: 0.6;
+.icon {
+  position: relative;
+  z-index: 2;
+  width: 38%;
+  height: 38%;
+  overflow: visible;
+}
+.icon path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+.orbit {
+  position: absolute;
+  inset: -14px;
+  width: calc(100% + 28px);
+  height: calc(100% + 28px);
+  animation: turn 22s linear infinite;
+}
+.orbit text {
+  font: 600 10.5px var(--mono);
+  letter-spacing: 2.2px;
+  fill: var(--faint);
+  transition: fill 0.3s;
+}
+.go:hover:not(:disabled) .orbit text {
+  fill: var(--accent);
+}
+.on .orbit {
+  animation-duration: 9s;
+}
+.on .orbit text,
+.on .go:hover .orbit text {
+  fill: var(--ok);
+}
+.go.busy .orbit {
+  animation-duration: 2.2s;
+}
+.ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.ring circle {
+  fill: none;
+  stroke-width: 3;
+}
+.track {
+  stroke: var(--line);
+}
+.arc {
+  stroke: var(--c);
+  stroke-linecap: round;
+  stroke-dasharray: 0 400;
+  transition: stroke-dasharray 0.6s ease;
+}
+.on .arc {
+  stroke-dasharray: 360 400;
+  filter: drop-shadow(0 0 5px var(--ok));
+}
+.go.busy .arc {
+  stroke: var(--accent);
+  stroke-dasharray: 90 400;
+  transform-origin: 64px 64px;
+  animation: turn 1s linear infinite;
+  filter: none;
+}
+.label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dim);
+}
+.on .label {
+  color: var(--ok);
+}
+@keyframes turn {
+  to {
+    transform: rotate(360deg);
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .go.busy {
+  .orbit,
+  .go.busy .arc {
     animation: none;
   }
 }
