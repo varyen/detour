@@ -1285,8 +1285,23 @@ cmd_nfqws2_apply() {
                 || die "install of nfqws2 failed"
         fi
     fi
+    ensure_nfqueue
     cmd_nfqws2_check >/dev/null 2>&1 || true
     log "nfqws2 now at $(nfqws2_installed_version)"
+}
+
+# nfqws2 без NFQUEUE бесполезен: на GL.iNet модуль и цель iptables есть в
+# прошивке, а на чистой OpenWrt их нет — пакет nfqws2 стоял, а zapret2 оставался
+# недоступным. iptables-mod-nfqueue тянет kmod-nfnetlink-queue и kmod-ipt-nfqueue.
+ensure_nfqueue() {
+    local have=1
+    lsmod 2>/dev/null | grep -q '^nfnetlink_queue' || modprobe nfnetlink_queue 2>/dev/null         || lsmod 2>/dev/null | grep -q '^nfnetlink_queue' || have=0
+    [ -e /usr/lib/iptables/libxt_NFQUEUE.so ] || [ -e /usr/lib/xtables/libxt_NFQUEUE.so ] || have=0
+    [ "$have" = 1 ] && return 0
+    log "нет NFQUEUE в ядре или в iptables — ставлю iptables-mod-nfqueue"
+    pkg_install iptables-mod-nfqueue 2>&1         || { log "WARNING: iptables-mod-nfqueue не встал — zapret2 останется недоступен"; return 0; }
+    modprobe nfnetlink_queue 2>/dev/null
+    return 0
 }
 
 # check-all — one cron tick: panel + all three feed binaries. Each runs in a

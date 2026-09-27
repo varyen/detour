@@ -69,6 +69,14 @@ zapret2_supported() {
     lsmod 2>/dev/null | grep -q '^nfnetlink_queue'
 }
 
+# Почему zapret2 недоступен — панель пишет разное: «поставить nfqws2» или
+# «нет модуля ядра NFQUEUE» (на чистой OpenWrt, пока нет iptables-mod-nfqueue).
+zapret2_reason() {
+    [ "$KEENETIC" = 1 ] && { echo keenetic; return; }
+    [ -x "$NFQWS_BIN" ] || { echo no_binary; return; }
+    zapret2_supported || echo no_nfqueue
+}
+
 # Extra inbound interfaces (e.g. a WG server) that should also get DPI bypass —
 # shared with sing-box / zapret-tpws via settings.json "vpn_redirect_ifaces".
 vpn_redirect_ifaces() {
@@ -291,18 +299,19 @@ cmd_boot() {
 }
 
 cmd_status() {
-    local m a sup running plat strat queued
+    local m a sup reason running plat strat queued
     m=$(cat "$MODE_FILE" 2>/dev/null);      [ -n "$m" ] || m=off
     a=$(cat "$AUTOSTART_FILE" 2>/dev/null); [ -n "$a" ] || a=0
     sup=false; zapret2_supported && sup=true
+    reason=""; [ "$sup" = true ] || reason=$(zapret2_reason)
     running=$(running_engine)
     plat=$([ "$KEENETIC" = 1 ] && echo keenetic || echo openwrt)
     strat=$(head -1 "$STRATEGY_FILE" 2>/dev/null); [ -n "$strat" ] || strat="$NFQWS_STRATEGY_DEFAULT"
     strat=$(printf '%s' "$strat" | tr -d '"\\')   # keep JSON valid (strategy normally has neither)
     queued=$(iptables -t mangle -L ZAPRET2_MANGLE -v -n 2>/dev/null | awk '/NFQUEUE/{s+=$1} END{print s+0}')
     [ -n "$queued" ] || queued=0
-    printf '{"mode":"%s","autostart":%s,"running":"%s","zapret2_supported":%s,"platform":"%s","qnum":%s,"queued":%s,"strategy":"%s"}\n' \
-        "$m" "$a" "$running" "$sup" "$plat" "$NFQWS_QNUM" "$queued" "$strat"
+    printf '{"mode":"%s","autostart":%s,"running":"%s","zapret2_supported":%s,"zapret2_reason":"%s","platform":"%s","qnum":%s,"queued":%s,"strategy":"%s"}\n' \
+        "$m" "$a" "$running" "$sup" "$reason" "$plat" "$NFQWS_QNUM" "$queued" "$strat"
 }
 
 case "${1:-status}" in

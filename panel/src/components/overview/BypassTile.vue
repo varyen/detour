@@ -232,6 +232,13 @@ async function saveStrategy() {
           обновления движков
         </RouterLink>.
       </template>
+      <template v-else-if="status.nfqueueMissing">
+        nfqws2 стоит, но в ядре нет NFQUEUE — поставьте модуль кнопкой обновления nfqws2
+        <RouterLink :to="{ path: '/journal', query: { focus: 'updates' } }">
+          в «Журнале»
+        </RouterLink>
+        (или <code>apk add iptables-mod-nfqueue</code>).
+      </template>
       <template v-else>
         zapret2 требует пакет nfqws2 —
         <RouterLink :to="{ path: '/journal', query: { focus: 'updates' } }">

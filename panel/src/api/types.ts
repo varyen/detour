@@ -270,6 +270,8 @@ export interface BypassStatus {
   /** Авторитетный признак: учитывает и платформу, и наличие бинарника nfqws2
       (binaries.nfqws2_supported проверяет только платформу). */
   zapret2_supported?: boolean;
+  /** Почему zapret2 недоступен: нет бинарника или нет NFQUEUE в ядре/iptables. */
+  zapret2_reason?: "" | "keenetic" | "no_binary" | "no_nfqueue";
   platform?: Platform;
   /** Номер очереди NFQUEUE и число отданных в неё пакетов — только для zapret2. */
   qnum?: number;

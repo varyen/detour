@@ -47,6 +47,8 @@ export const useStatusStore = defineStore("status", () => {
       data.value?.binaries?.nfqws2_supported !== false &&
       bypass.value?.zapret2_supported === false,
   );
+  /** nfqws2 стоит, но в ядре или iptables нет NFQUEUE — чистая OpenWrt без iptables-mod-nfqueue. */
+  const nfqueueMissing = computed(() => bypass.value?.zapret2_reason === "no_nfqueue");
   const udpVpnSupported = computed(() => udp.value?.supported !== false && !isKeenetic.value);
 
   /** Реально работающий движок обхода DPI — «none», если ни один. */
@@ -138,6 +140,7 @@ export const useStatusStore = defineStore("status", () => {
     hostGen,
     zapret2Supported,
     nfqws2Missing,
+    nfqueueMissing,
     bypassRunning,
     bypassAutostart,
     udpVpnSupported,
