@@ -5,6 +5,15 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+### Исправлено
+- **Модуль NFQUEUE для zapret2 нельзя было поставить из панели.** Подсказка в
+  «Обходе DPI» отправляла к кнопке обновления nfqws2, а та неактивна, когда
+  nfqws2 уже свежий. Теперь прямо в плитке есть кнопка «Поставить модуль»
+  (`detour-update nfqueue-ensure`, действие `nfqueue_install`), после неё
+  zapret2 включается. Только OpenWrt; на Keenetic NFQUEUE нет вовсе.
+
 ## [2.2.6] — 2026-09-28
 
 ### Исправлено

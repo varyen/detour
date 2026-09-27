@@ -156,6 +156,9 @@ export const diag = {
     requestJson<UpdateChannelState>("nfqws2_update_check", { method: "POST", timeoutMs: 120_000 }),
   nfqws2Apply: () =>
     requestJson<{ ok: boolean }>("nfqws2_update_apply", { method: "POST" }),
+  /** Модуль NFQUEUE для zapret2 на чистой OpenWrt — ставится синхронно. */
+  nfqueueInstall: () =>
+    requestJson<{ ok: boolean }>("nfqueue_install", { method: "POST", timeoutMs: 180_000 }),
   mihomoStatus: () => requestJsonTolerant<UpdateChannelState>("mihomo_update_status"),
   mihomoCheck: () =>
     requestJson<UpdateChannelState>("mihomo_update_check", { method: "POST", timeoutMs: 120_000 }),

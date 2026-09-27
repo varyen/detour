@@ -12,7 +12,7 @@ import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
-import { overview } from "@/api";
+import { diag, overview } from "@/api";
 import type { BypassMode } from "@/api";
 import { useStatusStore } from "@/stores/status";
 import { useToastStore } from "@/stores/toast";
@@ -233,11 +233,13 @@ async function saveStrategy() {
         </RouterLink>.
       </template>
       <template v-else-if="status.nfqueueMissing">
-        nfqws2 стоит, но в ядре нет NFQUEUE — поставьте модуль кнопкой обновления nfqws2
-        <RouterLink :to="{ path: '/journal', query: { focus: 'updates' } }">
-          в «Журнале»
-        </RouterLink>
-        (или <code>apk add iptables-mod-nfqueue</code>).
+        nfqws2 стоит, но в ядре нет модуля NFQUEUE — без него zapret2 не работает.
+        <UiButton
+          :busy="busy === 'nfqueue'"
+          @click="run('nfqueue', diag.nfqueueInstall, 'Модуль NFQUEUE поставлен — zapret2 доступен', 'Не удалось поставить модуль NFQUEUE')"
+        >
+          Поставить модуль
+        </UiButton>
       </template>
       <template v-else>
         zapret2 требует пакет nfqws2 —

@@ -47,6 +47,7 @@
 #   mihomo-apply           — install or upgrade mihomo (AmneziaWG sidecar) from the feed
 #   mihomo-check           — check the feed for a newer mihomo
 #   mihomo-remove          — stop the AWG sidecar and remove mihomo
+#   nfqueue-ensure         — поставить NFQUEUE (iptables-mod-nfqueue) для zapret2
 #   mihomo-ensure          — поставить mihomo, если есть AWG-профили и движок не «singbox»
 #   netfilter-ensure       — поставить iptables-nft (+tproxy), если iptables нет вовсе
 #   rollback              — re-install the previous panel .ipk from backup
@@ -1314,9 +1315,20 @@ cmd_nfqws2_apply() {
 # nfqws2 без NFQUEUE бесполезен: на GL.iNet модуль и цель iptables есть в
 # прошивке, а на чистой OpenWrt их нет — пакет nfqws2 стоял, а zapret2 оставался
 # недоступным. iptables-mod-nfqueue тянет kmod-nfnetlink-queue и kmod-ipt-nfqueue.
+# Отдельная команда для кнопки «Поставить модуль» в панели: когда nfqws2 уже
+# свежий, кнопка обновления неактивна и до ensure_nfqueue было не добраться.
+cmd_nfqueue_ensure() {
+    [ "$KEENETIC" = 1 ] && die "на Keenetic NFQUEUE нет"
+    ensure_nfqueue
+    lsmod 2>/dev/null | grep -q '^nfnetlink_queue' \
+        || die "модуль nfnetlink_queue так и не загрузился — нужна проверка вручную: apk add iptables-mod-nfqueue"
+    log "NFQUEUE на месте"
+}
+
 ensure_nfqueue() {
     local have=1
-    lsmod 2>/dev/null | grep -q '^nfnetlink_queue' || modprobe nfnetlink_queue 2>/dev/null         || lsmod 2>/dev/null | grep -q '^nfnetlink_queue' || have=0
+    lsmod 2>/dev/null | grep -q '^nfnetlink_queue' || modprobe nfnetlink_queue 2>/dev/null \
+        || lsmod 2>/dev/null | grep -q '^nfnetlink_queue' || have=0
     [ -e /usr/lib/iptables/libxt_NFQUEUE.so ] || [ -e /usr/lib/xtables/libxt_NFQUEUE.so ] || have=0
     [ "$have" = 1 ] && return 0
     log "нет NFQUEUE в ядре или в iptables — ставлю iptables-mod-nfqueue"
@@ -1631,6 +1643,7 @@ case "$ACTION" in
     mihomo-remove)     cmd_mihomo_remove ;;
     netfilter-ensure)  cmd_netfilter_ensure ;;
     mihomo-ensure)     cmd_mihomo_ensure ;;
+    nfqueue-ensure)    cmd_nfqueue_ensure ;;
     mihomo-status)     cat "$MIHOMO_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
     nfqws2-check)      cmd_nfqws2_check ;;
     nfqws2-apply)      cmd_nfqws2_apply ;;

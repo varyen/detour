@@ -3217,6 +3217,18 @@ nfqws2_update_check)
     fi
     ;;
 
+# Модуль NFQUEUE для zapret2 (чистая OpenWrt). Синхронно: пакет маленький.
+nfqueue_install)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    NQ_OUT=$("$UPDATE_BIN" nfqueue-ensure 2>&1)
+    if [ $? -eq 0 ]; then
+        json_ok
+    else
+        json_err "$(printf '%s' "$NQ_OUT" | grep -v '^\[detour-update\] [^E]' | tail -2 | json_escape)"
+    fi
+    ;;
+
 nfqws2_update_apply)
     # opkg update + upgrade nfqws2 from our feed (via the updater). Detached + live
     # log (apply_log).
