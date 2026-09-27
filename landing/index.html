@@ -183,6 +183,43 @@ footer .wrap{display:flex;flex-wrap:wrap;align-items:center;gap:12px 28px}
 footer a{color:var(--ink-2);text-decoration:none}
 footer .logo{font-size:15px;color:var(--ink-2)}
 footer .logo svg{width:20px;height:20px}
+/* первый экран: живая кнопка питания из панели — выноска на чертеже.
+   Цвета — светлая тема панели, а не лендинга: это кусок интерфейса. */
+.pw-demo{position:absolute;z-index:2;right:max(20px,calc((100vw - var(--wrap))/2 - 60px));top:50%;transform:translateY(calc(-30% - 56px));
+  --p-accent:#0d7c8c;--p-ok:#1f8a5b;--p-dim:#55707f;--p-faint:#86a0ad;--p-line:rgba(20,50,70,.14);--p-line-2:rgba(20,50,70,.28);
+  display:flex;flex-direction:column-reverse;align-items:center;gap:6px;padding:14px 22px 20px;text-align:center;border:1px solid var(--p-line);border-radius:14px;
+  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);box-shadow:0 20px 50px rgba(16,32,43,.16);
+  font-family:system-ui,"Segoe UI",Roboto,sans-serif;transition:border-color .3s}
+.pw-demo.on{border-color:color-mix(in srgb,var(--p-ok) 45%,var(--p-line))}
+.pw-demo::before{content:"панель · главная кнопка";position:absolute;left:50%;transform:translateX(-50%);white-space:nowrap;top:-22px;font:500 11px var(--mono);color:var(--ink-3);letter-spacing:.04em}
+.pw-demo .st{margin:0;display:flex;align-items:center;justify-content:center;gap:8px;font-size:16px;font-weight:650;color:#10202b;white-space:nowrap}
+.pw-demo .st i{width:9px;height:9px;border-radius:50%;background:var(--p-faint);transition:background .3s,box-shadow .3s}
+.pw-demo.on .st i{background:var(--p-ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--p-ok) 22%,transparent)}
+.pw-demo .sub{margin:4px 0 0;font-size:12.5px;color:var(--p-dim);white-space:nowrap}
+.pw-demo .kn{display:flex;flex-direction:column;align-items:center;gap:14px;padding:14px}
+.pw-demo .go{--c:var(--p-accent);position:relative;width:96px;height:96px;border-radius:50%;border:1px solid var(--p-line-2);padding:0;background:#fff;color:var(--p-dim);
+  display:grid;place-items:center;cursor:pointer;transition:box-shadow .3s,color .2s,transform .15s;-webkit-tap-highlight-color:transparent}
+.pw-demo.on .go{--c:var(--p-ok);color:var(--p-ok);box-shadow:0 0 34px color-mix(in srgb,var(--p-ok) 30%,transparent)}
+.pw-demo.busy .go{color:var(--p-accent)}
+.pw-demo .go:active{transform:scale(.96)}
+.pw-demo .go:focus-visible{outline:2px solid var(--p-accent);outline-offset:16px}
+.pw-demo .ic{position:relative;z-index:2;width:38%;height:38%;overflow:visible}
+.pw-demo .ic path{fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round}
+.pw-demo .orb{position:absolute;inset:-13px;width:calc(100% + 26px);height:calc(100% + 26px);animation:pw-turn 22s linear infinite}
+.pw-demo .orb text{font:600 10.5px var(--mono);letter-spacing:2px;fill:var(--p-faint);transition:fill .3s}
+.pw-demo.on .orb{animation-duration:9s}.pw-demo.on .orb text{fill:var(--p-ok)}
+.pw-demo.busy .orb{animation-duration:2.2s}.pw-demo.busy .orb text{fill:var(--p-accent)}
+.pw-demo .rg{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg)}
+.pw-demo .rg circle{fill:none;stroke-width:3}
+.pw-demo .rg .tr{stroke:var(--p-line)}
+.pw-demo .rg .ar{stroke:var(--c);stroke-linecap:round;stroke-dasharray:0 400;transition:stroke-dasharray .6s ease}
+.pw-demo.on .rg .ar{stroke-dasharray:360 400;filter:drop-shadow(0 0 5px var(--p-ok))}
+.pw-demo.busy .rg .ar{stroke:var(--p-accent);stroke-dasharray:90 400;transform-origin:64px 64px;animation:pw-turn 1s linear infinite}
+.pw-demo .lb{font-size:12.5px;font-weight:600;color:var(--p-dim)}
+.pw-demo.on .lb{color:var(--p-ok)}
+@keyframes pw-turn{to{transform:rotate(360deg)}}
+@media(max-width:820px){.pw-demo{position:relative;right:auto;top:auto;transform:none;order:3;margin:76px 16px 36px;align-self:center}}
+@media(prefers-reduced-motion:reduce){.pw-demo .orb,.pw-demo.busy .rg .ar{animation:none}}
 @media(prefers-reduced-motion:reduce){.scheme .flow{animation:none}html{scroll-behavior:auto}}
 </style>
 </head>
@@ -219,6 +256,20 @@ footer .logo svg{width:20px;height:20px}
       <dt>протоколы</dt><dd>VLESS · Trojan · VMess · Shadowsocks · WireGuard · AmneziaWG · Hysteria2 · TUIC · AnyTLS · SOCKS/HTTP</dd>
     </dl>
   </div></div>
+  <div class="pw-demo" id="pw-demo">
+    <div>
+      <p class="st"><i aria-hidden="true"></i><span data-st>VPN выключен</span></p>
+      <p class="sub" data-sub>Отключено · Example VPN</p>
+    </div>
+    <div class="kn">
+      <button class="go" type="button" aria-label="Демонстрация кнопки питания панели">
+        <svg class="orb" viewBox="0 0 156 156" aria-hidden="true"><defs><path id="pw-orb" d="M78 78m-68 0a68 68 0 1 1 136 0a68 68 0 1 1-136 0"/></defs><text><textPath href="#pw-orb" data-orb>アイウエオカキクケコサシスセソタチツテト0123456789&lt;&gt;[]</textPath></text></svg>
+        <svg class="rg" viewBox="0 0 128 128" aria-hidden="true"><circle class="tr" cx="64" cy="64" r="60"/><circle class="ar" cx="64" cy="64" r="60" pathLength="360"/></svg>
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9"/><path d="M6.3 7.2a8 8 0 1 0 11.4 0"/></svg>
+      </button>
+      <span class="lb" data-lb>Подключиться</span>
+    </div>
+  </div>
 </section>
 
 <div class="wrap">
@@ -414,6 +465,37 @@ opkg install /tmp/detour-keenetic_2.1.2_all.ipk</pre>
   <span>Страны узлов — <a href="https://db-ip.com">IP Geolocation by DB-IP</a></span>
 </div></footer>
 
+<script>
+/* Кнопка питания на первом экране — демонстрация, никуда не ходит: сама
+   перебирает «выключен → подключаю… → включён», клик переключает вручную. */
+(function () {
+  var box = document.getElementById('pw-demo');
+  if (!box) return;
+  var G = 'アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモ0123456789<>[]{}/*+-=$#@%&';
+  var t = ''; for (var i = 0; i < 30; i++) t += G[(Math.random() * G.length) | 0];
+  box.querySelector('[data-orb]').textContent = t;
+  var st = box.querySelector('[data-st]'), sub = box.querySelector('[data-sub]'), lb = box.querySelector('[data-lb]');
+  var state = 'off', timer = 0;
+  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function set(s) {
+    state = s;
+    box.classList.toggle('on', s === 'on');
+    box.classList.toggle('busy', s === 'busy' || s === 'busy-off');
+    st.textContent = s === 'on' || s === 'busy-off' ? 'VPN включён' : 'VPN выключен';
+    sub.textContent = (s === 'on' || s === 'busy-off' ? 'Подключено' : 'Отключено') + ' · Example VPN';
+    lb.textContent = s === 'busy' ? 'Подключаю…' : s === 'busy-off' ? 'Отключаю…' : s === 'on' ? 'Отключиться' : 'Подключиться';
+  }
+  function step() {
+    clearTimeout(timer);
+    if (state === 'off') { set('busy'); timer = setTimeout(step, 1700); }
+    else if (state === 'busy') { set('on'); if (!reduced) timer = setTimeout(step, 6500); }
+    else if (state === 'on') { set('busy-off'); timer = setTimeout(step, 1100); }
+    else { set('off'); if (!reduced) timer = setTimeout(step, 2600); }
+  }
+  box.querySelector('.go').addEventListener('click', step);
+  timer = setTimeout(step, reduced ? 0 : 1400);
+})();
+</script>
 <script>
 /* Параллакс фоновых слоёв: двигаются только элементы с data-parallax (доля от
    прокрутки), кадры и ролики не трогаются. Считаем в rAF по данным
