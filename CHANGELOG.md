@@ -5,7 +5,7 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [2.2.3] — 2026-09-27
 
 ### Исправлено
 - **«Отключиться» не выключал VPN, а сразу показывал «включён» снова.**
