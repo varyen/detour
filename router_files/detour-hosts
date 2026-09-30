@@ -200,6 +200,7 @@ do_filter() {
 do_apply() {
     want=0
     [ "$ENABLED" = "true" ] && [ -s "$LIST" ] && supported && want=1
+    [ -f "$DETOUR_DIR/power.off" ] && want=0   # панель остановлена целиком (detour-power off)
     changed=0
     # Drop the legacy /tmp/dnsmasq.d snippet (it pointed at /etc/detour, outside
     # the dnsmasq ujail, and silently failed to load — superseded by $SERVED).

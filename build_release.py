@@ -178,6 +178,8 @@ PANEL_FILES = [
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
     (("router_files", "detour-bypass"), "usr/sbin/detour-bypass", 0o755),
     (("router_files", "detour-bypass.initd"), "etc/init.d/detour-bypass", 0o755),
+    # Полная остановка панели («полный bypass») и её бесследное удаление.
+    (("router_files", "detour-power"), "usr/sbin/detour-power", 0o755),
     # Syslog log-bridge: tails Detour's log files → `logger` so a remote-log
     # target captures them. Gated by the log_to_syslog setting (off by default).
     (("router_files", "detour-logbridge"), "usr/sbin/detour-logbridge", 0o755),
@@ -481,7 +483,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
     /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-warp /usr/sbin/detour-meter /usr/sbin/detour-offload /usr/sbin/detour-portmap /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
     /usr/sbin/detour-rulist /usr/sbin/detour-torrent \\
-    /usr/sbin/detour-bypass /etc/init.d/detour-bypass \\
+    /usr/sbin/detour-bypass /etc/init.d/detour-bypass /usr/sbin/detour-power \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
     /usr/sbin/detour-awg /etc/init.d/detour-awg \\
     /www/cgi-bin/detour-api 2>/dev/null
@@ -664,6 +666,13 @@ fi
 if [ -d /etc/opkg ]; then
     mkdir -p /etc/opkg/keys
     chmod 0755 /etc/opkg/keys
+fi
+
+# 6) Панель была остановлена целиком (detour-power off) — обновление её не
+# «оживляет»: init-скрипты уже no-op по маркеру, а cron-строки, которые шаг 4
+# только что вернул, и проброс сервисов снимаются здесь снова.
+if [ -f /etc/detour/power.off ] && [ -x /usr/sbin/detour-power ]; then
+    /usr/sbin/detour-power reassert >/dev/null 2>&1
 fi
 
 echo "detour $VERSION installed."

@@ -916,6 +916,7 @@ udp_vpn_apply() {
 }
 
 start_service() {
+    [ -f /etc/detour/power.off ] && return 0   # панель остановлена целиком (detour-power off)
     # Disable broken MPTCP (QSDK kernel + some MediaTek kernels)
     sysctl -w net.mptcp.enabled=0 >/dev/null 2>&1
 
@@ -1305,7 +1306,9 @@ stop_service() {
     # Strict route blocks stay fail-closed even after a manual stop: keep only the
     # per-target REDIRECTs for strict route sections so matching traffic still hits
     # a closed local port instead of leaking through the active/direct path.
-    route_map_strict_slots | while read -r n id port ipset; do
+    # Исключение — полная остановка панели (detour-power off): там пользователь
+    # явно выбрал «всё напрямую», строгие блоки тоже снимаются.
+    [ -f /etc/detour/power.off ] || route_map_strict_slots | while read -r n id port ipset; do
         iptables -t nat -I PREROUTING 1 -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
         for VIF in $(vpn_redirect_ifaces); do
             [ -n "$VIF" ] || continue
@@ -1316,7 +1319,7 @@ stop_service() {
     # То же для UDP строгих целей: udp_vpn_down выше снял всю цепочку, поднимаем её
     # заново в режиме "off" — там остаются ТОЛЬКО правила strict-целей. QUIC
     # размеченного сайта упрётся в мёртвый порт (fail-closed), а не уйдёт напрямую.
-    if [ -n "$(route_map_strict_slots)" ]; then
+    if [ ! -f /etc/detour/power.off ] && [ -n "$(route_map_strict_slots)" ]; then
         udp_vpn_up off
     fi
 

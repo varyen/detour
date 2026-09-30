@@ -96,6 +96,8 @@ FILES = [
     # returned "detour-bypass not installed". zapret2 (NFQUEUE) is OpenWrt-only — on
     # Keenetic the shared source drives only off/zapret. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-bypass"), "opt/sbin/detour-bypass", 0o755, True),
+    # Полная остановка панели («полный bypass») и её бесследное удаление.
+    (os.path.join(ROUTER_FILES, "detour-power"), "opt/sbin/detour-power", 0o755, True),
     # VPN endpoint health probe (shared source, /opt shim). Driven by the
     # S90detour-cron loop below (KeeneticOS kills crond's job shell — see below).
     (os.path.join(ROUTER_FILES, "vpn-keepalive"), "opt/sbin/vpn-keepalive", 0o755, True),
@@ -303,7 +305,7 @@ fi
 # dist туда же напрямую — этих файлов opkg не знает и не тронет.
 rm -rf /opt/share/www/detour-next
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
-    /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-cron \
+    /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-power /opt/sbin/detour-cron \
     /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp /opt/sbin/detour-geo /opt/sbin/detour-trafficlog \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
@@ -394,6 +396,11 @@ fi
 /opt/etc/init.d/S91detour-logbridge restart 2>/dev/null
 # AmneziaWG-сайдкар: no-op без mihomo и без AWG-профилей.
 /opt/etc/init.d/S55detour-awg restart 2>/dev/null
+# Панель была остановлена целиком (detour-power off): S5x/S90 уже no-op по маркеру,
+# а здесь заново снимаются правила и проброс сервисов, если что-то успело подняться.
+if [ -f /opt/etc/detour/power.off ] && [ -x /opt/sbin/detour-power ]; then
+    /opt/sbin/detour-power reassert >/dev/null 2>&1
+fi
 echo ""
 echo "detour-keenetic {version} installed."
 echo "  Panel:  http://<router-ip>:8080/detour/"

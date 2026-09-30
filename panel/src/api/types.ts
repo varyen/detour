@@ -142,6 +142,8 @@ export interface StatusResponse {
   zapret: ZapretStatus;
   system: SystemStatus;
   wan_link?: WanLink;
+  /** Панель остановлена целиком (detour-power off): все правила сняты. */
+  power_off?: boolean;
 }
 
 export interface ProfileSummary {
@@ -319,6 +321,18 @@ export interface UpdatesOverview {
   tpws?: UpdateChannelState;
   nfqws2?: UpdateChannelState;
   mihomo?: UpdateChannelState;
+}
+
+/** Один пункт проверки остановки: сколько «живых» штук (0 — снято). */
+export interface PowerCheckItem {
+  id: string;
+  title: string;
+  n: number;
+}
+export interface PowerCheck {
+  ok?: boolean;
+  off: boolean;
+  items: PowerCheckItem[];
 }
 
 export interface ApplyLogResponse {

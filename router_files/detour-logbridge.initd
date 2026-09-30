@@ -19,6 +19,7 @@ syslog_enabled() {
 }
 
 start_service() {
+    [ -f /etc/detour/power.off ] && return 0   # панель остановлена целиком (detour-power off)
     syslog_enabled || return 0          # master toggle off → don't start
     [ -x "$PROG" ] || return 0
     procd_open_instance

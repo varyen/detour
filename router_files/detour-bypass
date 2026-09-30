@@ -251,6 +251,10 @@ start_zapret2() {
 }
 
 apply_mode() {
+    if [ "$1" != off ] && [ -f "$DETOUR_DIR/power.off" ]; then
+        log "панель остановлена целиком (detour-power off) — движок не поднимаю"
+        return 0
+    fi
     stop_all
     case "$1" in
         off)     log "engines stopped (mode off)" ;;

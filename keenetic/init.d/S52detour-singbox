@@ -98,6 +98,10 @@ status() {
 # running state). The flag lives under /opt/etc/detour, so a service the operator
 # turned off stays off across reinstalls and reboots.
 set_autostart() { mkdir -p "$(dirname "$AUTOSTART")" 2>/dev/null; echo "$1" > "$AUTOSTART"; }
+# Панель остановлена целиком (detour-power off) — ничего не поднимаем.
+case "$1" in start|force-start|restart|reconfigure|restart-daemon|reload)
+    [ -f /opt/etc/detour/power.off ] && { echo "$0: detour остановлен (detour-power)"; exit 0; } ;;
+esac
 case "$1" in
     start)
         [ "$(cat "$AUTOSTART" 2>/dev/null)" = "0" ] && { echo "$NAME: autostart disabled"; exit 0; }

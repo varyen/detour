@@ -14,6 +14,10 @@
 export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 BIN=/opt/sbin/detour-bypass
 
+# Панель остановлена целиком (detour-power off) — ничего не поднимаем.
+case "$1" in start|force-start|restart|reconfigure|restart-daemon|reload)
+    [ -f /opt/etc/detour/power.off ] && { echo "$0: detour остановлен (detour-power)"; exit 0; } ;;
+esac
 case "$1" in
     start|force-start) [ -x "$BIN" ] && "$BIN" boot ;;
     stop) ;;   # leave the running engine; a real reboot tears it all down anyway

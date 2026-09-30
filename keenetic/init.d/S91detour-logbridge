@@ -45,6 +45,10 @@ stop() {
     rm -f "$PIDF"
 }
 
+# Панель остановлена целиком (detour-power off) — ничего не поднимаем.
+case "$1" in start|force-start|restart|reconfigure|restart-daemon|reload)
+    [ -f /opt/etc/detour/power.off ] && { echo "$0: detour остановлен (detour-power)"; exit 0; } ;;
+esac
 case "$1" in
     start)   start ;;
     stop)    stop ;;

@@ -699,9 +699,15 @@ write_htpasswd() {  # $1 id  $2 user  $3 password
 
 apply_all() {
     _rc=0
+    # Панель остановлена целиком (detour-power off): публикации гасим, записи
+    # остаются в $CONF и вернутся при включении.
+    if [ -f "$DETOUR_DIR/power.off" ]; then
+        _conf_saved=$CONF; CONF=/dev/null
+    fi
     render_nginx    || _rc=1
     render_lighttpd || _rc=1
     if [ "$PLATFORM" = keenetic ]; then sync_firewall_keenetic; else sync_firewall_openwrt; fi
+    [ -n "${_conf_saved:-}" ] && CONF=$_conf_saved
     return $_rc
 }
 

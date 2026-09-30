@@ -1,0 +1,562 @@
+#!/bin/sh
+# detour-power — полная остановка панели («полный bypass») и её бесследное удаление.
+#
+#   off        остановить ВСЁ: sing-box/mihomo, обход DPI, AWG, hosts, лог-мост,
+#              планировщик, правила файрвола (перехват, устройства, UDP, IPv6,
+#              торренты, счётчики, reply-routing, запрет адресов), проброс сервисов.
+#              Весь трафик идёт напрямую, как без панели. Настройки не трогаются.
+#              Сама панель (веб-интерфейс) остаётся доступной — чтобы включить обратно.
+#   on         вернуть то, что работало перед `off`.
+#   reassert   если остановлено — снова всё снять (postinst после обновления).
+#   status     JSON: {"off":bool,"since":<unix>}
+#   check      JSON: что из Detour сейчас живо (процессы, правила, расписание)
+#   fw-purge [iptables|ip6tables]
+#              снести все наши правила/цепочки/таблицы (страховка поверх
+#              штатных стопов; ndm-хук Keenetic зовёт его в выключенном состоянии).
+#   uninstall [--keep-engines]
+#              off + удалить пакет панели, движки (если не --keep-engines),
+#              настройки, профили, ключи, фид, keeplist, cron, конфиги веб-сервера.
+#
+# Маркер остановки лежит в каталоге настроек (переживает перезагрузку и
+# обновление): init-скрипты, detour-bypass, detour-hosts, detour-portmap и
+# hotplug-сторож видят его и ничего не поднимают.
+set -u
+
+KEENETIC=0
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then KEENETIC=1; fi
+
+if [ "$KEENETIC" = 1 ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    O=/opt
+    DETOUR_DIR=/opt/etc/detour
+    SBIN=/opt/sbin
+    INITD=/opt/etc/init.d
+    LAN_IF=br0
+    [ -f "$DETOUR_DIR/detour.conf" ] && . "$DETOUR_DIR/detour.conf" 2>/dev/null
+    PKG_PANEL=detour-keenetic
+    OPKG_STATUS=/opt/lib/opkg/status
+else
+    O=""
+    DETOUR_DIR=/etc/detour
+    SBIN=/usr/sbin
+    INITD=/etc/init.d
+    LAN_IF=br-lan
+    PKG_PANEL=detour
+    OPKG_STATUS=/usr/lib/opkg/status
+fi
+
+MARK="$DETOUR_DIR/power.off"
+STATE="$DETOUR_DIR/power.state"      # что работало перед остановкой: key=value
+CRON_SAVE="$DETOUR_DIR/power.cron"   # снятые строки crontab (OpenWrt)
+FWUSER_SAVE="$DETOUR_DIR/power.fwuser"
+FIREWALL_USER=/etc/firewall.user
+FW_BLOCK_BEGIN="# DETOUR_EGRESS_BLOCK_BEGIN"
+FW_BLOCK_END="# DETOUR_EGRESS_BLOCK_END"
+CRON_PAT='detour-|subscription-refresh|vpn-keepalive'
+# Всё, что создаёт стек в iptables: свои цепочки, переходы в них и правила по
+# нашим ipset'ам/портам. Панельный ACCEPT на Keenetic (INPUT --dport 8080) и
+# фоллбэк-разметка LAN сюда не попадают — они должны пережить остановку.
+CHAIN_RE='^(SINGBOX_|ZAPRET|DETOUR_|UDP_VPN$|DISCORD_VPN$)'
+RULE_RE='(SINGBOX_|ZAPRET|DETOUR_|UDP_VPN|DISCORD_VPN|singbox_|zapret_|--to-ports (1081|12345|5354)( |$)|--on-port 12[3-9][0-9]{2}( |$))'
+
+log() { logger -t detour-power -- "$*" 2>/dev/null; echo "[detour-power] $*"; }
+
+is_off() { [ -f "$MARK" ]; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+svc() {  # $1 имя (OpenWrt) или файл S* (Keenetic), $2 действие
+    [ -x "$INITD/$1" ] && "$INITD/$1" "$2" >/dev/null 2>&1
+    return 0
+}
+
+procd_running() {  # $1 имя procd-сервиса
+    have ubus || return 1
+    ubus call service list "{\"name\":\"$1\"}" 2>/dev/null | grep -q '"running": *true'
+}
+
+state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1; }
+
+# ---------------------------------------------------------------------------
+# Что сейчас работает — чтобы `on` вернул именно это, а не «всё подряд».
+record_state() {
+    _sb=0; _zp=0; _dns=0
+    if [ "$KEENETIC" = 1 ]; then
+        [ -f "$DETOUR_DIR/singbox.enabled" ] && _sb=1
+        [ -f "$DETOUR_DIR/zapret.enabled" ] && _zp=1
+        [ -f "$DETOUR_DIR/dns.enabled" ] && _dns=1
+    else
+        procd_running sing-box && _sb=1
+        procd_running zapret-tpws && _zp=1
+    fi
+    _bp=""
+    [ -x "$SBIN/detour-bypass" ] && \
+        _bp=$("$SBIN/detour-bypass" status 2>/dev/null | sed -n 's/.*"running":"\([a-z0-9]*\)".*/\1/p')
+    case "$_bp" in zapret|zapret2) ;; *) _bp="" ;; esac   # status отдаёт "none", когда движок не запущен
+    mkdir -p "$DETOUR_DIR"
+    {
+        echo "since=$(date +%s)"
+        echo "singbox=$_sb"
+        echo "zapret=$_zp"
+        echo "bypass=$_bp"
+        echo "dns=$_dns"
+    } > "$STATE"
+}
+
+# ---------------------------------------------------------------------------
+fw_purge_ipt() {  # $1 iptables | ip6tables
+    _ipt=$1
+    have "$_ipt" || return 0
+    have "$_ipt-save" || return 0
+    for _t in nat mangle filter raw; do
+        "$_ipt-save" -t "$_t" 2>/dev/null | grep '^-A ' | grep -E -- "$RULE_RE" | sed 's/^-A /-D /' | \
+            while IFS= read -r _r; do eval "$_ipt -t $_t $_r" 2>/dev/null; done
+        _chains=$("$_ipt-save" -t "$_t" 2>/dev/null | sed -n 's/^:\([^ ]*\) .*/\1/p' | grep -E "$CHAIN_RE")
+        for _c in $_chains; do "$_ipt" -t "$_t" -F "$_c" 2>/dev/null; done
+        for _c in $_chains; do "$_ipt" -t "$_t" -X "$_c" 2>/dev/null; done
+    done
+    if [ "$_ipt" = ip6tables ]; then
+        # IPv6-заслонка «пока VPN включён» и исключения устройств из неё (Keenetic).
+        ip6tables-save -t filter 2>/dev/null | grep '^-A FORWARD ' | \
+            grep -E -- '(-j REJECT --reject-with icmp6-adm-prohibited$|detour-dev)' | sed 's/^-A /-D /' | \
+            while IFS= read -r _r; do eval "ip6tables -t filter $_r" 2>/dev/null; done
+    fi
+}
+
+fw_purge_nft() {
+    have nft || return 0
+    for _tb in $(nft list tables 2>/dev/null | awk '$1=="table" && $3 ~ /^detour_/ {print $2" "$3}' | tr ' ' ':'); do
+        nft delete table "${_tb%%:*}" "${_tb#*:}" 2>/dev/null
+    done
+    # ACCEPT'ы портов прокси во входной цепочке fw4 (open_port_lan в init-скриптах).
+    for _ch in input_lan input; do
+        nft -a list chain inet fw4 "$_ch" 2>/dev/null | \
+            sed -n 's/.*comment "\(sing-box proxy\|zapret-tpws\|detour[^"]*\)".*# handle \([0-9]*\)$/\2/p' | \
+            while read -r _h; do nft delete rule inet fw4 "$_ch" handle "$_h" 2>/dev/null; done
+    done
+}
+
+fw_purge() {  # $1 = пусто | iptables | ip6tables
+    case "${1:-}" in
+        iptables)  fw_purge_ipt iptables ;;
+        ip6tables) fw_purge_ipt ip6tables ;;
+        *)         fw_purge_ipt iptables; fw_purge_ipt ip6tables; fw_purge_nft ;;
+    esac
+    # Политика маршрутизации UDP→VPN (sing-box.initd, таблица 106).
+    if have ip; then
+        while ip rule del table 106 2>/dev/null; do :; done
+        ip route flush table 106 2>/dev/null
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+cron_strip() {
+    if [ "$KEENETIC" = 1 ]; then return 0; fi   # на Keenetic расписание — демон S90
+    have crontab || return 0
+    _cur=$(crontab -l 2>/dev/null)
+    _ours=$(printf '%s\n' "$_cur" | grep -E "$CRON_PAT")
+    [ -n "$_ours" ] || return 0
+    printf '%s\n' "$_ours" > "$CRON_SAVE"
+    printf '%s\n' "$_cur" | grep -vE "$CRON_PAT" | grep -v '^$' | crontab - 2>/dev/null
+    [ -x /etc/init.d/cron ] && /etc/init.d/cron restart >/dev/null 2>&1
+    return 0
+}
+
+cron_restore() {
+    [ "$KEENETIC" = 1 ] && return 0
+    [ -s "$CRON_SAVE" ] || return 0
+    have crontab || return 0
+    { crontab -l 2>/dev/null | grep -vE "$CRON_PAT"; cat "$CRON_SAVE"; } | grep -v '^$' | crontab - 2>/dev/null
+    rm -f "$CRON_SAVE"
+    [ -x /etc/init.d/cron ] && /etc/init.d/cron restart >/dev/null 2>&1
+    return 0
+}
+
+# Блок «запрет адресов» в /etc/firewall.user (fw3 выполняет его на каждой
+# перезагрузке файрвола) — убираем на время остановки, иначе он вернётся сам.
+fwuser_strip() {
+    [ "$KEENETIC" = 1 ] && return 0
+    [ -f "$FIREWALL_USER" ] || return 0
+    grep -qxF "$FW_BLOCK_BEGIN" "$FIREWALL_USER" || return 0
+    awk -v b="$FW_BLOCK_BEGIN" -v e="$FW_BLOCK_END" '
+        $0==b {s=1} s==1 {print} $0==e {s=0}' "$FIREWALL_USER" > "$FWUSER_SAVE"
+    awk -v b="$FW_BLOCK_BEGIN" -v e="$FW_BLOCK_END" '
+        $0==b {s=1; next} $0==e {s=0; next} s!=1 {print}' "$FIREWALL_USER" > "$FIREWALL_USER.tmp.$$" \
+        && mv "$FIREWALL_USER.tmp.$$" "$FIREWALL_USER"
+}
+
+fwuser_restore() {
+    [ "$KEENETIC" = 1 ] && return 0
+    [ -s "$FWUSER_SAVE" ] || return 0
+    cat "$FWUSER_SAVE" >> "$FIREWALL_USER"
+    sh "$FWUSER_SAVE" >/dev/null 2>&1
+    rm -f "$FWUSER_SAVE"
+}
+
+# Фоновые проверки держат временные экземпляры sing-box — гасим их вместе с циклом.
+kill_workers() {
+    for _p in $(pgrep -f "$SBIN/detour-health" 2>/dev/null); do kill "$_p" 2>/dev/null; done
+    for _p in $(pgrep -f 'sing-box run -c /tmp/detour-' 2>/dev/null); do kill "$_p" 2>/dev/null; done
+    for _p in $(pgrep -f 'mihomo .*-d /tmp/detour-' 2>/dev/null); do kill "$_p" 2>/dev/null; done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+teardown() {
+    if [ "$KEENETIC" = 1 ]; then
+        svc S90detour-cron stop
+        kill_workers
+        svc S91detour-logbridge stop
+        svc S55detour-awg stop
+        [ -x "$SBIN/detour-bypass" ] && "$SBIN/detour-bypass" stop >/dev/null 2>&1
+        svc S53detour-zapret stop
+        svc S52detour-singbox stop
+        svc S50detour-dns stop
+        [ -x "$SBIN/detour-portmap" ] && "$SBIN/detour-portmap" apply >/dev/null 2>&1
+    else
+        cron_strip
+        kill_workers
+        svc detour-logbridge stop
+        svc detour-awg stop
+        [ -x "$SBIN/detour-bypass" ] && "$SBIN/detour-bypass" stop >/dev/null 2>&1
+        svc zapret-tpws stop
+        svc sing-box stop
+        svc detour-hosts stop
+        fwuser_strip
+        [ -x "$SBIN/detour-portmap" ] && "$SBIN/detour-portmap" apply >/dev/null 2>&1
+    fi
+    [ -x "$SBIN/detour-torrent" ] && "$SBIN/detour-torrent" clear >/dev/null 2>&1
+    [ -x "$SBIN/detour-meter" ]   && "$SBIN/detour-meter" remove >/dev/null 2>&1
+    [ -x "$SBIN/detour-wanpin" ]  && "$SBIN/detour-wanpin" clear >/dev/null 2>&1
+    fw_purge
+    # Keenetic: ndm-хук в выключенном состоянии оставляет только доступ к панели.
+    [ -x /opt/etc/ndm/netfilter.d/50-detour.sh ] && /opt/etc/ndm/netfilter.d/50-detour.sh iptables filter >/dev/null 2>&1
+    [ -x /opt/etc/ndm/netfilter.d/50-detour.sh ] && /opt/etc/ndm/netfilter.d/50-detour.sh ip6tables filter >/dev/null 2>&1
+    # Соединения, уже заведённые в прокси, иначе висят до таймаута.
+    if have conntrack; then
+        for _port in 12345 1081; do conntrack -D -p tcp --reply-port-src "$_port" >/dev/null 2>&1; done
+    fi
+    return 0
+}
+
+cmd_off() {
+    if is_off; then
+        log "уже остановлено — снимаю всё повторно"
+    else
+        record_state
+        mkdir -p "$DETOUR_DIR"
+        date +%s > "$MARK"
+    fi
+    log "полная остановка: сервисы, расписание, правила"
+    teardown
+    log "готово: весь трафик идёт напрямую, панель доступна"
+}
+
+cmd_on() {
+    if ! is_off; then log "не остановлено — нечего включать"; return 0; fi
+    rm -f "$MARK"
+    log "включаю обратно"
+    _sb=$(state_get singbox); _zp=$(state_get zapret); _bp=$(state_get bypass); _dns=$(state_get dns)
+    if [ "$KEENETIC" = 1 ]; then
+        [ "$_dns" = 1 ] && svc S50detour-dns start
+        [ "$_sb" = 1 ] && svc S52detour-singbox force-start
+        if [ -n "$_bp" ] && [ "$_bp" != off ]; then
+            "$SBIN/detour-bypass" set "$_bp" >/dev/null 2>&1
+        elif [ "$_zp" = 1 ]; then
+            svc S53detour-zapret force-start
+        fi
+        svc S55detour-awg start
+        svc S91detour-logbridge start
+        [ -x "$SBIN/detour-portmap" ] && "$SBIN/detour-portmap" apply >/dev/null 2>&1
+        [ -x /opt/etc/ndm/netfilter.d/50-detour.sh ] && /opt/etc/ndm/netfilter.d/50-detour.sh iptables filter >/dev/null 2>&1
+        [ -x /opt/etc/ndm/netfilter.d/50-detour.sh ] && /opt/etc/ndm/netfilter.d/50-detour.sh ip6tables filter >/dev/null 2>&1
+        svc S90detour-cron start
+    else
+        fwuser_restore
+        svc detour-hosts start
+        svc detour-awg start
+        [ "$_sb" = 1 ] && svc sing-box start
+        if [ -n "$_bp" ] && [ "$_bp" != off ]; then
+            "$SBIN/detour-bypass" set "$_bp" >/dev/null 2>&1
+        elif [ "$_zp" = 1 ]; then
+            svc zapret-tpws start
+        fi
+        svc detour-logbridge start
+        [ -x "$SBIN/detour-portmap" ] && "$SBIN/detour-portmap" apply >/dev/null 2>&1
+        [ -x "$SBIN/detour-wanpin" ] && "$SBIN/detour-wanpin" apply >/dev/null 2>&1
+        cron_restore
+    fi
+    rm -f "$STATE"
+    log "готово: sing-box=${_sb:-0} обход DPI=${_bp:-${_zp:-0}}"
+}
+
+# Что из Detour сейчас живо — для проверки остановки прямо из панели. На каждый
+# пункт — число «живых» штук: 0 значит снято. Считаем по факту (процессы,
+# правила, таблицы), а не по флагам: флаг врёт ровно тогда, когда что-то сломалось.
+cnt() { grep -c . 2>/dev/null || true; }
+
+pcount() {  # $@ — шаблоны pgrep -f, сумма совпадений
+    _n=0
+    for _pat in "$@"; do
+        _k=$(pgrep -f "$_pat" 2>/dev/null | grep -v "^$$\$" | cnt)
+        _n=$((_n + ${_k:-0}))
+    done
+    echo "$_n"
+}
+
+cmd_check() {
+    _eng=$(pcount "sing-box run -c $O/etc/sing-box/config" "mihomo .*detour-engine")
+    _dpi=$(pcount "tpws-zapret" "nfqws2 ")
+    _awg=$(pcount "mihomo .*detour-awg")
+    _bg=$(pcount "$SBIN/detour-health" "sing-box run -c /tmp/detour-")
+    _ipt=0; _ip6=0; _nft=0; _rt=0; _dns=0; _cron=0; _pm=0
+    if have iptables-save; then
+        _ipt=$(for _t in nat mangle filter raw; do iptables-save -t "$_t" 2>/dev/null; done | grep '^-A ' | grep -E -- "$RULE_RE" | cnt)
+    fi
+    if have ip6tables-save; then
+        _ip6=$(ip6tables-save 2>/dev/null | grep '^-A ' | grep -E -- "$RULE_RE|-j REJECT --reject-with icmp6-adm-prohibited$|detour-dev" | cnt)
+    fi
+    have nft && _nft=$(nft list tables 2>/dev/null | grep -E ' detour_' | cnt)
+    have ip && _rt=$(ip rule 2>/dev/null | grep -E 'lookup 106( |$)' | cnt)
+    if [ "$KEENETIC" = 1 ]; then
+        _dns=$(pcount "dnsmasq .*--port=${DETOUR_DNS_PORT:-5354}")
+        [ -f /opt/var/run/detour-cron.pid ] && kill -0 "$(cat /opt/var/run/detour-cron.pid 2>/dev/null)" 2>/dev/null && _cron=1
+        _pm=$(cat /opt/etc/lighttpd/conf.d/detour-portmap.conf 2>/dev/null | grep 'proxy.server' | cnt)
+    else
+        _dns=$(ls /tmp/dnsmasq.d/singbox-* /tmp/dnsmasq.d/detour-* 2>/dev/null | cnt)
+        _cron=$(crontab -l 2>/dev/null | grep -E "$CRON_PAT" | cnt)
+        _pm=$( { uci show firewall 2>/dev/null | grep "\.name='detour-pm-"
+                 cat /etc/nginx/conf.d/zz-detour-portmap.conf 2>/dev/null | grep 'listen '; } | cnt)
+    fi
+    _off=false; is_off && _off=true
+    printf '{"ok":true,"off":%s,"items":[' "$_off"
+    printf '{"id":"engine","title":"VPN-движок (sing-box / mihomo)","n":%s},' "${_eng:-0}"
+    printf '{"id":"dpi","title":"Обход DPI (tpws / nfqws2)","n":%s},' "${_dpi:-0}"
+    printf '{"id":"awg","title":"AmneziaWG","n":%s},' "${_awg:-0}"
+    printf '{"id":"ipt","title":"Правила перехвата IPv4","n":%s},' "${_ipt:-0}"
+    printf '{"id":"ip6","title":"Правила IPv6","n":%s},' "${_ip6:-0}"
+    printf '{"id":"nft","title":"Таблицы nftables (торренты, IPv6)","n":%s},' "${_nft:-0}"
+    printf '{"id":"route","title":"Маршрутизация UDP через VPN","n":%s},' "${_rt:-0}"
+    printf '{"id":"dns","title":"Списки доменов в DNS","n":%s},' "${_dns:-0}"
+    printf '{"id":"portmap","title":"Проброс сервисов","n":%s},' "${_pm:-0}"
+    printf '{"id":"cron","title":"Расписание","n":%s},' "${_cron:-0}"
+    printf '{"id":"bg","title":"Фоновые проверки","n":%s}' "${_bg:-0}"
+    printf ']}\n'
+}
+
+cmd_status() {
+    if is_off; then
+        _s=$(state_get since); [ -n "$_s" ] || _s=$(cat "$MARK" 2>/dev/null)
+        printf '{"ok":true,"off":true,"since":%s}\n' "${_s:-0}"
+    else
+        printf '{"ok":true,"off":false}\n'
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Удаление. Скрипт должен пережить снос собственного пакета, поэтому `uninstall`
+# сначала копирует себя в /tmp и продолжает оттуда.
+pkg_mgr() {
+    if [ "$KEENETIC" = 0 ] && [ -f /etc/apk/world ] && have apk; then echo apk; else echo opkg; fi
+}
+
+pkg_installed() {  # $1
+    case "$(pkg_mgr)" in
+        apk)  apk info -e "$1" >/dev/null 2>&1 ;;
+        # Не `opkg list-installed`: под чужой блокировкой базы он молча пуст, и
+        # пакет сошёл бы за удалённый. Файл статуса читается без блокировки.
+        opkg) grep -qx "Package: $1" "$OPKG_STATUS" 2>/dev/null ;;
+    esac
+}
+
+# База пакетов может быть занята (фоновая доустановка движков, обновление по
+# расписанию) — ждём до трёх минут, прежде чем сдаться.
+pkg_remove() {  # $@
+    _l=""
+    for _p in "$@"; do pkg_installed "$_p" && _l="$_l $_p"; done
+    [ -n "$_l" ] || return 0
+    log "удаляю пакеты:$_l"
+    _try=0
+    while :; do
+        case "$(pkg_mgr)" in
+            apk)  apk del $_l ;;
+            opkg) opkg remove --force-depends $_l ;;
+        esac
+        _left=""
+        for _p in $_l; do pkg_installed "$_p" && _left="$_left $_p"; done
+        [ -n "$_left" ] || return 0
+        _try=$((_try + 1))
+        [ "$_try" -ge 36 ] && { log "не удалось удалить:$_left"; return 1; }
+        [ "$_try" = 1 ] && log "база пакетов занята — жду"
+        sleep 5
+    done
+}
+
+strip_block() {  # $1 файл, $2 начало, $3 конец — удалить блок между маркерами включительно
+    [ -f "$1" ] || return 0
+    grep -qxF "$2" "$1" || return 0
+    awk -v b="$2" -v e="$3" '$0==b {s=1; next} $0==e {s=0; next} s!=1 {print}' "$1" > "$1.tmp.$$" && mv "$1.tmp.$$" "$1"
+}
+
+strip_lines() {  # $1 файл, $2 ERE
+    [ -f "$1" ] || return 0
+    grep -qE "$2" "$1" || return 0
+    grep -vE "$2" "$1" > "$1.tmp.$$"; mv "$1.tmp.$$" "$1"
+}
+
+# GL.iNet режет весь немаркированный LAN-трафик правилом прошивки
+# (lan_drop_leak_*), и живёт LAN только за счёт нашей фоллбэк-разметки. Снимать
+# её можно, лишь если такого правила в fw4 нет.
+fallback_needed() {
+    have nft || return 1
+    nft list chain inet fw4 forward 2>/dev/null | grep -q 'lan_drop_leak'
+}
+
+nginx_restart_checked() {
+    have nginx || return 0
+    if nginx -t >/dev/null 2>&1; then
+        /etc/init.d/nginx restart >/dev/null 2>&1
+    else
+        log "nginx -t не прошёл после удаления наших конфигов — оставляю как есть"
+    fi
+}
+
+acme_bin() {
+    for _a in /root/.acme.sh/acme.sh /opt/.acme.sh/acme.sh /opt/root/.acme.sh/acme.sh /usr/lib/acme/acme.sh; do
+        [ -x "$_a" ] && { echo "$_a"; return 0; }
+    done
+    command -v acme.sh 2>/dev/null
+}
+
+# Сертификат выпускал detour-cert: без снятия регистрации acme.sh продолжал бы
+# продлевать его с reload-хуком на удалённый скрипт. Сам acme.sh сносится, только
+# если других сертификатов в нём не осталось.
+cert_cleanup() {
+    _cc="$DETOUR_DIR/cert.conf"
+    [ -f "$_cc" ] || return 0
+    DOMAIN=""; CERT_DIR=""; TARGET_MODE=""
+    . "$_cc" 2>/dev/null
+    _acme=$(acme_bin)
+    if [ -n "$_acme" ] && [ -n "$DOMAIN" ]; then
+        "$_acme" --remove -d "$DOMAIN" >/dev/null 2>&1
+        "$_acme" --remove -d "$DOMAIN" --ecc >/dev/null 2>&1
+        _home=$(dirname "$_acme")
+        rm -rf "$_home/$DOMAIN" "$_home/${DOMAIN}_ecc"
+        # Каталоги сертификатов acme.sh названы по домену (с точкой); ca/, dnsapi/ — без.
+        if [ -z "$(ls -d "$_home"/*.*/ 2>/dev/null)" ]; then
+            "$_acme" --uninstall >/dev/null 2>&1
+            rm -rf "$_home"
+            log "acme.sh удалён (других сертификатов в нём не было)"
+        fi
+    fi
+    case "$CERT_DIR" in /etc/nginx/ssl/?*) rm -rf "$CERT_DIR" ;; esac
+    if [ "$KEENETIC" = 0 ] && have uci; then
+        case "$(uci -q get uhttpd.main.cert)" in
+            "$DETOUR_DIR"/*)
+                uci set uhttpd.main.cert=/etc/uhttpd.crt
+                uci set uhttpd.main.key=/etc/uhttpd.key
+                uci commit uhttpd
+                /etc/init.d/uhttpd restart >/dev/null 2>&1
+                ;;
+        esac
+    fi
+}
+
+cmd_uninstall() {
+    KEEP_ENGINES=0
+    [ "${1:-}" = "--keep-engines" ] && KEEP_ENGINES=1
+    case "$0" in
+        /tmp/*) ;;
+        *)
+            cp "$0" /tmp/detour-power-uninstall 2>/dev/null && chmod 0755 /tmp/detour-power-uninstall \
+                && exec /tmp/detour-power-uninstall uninstall "$@"
+            ;;
+    esac
+
+    log "удаление панели: шаг 1 — полная остановка"
+    is_off || record_state
+    mkdir -p "$DETOUR_DIR"; date +%s > "$MARK"
+    teardown
+
+    log "шаг 2 — пакеты"
+    # Иначе prerm/postinst Keenetic попытаются держать lighttpd для «живого лога».
+    rm -f /tmp/detour-panel-selfupdate
+    if ! pkg_remove "$PKG_PANEL"; then
+        # Без удалённого пакета снос настроек оставил бы полупанель. Detour
+        # остаётся остановленным, удаление можно повторить.
+        log "ОШИБКА: пакет панели не удалён — удаление прервано, Detour остановлен"
+        rm -f /tmp/detour-power-uninstall
+        exit 1
+    fi
+    if [ "$KEEP_ENGINES" = 0 ]; then
+        pkg_remove mihomo nfqws2 tpws-zapret sing-box sing-box-go || log "движки удалены не все — см. выше"
+    fi
+
+    log "шаг 3 — сертификат панели, настройки, профили, ключи, журналы"
+    cert_cleanup
+    if [ "$KEENETIC" = 1 ]; then
+        rm -rf /opt/etc/detour /opt/etc/detour.auth /opt/etc/sing-box /opt/etc/zapret-tpws /opt/etc/zapret-tpws.conf \
+               /opt/share/www/detour /opt/share/www/detour-old /opt/share/www/detour-next /opt/share/detour \
+               /opt/etc/lighttpd/conf.d/detour-portmap.conf /opt/etc/lighttpd/conf.d/detour-ssl.conf \
+               /opt/var/run/detour-awg /opt/var/run/detour-engine /opt/var/run/detour-*.pid \
+               /opt/var/state/detour-* /opt/var/state/vpn-keepalive.json \
+               /opt/var/log/detour-* /opt/var/log/sing-box.log /opt/var/log/nfqws2.log /opt/var/log/subscription-refresh.log
+        strip_lines /opt/etc/opkg/customfeeds.conf 'varyen/detour'
+        [ "$KEEP_ENGINES" = 1 ] || rm -rf /opt/etc/sing-box
+    else
+        rm -rf /etc/detour /etc/detour.auth /etc/sing-box /etc/zapret-tpws /etc/zapret-tpws.conf \
+               /www/detour /www/detour-old /www/detour-next /usr/share/detour \
+               /etc/uci-defaults/99-detour-restore \
+               /var/etc/detour-engine /var/run/detour-awg /var/state/detour-* /var/state/vpn-keepalive.json \
+               /var/log/detour-* /var/log/sing-box.log /var/log/nfqws2.log /var/log/subscription-refresh.log \
+               /var/log/vpn-keepalive.log /var/detour-backup
+        rm -f /etc/nginx/conf.d/zz-detour-*.conf /etc/nginx/conf.d/detour-*.conf
+        nginx_restart_checked
+        strip_block /etc/sysupgrade.conf '# === detour keeplist (managed: do not edit between markers) ===' '# === end detour keeplist ==='
+        strip_block "$FIREWALL_USER" "$FW_BLOCK_BEGIN" "$FW_BLOCK_END"
+        strip_lines /etc/opkg/customfeeds.conf 'varyen/detour'
+        [ -d /etc/apk/repositories.d ] && rm -f /etc/apk/repositories.d/detour*.list
+        # Ключ нашего фида в keyring opkg: файл с тем же телом, что release.usign.pub.
+        for _k in /etc/opkg/keys/*; do
+            [ -f "$_k" ] && grep -qs 'detour' "$_k" && rm -f "$_k"
+        done
+        if have uci; then
+            # Правила проброса (detour-pm-*) уже сняты `detour-portmap apply` в teardown.
+            if ! fallback_needed; then
+                uci -q delete firewall.lan_mark_fallback
+                rm -f /etc/firewall.lan_mark_fallback
+                have nft && nft delete table inet lan_mark_fallback 2>/dev/null
+            else
+                log "фоллбэк-разметка LAN оставлена: без неё прошивка GL.iNet режет весь LAN"
+            fi
+            uci commit firewall 2>/dev/null
+            /etc/init.d/firewall reload >/dev/null 2>&1
+        fi
+    fi
+
+    log "шаг 4 — временные файлы, наборы адресов, DNS"
+    rm -rf /tmp/detour-* /tmp/.singbox-* /tmp/routemap-* /tmp/dnsmasq.d/singbox-* /tmp/dnsmasq.d/detour-* \
+           /tmp/detour-sessions /tmp/hosts/detour* 2>/dev/null
+    if have ipset; then
+        for _s in $(ipset list -n 2>/dev/null | grep -E '^(singbox_|zapret_|detour_)'); do
+            ipset destroy "$_s" 2>/dev/null
+        done
+    fi
+    if [ "$KEENETIC" = 0 ]; then
+        /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    fi
+    log "панель удалена"
+    rm -f /tmp/detour-power-uninstall
+}
+
+case "${1:-}" in
+    off)       cmd_off ;;
+    on)        cmd_on ;;
+    reassert)  is_off && teardown; exit 0 ;;
+    status)    cmd_status ;;
+    check)     cmd_check ;;
+    fw-purge)  fw_purge "${2:-}" ;;
+    uninstall) shift; cmd_uninstall "$@" ;;
+    *) echo "usage: $0 off | on | status | check | reassert | fw-purge [iptables|ip6tables] | uninstall [--keep-engines]" >&2; exit 2 ;;
+esac

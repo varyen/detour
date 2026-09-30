@@ -7,12 +7,14 @@
    Экран собран списком областей, а не сеткой карточек: областей семь, часть из
    них на конкретном роутере вообще недоступна, и длинный список коротких строк
    переживает узкий экран лучше любой сетки. */
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import ServicePanel from "@/components/services/ServicePanel.vue";
 import PortmapSheet from "@/components/services/PortmapSheet.vue";
 import CertSheet from "@/components/services/CertSheet.vue";
 import KeenHttpsSheet from "@/components/services/KeenHttpsSheet.vue";
 import PasswordSheet from "@/components/services/PasswordSheet.vue";
+import UninstallSheet from "@/components/services/UninstallSheet.vue";
+import LogPane from "@/components/journal/LogPane.vue";
 import FormField from "@/components/services/FormField.vue";
 import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
@@ -24,6 +26,7 @@ import { useSessionStore } from "@/stores/session";
 import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
 import { useProfilesStore } from "@/stores/profiles";
+import { usePowerStore } from "@/stores/power";
 import { fmtAgo, fmtDate, fmtInt } from "@/lib/format";
 import { useFocusTarget } from "@/lib/deeplink";
 import { getRegistration, swSupported } from "@/pwa";
@@ -143,6 +146,7 @@ const open = reactive<Record<string, boolean>>({
   swap: false,
   backup: false,
   account: false,
+  power: false,
 });
 
 /* Ссылки из карточки «Сервисы и доступ» на «Обзоре»: `#/services?focus=cert`.
@@ -186,6 +190,38 @@ const confirmImport = ref(false);
 const sheetPortmap = ref(false);
 const sheetCert = ref(false);
 const sheetPassword = ref(false);
+const sheetUninstall = ref(false);
+const power = usePowerStore();
+
+/* Проверка остановки: при выключенном Detour всё, что ещё живо, — остаток,
+   который не снялся. При включённом тот же список просто показывает, что работает. */
+const powerLeft = computed(() => (power.check?.items ?? []).filter((i) => i.n > 0));
+const powerVerdict = computed(() => {
+  const c = power.check;
+  if (!c) return "";
+  if (!c.off) return "Detour работает. После остановки здесь всё должно стать «снято».";
+  return powerLeft.value.length
+    ? `Не снялось: ${powerLeft.value.length}. Нажмите «Снять ещё раз».`
+    : "Всё снято — от Detour на роутере ничего не работает, трафик идёт напрямую.";
+});
+watch(
+  () => open.power,
+  (o) => {
+    if (o) void power.loadCheck(true);
+  },
+);
+
+function stopAll() {
+  if (
+    !confirm(
+      "Остановить Detour целиком?\n\nСнимутся все правила: VPN, обход DPI, маршруты, " +
+        "устройства, проброс сервисов, расписание. Весь трафик пойдёт напрямую. " +
+        "Настройки сохранятся — включить обратно можно одной кнопкой.",
+    )
+  )
+    return;
+  void power.run("off");
+}
 const sheetKeenHttps = ref(false);
 const editing = ref<PortmapRow | null>(null);
 
@@ -904,6 +940,27 @@ onMounted(async () => {
       run: () => void exportConfig(),
     },
     {
+      id: "svc:power",
+      title: "Остановить Detour целиком / включить обратно",
+      group: "сервисы",
+      keywords: "выключить всё bypass напрямую стоп пауза",
+      available: () => !status.isClient,
+      run: () => {
+        open.power = true;
+      },
+    },
+    {
+      id: "svc:uninstall",
+      title: "Удалить панель с роутера",
+      group: "сервисы",
+      keywords: "удаление деинсталляция снести",
+      available: () => !status.isClient,
+      run: () => {
+        open.power = true;
+        sheetUninstall.value = true;
+      },
+    },
+    {
       id: "svc:password",
       title: "Сменить пароль от панели",
       group: "доступ",
@@ -1401,6 +1458,99 @@ onBeforeUnmount(() => unregister?.());
         </UiButton>
       </div>
     </ServicePanel>
+
+    <!-- ===== остановка и удаление ===== -->
+    <ServicePanel
+      v-if="!status.isClient"
+      id="svc-power"
+      v-model:open="open.power"
+      title="Остановка и удаление"
+      :summary="
+        status.powerOff
+          ? 'Detour остановлен целиком — трафик идёт напрямую'
+          : 'Выключить всё разом или удалить панель с роутера'
+      "
+      :chip="status.powerOff ? 'остановлен' : undefined"
+      :tone="status.powerOff ? 'warn' : undefined"
+    >
+      <p class="lead">
+        Полная остановка снимает всё, что делает Detour: VPN и цепочки, обход DPI,
+        маршруты и правила устройств, запрет торрентов, блокировку IPv6, проброс
+        сервисов, фоновые проверки и расписание. Трафик идёт напрямую, как без
+        панели. Настройки остаются на месте, остановка переживает перезагрузку и
+        обновление — до тех пор, пока вы не включите Detour обратно.
+      </p>
+
+      <div class="actions">
+        <UiButton
+          v-if="!status.powerOff"
+          variant="danger"
+          :busy="power.busy === 'off'"
+          :disabled="!!power.busy"
+          @click="stopAll"
+        >
+          Остановить всё
+        </UiButton>
+        <UiButton
+          v-else
+          variant="primary"
+          :busy="power.busy === 'on'"
+          :disabled="!!power.busy"
+          @click="power.run('on')"
+        >
+          Включить обратно
+        </UiButton>
+        <UiButton
+          v-if="status.powerOff && powerLeft.length"
+          variant="danger"
+          :busy="power.busy === 'off'"
+          :disabled="!!power.busy"
+          @click="power.run('off')"
+        >
+          Снять ещё раз
+        </UiButton>
+        <UiButton :busy="power.checking" :disabled="!!power.busy" @click="power.loadCheck()">
+          Проверить
+        </UiButton>
+      </div>
+
+      <div v-if="power.check" class="pcheck">
+        <p
+          class="note"
+          :class="power.check.off ? (powerLeft.length ? 'bad' : 'live') : 'faint'"
+        >
+          {{ powerVerdict }}
+        </p>
+        <ul class="pcheck-list">
+          <li v-for="i in power.check.items" :key="i.id">
+            <span class="pcheck-title">{{ i.title }}</span>
+            <span
+              class="pcheck-state"
+              :class="{ on: i.n > 0 && !power.check.off, left: i.n > 0 && power.check.off }"
+            >
+              {{ i.n > 0 ? (power.check.off ? `осталось: ${i.n}` : `работает · ${i.n}`) : "снято" }}
+            </span>
+          </li>
+        </ul>
+      </div>
+
+      <LogPane
+        v-if="power.log && power.busy !== 'uninstall'"
+        :text="power.log"
+        follow
+        height="180px"
+      />
+
+      <p class="lead">
+        Удаление убирает панель с роутера бесследно: пакет, профили, подписки,
+        списки, сертификат, расписание и строку нашего фида. Спросим дважды.
+      </p>
+      <div class="actions">
+        <UiButton variant="danger" :disabled="!!power.busy" @click="sheetUninstall = true">
+          Удалить панель…
+        </UiButton>
+      </div>
+    </ServicePanel>
   </div>
 
   <PortmapSheet
@@ -1442,6 +1592,7 @@ onBeforeUnmount(() => unregister?.());
   />
 
   <PasswordSheet :open="sheetPassword" @close="sheetPassword = false" />
+  <UninstallSheet :open="sheetUninstall" @close="sheetUninstall = false" />
 </template>
 
 <style scoped>
@@ -1487,6 +1638,49 @@ onBeforeUnmount(() => unregister?.());
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* ---- проверка остановки ---- */
+.pcheck {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.pcheck-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.pcheck-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 11px;
+  font-size: 12.5px;
+  min-width: 0;
+}
+.pcheck-list li + li {
+  border-top: 1px solid var(--line);
+}
+.pcheck-title {
+  color: var(--dim);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.pcheck-state {
+  flex: none;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.pcheck-state.on {
+  color: var(--accent);
+}
+.pcheck-state.left {
+  color: var(--bad);
 }
 
 /* ---- движок ---- */

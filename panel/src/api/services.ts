@@ -5,6 +5,7 @@ import type {
   EngineConfig,
   EngineMode,
   OffloadStatus,
+  PowerCheck,
   PortmapEntry,
   PortmapStatus,
   PushConfig,
@@ -14,6 +15,16 @@ import type {
 } from "./types";
 
 export const services = {
+  /* --- полная остановка и удаление панели (фоном, ход — в apply_log) --- */
+  /** Что из Detour сейчас живо на роутере — процессы, правила, расписание. */
+  powerCheck: () => requestJson<PowerCheck>("power_check", { timeoutMs: 30_000 }),
+  powerOff: () => requestJson<{ ok: boolean }>("power_off", { method: "POST" }),
+  powerOn: () => requestJson<{ ok: boolean }>("power_on", { method: "POST" }),
+  selfUninstall: (keepEngines: boolean) =>
+    requestJson<{ ok: boolean }>("self_uninstall", {
+      body: { confirm: "uninstall", keep_engines: keepEngines },
+    }),
+
   /* --- проброс сервисов наружу --- */
   portmapStatus: () => requestJsonTolerant<PortmapStatus>("portmap_status"),
   portmapSave: (e: PortmapEntry) =>

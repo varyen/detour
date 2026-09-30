@@ -18,6 +18,7 @@ export const useStatusStore = defineStore("status", () => {
 
   const platform = computed(() => data.value?.platform ?? "openwrt");
   const isKeenetic = computed(() => platform.value === "keenetic");
+  const powerOff = computed(() => data.value?.power_off === true);
   /* Панель в приложении на самом устройстве, а не на роутере: нет LAN,
      файрвола, nginx, opkg и входа по паролю. Сборка это знает заранее —
      роутерные разделы не мелькают до первого ответа status. */
@@ -137,6 +138,7 @@ export const useStatusStore = defineStore("status", () => {
     platform,
     isKeenetic,
     isClient,
+    powerOff,
     hostGen,
     zapret2Supported,
     nfqws2Missing,

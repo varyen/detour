@@ -171,6 +171,7 @@ del_rules() {
 }
 
 start_service() {
+    [ -f /etc/detour/power.off ] && return 0   # панель остановлена целиком (detour-power off)
     # The tpws-zapret binary is bundled in the `detour` panel package (zapret is
     # in no opkg feed). If absent, bail BEFORE add_rules — otherwise the DPI-bypass
     # REDIRECT would point at a dead :1081 and break the affected domains. No rules = direct.

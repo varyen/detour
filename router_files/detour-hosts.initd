@@ -15,6 +15,7 @@ HOSTS_BIN=/usr/sbin/detour-hosts
 boot() { start; }
 
 start() {
+    [ -f /etc/detour/power.off ] && return 0   # панель остановлена целиком (detour-power off)
     [ -x "$HOSTS_BIN" ] && "$HOSTS_BIN" apply >/dev/null 2>&1
     return 0
 }

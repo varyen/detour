@@ -67,6 +67,7 @@ KEEPALIVE_STATE="/var/state/vpn-keepalive.json"
 KEEPALIVE_BIN="/usr/sbin/vpn-keepalive"
 UPDATE_BIN="/usr/sbin/detour-update"
 BYPASS_BIN="/usr/sbin/detour-bypass"
+POWER_BIN="/usr/sbin/detour-power"          # полная остановка панели и её удаление
 BYPASS_STRATEGY_FILE="/etc/detour/nfqws2.strategy"
 VERSION_FILE="/etc/detour/version"
 UPDATE_STATE="/var/state/detour-update.json"
@@ -203,6 +204,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     KEEPALIVE_BIN="$OPT/sbin/vpn-keepalive"
     UPDATE_BIN="$OPT/sbin/detour-update"
     BYPASS_BIN="$OPT/sbin/detour-bypass"
+    POWER_BIN="$OPT/sbin/detour-power"
     BYPASS_STRATEGY_FILE="$OPT/etc/detour/nfqws2.strategy"
     VERSION_FILE="$OPT/etc/detour/version"
     UPDATE_STATE="$OPT/var/state/detour-update.json"
@@ -415,6 +417,14 @@ APPLY_DONE_MARK="===DETOUR_APPLY_DONE"
 # (apply_log) — OpenWrt parity. Set right before the detached opkg starts; the new postinst
 # removes it. (Harmless/ignored on OpenWrt, where nothing reads it.)
 SELFUPDATE_MARK=/tmp/detour-panel-selfupdate
+
+# Панель остановлена целиком (detour-power off): init-скрипты молча ничего не
+# поднимут, поэтому ручной «Вкл» отвечает понятной ошибкой.
+power_guard() {
+    [ -f "$DETOUR_DIR/power.off" ] || return 0
+    json_err "панель остановлена целиком — сначала включите её"
+    return 1
+}
 
 # start_apply <full-shell-command> — truncate the log, run the command detached
 # (stdout+stderr → APPLY_LOG) with a completion sentinel carrying the exit code,
@@ -2733,7 +2743,8 @@ status)
     "cpu": "$CPU_PCT",
     "cpu_cores": $CPU_CORES
     },
-    "wan_link": $WANLINK_JSON
+    "wan_link": $WANLINK_JSON,
+    "power_off": $([ -f "$DETOUR_DIR/power.off" ] && echo true || echo false)
 }
 EOF
     ;;
@@ -3549,7 +3560,7 @@ singbox_config)
     fi
     ;;
 
-singbox_start)  $SINGBOX_INITD $SVC_START >/dev/null 2>&1; sleep 2; json_ok ;;
+singbox_start)  power_guard || exit 0; $SINGBOX_INITD $SVC_START >/dev/null 2>&1; sleep 2; json_ok ;;
 singbox_stop)   $SINGBOX_INITD stop >/dev/null 2>&1; sleep 1; json_ok ;;
 singbox_restart) $SINGBOX_INITD restart >/dev/null 2>&1; sleep 3; json_ok ;;
 singbox_enable) $SINGBOX_INITD enable >/dev/null 2>&1; set_autostart singbox 1; json_ok ;;
@@ -3606,7 +3617,7 @@ logs_clear)
     ;;
 
 # ==================== ZAPRET-TPWS ====================
-zapret_start)   $ZAPRET_INITD $SVC_START >/dev/null 2>&1; sleep 2; json_ok ;;
+zapret_start)   power_guard || exit 0; $ZAPRET_INITD $SVC_START >/dev/null 2>&1; sleep 2; json_ok ;;
 zapret_stop)    $ZAPRET_INITD stop >/dev/null 2>&1; sleep 1; json_ok ;;
 zapret_restart) $ZAPRET_INITD stop >/dev/null 2>&1; sleep 1; $ZAPRET_INITD $SVC_START >/dev/null 2>&1; sleep 2; json_ok ;;
 zapret_enable)  $ZAPRET_INITD enable >/dev/null 2>&1; set_autostart zapret 1; json_ok ;;
@@ -5255,6 +5266,39 @@ warp_delete)
 # (forwarding fell to the CPU → ~100 Mbit until reboot) and recovers without a reboot.
 # QCA-only: the helper reports supported:false on non-QCA (Keenetic/MT6000) and the panel
 # hides the control. The binary is shipped OpenWrt-only, so guard on its presence too.
+# Полная остановка панели («полный bypass»): все сервисы, расписание и правила
+# снимаются, трафик идёт напрямую, настройки остаются. Долго (перезапуск dnsmasq,
+# снос ipset'ов) — поэтому в фоне, с живым логом через apply_log.
+power_status)
+    if [ -x "$POWER_BIN" ]; then "$POWER_BIN" status
+    else printf '{"ok":true,"off":false,"supported":false}'; fi
+    ;;
+
+# Что из Detour сейчас живо (процессы, правила, расписание) — панель показывает
+# это списком, чтобы остановку можно было проверить без SSH.
+power_check)
+    if [ -x "$POWER_BIN" ]; then "$POWER_BIN" check
+    else json_err "нет detour-power — обновите панель"; fi
+    ;;
+
+power_off|power_on)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$POWER_BIN" ] || { json_err "нет detour-power — обновите панель"; exit 0; }
+    start_apply "\"$POWER_BIN\" ${ACTION#power_}"
+    ;;
+
+# Бесследное удаление панели. Второе подтверждение проверяется и здесь, а не только
+# в интерфейсе: без {"confirm":"uninstall"} запрос ничего не делает.
+self_uninstall)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$POWER_BIN" ] || { json_err "нет detour-power — обновите панель"; exit 0; }
+    printf '%s' "$POST_DATA" | grep -q '"confirm"[[:space:]]*:[[:space:]]*"uninstall"' \
+        || { json_err "нужно подтверждение"; exit 0; }
+    UNINST_ARGS=""
+    printf '%s' "$POST_DATA" | grep -q '"keep_engines"[[:space:]]*:[[:space:]]*true' && UNINST_ARGS="--keep-engines"
+    start_apply "\"$POWER_BIN\" uninstall $UNINST_ARGS"
+    ;;
+
 offload_status)
     if [ -x "$OFFLOAD_BIN" ]; then "$OFFLOAD_BIN" status
     else printf '{"ok":true,"supported":false,"mode":"off"}'; fi

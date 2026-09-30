@@ -254,7 +254,8 @@ start() {
 }
 
 stop() {
-    if [ -f /opt/etc/detour/singbox.enabled ] || [ -f /opt/etc/detour/zapret.enabled ] || has_strict_routes; then
+    if [ ! -f /opt/etc/detour/power.off ] && \
+       { [ -f /opt/etc/detour/singbox.enabled ] || [ -f /opt/etc/detour/zapret.enabled ] || has_strict_routes; }; then
         touch "$MARK"
         regen
         if running; then
@@ -277,6 +278,10 @@ reload() {
     if running; then kill -HUP "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; else start; fi
 }
 
+# Панель остановлена целиком (detour-power off) — ничего не поднимаем.
+case "$1" in start|force-start|restart|reconfigure|restart-daemon|reload)
+    [ -f /opt/etc/detour/power.off ] && { echo "$0: detour остановлен (detour-power)"; exit 0; } ;;
+esac
 case "$1" in
     start) start ;;
     stop) stop ;;

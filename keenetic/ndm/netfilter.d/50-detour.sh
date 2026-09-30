@@ -42,6 +42,17 @@ vpn_ifaces() {
 }
 
 TYPE="${1:-$type}"     # iptables | ip6tables
+
+# Панель остановлена целиком (detour-power off): снимаем всё своё и оставляем
+# только доступ к самой панели — иначе её не включить обратно.
+if [ -f /opt/etc/detour/power.off ]; then
+    [ -x /opt/sbin/detour-power ] && /opt/sbin/detour-power fw-purge "$TYPE" >/dev/null 2>&1
+    if [ "$TYPE" != ip6tables ]; then
+        iptables -C INPUT -i "$LAN_IF" -p tcp --dport "$PANEL_PORT" -j ACCEPT 2>/dev/null || \
+            iptables -A INPUT -i "$LAN_IF" -p tcp --dport "$PANEL_PORT" -j ACCEPT
+    fi
+    exit 0
+fi
 # Перехват — только IPv4. Чтобы IPv6 не уводил трафик мимо VPN, пока прокси
 # включён, IPv6 из LAN наружу отбивается сразу: устройства без задержки уходят
 # на IPv4 (AAAA-записи им к тому же не отдаёт detour-dns, см. S50detour-dns).

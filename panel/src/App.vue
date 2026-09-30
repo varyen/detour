@@ -12,6 +12,7 @@ import { useStatusStore } from "@/stores/status";
 import { useCommandStore } from "@/stores/commands";
 import { useProfilesStore } from "@/stores/profiles";
 import { useToastStore } from "@/stores/toast";
+import { usePowerStore } from "@/stores/power";
 import { useTheme } from "@/composables/useTheme";
 
 const session = useSessionStore();
@@ -19,6 +20,7 @@ const status = useStatusStore();
 const commands = useCommandStore();
 const profiles = useProfilesStore();
 const toast = useToastStore();
+const power = usePowerStore();
 const route = useRoute();
 const router = useRouter();
 const { theme, toggle: toggleTheme } = useTheme();
@@ -144,6 +146,17 @@ session.$subscribe((_m, s) => {
     <span class="eyebrow">Detour</span>
   </div>
 
+  <div v-else-if="power.removed" class="boot">
+    <div class="gone">
+      <span class="eyebrow">Detour</span>
+      <h1>Панель удалена</h1>
+      <p>
+        Роутер работает без неё: правила сняты, трафик идёт напрямую. Эту вкладку
+        можно закрыть.
+      </p>
+    </div>
+  </div>
+
   <LoginView v-else-if="!session.authorized" />
 
   <div v-else class="app">
@@ -193,6 +206,20 @@ session.$subscribe((_m, s) => {
       </header>
 
       <p v-if="status.error" class="alert">{{ status.error }}</p>
+
+      <div v-if="status.powerOff && !isClientApp" class="stopped" role="status">
+        <span>
+          <b>Detour остановлен целиком.</b> Правила сняты, весь трафик идёт напрямую.
+        </span>
+        <button
+          class="stopped-btn"
+          type="button"
+          :disabled="!!power.busy"
+          @click="power.run('on')"
+        >
+          {{ power.busy === "on" ? "Включаю…" : "Включить" }}
+        </button>
+      </div>
 
       <RouterView v-slot="{ Component }">
         <component :is="Component" />
@@ -359,6 +386,53 @@ session.$subscribe((_m, s) => {
   padding: 10px 14px;
   font-size: 13.5px;
   margin-bottom: 16px;
+}
+
+.stopped {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 13.5px;
+  margin-bottom: 16px;
+}
+.stopped span {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.stopped-btn {
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  font: inherit;
+  cursor: pointer;
+  min-height: 36px;
+}
+.stopped-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.gone {
+  max-width: 420px;
+  padding: 0 16px;
+  display: grid;
+  gap: 10px;
+  text-align: center;
+}
+.gone h1 {
+  font-size: 22px;
+}
+.gone p {
+  color: var(--dim);
+  font-size: 14px;
 }
 
 /* ---- нижний бар (телефон) ---- */
