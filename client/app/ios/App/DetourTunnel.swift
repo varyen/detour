@@ -1,5 +1,5 @@
-// Управление туннелем из приложения. НЕ СОБИРАЛОСЬ (нет Xcode с iOS SDK) —
-// см. client/app/ios/README.md.
+// Управление туннелем из приложения. Собирается; сам запуск туннеля не проверен —
+// нужна подпись с entitlement'ом Network Extension, см. client/app/ios/README.md.
 //
 // Туннель живёт в расширении DetourTunnel (NEPacketTunnelProvider), приложение
 // только включает и выключает его через NETunnelProviderManager. Ядро на Rust

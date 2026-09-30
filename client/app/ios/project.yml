@@ -1,0 +1,132 @@
+# Спецификация xcodegen для iOS-сборки Detour. Заменяет gen/apple/project.yml,
+# который создаёт `cargo tauri ios init` (tauri-cli 2.11.4): за основу взят он, плюс
+#  * цель DetourTunnel — Network Extension (packet-tunnel), встраивается в приложение;
+#  * Libbox.xcframework в обе цели (приложению Embed, расширению — только линковка);
+#  * libresolv.tbd: DNS-резолвер Go (cgo) без неё не линкуется;
+#  * deploymentTarget 15.0 — как у Libbox (gomobile -iosversion 15.0);
+#  * подпись выключена: аккаунта Apple Developer нет, .ipa собирается без подписи.
+# Маркер версии (в двух строках CFBundle* и двух MARKETING_/CURRENT_) заменяет build.sh по файлу VERSION.
+name: detour-app
+options:
+  bundleIdPrefix: io.github.varyen.detour
+  deploymentTarget:
+    iOS: 15.0
+configs:
+  debug: debug
+  release: release
+settings:
+  base:
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGN_STYLE: Manual
+settingGroups:
+  app:
+    base:
+      PRODUCT_NAME: Detour
+      PRODUCT_BUNDLE_IDENTIFIER: io.github.varyen.detour
+targetTemplates:
+  app:
+    type: application
+    sources:
+      - path: Sources
+    scheme:
+      environmentVariables:
+        RUST_BACKTRACE: full
+        RUST_LOG: info
+    settings:
+      groups: [app]
+targets:
+  detour-app_iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Assets.xcassets
+      - path: Externals
+      - path: detour-app_iOS
+      - path: assets
+        buildPhase: resources
+        type: folder
+      - path: LaunchScreen.storyboard
+    info:
+      path: detour-app_iOS/Info.plist
+      properties:
+        LSRequiresIPhoneOS: true
+        UILaunchStoryboardName: LaunchScreen
+        UIRequiredDeviceCapabilities: [arm64, metal]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleShortVersionString: @VERSION@
+        CFBundleVersion: "@VERSION@"
+    entitlements:
+      path: detour-app_iOS/detour-app_iOS.entitlements
+    scheme:
+      environmentVariables:
+        RUST_BACKTRACE: full
+        RUST_LOG: info
+    settings:
+      base:
+        ENABLE_BITCODE: false
+        ARCHS: [arm64, x86_64]
+        VALID_ARCHS: arm64  x86_64 
+        LIBRARY_SEARCH_PATHS[arch=x86_64]: $(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
+        LIBRARY_SEARCH_PATHS[arch=arm64]: $(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
+        EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+      groups: [app]
+    dependencies:
+      - framework: libapp.a
+        embed: false
+      - framework: Frameworks/Libbox.xcframework
+        embed: true
+        codeSign: false
+      - target: DetourTunnel
+        embed: true
+      - sdk: libresolv.tbd
+      - sdk: CoreGraphics.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: Security.framework
+      - sdk: UIKit.framework
+      - sdk: WebKit.framework
+    preBuildScripts:
+      - script: cargo tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
+        name: Build Rust Code
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a
+          - $(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a
+  DetourTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: DetourTunnel/PacketTunnelProvider.swift
+    info:
+      path: DetourTunnel/Info.plist
+    entitlements:
+      path: DetourTunnel/DetourTunnel.entitlements
+    settings:
+      base:
+        PRODUCT_NAME: DetourTunnel
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.varyen.detour.tunnel
+        MARKETING_VERSION: @VERSION@
+        CURRENT_PROJECT_VERSION: "@VERSION@"
+        ENABLE_BITCODE: false
+        SWIFT_VERSION: 5.0
+        ARCHS: [arm64, x86_64]
+        EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+    dependencies:
+      - framework: Frameworks/Libbox.xcframework
+        embed: false
+      - sdk: libresolv.tbd
+      - sdk: NetworkExtension.framework
+      - sdk: Network.framework

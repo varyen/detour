@@ -1,5 +1,5 @@
-// Туннель Detour на iOS. НЕ СОБИРАЛОСЬ (нет Xcode с iOS SDK) — см.
-// client/app/ios/README.md.
+// Туннель Detour на iOS. Собирается; сам запуск туннеля не проверен — нужна подпись
+// с entitlement'ом Network Extension, см. client/app/ios/README.md.
 //
 // Отдельный процесс-расширение: система отдаёт TUN только ему. Внутри — libbox
 // (sing-box), тот же, что на Android, и то же устройство PlatformInterface
@@ -134,8 +134,10 @@ final class Platform: NSObject, LibboxPlatformInterfaceProtocol, LibboxCommandSe
     }
 
     // Сокеты расширения и так не заходят в собственный туннель.
-    func usePlatformAutoDetectInterfaceControl() -> Bool { true }
-    func autoDetectInterfaceControl(_ fd: Int32) throws {}
+    // API notes у сгенерированного модуля переименовывают их для Swift независимо
+    // от исходного ObjC-заголовка (сообщение компилятора: "has been renamed to").
+    func usePlatformAutoDetectControl() -> Bool { true }
+    func autoDetectControl(_ fd: Int32) throws {}
 
     func underNetworkExtension() -> Bool { true }
     func includeAllNetworks() -> Bool { false }

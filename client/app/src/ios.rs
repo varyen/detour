@@ -1,5 +1,5 @@
-//! Мост ядра в iOS-часть приложения. НЕ СОБИРАЛОСЬ: для iOS нужен Xcode с
-//! iOS SDK, а под рукой только Command Line Tools (см. client/app/ios/README.md).
+//! Мост ядра в iOS-часть приложения. Собирается; сам запуск туннеля не проверен —
+//! нужна подпись с entitlement'ом Network Extension (см. client/app/ios/README.md).
 //!
 //! Туннель на iOS живёт в отдельном процессе — расширении
 //! `NEPacketTunnelProvider` с libbox внутри. Приложение им только управляет
