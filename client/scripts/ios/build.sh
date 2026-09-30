@@ -55,6 +55,7 @@ echo "== панель"
 
 echo "== проект Xcode"
 ( cd "$ROOT/client/app" && [ -d gen/apple ] || cargo tauri ios init )
+cp "$ROOT/client/app/icons/ios/"AppIcon-*.png "$APPLE/Assets.xcassets/AppIcon.appiconset/"
 mkdir -p "$APPLE/Frameworks" "$APPLE/DetourTunnel"
 rm -rf "$APPLE/Frameworks/Libbox.xcframework"
 cp -R "$WORK/Libbox.xcframework" "$APPLE/Frameworks/"

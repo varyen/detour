@@ -31,6 +31,8 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "Detour"
 
+!define MUI_ICON "${__FILEDIR__}\..\app\icons\icon.ico"
+!define MUI_UNICON "${__FILEDIR__}\..\app\icons\icon.ico"
 !define MUI_ABORTWARNING
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
