@@ -1,0 +1,60 @@
+Package: mihomo
+Version: 1.19.32-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 57409662
+Description: mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar for AmneziaWG profiles (sing-box has no AmneziaWG). (1.19.32-1)
+Filename: mihomo_1.19.32-1_all.ipk
+Size: 20621369
+MD5Sum: d8cc60102e0039ec4fe544c8b4ff8d35
+SHA256sum: e28a07243770f06a4803fbe2b0edc0259e68f5829753a2d58916344123850390
+
+Package: nfqws2
+Version: 1.0.5.2-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 483592
+Description: zapret2 nfqws2 NFQUEUE DPI-bypass engine + LuaJIT desync scripts (bol-van/zapret2). Optional — used by zapret2 mode. (1.0.5.2-1)
+Filename: nfqws2_1.0.5.2-1_all.ipk
+Size: 357087
+MD5Sum: 531bf96da8bfd7cf7c1414bffaffc2b7
+SHA256sum: 6d28985c8163247b86201b443bc94a76953953e1ffcfdbe62c46cae60e4db973
+
+Package: sing-box
+Version: 1.14.2-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 86012408
+Description: sing-box universal proxy platform. Detour feed build for OpenWrt/GL.iNet (the distro feed is stuck on 1.8.x). (1.14.2-1)
+Filename: sing-box_1.14.2-1_all.ipk
+Size: 29421330
+MD5Sum: 1736140ce6ac95bc6e24e82c75bbdf65
+SHA256sum: 4c3801dfa8a5674a84b83dc725c0f4c186a842b3d855b8b7988a69c2fd92bfd9
+
+Package: tpws-zapret
+Version: 72.13-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 110488
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build — zapret is in no opkg feed. (72.13-1)
+Filename: tpws-zapret_72.13-1_all.ipk
+Size: 110735
+MD5Sum: 21932d9de6a7cdc5860c5c4c25404dd4
+SHA256sum: 11e940338f877e5c5f74985fc2bda667f5d919fc2708081581974514438ed19d
+
