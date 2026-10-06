@@ -9,7 +9,11 @@
 import { computed, ref, watch } from "vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import UiButton from "@/components/UiButton.vue";
-import { countEntries, entriesLabel } from "./entries";
+import { countEntries, entriesLabel, skippedEntries } from "./entries";
+
+function shortList(items: string[]): string {
+  return items.length > 3 ? `${items.slice(0, 3).join(", ")} и ещё ${items.length - 3}` : items.join(", ");
+}
 
 interface RouteRule {
   id: string;
@@ -137,6 +141,8 @@ function remove(index: number) {
   rules.value = rules.value.filter((_, i) => i !== index);
 }
 
+const skipped = computed(() => rules.value.map((r) => skippedEntries(r.text)));
+
 const ready = computed(() => rules.value.filter((r) => r.id && r.text.trim()).length);
 </script>
 
@@ -221,6 +227,18 @@ const ready = computed(() => rules.value.filter((r) => r.id && r.text.trim()).le
         placeholder="// заметка к блоку&#10;example.com&#10;*.example.com&#10;203.0.113.0/24"
       ></textarea>
       <p class="cnt">{{ entriesLabel(countEntries(rule.text)) }}</p>
+      <template v-if="skipped[i]">
+        <p v-if="skipped[i].ipv6.length" class="warn">
+          IPv6 не маршрутизируется: роутер перехватывает только IPv4, а IPv6 из
+          домашней сети, пока VPN включён, отключён целиком. Эти записи будут
+          пропущены — укажите IPv4-адрес или домен:
+          <span class="mono">{{ shortList(skipped[i].ipv6) }}</span>
+        </p>
+        <p v-if="skipped[i].other.length" class="warn">
+          Не похоже на домен или IPv4-адрес — будет пропущено:
+          <span class="mono">{{ shortList(skipped[i].other) }}</span>
+        </p>
+      </template>
     </div>
 
     <UiButton class="add" @click="add">Добавить маршрут</UiButton>
@@ -349,6 +367,11 @@ const ready = computed(() => rules.value.filter((r) => r.id && r.text.trim()).le
 .cnt {
   font-size: 12px;
   color: var(--faint);
+}
+.warn {
+  font-size: 12.5px;
+  color: var(--warn);
+  overflow-wrap: anywhere;
 }
 .add {
   width: 100%;

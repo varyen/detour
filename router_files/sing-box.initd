@@ -578,6 +578,20 @@ route_map_orphans() {
     done
 }
 
+# Перехват только IPv4: IPv6-строки маршрутов не попадают ни в ipset, ни в правила.
+# Утечки нет — IPv6 из LAN при включённом VPN отбивает v6_guard, — но пропуск
+# должен быть виден в журнале, а не молчать.
+route_map_warn_ipv6() {
+    [ -f "$ROUTE_MAP" ] || return 0
+    local v6
+    v6=$(awk '
+        { sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
+        /^\[?[0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F:.]*\]?(\/[0-9]+)?$/ { n++; if (n <= 3) s = s (s ? " " : "") $0 }
+        END { if (n) print n, s }' "$ROUTE_MAP")
+    [ -n "$v6" ] && logger -t sing-box "routes: ${v6%% *} IPv6 entr(y/ies) skipped — interception is IPv4-only, IPv6 is blocked while the VPN is on: ${v6#* }"
+    return 0
+}
+
 route_map_strict_slots() {
     local n id port ipset
     route_map_slots | while read -r n id port ipset; do
@@ -1003,6 +1017,7 @@ start_service() {
     # ---- Per-target route ipsets + dnsmasq (one set/port per route target) ----
     route_map_slots > "$INST_TMP"
     if [ "$FAST" != 1 ]; then
+        route_map_warn_ipv6
         rm -f /tmp/dnsmasq.d/singbox-singbox_t*.conf
         CUR_ROUTE_IPSETS=$(awk '{print $4}' "$INST_TMP" 2>/dev/null | tr '\n' ' ')
         # Sets belonging to targets that no longer exist go away. Sets still in use are

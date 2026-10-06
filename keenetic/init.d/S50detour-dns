@@ -194,6 +194,14 @@ regen() {
     fi
 
     rm -f "$DNSMASQ_CONF_DIR"/singbox-singbox_t*.conf
+    # Перехват только IPv4 — IPv6-строки маршрутов пропускаются; говорим об этом в журнал.
+    if [ -f "$SINGBOX_ROUTEMAP_LIST" ]; then
+        v6=$(awk '
+            { sub(/\/\/.*/, ""); sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
+            /^\[?[0-9a-fA-F]*:[0-9a-fA-F]*:[0-9a-fA-F:.]*\]?(\/[0-9]+)?$/ { n++; if (n <= 3) s = s (s ? " " : "") $0 }
+            END { if (n) print n, s }' "$SINGBOX_ROUTEMAP_LIST")
+        [ -n "$v6" ] && logger -t detour-dns "routes: ${v6%% *} IPv6 entr(y/ies) skipped — interception is IPv4-only, IPv6 is blocked while the VPN is on: ${v6#* }"
+    fi
     route_map_slots | while read -r n id ipset; do
         ipset create "$ipset" hash:net -exist 2>/dev/null
         route_map_section "$id" > "/tmp/detour-routemap-$ipset.list"
