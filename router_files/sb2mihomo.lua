@@ -96,6 +96,11 @@ local function apply_transport(p, ob, tls_on)
         set(o, "path", tr.path)
         set(o, "host", tr.host)
         set(o, "mode", tr.mode)
+        if type(tr.headers) == "table" and next(tr.headers) then o.headers = tr.headers end
+        if tr.no_grpc_header == true then o["no-grpc-header"] = true end
+        set(o, "x-padding-bytes", tr.x_padding_bytes)
+        if tonumber(tr.sc_max_each_post_bytes) then o["sc-max-each-post-bytes"] = tonumber(tr.sc_max_each_post_bytes) end
+        if tonumber(tr.sc_min_posts_interval_ms) then o["sc-min-posts-interval-ms"] = tonumber(tr.sc_min_posts_interval_ms) end
         p["xhttp-opts"] = o
     else
         return "транспорт " .. tostring(t) .. " не поддерживается mihomo"

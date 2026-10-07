@@ -74,10 +74,17 @@ export interface ProfileDraft {
   insecure: boolean;
   realityKey: string;
   realityShortId: string;
-  transport: "" | "ws" | "grpc" | "http";
+  transport: "" | "ws" | "grpc" | "http" | "xhttp";
   path: string;
   host: string;
   serviceName: string;
+  /** xhttp: stream-one / stream-up / packet-up, пусто — auto */
+  xhttpMode: string;
+  /**
+   * xhttp: остальные поля транспорта (заголовки, паддинг…), которых нет в
+   * форме, — JSON. Носим как есть, чтобы правка профиля их не стирала.
+   */
+  xhttpExtra: string;
   /** hysteria2 */
   obfsPassword: string;
   upMbps: string;
@@ -126,6 +133,8 @@ export function emptyDraft(): ProfileDraft {
     path: "",
     host: "",
     serviceName: "",
+    xhttpMode: "",
+    xhttpExtra: "",
     obfsPassword: "",
     upMbps: "",
     downMbps: "",
@@ -314,8 +323,14 @@ export function outboundFromDraft(d: ProfileDraft): Record<string, unknown> {
     } else if (d.transport === "http") {
       if (d.path.trim()) tr.path = d.path.trim();
       if (d.host.trim()) tr.host = [d.host.trim()];
+    } else if (d.transport === "xhttp") {
+      Object.assign(tr, parseExtra(d.xhttpExtra));
+      tr.type = "xhttp";
+      if (d.path.trim()) tr.path = d.path.trim();
+      if (d.host.trim()) tr.host = d.host.trim();
+      if (d.xhttpMode.trim()) tr.mode = d.xhttpMode.trim();
     }
-    o.transport = tr;
+    if (d.transport !== "xhttp" || d.type === "vless") o.transport = tr;
   }
 
   for (const k of Object.keys(o)) if (o[k] === undefined) delete o[k];
@@ -385,6 +400,13 @@ export function draftFromProfile(p: Record<string, unknown>): ProfileDraft {
     d.path = str(tr.path);
     d.serviceName = str(tr.service_name);
     d.host = str(obj(tr.headers).Host) || list(tr.host)[0] || "";
+  } else if (trType === "xhttp" || trType === "splithttp") {
+    d.transport = "xhttp";
+    d.path = str(tr.path);
+    d.host = str(tr.host);
+    d.xhttpMode = str(tr.mode);
+    const { type: _t, path: _p, host: _h, mode: _m, ...rest } = tr;
+    d.xhttpExtra = Object.keys(rest).length ? JSON.stringify(rest) : "";
   } else if (d.type === "http") {
     d.path = str(o.path);
   }
@@ -496,7 +518,48 @@ function applyTransportParams(d: ProfileDraft, p: Record<string, string>) {
     d.transport = "http";
     d.path = p.path || "";
     d.host = p.host || "";
+  } else if (tr === "xhttp" || tr === "splithttp") {
+    d.transport = "xhttp";
+    d.path = p.path || "";
+    d.host = p.host || "";
+    d.xhttpMode = p.mode && p.mode !== "auto" ? p.mode : "";
+    const extra = xhttpExtraFromXray(p.extra);
+    d.xhttpExtra = Object.keys(extra).length ? JSON.stringify(extra) : "";
   }
+}
+
+function parseExtra(s: string): Record<string, unknown> {
+  if (!s.trim()) return {};
+  try {
+    const v = JSON.parse(s);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * `extra` из share-ссылки Xray (JSON) → поля профиля, которые понимает
+ * сайдкар mihomo. Та же выборка, что в subscription-refresh.
+ */
+function xhttpExtraFromXray(raw: string | undefined): Record<string, unknown> {
+  const x = parseExtra(raw || "");
+  const out: Record<string, unknown> = {};
+  const headers = obj(x.headers);
+  if (Object.keys(headers).length) out.headers = headers;
+  if (x.noGRPCHeader === true) out.no_grpc_header = true;
+  const pad = x.xPaddingBytes;
+  const padObj = obj(pad);
+  if (typeof pad === "string" && pad) out.x_padding_bytes = pad;
+  else if (typeof pad === "number") out.x_padding_bytes = String(pad);
+  else if (padObj.from != null) out.x_padding_bytes = `${padObj.from}-${padObj.to ?? padObj.from}`;
+  if (Number.isFinite(Number(x.scMaxEachPostBytes)) && x.scMaxEachPostBytes != null) {
+    out.sc_max_each_post_bytes = Number(x.scMaxEachPostBytes);
+  }
+  if (Number.isFinite(Number(x.scMinPostsIntervalMs)) && x.scMinPostsIntervalMs != null) {
+    out.sc_min_posts_interval_ms = Number(x.scMinPostsIntervalMs);
+  }
+  return out;
 }
 
 /**
@@ -748,6 +811,9 @@ function transportParams(d: ProfileDraft): Record<string, string | undefined> {
   if (d.transport === "ws") return { type: "ws", path: d.path.trim(), host: d.host.trim() };
   if (d.transport === "grpc") return { type: "grpc", serviceName: d.serviceName.trim() };
   if (d.transport === "http") return { type: "http", path: d.path.trim(), host: d.host.trim() };
+  if (d.transport === "xhttp") {
+    return { type: "xhttp", path: d.path.trim(), host: d.host.trim(), mode: d.xhttpMode.trim() };
+  }
   return { type: "tcp" };
 }
 

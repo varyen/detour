@@ -113,6 +113,9 @@ pub fn prepare(mut ob: Value, tag: &str, detour: Option<&str>) -> Result<Hop> {
     if t == awg::TYPE {
         bail!("AmneziaWG работает только через сайдкар mihomo");
     }
+    if matches!(obj.get("transport").and_then(|t| t.get("type")).and_then(Value::as_str), Some("xhttp" | "splithttp")) {
+        bail!("xhttp работает только через сайдкар mihomo");
+    }
     if QUIC_TYPES.contains(&t.as_str()) {
         if let Some(tls) = obj.get_mut("tls").and_then(Value::as_object_mut) {
             tls.remove("utls");

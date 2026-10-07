@@ -16,7 +16,9 @@ use crate::store::{self, Store};
 pub const SUBS_DIR: &str = "subscriptions";
 pub const DEFAULT_UA: &str = "sing-box/1.13.2";
 const MAX_BODY: usize = 16 << 20;
-const XRAY_ONLY: [&str; 5] = ["xhttp", "splithttp", "kcp", "mkcp", "httpupgrade"];
+const XRAY_ONLY: [&str; 3] = ["kcp", "mkcp", "httpupgrade"];
+/// xhttp sing-box не умеет, а сайдкар mihomo умеет — но только у VLESS.
+const XHTTP: [&str; 2] = ["xhttp", "splithttp"];
 const SKIP_SB_TYPES: [&str; 5] = ["direct", "block", "dns", "selector", "urltest"];
 const SKIP_V2RAY: [&str; 6] = ["freedom", "blackhole", "dns", "loopback", "balancer", "chain"];
 
@@ -195,11 +197,30 @@ fn tls_from_stream(stream: &Value) -> Option<Value> {
 }
 
 /// `Err(())` — транспорт только Xray: такой outbound ронял бы весь конфиг.
-fn transport_from_stream(stream: &Value) -> Result<Option<Value>, ()> {
+fn transport_from_stream(stream: &Value, vless: bool) -> Result<Option<Value>, ()> {
     let net = stream.get("network").and_then(Value::as_str).unwrap_or("tcp");
     let get = |k: &str| stream.get(k).cloned().unwrap_or_default();
     Ok(match net {
         "tcp" | "raw" => None,
+        "xhttp" | "splithttp" if vless => {
+            let x = stream.get("xhttpSettings").or_else(|| stream.get("splithttpSettings")).cloned().unwrap_or_default();
+            let extra = match x.get("extra") {
+                Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_default(),
+                Some(v) => v.clone(),
+                None => Value::Null,
+            };
+            let mut t = sharelink::xhttp_extra(&extra);
+            t.insert("type".into(), json!("xhttp"));
+            for k in ["path", "host"] {
+                if let Some(v) = x.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()) {
+                    t.insert(k.into(), json!(v));
+                }
+            }
+            if let Some(m) = x.get("mode").and_then(Value::as_str).filter(|m| !m.is_empty() && *m != "auto") {
+                t.insert("mode".into(), json!(m));
+            }
+            Some(Value::Object(t))
+        }
         "ws" => {
             let ws = get("wsSettings");
             let mut t = json!({ "type": "ws" });
@@ -268,7 +289,7 @@ fn v2ray_to_singbox(ob: &Value) -> Option<Value> {
         if let Some(t) = tls_from_stream(&stream) {
             o.insert("tls".into(), t);
         }
-        if let Some(t) = transport_from_stream(&stream).ok()? {
+        if let Some(t) = transport_from_stream(&stream, proto == "vless").ok()? {
             o.insert("transport".into(), t);
         }
         Some(())
@@ -373,6 +394,9 @@ fn usable(mut ob: Value) -> Option<Value> {
     if XRAY_ONLY.contains(&tr) {
         return None;
     }
+    if XHTTP.contains(&tr) && o.get("type").and_then(Value::as_str) != Some("vless") {
+        return None;
+    }
     o.remove("detour");
     o.remove("domain_resolver");
     o.insert("tag".into(), json!("proxy"));
@@ -463,7 +487,13 @@ pub fn parse_body(body: &str, apply_routing: bool) -> Parsed {
                 continue;
             }
             let parsed = sharelink::parse(line)
-                .filter(|s| !XRAY_ONLY.contains(&s.requested_transport.as_str()))
+                .filter(|s| {
+                    let req = s.requested_transport.as_str();
+                    // xhttp не у VLESS сводится к голому TCP — мёртвый профиль
+                    let xhttp_lost = XHTTP.contains(&req)
+                        && s.outbound.pointer("/transport/type").and_then(Value::as_str) != Some("xhttp");
+                    !XRAY_ONLY.contains(&req) && !xhttp_lost
+                })
                 .and_then(|s| {
                     let name = if s.name.is_empty() { s.server.clone() } else { s.name.clone() };
                     usable(s.outbound).map(|ob| (name, ob))
@@ -744,11 +774,13 @@ mod tests {
             {"type":"selector","tag":"select","outbounds":["a"]},
             {"type":"vless","tag":"🇳🇱 NL","server":"vpn.example.com","server_port":443,"uuid":"u","domain_resolver":"dns-remote","detour":"x"},
             {"type":"vless","tag":"xh","server":"vpn.example.com","server_port":443,"uuid":"u","transport":{"type":"xhttp"}},
+            {"type":"trojan","tag":"tx","server":"vpn.example.com","server_port":443,"password":"p","transport":{"type":"xhttp"}},
             {"type":"direct","tag":"direct"}]}"#;
         let p = parse_body(body, false);
         assert_eq!(p.kind, "json");
-        assert_eq!(p.entries.len(), 1);
+        assert_eq!(p.entries.len(), 2);
         assert_eq!(p.skipped, 1);
+        assert_eq!(p.entries[1].1["transport"]["type"], "xhttp");
         let ob = &p.entries[0].1;
         assert_eq!(ob["tag"], "proxy");
         assert!(ob.get("domain_resolver").is_none() && ob.get("detour").is_none());
@@ -771,15 +803,26 @@ mod tests {
     }
 
     #[test]
-    fn base64_uri_list_skips_xhttp() {
-        let list = "vless://u@vpn.example.com:443?security=tls#A\nvless://u@vpn.example.com:443?type=xhttp#B\n# comment\nwireguard://x@y:1#C\n";
+    fn base64_uri_list_keeps_vless_xhttp() {
+        let list = "vless://u@vpn.example.com:443?security=tls#A\nvless://u@vpn.example.com:443?type=xhttp&path=%2Fx&mode=stream-one#B\ntrojan://p@vpn.example.com:443?type=xhttp#T\nvless://u@vpn.example.com:443?type=kcp#K\n# comment\nwireguard://x@y:1#C\n";
         let body = base64::engine::general_purpose::STANDARD.encode(list);
         use base64::Engine as _;
         let p = parse_body(&body, false);
         assert_eq!(p.kind, "uri-list-b64");
-        assert_eq!(p.entries.len(), 1);
-        assert_eq!(p.skipped, 2);
+        assert_eq!(p.entries.len(), 2);
+        assert_eq!(p.skipped, 3);
         assert_eq!(p.entries[0].2, "vless://u@vpn.example.com:443?security=tls#A");
+        assert_eq!(p.entries[1].1["transport"], json!({ "type": "xhttp", "path": "/x", "mode": "stream-one" }));
+    }
+
+    #[test]
+    fn v2ray_json_vless_xhttp() {
+        let body = r#"[{"remarks":"X","outbounds":[{"protocol":"vless","tag":"proxy",
+            "settings":{"vnext":[{"address":"vpn.example.com","port":443,"users":[{"id":"u"}]}]},
+            "streamSettings":{"network":"xhttp","xhttpSettings":{"path":"/x","mode":"packet-up","extra":{"xPaddingBytes":{"from":10,"to":20}}}}}]}]"#;
+        let p = parse_body(body, false);
+        assert_eq!(p.entries.len(), 1);
+        assert_eq!(p.entries[0].1["transport"], json!({ "type": "xhttp", "path": "/x", "mode": "packet-up", "x_padding_bytes": "10-20" }));
     }
 
     #[test]

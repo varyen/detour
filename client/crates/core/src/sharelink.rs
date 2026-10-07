@@ -37,6 +37,8 @@ struct Draft {
     path: String,
     host: String,
     service_name: String,
+    xhttp_mode: String,
+    xhttp_extra: Map<String, Value>,
     obfs_password: String,
     congestion: String,
 }
@@ -190,9 +192,58 @@ fn apply_transport(d: &mut Draft, p: &[(String, String)]) -> String {
             d.path = param(p, "path").into();
             d.host = param(p, "host").into();
         }
+        "xhttp" | "splithttp" => {
+            d.transport = "xhttp";
+            d.path = param(p, "path").into();
+            d.host = param(p, "host").into();
+            let mode = param(p, "mode");
+            d.xhttp_mode = if mode == "auto" { "" } else { mode }.into();
+            d.xhttp_extra = xhttp_extra(&serde_json::from_str(param(p, "extra")).unwrap_or_default());
+        }
         _ => {}
     }
     tr
+}
+
+/// `extra` Xray (JSON share-ссылки или `xhttpSettings.extra`) → поля профиля,
+/// которые понимает сайдкар mihomo. Порт `xhttpExtraFromXray` из uri.ts.
+pub(crate) fn xhttp_extra(x: &Value) -> Map<String, Value> {
+    let mut out = Map::new();
+    if let Some(h) = x.get("headers").and_then(Value::as_object).filter(|h| !h.is_empty()) {
+        out.insert("headers".into(), Value::Object(h.clone()));
+    }
+    if x.get("noGRPCHeader") == Some(&Value::Bool(true)) {
+        out.insert("no_grpc_header".into(), json!(true));
+    }
+    match x.get("xPaddingBytes") {
+        Some(Value::String(s)) if !s.is_empty() => {
+            out.insert("x_padding_bytes".into(), json!(s));
+        }
+        Some(Value::Number(n)) => {
+            out.insert("x_padding_bytes".into(), json!(n.to_string()));
+        }
+        Some(Value::Object(o)) if o.get("from").is_some_and(|v| !v.is_null()) => {
+            let txt = |v: &Value| match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let from = txt(&o["from"]);
+            let to = o.get("to").filter(|v| !v.is_null()).map(txt).unwrap_or_else(|| from.clone());
+            out.insert("x_padding_bytes".into(), json!(format!("{from}-{to}")));
+        }
+        _ => {}
+    }
+    for (src, dst) in [("scMaxEachPostBytes", "sc_max_each_post_bytes"), ("scMinPostsIntervalMs", "sc_min_posts_interval_ms")] {
+        let n = match x.get(src) {
+            Some(Value::Number(n)) => n.as_f64(),
+            Some(Value::String(s)) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        };
+        if let Some(n) = n.filter(|n| n.is_finite()) {
+            out.insert(dst.into(), if n.fract() == 0.0 { json!(n as i64) } else { json!(n) });
+        }
+    }
+    out
 }
 
 fn num(s: &str) -> Option<u64> {
@@ -450,7 +501,10 @@ fn outbound(d: &Draft) -> Value {
         o.insert("tls".into(), Value::Object(tls));
     }
 
-    if !d.transport.is_empty() && matches!(d.kind, "vless" | "vmess" | "trojan") {
+    if !d.transport.is_empty()
+        && matches!(d.kind, "vless" | "vmess" | "trojan")
+        && (d.transport != "xhttp" || d.kind == "vless")
+    {
         let mut tr = Map::new();
         tr.insert("type".into(), json!(d.transport));
         match d.transport {
@@ -473,6 +527,21 @@ fn outbound(d: &Draft) -> Value {
                 }
                 if let Some(h) = nonempty(&d.host) {
                     tr.insert("host".into(), json!([h]));
+                }
+            }
+            "xhttp" => {
+                for (k, v) in &d.xhttp_extra {
+                    tr.insert(k.clone(), v.clone());
+                }
+                tr.insert("type".into(), json!("xhttp"));
+                if let Some(p) = nonempty(&d.path) {
+                    tr.insert("path".into(), json!(p));
+                }
+                if let Some(h) = nonempty(&d.host) {
+                    tr.insert("host".into(), json!(h));
+                }
+                if let Some(m) = nonempty(&d.xhttp_mode) {
+                    tr.insert("mode".into(), json!(m));
                 }
             }
             _ => {}

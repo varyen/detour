@@ -9,6 +9,9 @@
 # обычный socks-outbound на этот порт. Маршруты, файрвол, health и счётчики
 # остаются прежними.
 #
+# Тем же путём идут VLESS-профили с транспортом xhttp (Xray): sing-box его не
+# знает, mihomo знает. Их прокси переводит sb2mihomo.lua, как в режиме «mihomo».
+#
 # Профиль (profiles/<id>.json): top-level "type":"amneziawg", outbound —
 #   {"type":"amneziawg","server","server_port","local_address":[...],
 #    "private_key","peer_public_key","pre_shared_key","mtu","reserved",
@@ -64,14 +67,19 @@ local function read(path)
     local s = f:read("*a"); f:close(); return s
 end
 
--- AWG-профили: id → outbound
+-- Профили сайдкара: id → outbound. AmneziaWG и VLESS поверх xhttp — оба
+-- sing-box не умеет, оба умеет mihomo.
+local function xhttp_ob(ob)
+    local tr = type(ob.transport) == "table" and ob.transport or nil
+    return tr ~= nil and (tr.type == "xhttp" or tr.type == "splithttp")
+end
 local profiles, ids = {}, {}
 local ls = io.popen('ls "' .. pdir .. '"/*.json 2>/dev/null')
 if ls then
     for f in ls:lines() do
         local obj = cjson.decode(read(f) or "")
         if type(obj) == "table" and type(obj.outbound) == "table"
-           and (obj.outbound.type == "amneziawg" or obj.type == "amneziawg") then
+           and (obj.outbound.type == "amneziawg" or obj.type == "amneziawg" or xhttp_ob(obj.outbound)) then
             local id = obj.id or f:match("([^/]+)%.json$")
             profiles[id] = obj.outbound
             ids[#ids + 1] = id
@@ -126,46 +134,72 @@ local AWG_KEYS = {
 local NUM = { version = 1, jc = 1, jmin = 1, jmax = 1, s1 = 1, s2 = 1, s3 = 1, s4 = 1, itime = 1 }
 local BOOL = { ["random-trailers"] = 1, ["disable-cookies"] = 1 }
 
+-- xhttp переводит общий транслятор режима «mihomo» — те же поля, что и там
+local sb2
+local function xhttp_proxy(ob, name)
+    if not sb2 then
+        local path = (arg[1] == "keenetic" and "/opt" or "/usr") .. "/share/detour/sb2mihomo.lua"
+        local ok, m = pcall(dofile, path)
+        sb2 = ok and type(m) == "table" and m or false
+    end
+    if not sb2 then return nil end
+    local copy = {}
+    for k, v in pairs(ob) do copy[k] = v end
+    copy.tag, copy.detour = name, nil
+    return (sb2.proxy(copy))
+end
+
 local proxies, listeners = {}, {}
 for _, id in ipairs(ids) do
     local ob, port = profiles[id], ports[id]
-    local addrs = ob.local_address or ob.address
-    if type(addrs) == "string" then addrs = { addrs } end
-    local ip4, ip6
-    for _, a in ipairs(type(addrs) == "table" and addrs or {}) do
-        local host = tostring(a):gsub("/%d+$", "")
-        if host:find(":", 1, true) then ip6 = ip6 or host else ip4 = ip4 or host end
-    end
-    if port and ob.server and ob.server_port and ob.private_key and ob.peer_public_key and (ip4 or ip6) then
-        local name = "awg-" .. id
-        local px = {
-            name = name, type = "wireguard", server = ob.server, port = tonumber(ob.server_port),
-            ["private-key"] = ob.private_key, ["public-key"] = ob.peer_public_key,
-            ip = ip4, ipv6 = ip6, udp = true, mtu = tonumber(ob.mtu) or 1280,
-            ["allowed-ips"] = { "0.0.0.0/0", "::/0" },
-        }
-        if ob.pre_shared_key and ob.pre_shared_key ~= "" then px["pre-shared-key"] = ob.pre_shared_key end
-        if tonumber(ob.persistent_keepalive_interval) then
-            px["persistent-keepalive"] = tonumber(ob.persistent_keepalive_interval)
+    if xhttp_ob(ob) then
+        local px = port and xhttp_proxy(ob, "xh-" .. id)
+        if px then
+            proxies[#proxies + 1] = px
+            listeners[#listeners + 1] = {
+                name = "in-" .. id, type = "socks", listen = "127.0.0.1", port = port,
+                udp = true, proxy = px.name,
+            }
         end
-        local opt, n = {}, 0
-        local src = type(ob.amnezia) == "table" and ob.amnezia or {}
-        for _, k in ipairs(AWG_KEYS) do
-            local v = src[k]
-            if v == nil then v = src[k:gsub("-", "_")] end
-            if v ~= nil and v ~= "" and v ~= cjson.null then
-                if NUM[k] then v = tonumber(v)
-                elseif BOOL[k] then v = (v == true or v == 1 or v == "1" or v == "true")
-                else v = tostring(v) end
-                if v ~= nil then opt[k] = v; n = n + 1 end
+    else
+        local addrs = ob.local_address or ob.address
+        if type(addrs) == "string" then addrs = { addrs } end
+        local ip4, ip6
+        for _, a in ipairs(type(addrs) == "table" and addrs or {}) do
+            local host = tostring(a):gsub("/%d+$", "")
+            if host:find(":", 1, true) then ip6 = ip6 or host else ip4 = ip4 or host end
+        end
+        if port and ob.server and ob.server_port and ob.private_key and ob.peer_public_key and (ip4 or ip6) then
+            local name = "awg-" .. id
+            local px = {
+                name = name, type = "wireguard", server = ob.server, port = tonumber(ob.server_port),
+                ["private-key"] = ob.private_key, ["public-key"] = ob.peer_public_key,
+                ip = ip4, ipv6 = ip6, udp = true, mtu = tonumber(ob.mtu) or 1280,
+                ["allowed-ips"] = { "0.0.0.0/0", "::/0" },
+            }
+            if ob.pre_shared_key and ob.pre_shared_key ~= "" then px["pre-shared-key"] = ob.pre_shared_key end
+            if tonumber(ob.persistent_keepalive_interval) then
+                px["persistent-keepalive"] = tonumber(ob.persistent_keepalive_interval)
             end
+            local opt, n = {}, 0
+            local src = type(ob.amnezia) == "table" and ob.amnezia or {}
+            for _, k in ipairs(AWG_KEYS) do
+                local v = src[k]
+                if v == nil then v = src[k:gsub("-", "_")] end
+                if v ~= nil and v ~= "" and v ~= cjson.null then
+                    if NUM[k] then v = tonumber(v)
+                    elseif BOOL[k] then v = (v == true or v == 1 or v == "1" or v == "true")
+                    else v = tostring(v) end
+                    if v ~= nil then opt[k] = v; n = n + 1 end
+                end
+            end
+            if n > 0 then px["amnezia-wg-option"] = opt end
+            proxies[#proxies + 1] = px
+            listeners[#listeners + 1] = {
+                name = "in-" .. id, type = "socks", listen = "127.0.0.1", port = port,
+                udp = true, proxy = name,
+            }
         end
-        if n > 0 then px["amnezia-wg-option"] = opt end
-        proxies[#proxies + 1] = px
-        listeners[#listeners + 1] = {
-            name = "in-" .. id, type = "socks", listen = "127.0.0.1", port = port,
-            udp = true, proxy = name,
-        }
     end
 end
 

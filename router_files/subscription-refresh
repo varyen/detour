@@ -222,6 +222,21 @@ local function vpn_proxy_url()
     return "socks5h://127.0.0.1:" .. VPN_PORT
 end
 
+-- Some panels send `Content-Encoding: gzip` even though curl never asked for it,
+-- and without --compressed curl hands the raw gzip bytes through. --compressed
+-- itself is not an option: a curl built without zlib rejects the flag outright.
+local function gunzip_if_needed(body)
+    if body:sub(1, 2) ~= "\31\139" then return body end
+    local tmp = "/tmp/sub-gz-" .. tostring(os.time()) .. "-" .. math.random(99999)
+    local f = io.open(tmp, "wb"); if not f then return body end
+    f:write(body); f:close()
+    local h = io.popen("gzip -dc " .. tmp .. " 2>/dev/null", "r")
+    local out = h and h:read("*a"); if h then h:close() end
+    os.remove(tmp)
+    if out and out ~= "" then return out end
+    return body
+end
+
 -- One HTTP fetch. `proxy` = nil for a direct fetch, else a curl -x URL.
 -- Returns body, or nil + a human-readable reason.
 local function fetch_body(url, ua, proxy, timeout)
@@ -250,6 +265,7 @@ local function fetch_body(url, ua, proxy, timeout)
         return nil, "server returned HTTP " .. http_code .. ", not a subscription feed"
     end
     if not body or body == "" then return nil, "empty response" end
+    body = gunzip_if_needed(body)
     -- An HTML body (e.g. an nginx 5xx page, or a 200 captive/landing page) is never
     -- a subscription feed — say so instead of letting the parser reject every line.
     if body:lower():match("<html") then
@@ -364,6 +380,29 @@ local function take_query(noscheme)
     return noscheme:sub(1, q - 1), parse_qs(noscheme:sub(q + 1))
 end
 
+-- xhttp (Xray) sing-box не умеет: такой профиль поднимает сайдкар mihomo
+-- (detour-awg), sb2mihomo переводит поля в xhttp-opts. `extra` — JSON-объект
+-- Xray (из share-ссылки или xhttpSettings.extra); берём то, что понимает mihomo.
+local function xhttp_transport(path, host, mode, extra)
+    local tr = { type = "xhttp" }
+    if path and path ~= "" then tr.path = path end
+    if host and host ~= "" then tr.host = host end
+    if mode and mode ~= "" and mode ~= "auto" then tr.mode = mode end
+    if type(extra) == "string" and extra ~= "" then extra = cjson.decode(extra) end
+    if type(extra) == "table" then
+        if type(extra.headers) == "table" and next(extra.headers) then tr.headers = extra.headers end
+        if extra.noGRPCHeader == true then tr.no_grpc_header = true end
+        local pad = extra.xPaddingBytes
+        if type(pad) == "table" and tonumber(pad.from) then
+            pad = tostring(pad.from) .. "-" .. tostring(tonumber(pad.to) or pad.from)
+        end
+        if pad ~= nil and pad ~= "" and type(pad) ~= "table" then tr.x_padding_bytes = tostring(pad) end
+        if tonumber(extra.scMaxEachPostBytes) then tr.sc_max_each_post_bytes = tonumber(extra.scMaxEachPostBytes) end
+        if tonumber(extra.scMinPostsIntervalMs) then tr.sc_min_posts_interval_ms = tonumber(extra.scMinPostsIntervalMs) end
+    end
+    return tr
+end
+
 local function parse_vless_uri(uri)
     local noscheme = uri:sub(9)
     local name; noscheme, name = take_hash_name(noscheme)
@@ -405,6 +444,12 @@ local function parse_vless_uri(uri)
         out.transport = { type = "http" }
         if params.path and params.path ~= "" then out.transport.path = params.path end
         if params.host and params.host ~= "" then out.transport.host = { params.host } end
+    elseif transport == "xhttp" or transport == "splithttp" then
+        out.transport = xhttp_transport(params.path, params.host, params.mode, params.extra)
+    elseif transport ~= "tcp" and transport ~= "raw" then
+        -- dropping the transport leaves a bare TCP outbound the server never
+        -- answers — a profile that imports fine and is silently dead.
+        return nil, "vless: unsupported transport " .. transport
     end
     return { outbound = out, name = name }
 end
@@ -441,6 +486,8 @@ local function parse_trojan_uri(uri)
     elseif transport == "grpc" then
         out.transport = { type = "grpc" }
         if params.serviceName and params.serviceName ~= "" then out.transport.service_name = params.serviceName end
+    elseif transport ~= "tcp" and transport ~= "raw" then
+        return nil, "trojan: unsupported transport " .. transport
     end
     return { outbound = out, name = name }
 end
@@ -480,6 +527,8 @@ local function parse_vmess_uri(uri)
         out.transport = { type = "http" }
         if json.path and json.path ~= "" then out.transport.path = json.path end
         if json.host and json.host ~= "" then out.transport.host = { json.host } end
+    elseif net ~= "tcp" and net ~= "raw" then
+        return nil, "vmess: unsupported transport " .. net
     end
     return { outbound = out, name = json.ps or json.name or "" }
 end
@@ -565,8 +614,12 @@ local function tls_from_stream(stream)
     return out
 end
 
-local function transport_from_stream(stream)
+local function transport_from_stream(stream, allow_xhttp)
     local net = stream.network or "tcp"
+    if allow_xhttp and (net == "xhttp" or net == "splithttp") then
+        local x = stream.xhttpSettings or stream.splithttpSettings or {}
+        return xhttp_transport(x.path, x.host, x.mode, x.extra)
+    end
     if net == "tcp" or net == "raw" then return nil end
     if net == "ws" then
         local ws = stream.wsSettings or {}
@@ -623,7 +676,7 @@ local function v2ray_to_singbox(ob)
         if user.flow then o.flow = user.flow end
         if user.encryption and user.encryption ~= "none" then o.encryption = user.encryption end
         local tls = tls_from_stream(stream); if tls then o.tls = tls end
-        local tr, bad = transport_from_stream(stream)
+        local tr, bad = transport_from_stream(stream, true)
         if bad then return nil end
         if tr then o.transport = tr end
         return o
@@ -1090,6 +1143,13 @@ end
 -- next run's vpn_proxy_url() would find the port taken and silently lose the VPN
 -- leg for good.
 vpn_proxy_down()
+
+-- AmneziaWG/xhttp-профили поднимает сайдкар mihomo: без sync новые профили
+-- остаются без порта, и detour-health их не видит до ближайшей пересборки.
+if processed > errored then
+    local awg = (OPT ~= "" and "/opt/sbin" or "/usr/sbin") .. "/detour-awg"
+    if file_exists(awg) then sh_ok(awg .. " sync") end
+end
 
 last_state.processed = processed
 last_state.errored = errored

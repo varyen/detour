@@ -89,6 +89,51 @@
           "enabled": true,
           "fingerprint": "chrome"
         }
+      },
+      "transport": {
+        "type": "xhttp",
+        "path": "/x"
+      }
+    }
+  },
+  {
+    "uri": "vless://00000000-0000-0000-0000-000000000001@vpn.example.com:443?security=tls&sni=vpn.example.com&type=xhttp&path=%2Fxh&host=cdn.example.com&mode=packet-up&extra=%7B%22xPaddingBytes%22%3A%7B%22from%22%3A100%2C%22to%22%3A1000%7D%2C%22noGRPCHeader%22%3Atrue%2C%22scMaxEachPostBytes%22%3A%22500000%22%2C%22headers%22%3A%7B%22X-A%22%3A%221%22%7D%7D#xhttp%20extra",
+    "name": "xhttp extra",
+    "outbound": {
+      "type": "vless",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "uuid": "00000000-0000-0000-0000-000000000001",
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.example.com"
+      },
+      "transport": {
+        "type": "xhttp",
+        "headers": {
+          "X-A": "1"
+        },
+        "no_grpc_header": true,
+        "x_padding_bytes": "100-1000",
+        "sc_max_each_post_bytes": 500000,
+        "path": "/xh",
+        "host": "cdn.example.com",
+        "mode": "packet-up"
+      }
+    }
+  },
+  {
+    "uri": "trojan://pw@vpn.example.com:443?type=xhttp&path=%2Fx#trojan%20xhttp",
+    "name": "trojan xhttp",
+    "outbound": {
+      "type": "trojan",
+      "tag": "proxy",
+      "server": "vpn.example.com",
+      "server_port": 443,
+      "password": "pw",
+      "tls": {
+        "enabled": true
       }
     }
   },

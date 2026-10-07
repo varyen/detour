@@ -150,6 +150,19 @@ fn apply_transport(p: &mut Map<String, Value>, ob: &Value, tls_on: bool) -> Resu
             set(&mut o, "path", s(tr, "path"));
             set(&mut o, "host", s(tr, "host"));
             set(&mut o, "mode", s(tr, "mode"));
+            if let Some(h) = tr.get("headers").and_then(Value::as_object).filter(|h| !h.is_empty()) {
+                o.insert("headers".into(), Value::Object(h.clone()));
+            }
+            if tr.get("no_grpc_header").and_then(Value::as_bool) == Some(true) {
+                o.insert("no-grpc-header".into(), json!(true));
+            }
+            set(&mut o, "x-padding-bytes", s(tr, "x_padding_bytes"));
+            if let Some(n) = num(tr, "sc_max_each_post_bytes") {
+                o.insert("sc-max-each-post-bytes".into(), json!(n));
+            }
+            if let Some(n) = num(tr, "sc_min_posts_interval_ms") {
+                o.insert("sc-min-posts-interval-ms".into(), json!(n));
+            }
             p.insert("xhttp-opts".into(), Value::Object(o));
         }
         other => return Err(format!("транспорт {other} не поддерживается mihomo")),

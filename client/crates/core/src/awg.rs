@@ -42,8 +42,14 @@ const KEYS: [&str; 30] = [
 const NUMERIC: [&str; 9] = ["version", "jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "itime"];
 const BOOL: [&str; 2] = ["random-trailers", "disable-cookies"];
 
+/// Профиль, который поднимает сайдкар mihomo: AmneziaWG и VLESS поверх xhttp —
+/// ни то, ни другое sing-box не умеет.
 pub fn is_awg(ob: &Value) -> bool {
-    ob.get("type").and_then(Value::as_str) == Some(TYPE)
+    ob.get("type").and_then(Value::as_str) == Some(TYPE) || is_xhttp(ob)
+}
+
+pub fn is_xhttp(ob: &Value) -> bool {
+    matches!(ob.pointer("/transport/type").and_then(Value::as_str), Some("xhttp" | "splithttp"))
 }
 
 /// Что видит sing-box вместо AWG-профиля.
@@ -88,6 +94,15 @@ fn host_of(a: &str) -> &str {
 
 /// Один прокси mihomo из outbound'а профиля (плоская форма панели).
 pub fn proxy(name: &str, ob: &Value) -> Result<Value> {
+    if is_xhttp(ob) {
+        // тот же перевод, что в движке mihomo
+        let mut o = ob.clone();
+        o["tag"] = json!(name);
+        if let Some(m) = o.as_object_mut() {
+            m.remove("detour");
+        }
+        return crate::mihomo::proxy(&o).map_err(|e| anyhow::anyhow!(e));
+    }
     let s = |k: &str| ob.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
     let server = s("server").context("нет адреса сервера")?;
     let port = ob.get("server_port").and_then(num).context("нет порта сервера")?;

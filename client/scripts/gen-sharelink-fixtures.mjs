@@ -17,6 +17,8 @@ const links = [
   `vless://${U}@vpn.example.com:8443?security=tls&type=ws&path=%2Fws%3Fed%3D2048&host=cdn.example.com&sni=cdn.example.com&alpn=h2,http/1.1#WS`,
   `vless://${U}@[2001:db8::1]:443?security=tls&type=grpc&serviceName=grpcsvc#IPv6%20gRPC`,
   `vless://${U}@vpn.example.com:443?security=reality&sni=www.example.com&fp=chrome&pbk=K&sid=&type=xhttp&path=%2Fx#xhttp`,
+  `vless://${U}@vpn.example.com:443?security=tls&sni=vpn.example.com&type=xhttp&path=%2Fxh&host=cdn.example.com&mode=packet-up&extra=${encodeURIComponent(JSON.stringify({ xPaddingBytes: { from: 100, to: 1000 }, noGRPCHeader: true, scMaxEachPostBytes: "500000", headers: { "X-A": "1" } }))}#xhttp%20extra`,
+  `trojan://pw@vpn.example.com:443?type=xhttp&path=%2Fx#trojan%20xhttp`,
   `VLESS://${U}@vpn.example.com:443?security=none#Upper`,
   `vless://${U}@vpn.example.com:443/?security=tls&type=h2&path=%2Fh2&host=h2.example.com#H2`,
   `trojan://p%40ss+word@vpn.example.com:443?sni=vpn.example.com&allowInsecure=1#Trojan+DE`,

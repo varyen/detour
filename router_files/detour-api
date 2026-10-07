@@ -560,13 +560,23 @@ strip_quic_utls() {
     printf '%s\n' "$line"
 }
 
+# Профиль, который поднимает сайдкар mihomo (detour-awg), а не sing-box:
+# AmneziaWG и VLESS поверх xhttp — ни то, ни другое sing-box не умеет.
 is_awg_profile() {
-    grep -q '"type"[[:space:]]*:[[:space:]]*"amneziawg"' "$1" 2>/dev/null
+    grep -qE '"type"[[:space:]]*:[[:space:]]*"(amneziawg|xhttp|splithttp)"' "$1" 2>/dev/null
+}
+# Для сообщений: «AmneziaWG-профиль» / «xhttp-профиль».
+sidecar_kind() {
+    if grep -q '"type"[[:space:]]*:[[:space:]]*"amneziawg"' "$1" 2>/dev/null; then
+        printf 'AmneziaWG'
+    else
+        printf 'xhttp'
+    fi
 }
 
 # Режим движков (настройка engine_mode):
-#   singbox — только sing-box, AmneziaWG недоступен;
-#   hybrid  — sing-box для всего, AmneziaWG через сайдкар mihomo (по умолчанию);
+#   singbox — только sing-box, AmneziaWG и xhttp недоступны;
+#   hybrid  — sing-box для всего, AmneziaWG и xhttp через сайдкар mihomo (по умолчанию);
 #   mihomo  — всё через mihomo. Если на цепочке действует запрет торрентов и
 #             включён engine_torrent_singbox, цепочка идёт как в hybrid: запрет
 #             торрентов на уровне потока умеет только sing-box.
@@ -1841,7 +1851,7 @@ render_fail_reason() {
     if [ -n "$miss" ]; then
         printf 'профиль недоступен: %s (активный профиль удалён — выберите другой)' "$miss"
     elif [ -n "$awg" ]; then
-        printf 'AmneziaWG-профиль %s может быть только первым звеном цепочки' "$awg"
+        printf '%s-профиль %s может быть только первым звеном цепочки' "$(sidecar_kind "$SINGBOX_PROFILES_DIR/${awg%% *}.json")" "$awg"
     else
         printf '%s' "$2"
     fi
@@ -1946,7 +1956,7 @@ build_config() {
             is_awg_profile "$SINGBOX_PROFILES_DIR/$_tid.json" && _awg_used="$_tid"
         done
         if [ -n "$_awg_used" ]; then
-            echo "AmneziaWG-профиль $_awg_used недоступен в режиме «только sing-box» — выберите гибрид или mihomo"
+            echo "$(sidecar_kind "$SINGBOX_PROFILES_DIR/$_awg_used.json")-профиль $_awg_used недоступен в режиме «только sing-box» — выберите гибрид или mihomo"
             return 1
         fi
     elif [ ! -x "$MIHOMO_BIN" ]; then
@@ -1954,7 +1964,7 @@ build_config() {
         # весь трафик цепочки ушёл бы в никуда. Отказываем — прежний конфиг цел.
         for _tid in $(printf '%s' "$chain" | tr ',' ' '); do
             if is_awg_profile "$SINGBOX_PROFILES_DIR/$_tid.json"; then
-                echo "AmneziaWG-профиль $_tid требует mihomo, а он не установлен — поставьте его в «Журнал → Обновления»"
+                echo "$(sidecar_kind "$SINGBOX_PROFILES_DIR/$_tid.json")-профиль $_tid требует mihomo, а он не установлен — поставьте его в «Журнал → Обновления»"
                 return 1
             fi
         done
@@ -2054,7 +2064,7 @@ build_config() {
     done
     write_devices_map "$DX_MAP${DX_MAP:+
 }"
-    # singbox — чистый sing-box, hybrid — плюс сайдкар AmneziaWG (mihomo в
+    # singbox — чистый sing-box, hybrid — плюс сайдкар AmneziaWG/xhttp (mihomo в
     # режиме «mihomo», откатившемся из-за запрета торрентов, — тоже гибрид).
     if [ "$engine_mode" = singbox ]; then echo singbox > "$ENGINE_FILE"; else echo hybrid > "$ENGINE_FILE"; fi
     # Сайдкар поднимаем после рендера: порты AWG-профилей выдаются в нём. Init
@@ -4110,12 +4120,12 @@ profile_save)
             exit 0
         fi
     fi
-    # Новый AmneziaWG-профиль без mihomo работать не может: в гибриде он
-    # становится socks на порт, который никто не слушает. Правку уже
-    # существующего AWG-профиля пропускаем — его и так надо как-то чинить.
-    if printf '%s' "$POST_DATA" | grep -q '"type"[[:space:]]*:[[:space:]]*"amneziawg"' \
+    # Новый AmneziaWG- или xhttp-профиль без mihomo работать не может: в гибриде
+    # он становится socks на порт, который никто не слушает. Правку уже
+    # существующего такого профиля пропускаем — его и так надо как-то чинить.
+    if printf '%s' "$POST_DATA" | grep -qE '"type"[[:space:]]*:[[:space:]]*"(amneziawg|xhttp|splithttp)"' \
        && [ ! -x "$MIHOMO_BIN" ] && ! is_awg_profile "$PS_FILE"; then
-        json_err "AmneziaWG работает через mihomo, а он не установлен. Поставьте его в «Журнал → Обновления» и сохраните профиль снова"
+        json_err "AmneziaWG и xhttp работают через mihomo, а он не установлен. Поставьте его в «Журнал → Обновления» и сохраните профиль снова"
         exit 0
     fi
     echo "$POST_DATA" > "$PS_FILE"
@@ -4125,7 +4135,7 @@ profile_save)
         AWG_ERR=$("$AWG_BIN" sync 2>&1 >/dev/null)
         AWG_RC=$?
         if [ "$AWG_RC" != 0 ] && [ "$AWG_RC" != 3 ]; then
-            json_err "профиль сохранён, но сайдкар AmneziaWG его не принял: $(printf '%s' "$AWG_ERR" | json_escape)"
+            json_err "профиль сохранён, но сайдкар mihomo его не принял: $(printf '%s' "$AWG_ERR" | json_escape)"
             exit 0
         fi
     fi
@@ -4704,6 +4714,12 @@ subscription_fetch)
         json_err "fetch failed: $SUB_ERR"
         exit 0
     fi
+    # Some panels gzip the body unasked. Not --compressed: curl without zlib
+    # rejects the flag itself.
+    # No od on GL.iNet busybox; gzip -dc fails on non-gzip input, which is the check.
+    if gzip -dc "$SUB_TMP/body" > "$SUB_TMP/body.raw" 2>/dev/null; then
+        mv "$SUB_TMP/body.raw" "$SUB_TMP/body"
+    fi
     # Parse selected response headers (case-insensitive, last value across redirects wins).
     SUB_HDR_TITLE=$(grep -i '^profile-title:' "$SUB_TMP/hdrs" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tail -1)
     SUB_HDR_INTERVAL=$(grep -i '^profile-update-interval:' "$SUB_TMP/hdrs" 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | tail -1)
@@ -4902,13 +4918,13 @@ panel_import_config)
     [ -x "$PORTMAP_BIN" ] && [ -s "$DETOUR_DIR/portmap.conf" ] && "$PORTMAP_BIN" apply >/dev/null 2>&1
     # Перезапуск в фоне: ответ должен уйти раньше, чем VPN на секунды пропадёт.
     ( sleep 1; $SINGBOX_INITD restart; $ZAPRET_INITD restart ) >/dev/null 2>&1 &
-    # Копия с AmneziaWG-профилями на роутер без mihomo: без него они молча не
-    # поднимаются. Ставим в фоне (~20 МБ качать), затем перезапуск sing-box.
+    # Копия с AmneziaWG/xhttp-профилями на роутер без mihomo: без него они молча
+    # не поднимаются. Ставим в фоне (~20 МБ качать), затем перезапуск sing-box.
     if [ ! -x "$MIHOMO_BIN" ] && [ -x "$UPDATE_BIN" ] && [ "$(get_engine_mode)" != singbox ] \
-       && grep -qs '"type"[[:space:]]*:[[:space:]]*"amneziawg"' "$SINGBOX_PROFILES_DIR"/*.json; then
+       && grep -qsE '"type"[[:space:]]*:[[:space:]]*"(amneziawg|xhttp|splithttp)"' "$SINGBOX_PROFILES_DIR"/*.json; then
         : > "$APPLY_LOG" 2>/dev/null
         detach_bg "$APPLY_LOG" "sleep 3; \"$UPDATE_BIN\" mihomo-ensure && $SINGBOX_INITD restart; echo \"$APPLY_DONE_MARK rc=\$?\""
-        IMPORT_WARN="${IMPORT_WARN:+$IMPORT_WARN; }AmneziaWG-профили заработают после установки mihomo — она идёт в фоне, ход виден в «Журнал → Обновления»"
+        IMPORT_WARN="${IMPORT_WARN:+$IMPORT_WARN; }AmneziaWG- и xhttp-профили заработают после установки mihomo — она идёт в фоне, ход виден в «Журнал → Обновления»"
     fi
     if [ -n "$IMPORT_WARN" ]; then
         printf '{"ok":true,"warning":"%s","result":%s}' "$(printf '%s' "$IMPORT_WARN" | json_escape)" "$IMPORT_OUT"
@@ -5199,7 +5215,7 @@ mihomo_remove)
         MR_AWG="${MR_AWG:+$MR_AWG, }$MR_ID"
     done
     if [ -n "$MR_AWG" ]; then
-        json_err "есть AmneziaWG-профили ($(printf '%s' "$MR_AWG" | json_escape)) — удалите их, затем mihomo"
+        json_err "есть профили AmneziaWG/xhttp ($(printf '%s' "$MR_AWG" | json_escape)) — удалите их, затем mihomo"
         exit 0
     fi
     start_apply "\"$UPDATE_BIN\" mihomo-remove"

@@ -509,13 +509,32 @@ async function copyShare() {
             <option value="ws">websocket</option>
             <option value="grpc">gRPC</option>
             <option value="http">http/2</option>
+            <option v-if="type === 'vless'" value="xhttp">xhttp</option>
           </select>
         </PField>
-        <PField v-if="d.transport === 'ws' || d.transport === 'http'" label="Путь">
+        <p v-if="d.transport === 'xhttp'" class="warn" role="note">
+          xhttp sing-box не умеет: такой профиль поднимает mihomo (движок «гибрид» или
+          «mihomo»). Стоит только первым звеном цепочки.
+        </p>
+        <PField
+          v-if="d.transport === 'ws' || d.transport === 'http' || d.transport === 'xhttp'"
+          label="Путь"
+        >
           <input v-model="d.path" type="text" spellcheck="false" placeholder="/ws" />
         </PField>
-        <PField v-if="d.transport === 'ws' || d.transport === 'http'" label="Host-заголовок">
+        <PField
+          v-if="d.transport === 'ws' || d.transport === 'http' || d.transport === 'xhttp'"
+          label="Host-заголовок"
+        >
           <input v-model="d.host" type="text" spellcheck="false" />
+        </PField>
+        <PField v-if="d.transport === 'xhttp'" label="Режим xhttp">
+          <select v-model="d.xhttpMode">
+            <option value="">auto</option>
+            <option value="stream-one">stream-one</option>
+            <option value="stream-up">stream-up</option>
+            <option value="packet-up">packet-up</option>
+          </select>
         </PField>
         <PField v-if="d.transport === 'grpc'" label="gRPC service name">
           <input v-model="d.serviceName" type="text" spellcheck="false" />
