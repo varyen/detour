@@ -232,17 +232,24 @@ for IF in $IFACES; do
     fi
 done
 
-# --- nat PREROUTING: zapret domain-set → REDIRECT (zapret first = higher priority) ---
+# --- nat PREROUTING: zapret domain-set → REDIRECT ---
+# Порядок: «Отдельные маршруты» → zapret → общий перехват sing-box. Маршрут главнее
+# zapret: адреса CDN общие, и IP сайта из маршрута легко попадает в zapret_domains
+# чужим доменом. Правило снимается здесь и дописывается заново после маршрутов
+# (zapret_nat_add), иначе оно, однажды вставленное, так и стояло бы выше них.
 for IF in $IFACES; do
     [ -n "$IF" ] || continue
-    if [ -f /opt/etc/detour/zapret.enabled ]; then
+    del nat PREROUTING -i "$IF" -p tcp -m set --match-set "$ZAPRET_IPSET" dst \
+        -j REDIRECT --to-ports "$ZAPRET_PORT"
+done
+zapret_nat_add() {
+    [ -f /opt/etc/detour/zapret.enabled ] || return 0
+    for IF in $IFACES; do
+        [ -n "$IF" ] || continue
         add nat PREROUTING -i "$IF" -p tcp -m set --match-set "$ZAPRET_IPSET" dst \
             -j REDIRECT --to-ports "$ZAPRET_PORT"
-    else
-        del nat PREROUTING -i "$IF" -p tcp -m set --match-set "$ZAPRET_IPSET" dst \
-            -j REDIRECT --to-ports "$ZAPRET_PORT"
-    fi
-done
+    done
+}
 
 # --- sing-box: tear down BOTH modes' rules on every iface, then apply active ---
 for IF in $IFACES; do
@@ -266,6 +273,7 @@ if [ -f /opt/etc/detour/singbox.enabled ]; then
                 -j REDIRECT --to-ports "$port"
         done
     done
+    zapret_nat_add
     if [ "$ROUTING_MODE" = "all-except" ]; then
         # Proxy EVERYTHING except private/loopback/CGNAT, the upstream server(s),
         # and the whitelist ipset. sing-box itself also sends whitelisted domains
@@ -310,6 +318,7 @@ else
                 -j REDIRECT --to-ports "$port"
         done
     done
+    zapret_nat_add
     # sing-box disabled → make sure the all-except chain is gone.
     iptables -t nat -F SINGBOX_ALL 2>/dev/null
     iptables -t nat -X SINGBOX_ALL 2>/dev/null
@@ -352,7 +361,7 @@ fi
 # --- Устройства по MAC: «мимо VPN» / «через свой VPN или цепочку» ---
 # Карта «mac mode port udp_port» — от detour-api. Переход стоит ПЕРВЫМ (выше
 # «Все через VPN»), поэтому цепочка устройства сама повторяет то, что главнее
-# правила устройства: zapret и «Отдельные маршруты» роутера.
+# правила устройства: «Отдельные маршруты» роутера, затем zapret.
 DEV_MAP="/opt/etc/sing-box/devices.map"
 for IF in $IFACES; do
     [ -n "$IF" ] || continue
@@ -372,13 +381,13 @@ if [ -f /opt/etc/detour/singbox.enabled ] && [ -s "$DEV_MAP" ]; then
         [ -n "$mac" ] || continue
         i=$((i + 1)); c="SINGBOX_DEV_$i"
         iptables -t nat -N "$c"
-        [ -f /opt/etc/detour/zapret.enabled ] && \
-            iptables -t nat -A "$c" -p tcp -m set --match-set "$ZAPRET_IPSET" dst -j REDIRECT --to-ports "$ZAPRET_PORT"
         route_map_slots > /tmp/detour-dev-slots.$$
         while read -r n id rport ipset; do
             [ -n "$ipset" ] && iptables -t nat -A "$c" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$rport"
         done < /tmp/detour-dev-slots.$$
         rm -f /tmp/detour-dev-slots.$$
+        [ -f /opt/etc/detour/zapret.enabled ] && \
+            iptables -t nat -A "$c" -p tcp -m set --match-set "$ZAPRET_IPSET" dst -j REDIRECT --to-ports "$ZAPRET_PORT"
         if [ "$mode" = vpn ] && [ "$port" != 0 ]; then
             for ip in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 100.64.0.0/10; do
                 iptables -t nat -A "$c" -d "$ip" -j ACCEPT

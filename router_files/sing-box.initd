@@ -322,6 +322,20 @@ flush_routing_conntrack() {
     flush_ipset_conntrack $sets
 }
 
+# Порядок в nat PREROUTING для интерфейса: «Отдельные маршруты» → zapret → общий
+# перехват. Маршрут главнее zapret: адреса CDN общие, и IP сайта из маршрута
+# легко оказывается в zapret_domains чужим доменом — тогда zapret уводил его
+# напрямую. Zapret ставят и detour-bypass, и zapret-tpws, причём кто угодно из них
+# может перезапуститься после нас, поэтому позиции считаются от того, что уже
+# стоит, а не «первым номером». Печатает «первый последний» номер правила с
+# переходом в ZAPRET_REDIRECT/ZAPRET2_NAT; пусто — zapret не стоит.
+zapret_nat_span() {
+    iptables -t nat -S PREROUTING 2>/dev/null | awk -v i="$1" '
+        $1 == "-A" { n++ }
+        $1 == "-A" && index($0, " -i " i " ") && / -j (ZAPRET_REDIRECT|ZAPRET2_NAT)$/ { if (!f) f = n; l = n }
+        END { if (f) print f, l }'
+}
+
 # Open LAN-side port for sing-box.
 # nft fw4 path: insert ACCEPT rule into input_lan chain.
 # iptables/fw3 path: rely on LAN zone default ACCEPT (already permissive).
@@ -660,8 +674,8 @@ teardown_intercept() {
 # ---- Устройства: «мимо VPN» / «через свой VPN или цепочку» ----
 # Переход в SINGBOX_DEVICES стоит ПЕРВЫМ в nat PREROUTING — выше «Все через VPN»
 # (оно тоже встаёт на первую позицию) и общего перехвата. Поэтому цепочка каждого
-# устройства сама повторяет то, что главнее правила устройства: zapret и
-# «Отдельные маршруты» роутера (их набор адресов → их порт), и только потом
+# устройства сама повторяет то, что главнее правила устройства: «Отдельные
+# маршруты» роутера (их набор адресов → их порт), затем zapret, и только потом
 # решает за устройство. ACCEPT в nat — «больше ничего не перенаправлять».
 devices_down() {
     local c
@@ -686,9 +700,6 @@ devices_up() {
         [ -n "$mac" ] || continue
         i=$((i + 1)); c="SINGBOX_DEV_$i"
         iptables -t nat -N "$c"
-        # zapret создаёт свою цепочку через -N/-F, пустая заготовка ему не мешает
-        iptables -t nat -N ZAPRET_REDIRECT 2>/dev/null
-        iptables -t nat -A "$c" -j ZAPRET_REDIRECT
         if [ -s "$slots" ]; then
             while read -r n id rport ipset rest; do
                 [ -n "$ipset" ] && iptables -t nat -A "$c" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$rport"
@@ -696,6 +707,12 @@ devices_up() {
         fi
         ipset list -n 2>/dev/null | grep -qx "$ROUTE_DEAD_IPSET" && \
             iptables -t nat -A "$c" -p tcp -m set --match-set "$ROUTE_DEAD_IPSET" dst -j REDIRECT --to-ports "$ROUTE_DEAD_PORT"
+        # zapret (tpws / zapret2) создаёт свою цепочку через -N/-F, пустая заготовка
+        # ему не мешает. Порядок тот же, что в общем пути (zapret_nat_span).
+        iptables -t nat -N ZAPRET_REDIRECT 2>/dev/null
+        iptables -t nat -A "$c" -j ZAPRET_REDIRECT
+        iptables -t nat -N ZAPRET2_NAT 2>/dev/null
+        iptables -t nat -A "$c" -j ZAPRET2_NAT
         if [ "$mode" = vpn ] && [ "$port" != 0 ]; then
             for ip in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8; do
                 iptables -t nat -A "$c" -d "$ip" -j ACCEPT
@@ -960,7 +977,7 @@ start_service() {
 
     local MODE=$(get_singbox_mode)
     local ROUTING_MODE=$(get_routing_mode)
-    local SB_POS=1 ZL
+    local SB_POS=1 RT_POS=1 ZSPAN
     local INST_TMP=/tmp/singbox-instances.start.$$
     local CUR_ROUTE_IPSETS=""
     # Fast profile/chain switch (reconfigure): domains/ipsets/dnsmasq unchanged, so
@@ -1140,9 +1157,9 @@ start_service() {
         iptables -t nat -A SINGBOX_ALL -p tcp -j REDIRECT --to-ports 12345 \
             || logger -p daemon.err -t sing-box "REDIRECT не встал (нет kmod-ipt-nat?) — трафик пойдёт мимо VPN; detour-update netfilter-ensure"
         iptables -t nat -D PREROUTING -i br-lan -j SINGBOX_ALL 2>/dev/null
-        # Insert AFTER zapret-tpws's ZAPRET_REDIRECT if present (zapret must run first)
-        ZL=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | awk '/ZAPRET_REDIRECT/ {print $1; exit}')
-        [ -n "$ZL" ] && SB_POS=$((ZL + 1))
+        # Ниже zapret (tpws или zapret2): его домены идут мимо VPN (zapret_nat_span).
+        ZSPAN=$(zapret_nat_span br-lan)
+        [ -n "$ZSPAN" ] && SB_POS=$((${ZSPAN#* } + 1))
         iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -j SINGBOX_ALL
 
         # GL.iNet policy routing has rule 9920 (br-lan -> blackhole) for unmarked LAN
@@ -1153,31 +1170,34 @@ start_service() {
     else
         # Mode: proxy ONLY listed domains/IPs (default)
         iptables -t nat -D PREROUTING -i br-lan -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345 2>/dev/null
-        ZL=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | awk '/ZAPRET_REDIRECT/ {print $1; exit}')
-        [ -n "$ZL" ] && SB_POS=$((ZL + 1))
+        ZSPAN=$(zapret_nat_span br-lan)
+        [ -n "$ZSPAN" ] && SB_POS=$((${ZSPAN#* } + 1))
         iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345
     fi
 
-    # ---- Per-target ports + REDIRECTs inserted ABOVE the default catch-all.
+    # ---- Per-target ports + REDIRECTs inserted ABOVE zapret and the default catch-all.
     # REDIRECT delivers locally, so strict per-target routes are never blackholed
     # by rule 9920 before sing-box gets a chance to decide between target/block.
+    # Old per-target rules are removed first, so the span is re-read after that.
     if command -v iptables-save >/dev/null 2>&1; then
         iptables-save -t nat 2>/dev/null | grep -- '--match-set singbox_t' | sed 's/^-A/-D/' | while IFS= read -r rule; do
             [ -n "$rule" ] && iptables -t nat $rule 2>/dev/null
         done
     fi
+    ZSPAN=$(zapret_nat_span br-lan)
+    RT_POS=${ZSPAN%% *}; [ -n "$RT_POS" ] || RT_POS=$SB_POS
     if [ -s "$INST_TMP" ]; then
         while read -r n id port ipset; do
             open_port_lan "$port"
             iptables -t nat -D PREROUTING -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port" 2>/dev/null
-            iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
+            iptables -t nat -I PREROUTING "$RT_POS" -i br-lan -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
         done < "$INST_TMP"
     fi
     # Routes whose target vanished: send them into the dead port. The set is empty in
     # the normal case, so this rule then matches nothing at all.
     if ipset list -n 2>/dev/null | grep -qx "$ROUTE_DEAD_IPSET"; then
         open_port_lan "$ROUTE_DEAD_PORT"
-        iptables -t nat -I PREROUTING "$SB_POS" -i br-lan -p tcp \
+        iptables -t nat -I PREROUTING "$RT_POS" -i br-lan -p tcp \
             -m set --match-set "$ROUTE_DEAD_IPSET" dst -j REDIRECT --to-ports "$ROUTE_DEAD_PORT"
     fi
 
@@ -1187,19 +1207,28 @@ start_service() {
     # add the per-interface PREROUTING jumps.
     for VIF in $(vpn_redirect_ifaces); do
         [ -n "$VIF" ] || continue
+        # Тот же порядок, что для br-lan: маршруты → zapret → общий перехват. Номера
+        # считаются после снятия старых правил, иначе они съезжают.
+        iptables -t nat -D PREROUTING -i "$VIF" -j SINGBOX_ALL 2>/dev/null
+        iptables -t nat -D PREROUTING -i "$VIF" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345 2>/dev/null
+        ZSPAN=$(zapret_nat_span "$VIF")
+        if [ -n "$ZSPAN" ]; then
+            SB_POS=$((${ZSPAN#* } + 1))
+        else
+            SB_POS=1
+        fi
         if [ "$ROUTING_MODE" = "all-except" ]; then
-            iptables -t nat -D PREROUTING -i "$VIF" -j SINGBOX_ALL 2>/dev/null
-            iptables -t nat -I PREROUTING -i "$VIF" -j SINGBOX_ALL
+            iptables -t nat -I PREROUTING "$SB_POS" -i "$VIF" -j SINGBOX_ALL
             iptables -t mangle -D PREROUTING -i "$VIF" -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000 2>/dev/null
             iptables -t mangle -I PREROUTING 1 -i "$VIF" -m set --match-set $IPSET_WL dst -j MARK --set-xmark 0x8000/0xf000
         else
-            iptables -t nat -D PREROUTING -i "$VIF" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345 2>/dev/null
-            iptables -t nat -I PREROUTING -i "$VIF" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345
+            iptables -t nat -I PREROUTING "$SB_POS" -i "$VIF" -p tcp -m set --match-set $IPSET_NAME dst -j REDIRECT --to-ports 12345
         fi
         if [ -s "$INST_TMP" ]; then
+            RT_POS=${ZSPAN%% *}; [ -n "$RT_POS" ] || RT_POS=1
             while read -r n id port ipset; do
                 iptables -t nat -D PREROUTING -i "$VIF" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port" 2>/dev/null
-                iptables -t nat -I PREROUTING -i "$VIF" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
+                iptables -t nat -I PREROUTING "$RT_POS" -i "$VIF" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$port"
             done < "$INST_TMP"
         fi
     done
@@ -1222,7 +1251,16 @@ start_service() {
     # drop them now that all PREROUTING rules are in place. Skipped on a fast
     # profile switch: the sets didn't change (so no stale verdicts to clear), and
     # this is one `conntrack -D` per member — ~100s with a big all-except whitelist.
-    [ "$FAST" != 1 ] && flush_routing_conntrack "$ROUTING_MODE"
+    # Наборы маршрутов маленькие — их потоки сбрасываются и на быстром пути: до
+    # этого старта над маршрутами мог стоять zapret (см. zapret_nat_span), и
+    # закреплённый им прямой поток к адресу маршрута иначе жил бы часами.
+    if [ "$FAST" != 1 ]; then
+        flush_routing_conntrack "$ROUTING_MODE"
+    else
+        local rt_sets
+        rt_sets=$(ipset list -n 2>/dev/null | grep '^singbox_t' | tr '\n' ' ')
+        [ -n "$rt_sets" ] && flush_ipset_conntrack $rt_sets
+    fi
 
     # Clear log
     > $LOG

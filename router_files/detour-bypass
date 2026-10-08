@@ -150,8 +150,8 @@ flush_ipset_conntrack() {
 }
 
 # ---------- zapret2 (nfqws2) firewall (OpenWrt only) ----------
-# nat: make zapret_domains skip sing-box (ACCEPT before SINGBOX_ALL) so the
-#      connection goes DIRECT and nfqws2 can desync it in flight.
+# nat: make zapret_domains skip sing-box (ACCEPT before SINGBOX_ALL, after the
+#      per-target routes) so the connection goes DIRECT and nfqws2 can desync it.
 # mangle: NFQUEUE the first packets of those :443 connections to nfqws2, with
 #         --queue-bypass (dead daemon → pass, never drop) and a fwmark loop guard.
 zapret2_fw_up() {
@@ -164,11 +164,23 @@ zapret2_fw_up() {
     iptables -t nat -A ZAPRET2_NAT -d 192.168.0.0/16 -j RETURN
     iptables -t nat -A ZAPRET2_NAT -d 127.0.0.0/8 -j RETURN
     iptables -t nat -A ZAPRET2_NAT -p tcp -m set --match-set "$IPSET_NAME" dst -j ACCEPT
-    local IF
+    local IF pos
     for IF in br-lan $(vpn_redirect_ifaces); do
         [ -n "$IF" ] || continue
+        # Прямо над общим перехватом sing-box (SINGBOX_ALL или список → :12345): ниже
+        # «Отдельных маршрутов» и устройств. Маршрут главнее zapret — адреса CDN
+        # общие, и IP сайта из маршрута легко попадает в zapret_domains чужим
+        # доменом; на первой позиции ACCEPT уводил такой сайт мимо его VPN.
+        # sing-box не запущен — в конец (при старте он сам встанет под нас).
         iptables -t nat -D PREROUTING -i "$IF" -j ZAPRET2_NAT 2>/dev/null
-        iptables -t nat -I PREROUTING 1 -i "$IF" -j ZAPRET2_NAT
+        pos=$(iptables -t nat -S PREROUTING 2>/dev/null | awk -v i="$IF" '
+            $1 == "-A" { n++ }
+            $1 == "-A" && index($0, " -i " i " ") && (/ -j SINGBOX_ALL$/ || / --to-ports 12345$/) { print n; exit }')
+        if [ -n "$pos" ]; then
+            iptables -t nat -I PREROUTING "$pos" -i "$IF" -j ZAPRET2_NAT
+        else
+            iptables -t nat -A PREROUTING -i "$IF" -j ZAPRET2_NAT
+        fi
     done
 
     iptables -t mangle -N ZAPRET2_MANGLE 2>/dev/null

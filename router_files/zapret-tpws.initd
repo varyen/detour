@@ -128,15 +128,13 @@ add_rules() {
     iptables -t nat -A ZAPRET_REDIRECT -d 192.168.0.0/16 -j RETURN
     iptables -t nat -A ZAPRET_REDIRECT -d 127.0.0.0/8 -j RETURN
     iptables -t nat -A ZAPRET_REDIRECT -p tcp -m set --match-set "$IPSET_NAME" dst -j REDIRECT --to-ports "$PORT"
-    # Insert at PREROUTING position 1 — must be BEFORE sing-box's SINGBOX_ALL chain
-    iptables -t nat -D PREROUTING -i br-lan -j ZAPRET_REDIRECT 2>/dev/null
-    iptables -t nat -I PREROUTING 1 -i br-lan -j ZAPRET_REDIRECT
+    # BEFORE sing-box's catch-all, but BELOW its per-target routes (zapret_nat_insert).
+    zapret_nat_insert br-lan
 
-    # Same DPI-bypass for VPN inbound interfaces (must stay before SINGBOX_ALL too).
+    # Same DPI-bypass for VPN inbound interfaces.
     for VIF in $(vpn_redirect_ifaces); do
         [ -n "$VIF" ] || continue
-        iptables -t nat -D PREROUTING -i "$VIF" -j ZAPRET_REDIRECT 2>/dev/null
-        iptables -t nat -I PREROUTING 1 -i "$VIF" -j ZAPRET_REDIRECT
+        zapret_nat_insert "$VIF"
     done
 
     # Flows opened before their dst IP entered the set are still pinned to the
@@ -145,6 +143,23 @@ add_rules() {
     # resolve_domains lookups land in the ipset first.
     sleep 1
     flush_ipset_conntrack "$IPSET_NAME"
+}
+
+# Переход в ZAPRET_REDIRECT — прямо над общим перехватом sing-box (SINGBOX_ALL или
+# список → :12345): ниже «Отдельных маршрутов» и устройств, выше VPN. Маршрут главнее
+# zapret — адреса CDN общие, и IP сайта из маршрута легко попадает в zapret_domains
+# чужим доменом. sing-box не запущен — в конец (тогда он сам встанет под нас).
+zapret_nat_insert() {
+    local pos
+    iptables -t nat -D PREROUTING -i "$1" -j ZAPRET_REDIRECT 2>/dev/null
+    pos=$(iptables -t nat -S PREROUTING 2>/dev/null | awk -v i="$1" '
+        $1 == "-A" { n++ }
+        $1 == "-A" && index($0, " -i " i " ") && (/ -j SINGBOX_ALL$/ || / --to-ports 12345$/) { print n; exit }')
+    if [ -n "$pos" ]; then
+        iptables -t nat -I PREROUTING "$pos" -i "$1" -j ZAPRET_REDIRECT
+    else
+        iptables -t nat -A PREROUTING -i "$1" -j ZAPRET_REDIRECT
+    fi
 }
 
 del_rules() {

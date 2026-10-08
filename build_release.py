@@ -569,6 +569,9 @@ detour_apply_autostart() {{   # $1 init.d path, $2 autostart flag file
         "$1" restart >/dev/null 2>&1
     fi
 }}
+# prerm left the KEEPFW flag for the upgrade gap. `restart` sets its own; a real
+# stop (autostart off) must not find a fresh one and keep the REDIRECTs.
+rm -f /tmp/.singbox-keepfw
 detour_apply_autostart /etc/init.d/sing-box /etc/detour/autostart.singbox
 # The DPI-bypass switch (detour-bypass) OWNS the zapret/zapret2 engine lifecycle.
 # Only fall back to the legacy standalone zapret-tpws autostart when the switch was
@@ -694,7 +697,17 @@ exec >> "$LOG" 2>&1
 set -x
 echo "=== detour prerm start pid=$$ args:$* ==="
 
-# Stop services so opkg can replace the binaries cleanly.
+# Stop services so opkg can replace the binaries cleanly. On an UPGRADE the
+# firewall must stay up (the KEEPFW flag makes stop_service skip its teardown):
+# the gap until postinst restarts us then fails CLOSED — LAN hits dead sing-box
+# ports and gets no internet — instead of every flow, routes included, going
+# direct and staying pinned there in conntrack long after the upgrade. opkg
+# passes "upgrade"; apk's pre-upgrade passes two versions, pre-deinstall one.
+case "$1" in
+    upgrade) : > /tmp/.singbox-keepfw ;;
+    remove|purge) ;;
+    *) [ -n "$2" ] && : > /tmp/.singbox-keepfw ;;
+esac
 /etc/init.d/sing-box stop >/dev/null 2>&1
 # Stop the syslog log-bridge (tail|logger followers) so they don't linger.
 [ -x /etc/init.d/detour-logbridge ] && /etc/init.d/detour-logbridge stop >/dev/null 2>&1

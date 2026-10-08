@@ -384,7 +384,13 @@ fi
 # so apply_log stays reachable for as long as possible. Fresh/manual install (no marker) →
 # start it now, before the proxies, so the UI is up to control them.
 [ -f /tmp/detour-panel-selfupdate ] || /opt/etc/init.d/S51detour-panel start 2>/dev/null
-/opt/etc/init.d/S52detour-singbox start 2>/dev/null
+# Был запущен до обновления (prerm upgrade-stop оставил маркер, правила стоят) —
+# поднимаем независимо от «Автозапуска», иначе LAN так и упирался бы в мёртвые порты.
+if [ -f /opt/etc/detour/singbox.enabled ]; then
+    /opt/etc/init.d/S52detour-singbox force-start 2>/dev/null
+else
+    /opt/etc/init.d/S52detour-singbox start 2>/dev/null
+fi
 # The DPI-bypass switch (detour-bypass) OWNS the zapret engine lifecycle. Only fall
 # back to the standalone zapret autostart when the switch was never used (no
 # bypass.mode persisted) — otherwise it would double-start tpws against the switch.
@@ -440,7 +446,13 @@ echo "=== detour-keenetic prerm start pid=$$ args:$* ==="
 # mode — the new postinst's `detour-bypass boot` re-applies it. Falls back to S53.
 [ -x /opt/sbin/detour-bypass ] && /opt/sbin/detour-bypass stop 2>/dev/null
 /opt/etc/init.d/S53detour-zapret stop 2>/dev/null
-/opt/etc/init.d/S52detour-singbox stop 2>/dev/null
+# On an UPGRADE keep the REDIRECT rules up (upgrade-stop): the gap until postinst
+# fails CLOSED instead of sending every flow, routes included, direct.
+if [ "$1" = upgrade ]; then
+    /opt/etc/init.d/S52detour-singbox upgrade-stop 2>/dev/null
+else
+    /opt/etc/init.d/S52detour-singbox stop 2>/dev/null
+fi
 # Panel web server: on a panel-driven SELF-UPDATE (marker set by the panel CGI) KEEP it
 # running so the browser can stream this install's log live (apply_log) — the new postinst
 # restarts it at the very end. The CGI/HTML are re-read per request, so serving from the

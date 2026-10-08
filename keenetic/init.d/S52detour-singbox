@@ -111,6 +111,13 @@ case "$1" in
     enable)  set_autostart 1 ;;
     disable) set_autostart 0 ;;
     stop)    stop ;;
+    upgrade-stop)
+        # prerm при обновлении пакета: гасим только демон, маркер и правила
+        # перехвата остаются. До старта новой версии LAN упирается в мёртвые порты
+        # (fail-closed), а не уходит напрямую — вместе с «Отдельными маршрутами».
+        # postinst поднимает демон по маркеру.
+        start-stop-daemon -K -q -p "$PIDF" 2>/dev/null
+        rm -f "$PIDF" ;;
     restart|reconfigure)
         # Reconfigure, NOT a teardown: bounce only the daemon and KEEP the enabled
         # marker so the REDIRECT rules — and the detour DNS server — stay up the
@@ -127,5 +134,5 @@ case "$1" in
         dns_reload ;;
     reload)  reload ;;
     status)  status ;;
-    *) echo "usage: $0 {start|force-start|stop|restart|reconfigure|reload|enable|disable|status}"; exit 1 ;;
+    *) echo "usage: $0 {start|force-start|stop|upgrade-stop|restart|reconfigure|reload|enable|disable|status}"; exit 1 ;;
 esac
