@@ -36,7 +36,7 @@ const status = useStatusStore();
 const toast = useToastStore();
 const commands = useCommandStore();
 
-type AreaKey = "logs" | "config" | "services" | "firewall" | "updates" | "health";
+type AreaKey = "logs" | "config" | "services" | "firewall" | "updates" | "health" | "console";
 
 const areas = reactive<Record<AreaKey, boolean>>({
   logs: true,
@@ -45,6 +45,7 @@ const areas = reactive<Record<AreaKey, boolean>>({
   firewall: false,
   updates: false,
   health: false,
+  console: false,
 });
 
 /** Раскрытую из палитры область нужно ещё и показать — иначе «ничего не произошло». */
@@ -671,6 +672,74 @@ async function removeMihomo() {
   await followApply(CH_TITLE.mihomo, false, "удалён");
 }
 
+/* Консоль роутера: одноразовый ttyd на LAN (detour-console). Адрес со случайным
+   путём выдаёт только залогиненная панель; ttyd гаснет, когда вкладку закрыли.
+   Вкладку открываем ДО запроса: после await браузер счёл бы её всплывающим окном. */
+const consoleSt = ref<{ installed: boolean; version: string; running: boolean } | null>(null);
+const consoleBusy = ref("");
+
+async function loadConsole() {
+  consoleSt.value = await diag.consoleStatus();
+}
+
+async function openConsole() {
+  const win = window.open("about:blank", "_blank");
+  consoleBusy.value = "open";
+  try {
+    const r = await diag.consoleStart();
+    const url = `http://${r.host}:${r.port}${r.path}`;
+    if (win) win.location.href = url;
+    else location.href = url;
+    void loadConsole();
+  } catch (e) {
+    win?.close();
+    toast.fromError(e, "Консоль не запустилась");
+  } finally {
+    consoleBusy.value = "";
+  }
+}
+
+async function stopConsole() {
+  consoleBusy.value = "stop";
+  try {
+    await diag.consoleStop();
+    toast.ok("Консоль закрыта");
+  } catch (e) {
+    toast.fromError(e, "Не удалось закрыть консоль");
+  } finally {
+    consoleBusy.value = "";
+    void loadConsole();
+  }
+}
+
+async function installConsole() {
+  if (!ask("Установить ttyd (~1 МБ) из штатного фида? Это веб-терминал для консоли роутера.")) return;
+  consoleBusy.value = "install";
+  applyText.value = "";
+  applyNote.value = "";
+  applyRunning.value = true;
+  applyOpen.value = true;
+  try {
+    await diag.consoleInstall();
+  } catch (e) {
+    applyRunning.value = false;
+    consoleBusy.value = "";
+    applyNote.value = e instanceof Error ? e.message : "Не удалось запустить установку";
+    toast.fromError(e, "Не удалось запустить установку");
+    return;
+  }
+  await followApply("ttyd", false, "установлен");
+  consoleBusy.value = "";
+  void loadConsole();
+}
+
+watch(
+  () => areas.console,
+  (open) => {
+    if (open && !consoleSt.value) void loadConsole();
+  },
+);
+
 async function applyChannel(ch: Channel) {
   const title = CH_TITLE[ch];
   if (
@@ -1009,6 +1078,14 @@ onMounted(async () => {
       run: () => {
         localOpen.value = true;
       },
+    },
+    {
+      id: "jr:console",
+      title: "Открыть консоль роутера",
+      group: "журнал",
+      keywords: "ssh терминал shell ttyd",
+      available: () => !status.isClient,
+      run: () => openArea("console"),
     },
     {
       id: "jr:health-all",
@@ -1358,6 +1435,46 @@ onBeforeUnmount(() => {
         <UiButton v-if="applyText || applyNote" @click="applyOpen = true">
           Журнал установки
         </UiButton>
+      </div>
+    </JournalArea>
+
+    <!-- ==================== консоль ==================== -->
+    <JournalArea
+      v-if="!status.isClient"
+      id="area-console"
+      v-model:open="areas.console"
+      title="Консоль роутера"
+      :summary="!consoleSt ? '' : !consoleSt.installed ? 'нужен ttyd' : consoleSt.running ? 'открыта' : 'готова'"
+    >
+      <p class="hint">
+        Терминал роутера прямо в браузере — как SSH, только без клиента. Открывается
+        в новой вкладке и работает только из домашней сети: адрес одноразовый, после
+        закрытия вкладки консоль гаснет сама.
+      </p>
+      <p v-if="consoleSt && !consoleSt.installed" class="hint">
+        Для консоли нужен пакет ttyd — он ставится из штатного фида роутера.
+      </p>
+      <div class="acts">
+        <UiButton
+          v-if="consoleSt?.installed"
+          variant="primary"
+          :busy="consoleBusy === 'open'"
+          @click="openConsole"
+        >
+          Открыть консоль
+        </UiButton>
+        <UiButton
+          v-else-if="consoleSt"
+          variant="primary"
+          :busy="consoleBusy === 'install'"
+          @click="installConsole"
+        >
+          Установить ttyd
+        </UiButton>
+        <UiButton v-if="consoleSt?.running" :busy="consoleBusy === 'stop'" @click="stopConsole">
+          Закрыть консоль
+        </UiButton>
+        <UiButton @click="loadConsole">Перечитать</UiButton>
       </div>
     </JournalArea>
 

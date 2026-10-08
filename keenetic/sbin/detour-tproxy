@@ -1,0 +1,76 @@
+#!/opt/bin/sh
+# Detour / Keenetic — есть ли TPROXY для «UDP через VPN».
+#
+# На OpenWrt TPROXY есть всегда. KeeneticOS его не держит загруженным: модуль
+# xt_TPROXY приезжает с компонентом прошивки «Модули ядра подсистемы Netfilter»
+# и лежит в /lib/modules/<ядро>/, а грузить его надо самим. Второе условие —
+# расширение iptables: у Entware-iptables его может не быть, тогда берём
+# системный /usr/sbin/iptables, если он TPROXY знает.
+#
+#   detour-tproxy status — «ok <iptables>», «no_kmod» или «no_ext»; код 0 только при ok.
+#                          Модуль при этом подгружается (без этого его не проверить).
+#   detour-tproxy component-install — поставить компонент «Модули ядра подсистемы
+#                          Netfilter». KeeneticOS при этом скачивает прошивку с
+#                          компонентом и ПЕРЕЗАГРУЖАЕТСЯ.
+#
+# ⚠ Не проверено на живом Keenetic: имена модулей и путь к ним взяты из сборок
+# KeeneticOS 4.x/5.x (ядро 4.9), расширение — по наличию в системном iptables.
+
+export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+
+kmod_load() {
+    grep -qx TPROXY /proc/net/ip_tables_targets 2>/dev/null && return 0
+    kdir="/lib/modules/$(uname -r)"
+    for m in nf_defrag_ipv4 nf_defrag_ipv6 nf_tproxy_ipv4 nf_tproxy_ipv6 xt_TPROXY; do
+        modprobe "$m" 2>/dev/null && continue
+        ko=$(find "$kdir" -name "$m.ko" 2>/dev/null | head -1)
+        [ -n "$ko" ] && insmod "$ko" 2>/dev/null
+    done
+    grep -qx TPROXY /proc/net/ip_tables_targets 2>/dev/null
+}
+
+ipt_with_tproxy() {
+    for b in /opt/sbin/iptables /usr/sbin/iptables /sbin/iptables; do
+        [ -x "$b" ] || continue
+        "$b" -j TPROXY --help 2>&1 | grep -q -- '--on-port' && { echo "$b"; return 0; }
+    done
+    return 1
+}
+
+# Команда CLI KeeneticOS. ndmc из шелла Entware доступен не всегда, поэтому
+# запасной путь — RCI на localhost:79 (без авторизации с самого роутера),
+# команда «parse» исполняет строку CLI как есть.
+ndm() {
+    if command -v ndmc >/dev/null 2>&1; then
+        out=$(ndmc -c "$1" 2>&1) && { printf '%s\n' "$out"; return 0; }
+    fi
+    curl -s -m 60 -X POST -H 'Content-Type: application/json' \
+        -d "[{\"parse\":\"$1\"}]" http://127.0.0.1:79/rci/ 2>&1
+}
+
+component_install() {
+    if kmod_load; then
+        echo "модуль TPROXY уже есть — компонент ставить не нужно"; return 0
+    fi
+    list=$(ndm 'components list')
+    [ -n "$list" ] || { echo "ошибка: CLI KeeneticOS не отвечает (ни ndmc, ни RCI :79)"; return 1; }
+    name=$(printf '%s\n' "$list" | grep -o '[a-z0-9-]*kmod-netfilter[a-z0-9-]*' | grep -v addons | head -1)
+    : "${name:=opkg-kmod-netfilter}"
+    echo "компонент: $name"
+    out=$(ndm "components install $name")
+    printf '%s\n' "$out"
+    case "$out" in *rror*|*not\ found*|*nvalid*)
+        echo "ошибка: KeeneticOS не принял установку компонента"; return 1 ;;
+    esac
+    echo "применяю: KeeneticOS скачает прошивку с компонентом и перезагрузится (несколько минут)"
+    ndm 'components commit'
+}
+
+case "$1" in
+    component-install) component_install; exit $? ;;
+    status)
+        kmod_load || { echo no_kmod; exit 1; }
+        ipt=$(ipt_with_tproxy) || { echo no_ext; exit 1; }
+        echo "ok $ipt" ;;
+    *) echo "usage: $0 {status|component-install}"; exit 1 ;;
+esac

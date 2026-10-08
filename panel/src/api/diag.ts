@@ -168,4 +168,21 @@ export const diag = {
   /** Роутер откажет, пока есть AWG-профили или выбран движок mihomo. */
   mihomoRemove: () =>
     requestJson<{ ok: boolean }>("mihomo_remove", { method: "POST" }),
+
+  /* --- консоль роутера (ttyd) --- */
+  consoleStatus: () =>
+    requestJsonTolerant<{ installed: boolean; version: string; running: boolean; port: number }>(
+      "console_status",
+    ),
+  /** Ставит ttyd из штатного фида; отсоединено, следить через applyLog. */
+  consoleInstall: () => requestJson<{ ok: boolean }>("console_install", { method: "POST" }),
+  /** Одноразовый ttyd на LAN; адрес со случайным путём живёт до отключения. */
+  consoleStart: () =>
+    requestJson<{ ok: boolean; host: string; port: number; path: string }>("console_start", {
+      method: "POST",
+    }),
+  consoleStop: () => requestJson<{ ok: boolean }>("console_stop", { method: "POST" }),
+  /** Keenetic: компонент «Модули ядра подсистемы Netfilter»; роутер перезагрузится. */
+  udpComponentInstall: () =>
+    requestJson<{ ok: boolean }>("udp_vpn_component", { method: "POST" }),
 };

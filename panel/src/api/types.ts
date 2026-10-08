@@ -287,6 +287,8 @@ export interface BypassStatus {
 export interface UdpVpnResponse {
   mode: UdpVpnMode;
   supported: boolean;
+  /** Почему недоступно: no_kmod — нет модуля xt_TPROXY, no_ext — нет расширения iptables. */
+  reason?: string;
   list?: string;
 }
 

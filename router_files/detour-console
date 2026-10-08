@@ -1,0 +1,156 @@
+#!/bin/sh
+# Detour — консоль роутера в браузере (ttyd), обе платформы.
+#
+#   detour-console status   — JSON {installed,running,version,port}
+#   detour-console start    — поднять одноразовый ttyd, JSON {ok,host,port,path}
+#   detour-console stop     — погасить
+#   detour-console fw       — (Keenetic) вернуть ACCEPT порта после реконфига NDM
+#
+# Безопасность. Панель и так даёт root-права, но консоль не должна стать
+# отдельной дверью. Поэтому:
+#   * ttyd слушает только LAN-интерфейс;
+#   * адрес содержит случайный путь (-b /<32 hex>) — он выдаётся только
+#     залогиненной панели и меняется на каждом запуске;
+#   * --once: после отключения клиента ttyd выходит; не подключился никто за
+#     $IDLE с — гасим; дольше $MAXLIFE с сессия не живёт.
+# Порт 7682, а не штатный 7681: пакет ttyd на OpenWrt ставит свой сервис с
+# /bin/login на 7681 (его ttyd-apply выключает, но порт не делим).
+
+PORT=7682
+IDLE=120
+MAXLIFE=7200
+FW_COMMENT=DETOUR_CONSOLE
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    KEENETIC=1
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    TTYD=/opt/bin/ttyd
+    LAN_IF=br0
+    [ -f /opt/etc/detour/detour.conf ] && . /opt/etc/detour/detour.conf 2>/dev/null
+    SHELL_CMD="/opt/bin/sh -l"
+    SH=/opt/bin/sh
+    RUN=/opt/var/run
+else
+    KEENETIC=0
+    TTYD=/usr/bin/ttyd
+    LAN_IF=br-lan
+    SHELL_CMD="/bin/ash -l"
+    SH=/bin/sh
+    RUN=/var/run
+fi
+PIDF=$RUN/detour-console.pid
+WATCHF=$RUN/detour-console.watch
+
+lan_ip() {
+    ip -4 -o addr show "$LAN_IF" 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4; exit }'
+}
+
+# Запуск в отдельной сессии с pid-файлом: процессы, порождённые CGI, веб-сервер
+# иначе может прибить вместе с запросом.
+spawn() {
+    pf="$1"; shift
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$@" </dev/null >/dev/null 2>&1 &
+        echo $! > "$pf"
+    else
+        bin="$1"; shift
+        start-stop-daemon -S -b -m -p "$pf" -x "$bin" -- "$@" </dev/null >/dev/null 2>&1
+    fi
+}
+
+running() {
+    [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null
+}
+
+fw_open() {
+    if [ "$KEENETIC" = 0 ] && command -v nft >/dev/null 2>&1; then
+        nft -a list chain inet fw4 input_lan 2>/dev/null | grep -q "comment \"detour-console\"" && return 0
+        nft insert rule inet fw4 input_lan tcp dport "$PORT" accept comment "detour-console" 2>/dev/null
+    else
+        iptables -C INPUT -i "$LAN_IF" -p tcp --dport "$PORT" -m comment --comment "$FW_COMMENT" -j ACCEPT 2>/dev/null || \
+            iptables -I INPUT 1 -i "$LAN_IF" -p tcp --dport "$PORT" -m comment --comment "$FW_COMMENT" -j ACCEPT 2>/dev/null
+    fi
+}
+
+fw_close() {
+    if [ "$KEENETIC" = 0 ] && command -v nft >/dev/null 2>&1; then
+        nft -a list chain inet fw4 input_lan 2>/dev/null | \
+            sed -n 's/.*comment "detour-console".*# handle \([0-9]*\)$/\1/p' | \
+            while read -r h; do nft delete rule inet fw4 input_lan handle "$h" 2>/dev/null; done
+    fi
+    while iptables -C INPUT -i "$LAN_IF" -p tcp --dport "$PORT" -m comment --comment "$FW_COMMENT" -j ACCEPT 2>/dev/null; do
+        iptables -D INPUT -i "$LAN_IF" -p tcp --dport "$PORT" -m comment --comment "$FW_COMMENT" -j ACCEPT
+    done
+}
+
+stop() {
+    if [ -f "$PIDF" ]; then
+        kill "$(cat "$PIDF")" 2>/dev/null
+        rm -f "$PIDF"
+    fi
+    [ -f "$WATCHF" ] && kill "$(cat "$WATCHF")" 2>/dev/null
+    rm -f "$WATCHF"
+    fw_close
+}
+
+# Есть ли подключённый клиент (ESTABLISHED на нашем порту).
+has_client() {
+    netstat -tn 2>/dev/null | awk -v p=":$PORT" '$6 == "ESTABLISHED" && $4 ~ p"$" { f = 1 } END { exit !f }'
+}
+
+watchdog() {
+    t=0
+    while running; do
+        sleep 5; t=$((t + 5))
+        if [ "$t" -ge "$MAXLIFE" ]; then break; fi
+        if [ "$t" -ge "$IDLE" ] && [ ! -f "$RUN/detour-console.seen" ]; then break; fi
+        has_client && : > "$RUN/detour-console.seen"
+    done
+    rm -f "$RUN/detour-console.seen" "$WATCHF"
+    [ -f "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null
+    rm -f "$PIDF"
+    fw_close
+}
+
+json_status() {
+    inst=false; ver=""; run=false
+    if [ -x "$TTYD" ]; then
+        inst=true
+        ver=$("$TTYD" --version 2>/dev/null | awk '{ print $NF; exit }')
+    fi
+    running && run=true
+    printf '{"installed":%s,"version":"%s","running":%s,"port":%s}\n' "$inst" "$ver" "$run" "$PORT"
+}
+
+start() {
+    [ -x "$TTYD" ] || { echo '{"ok":false,"error":"ttyd не установлен"}'; exit 0; }
+    host=$(lan_ip)
+    [ -n "$host" ] || { echo "{\"ok\":false,\"error\":\"нет IPv4 на $LAN_IF\"}"; exit 0; }
+    stop
+    mkdir -p "$RUN"
+    secret=$(head -c 16 /dev/urandom | hexdump -v -e '/1 "%02x"' 2>/dev/null)
+    [ ${#secret} -eq 32 ] || secret=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    [ ${#secret} -eq 32 ] || { echo '{"ok":false,"error":"нет /dev/urandom"}'; exit 0; }
+    rm -f "$RUN/detour-console.seen"
+    # Переменные CGI не должны протечь в шелл консоли.
+    unset $(env | awk -F= '/^(HTTP_|REQUEST_|QUERY_|CONTENT_|SERVER_|REMOTE_|SCRIPT_|GATEWAY_|DOCUMENT_|REDIRECT_|PATH_INFO|PATH_TRANSLATED|POST_DATA)/ { print $1 }')
+    export HOME=/root TERM=xterm-256color
+    # -W: с 1.7.0 ttyd по умолчанию только читает.
+    # shellcheck disable=SC2086
+    spawn "$PIDF" "$TTYD" -p "$PORT" -i "$LAN_IF" -b "/$secret" -o -W \
+        -t titleFixed="Detour — консоль роутера" -t fontSize=14 $SHELL_CMD
+    sleep 1
+    running || { rm -f "$PIDF"; echo '{"ok":false,"error":"ttyd не запустился"}'; exit 0; }
+    fw_open
+    spawn "$WATCHF" "$SH" "$0" __watch
+    printf '{"ok":true,"host":"%s","port":%s,"path":"/%s/"}\n' "$host" "$PORT" "$secret"
+}
+
+case "$1" in
+    status) json_status ;;
+    start)  start ;;
+    stop)   stop; echo '{"ok":true}' ;;
+    fw)     running && fw_open ;;
+    __watch) watchdog ;;
+    *) echo "usage: $0 {status|start|stop}"; exit 1 ;;
+esac

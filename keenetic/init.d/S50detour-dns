@@ -196,6 +196,17 @@ regen() {
         : > "$DNSMASQ_CONF_DIR/singbox-whitelist.conf"
     fi
 
+    # «UDP через VPN»: IP/подсети и домены списка → ipset, который TPROXY'ит
+    # netfilter-хук. Нужен и в режиме all — там список главнее белого.
+    if ! grep -q '"udp_vpn_mode"[[:space:]]*:[[:space:]]*"\(list\|all\)"' "$SINGBOX_SETTINGS" 2>/dev/null; then
+        rm -f "$DNSMASQ_CONF_DIR/singbox-udp-vpn.conf"
+        ipset flush singbox_udp_vpn 2>/dev/null
+    else
+        ipset create singbox_udp_vpn hash:net -exist 2>/dev/null
+        ipset flush singbox_udp_vpn 2>/dev/null
+        gen_list "${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/udp-vpn.list" singbox_udp_vpn "$DNSMASQ_CONF_DIR/singbox-udp-vpn.conf"
+    fi
+
     rm -f "$DNSMASQ_CONF_DIR"/singbox-singbox_t*.conf
     # Перехват только IPv4 — IPv6-строки маршрутов пропускаются; говорим об этом в журнал.
     if [ -f "$SINGBOX_ROUTEMAP_LIST" ]; then

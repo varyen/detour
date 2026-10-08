@@ -1042,8 +1042,7 @@ onBeforeUnmount(() => unregister?.());
         <RouterLink to="/">на «Обзоре»</RouterLink>.
       </p>
       <p v-if="!status.udpVpnSupported" class="warn">
-        На этой платформе перехват UDP недоступен: нужен TPROXY, которого здесь
-        нет.
+        {{ status.udpVpnUnsupportedText }}
       </p>
       <div v-else class="row">
         <UiButton variant="primary" @click="openEditor('udp')">

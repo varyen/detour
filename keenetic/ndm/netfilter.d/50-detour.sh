@@ -395,8 +395,155 @@ if [ -f /opt/etc/detour/singbox.enabled ] && [ -s "$DEV_MAP" ]; then
     done
 fi
 
+# --- «UDP через VPN»: TPROXY в tproxy-входы sing-box (порт udp_vpn_up из sing-box.initd) ---
+# NDM сносит mangle вместе со всем остальным, поэтому цепочка собирается здесь
+# на каждый реконфиг. Порядок как на OpenWrt: исключения → цели маршрутов →
+# устройства → общий режим (list/all). При выключенном прокси остаются только
+# строгие цели маршрутов: их UDP упирается в незанятый порт и отбрасывается, а не
+# уходит напрямую. TPROXY даёт компонент KeeneticOS «Модули ядра подсистемы
+# Netfilter» (см. detour-tproxy); без него цепочку снимаем целиком.
+# Метка — отдельный бит 0x20000000, а не 0x1e с OpenWrt: младшие биты KeeneticOS
+# занимает своими метками политик доступа, и маска 0x1e могла бы с ними совпасть.
+# ⚠ Не проверено на живом Keenetic.
+UDP_VPN_CHAIN=UDP_VPN
+UDP_VPN_IPSET=singbox_udp_vpn
+UDP_VPN_LIST="${SINGBOX_CONFIG_DIR:-/opt/etc/sing-box}/udp-vpn.list"
+UDP_VPN_PORT=12350
+UDP_VPN_MARK=0x20000000
+UDP_VPN_TABLE=106
+ROUTE_UDP_PORT_BASE=12500
+
+udp_vpn_down() {
+    for IF in $IFACES; do
+        [ -n "$IF" ] || continue
+        while iptables -t mangle -C PREROUTING -i "$IF" -j "$UDP_VPN_CHAIN" 2>/dev/null; do
+            iptables -t mangle -D PREROUTING -i "$IF" -j "$UDP_VPN_CHAIN"
+        done
+    done
+    iptables -t mangle -F "$UDP_VPN_CHAIN" 2>/dev/null
+    iptables -t mangle -X "$UDP_VPN_CHAIN" 2>/dev/null
+    while ip -4 rule del fwmark "$UDP_VPN_MARK/$UDP_VPN_MARK" lookup "$UDP_VPN_TABLE" 2>/dev/null; do :; done
+    ip -4 route flush table "$UDP_VPN_TABLE" 2>/dev/null
+}
+
+# Строки «:порт», «порт-порт», «ip[/cidr]:порт» списка → правила TPROXY. Голые
+# IP/подсети и домены идут через ipset (его наполняет S50detour-dns).
+udp_vpn_port_rules() {
+    [ -f "$UDP_VPN_LIST" ] || return 0
+    sed 's|//.*||; s|#.*||' "$UDP_VPN_LIST" | tr -d '\r' | while IFS= read -r raw; do
+        line=$(echo "$raw" | xargs)
+        [ -n "$line" ] || continue
+        case "$line" in *[a-zA-Z]*) continue ;; esac
+        host=""; p=""
+        case "$line" in
+            :*)      p=${line#:} ;;
+            *.*:*)   host=${line%:*}; p=${line##*:} ;;
+            *.*)     continue ;;
+            *)       p=$line ;;
+        esac
+        p=$(echo "$p" | tr '-' ':')
+        echo "$p" | grep -qE '^[0-9]+(:[0-9]+)?$' || continue
+        if [ -n "$host" ]; then
+            echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$' || continue
+            $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -p udp -m udp -d "$host" --dport "$p" $TP
+        else
+            $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -p udp -m udp --dport "$p" $TP
+        fi
+    done
+}
+
+UDP_MODE=$(sed -n 's/.*"udp_vpn_mode"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -1)
+case "$UDP_MODE" in list|all) ;; *) UDP_MODE=off ;; esac
+SB_MODE=$(sed -n 's/.*"singbox_mode"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -1)
+[ -f /opt/etc/detour/singbox.enabled ] || UDP_MODE=off
+# Цели маршрутов: при UDP_MODE=off — только строгие (их обещание «не течёт»).
+# Только single-режим: в multi у целей нет UDP-входов.
+UDP_SLOTS=""
+if [ "$SB_MODE" != multi ]; then
+    if [ "$UDP_MODE" = off ]; then UDP_SLOTS=$(route_map_strict_slots); else UDP_SLOTS=$(route_map_slots); fi
+fi
+UDP_DEVS=""
+[ -f /opt/etc/detour/singbox.enabled ] && [ "$UDP_MODE" != off ] && [ -s "$DEV_MAP" ] && UDP_DEVS=1
+
+udp_vpn_down
+TP_STATUS=""
+if [ "$UDP_MODE" != off ] || [ -n "$UDP_SLOTS" ]; then
+    TP_STATUS=$(/opt/sbin/detour-tproxy status 2>/dev/null)
+    case "$TP_STATUS" in
+        ok\ *) ;;
+        *) logger -t detour "UDP через VPN не поднят: нет TPROXY ($TP_STATUS) — нужен компонент «Модули ядра подсистемы Netfilter»"
+           TP_STATUS="" ;;
+    esac
+fi
+if [ -n "$TP_STATUS" ]; then
+    IPT_TP=${TP_STATUS#ok }
+    TP="-j TPROXY --on-ip 127.0.0.1 --on-port $UDP_VPN_PORT --tproxy-mark $UDP_VPN_MARK/$UDP_VPN_MARK"
+    ip -4 rule add fwmark "$UDP_VPN_MARK/$UDP_VPN_MARK" lookup "$UDP_VPN_TABLE" pref 12106
+    ip -4 route replace local default dev lo table "$UDP_VPN_TABLE"
+    iptables -t mangle -N "$UDP_VPN_CHAIN" 2>/dev/null
+    iptables -t mangle -F "$UDP_VPN_CHAIN"
+
+    for ip in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 100.64.0.0/10 \
+              169.254.0.0/16 224.0.0.0/4 255.255.255.255; do
+        iptables -t mangle -A "$UDP_VPN_CHAIN" -d "$ip" -j RETURN
+    done
+    if [ -n "$UPSTREAM_IPS" ]; then
+        OLD_IFS="$IFS"; IFS=','; set -- $UPSTREAM_IPS; IFS="$OLD_IFS"
+        for ip in "$@"; do
+            [ -n "$ip" ] && iptables -t mangle -A "$UDP_VPN_CHAIN" -d "$ip" -j RETURN
+        done
+    fi
+
+    echo "$UDP_SLOTS" | while read -r n id port ipset; do
+        [ -n "$ipset" ] || continue
+        ipset create "$ipset" hash:net -exist 2>/dev/null
+        $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -p udp -m set --match-set "$ipset" dst \
+            -j TPROXY --on-ip 127.0.0.1 --on-port "$((ROUTE_UDP_PORT_BASE + n))" \
+            --tproxy-mark "$UDP_VPN_MARK/$UDP_VPN_MARK"
+    done
+
+    ipset create "$UDP_VPN_IPSET" hash:net -exist 2>/dev/null
+    if [ -n "$UDP_DEVS" ]; then
+        while read -r mac dmode port uport; do
+            [ -n "$mac" ] || continue
+            if [ "$dmode" = direct ]; then
+                iptables -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -j RETURN
+            elif [ -n "$uport" ] && [ "$uport" != 0 ]; then
+                DTP="-j TPROXY --on-ip 127.0.0.1 --on-port $uport --tproxy-mark $UDP_VPN_MARK/$UDP_VPN_MARK"
+                if [ "$UDP_MODE" = all ]; then
+                    iptables -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -p udp --dport 53 -j RETURN
+                    iptables -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -m set --match-set "$WL_IPSET" dst -j RETURN
+                    $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -p udp $DTP
+                else
+                    $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -p udp \
+                        -m set --match-set "$UDP_VPN_IPSET" dst $DTP
+                    iptables -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -j RETURN
+                fi
+            fi
+        done < "$DEV_MAP"
+    fi
+
+    if [ "$UDP_MODE" = all ]; then
+        iptables -t mangle -A "$UDP_VPN_CHAIN" -p udp -m udp --dport 53 -j RETURN
+        udp_vpn_port_rules
+        $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -p udp -m set --match-set "$UDP_VPN_IPSET" dst $TP
+        iptables -t mangle -A "$UDP_VPN_CHAIN" -m set --match-set "$WL_IPSET" dst -j RETURN
+        $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -p udp $TP
+    elif [ "$UDP_MODE" = list ]; then
+        udp_vpn_port_rules
+        $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -p udp -m set --match-set "$UDP_VPN_IPSET" dst $TP
+    fi
+
+    for IF in $IFACES; do
+        [ -n "$IF" ] || continue
+        iptables -t mangle -I PREROUTING 1 -i "$IF" -j "$UDP_VPN_CHAIN"
+    done
+fi
+
 # --- filter INPUT: let the LAN reach the panel (lighttpd :PANEL_PORT) ---
 add filter INPUT -i "$LAN_IF" -p tcp --dport "$PANEL_PORT" -j ACCEPT
+# Открытая консоль (detour-console) — её ACCEPT тоже сносит реконфиг NDM.
+[ -x /opt/sbin/detour-console ] && /opt/sbin/detour-console fw >/dev/null 2>&1
 
 # --- egress deny-list: block selected destination IPs globally (router OUTPUT +
 # client FORWARD). Source list: /opt/etc/detour/blocked-egress-ips.list, one IPv4

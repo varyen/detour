@@ -271,10 +271,10 @@ const udpMode = computed({
   set: (m: UdpVpnMode) => void setUdp(m),
 });
 
-/* Заворачивать UDP в туннель умеет только OpenWrt: на Keenetic нет TPROXY.
-   Раньше сегменты оставались активными, клик уходил в CGI и возвращал ошибку. */
+/* Без TPROXY (Keenetic без модуля ядра) сегменты гасим: иначе клик уходил в
+   CGI и возвращал ошибку. */
 const udpUnsupportedHint = computed(() =>
-  status.udpVpnSupported ? undefined : "Нужен TPROXY — на этой платформе его нет",
+  status.udpVpnSupported ? undefined : status.udpVpnUnsupportedText,
 );
 
 const allvpn = computed({
@@ -293,6 +293,32 @@ async function setAllvpn(on: boolean) {
   } finally {
     busy.value = "";
     void status.refresh(true);
+  }
+}
+
+/* Keenetic без TPROXY: компонент прошивки ставим отсюда же. KeeneticOS при этом
+   скачивает прошивку с компонентом и перезагружается — сеть пропадёт на минуты. */
+const udpComponentOffer = computed(
+  () => status.isKeenetic && !status.udpVpnSupported && status.udp?.reason !== "no_ext",
+);
+
+async function installUdpComponent() {
+  if (
+    !window.confirm(
+      "Установить компонент KeeneticOS «Модули ядра подсистемы Netfilter»?\n\n" +
+        "Роутер скачает прошивку с этим компонентом и перезагрузится: интернет и панель " +
+        "пропадут на 3–5 минут. После перезагрузки «UDP через VPN» станет доступен.",
+    )
+  )
+    return;
+  busy.value = "udp-component";
+  try {
+    await diag.udpComponentInstall();
+    toast.ok("Компонент ставится. Роутер перезагрузится через несколько минут");
+  } catch (e) {
+    toast.fromError(e, "Не удалось запустить установку компонента");
+  } finally {
+    busy.value = "";
   }
 }
 
@@ -798,8 +824,15 @@ onBeforeUnmount(() => {
           ]"
         />
         <p v-if="!status.udpVpnSupported" class="hint">
-          Недоступно на этой платформе: нужен TPROXY.
+          {{ status.udpVpnUnsupportedText }}
         </p>
+        <UiButton
+          v-if="udpComponentOffer"
+          :busy="busy === 'udp-component'"
+          @click="installUdpComponent"
+        >
+          Установить компонент
+        </UiButton>
         <!-- Режим здесь, а список — в «Правилах». Без этой ссылки режим «по
              списку» оказывался тупиком: включить можно, а чем наполнять — нет. -->
         <p v-else class="hint">

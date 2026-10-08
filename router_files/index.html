@@ -5084,7 +5084,7 @@
             </div>
           </div>
 
-          <!-- UDP через VPN (TPROXY, OpenWrt only) -->
+          <!-- UDP через VPN (TPROXY; карточка скрыта, если роутер ответил supported:false) -->
           <div class="card" id="udp-vpn-card" style="display: none">
             <div class="card-header">
               <div class="card-title">
@@ -18491,15 +18491,11 @@
         }
       }
 
-      // ---- UDP через VPN (TPROXY, OpenWrt only) ----
+      // ---- UDP через VPN (TPROXY; на Keenetic — только с модулем ядра) ----
       // quiet=true — когда дёргает loadStatus (фон), иначе это действие человека.
       async function loadUdpVpn(quiet) {
         var card = document.getElementById("udp-vpn-card");
         if (!card) return;
-        if (currentPlatform === "keenetic") {
-          card.style.display = "none";
-          return;
-        }
         try {
           var d = await api("udp_vpn", null, null, quiet ? QUIET : null);
           if (d && d.supported === false) {

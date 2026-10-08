@@ -1359,8 +1359,8 @@ compute_route_extras() {
         # route.final это и есть та самая утечка.
         # strict-цель получает инбаунд даже при выключенном «UDP через VPN» —
         # обещание «не течёт» иначе не выполняется (initd ставит для неё правила).
-        # Keenetic: TPROXY нет (udp_vpn_mode_val там всегда off) — не эмитим.
-        if [ "$PLATFORM" != keenetic ] && { [ "$udp_mode" != off ] || [ "$strict" = "1" ]; }; then
+        # Без TPROXY (Keenetic без модуля) входа нет: правил на него не будет.
+        if udp_vpn_supported && { [ "$udp_mode" != off ] || [ "$strict" = "1" ]; }; then
             RX_INBOUNDS="$RX_INBOUNDS,
     {\"type\":\"tproxy\",\"tag\":\"in_rt_udp_$idx\",\"listen\":\"::\",\"listen_port\":$((ROUTE_UDP_PORT_BASE + idx)),\"network\":\"udp\"}"
             robj="{\"action\":\"route\",\"inbound\":[\"in_rt_udp_$idx\"],\"outbound\":\"$tag\"}"
@@ -1462,9 +1462,9 @@ compute_device_extras() {
 }
 
 # UDP-вход цели устройства есть, только когда «UDP через VPN» включён (иначе UDP
-# устройства и так идёт напрямую) и не на Keenetic (там нет TPROXY). 0 — нет входа.
+# устройства и так идёт напрямую). Без TPROXY режим и так off. 0 — нет входа.
 dev_udp_port() {
-    if [ "$PLATFORM" != keenetic ] && [ "$1" != off ]; then
+    if [ "$1" != off ]; then
         echo $((DEV_UDP_PORT_BASE + $2))
     else
         echo 0
@@ -1573,11 +1573,29 @@ compute_intercept_inbounds() { # $1 = active chain CSV
 #   $5 listen_port (default 12345)
 #   $6 inbound_kind (redirect | mixed; default redirect)
 # Returns 1 if the chain is invalid.
+# Есть ли TPROXY. OpenWrt — всегда. Keenetic — только с компонентом прошивки
+# «Модули ядра подсистемы Netfilter» (detour-tproxy подгружает модуль и ищет
+# iptables с расширением). Ответ кэшируется на запрос: зовут часто. Причину
+# отказа (no_kmod / no_ext) кладёт в UDP_VPN_REASON.
+UDP_VPN_SUP=""
+UDP_VPN_REASON=""
+udp_vpn_supported() {
+    [ "$PLATFORM" = keenetic ] || return 0
+    if [ -z "$UDP_VPN_SUP" ]; then
+        local st
+        st=$("$OPT/sbin/detour-tproxy" status 2>/dev/null)
+        case "$st" in
+            ok\ *) UDP_VPN_SUP=1 ;;
+            *) UDP_VPN_SUP=0; UDP_VPN_REASON=${st:-no_helper} ;;
+        esac
+    fi
+    [ "$UDP_VPN_SUP" = 1 ]
+}
 # UDP-through-VPN mode (off|list|all). Override env wins so a udp_vpn POST sees the
-# new value for the SAME request (build_config runs before write_settings). Never on
-# Keenetic (no TPROXY). Migrates the legacy discord_voice_vpn=1 flag → "list".
+# new value for the SAME request (build_config runs before write_settings). Off
+# where there is no TPROXY. Migrates the legacy discord_voice_vpn=1 flag → "list".
 udp_vpn_mode_val() {
-    [ "$PLATFORM" = keenetic ] && { echo off; return; }
+    udp_vpn_supported || { echo off; return; }
     local v=${UDP_VPN_MODE_OVERRIDE:-$(get_settings_val "udp_vpn_mode")}
     case "$v" in off|list|all) echo "$v"; return ;; esac
     [ "$(get_settings_val discord_voice_vpn)" = 1 ] && echo list || echo off
@@ -4361,14 +4379,15 @@ settings)
 #   list — only hosts/subnets/domains/ports from /etc/sing-box/udp-vpn.list;
 #   all  — all UDP except the direct whitelist (+ private/DNS).
 # Replaces the former standalone Discord-voice toggle — its 19294:19344 range is now
-# just a default entry in the list. OpenWrt only (needs TPROXY); on Keenetic the
-# action refuses and the UI hides the control. GET → {mode,supported,list}; POST
-# {mode} sets the mode. The list itself is saved via the udp_vpn_list action.
+# just a default entry in the list. Needs TPROXY: always on OpenWrt, on Keenetic
+# only with the «Модули ядра подсистемы Netfilter» firmware component (else the
+# action refuses and the UI disables the control). GET → {mode,supported,reason,list};
+# POST {mode} sets the mode. The list itself is saved via the udp_vpn_list action.
 udp_vpn)
-    UDP_VPN_LIST_FILE=/etc/sing-box/udp-vpn.list
+    UDP_VPN_LIST_FILE="$SINGBOX_CONFIG_DIR/udp-vpn.list"
     if [ "$REQUEST_METHOD" = "POST" ]; then
-        if [ "$PLATFORM" = keenetic ]; then
-            json_err "UDP через VPN недоступен на Keenetic (нет TPROXY)"; exit 0
+        if ! udp_vpn_supported; then
+            json_err "UDP через VPN недоступен: нет TPROXY. В KeeneticOS установите компонент «Модули ядра подсистемы Netfilter»"; exit 0
         fi
         NEW=$(printf '%s' "$POST_DATA" | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\(off\|list\|all\)".*/\1/p' | head -1)
         case "$NEW" in off|list|all) ;; *) json_err "mode must be off/list/all"; exit 0 ;; esac
@@ -4387,9 +4406,9 @@ udp_vpn)
         json_ok
     else
         MODE=$(udp_vpn_mode_val)
-        SUP=true; [ "$PLATFORM" = keenetic ] && SUP=false
+        SUP=true; udp_vpn_supported || SUP=false
         LIST=""; [ -f "$UDP_VPN_LIST_FILE" ] && LIST=$(cat "$UDP_VPN_LIST_FILE" | json_escape)
-        printf '{"mode":"%s","supported":%s,"list":"%s"}\n' "$MODE" "$SUP" "$LIST"
+        printf '{"mode":"%s","supported":%s,"reason":"%s","list":"%s"}\n' "$MODE" "$SUP" "$UDP_VPN_REASON" "$LIST"
     fi
     ;;
 
@@ -4427,14 +4446,14 @@ dns_vpn)
     ;;
 
 # Save the UDP-VPN target list (raw body) and restart so it takes effect (only if the
-# feature is on). OpenWrt only. GET → {list}.
+# feature is on). Needs TPROXY (see udp_vpn). GET → {list}.
 udp_vpn_list)
-    UDP_VPN_LIST_FILE=/etc/sing-box/udp-vpn.list
+    UDP_VPN_LIST_FILE="$SINGBOX_CONFIG_DIR/udp-vpn.list"
     if [ "$REQUEST_METHOD" = "POST" ]; then
-        if [ "$PLATFORM" = keenetic ]; then
-            json_err "UDP через VPN недоступен на Keenetic (нет TPROXY)"; exit 0
+        if ! udp_vpn_supported; then
+            json_err "UDP через VPN недоступен: нет TPROXY. В KeeneticOS установите компонент «Модули ядра подсистемы Netfilter»"; exit 0
         fi
-        mkdir -p /etc/sing-box
+        mkdir -p "$SINGBOX_CONFIG_DIR"
         printf '%s' "$POST_DATA" > "$UDP_VPN_LIST_FILE"
         if [ "$(udp_vpn_mode_val)" != off ]; then
             $SINGBOX_INITD restart >/dev/null 2>&1
@@ -5213,6 +5232,37 @@ awg_install|mihomo_update_apply)
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
     start_apply "\"$UPDATE_BIN\" mihomo-apply"
+    ;;
+
+# ==================== КОНСОЛЬ (ttyd) ====================
+# Одноразовый ttyd на LAN со случайным путём — см. detour-console. Ставится
+# пакетом штатного фида (detour-update ttyd-apply, detached + apply_log).
+console_status|console_start|console_stop|console_install)
+    CONSOLE_BIN="${OPT}/usr/sbin/detour-console"
+    [ "$PLATFORM" = keenetic ] && CONSOLE_BIN="$OPT/sbin/detour-console"
+    [ -x "$CONSOLE_BIN" ] || { json_err "detour-console не установлен"; exit 0; }
+    case "$ACTION" in
+        console_status) "$CONSOLE_BIN" status ;;
+        *)
+            if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+            case "$ACTION" in
+                console_start) "$CONSOLE_BIN" start ;;
+                console_stop)  "$CONSOLE_BIN" stop ;;
+                console_install)
+                    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+                    start_apply "\"$UPDATE_BIN\" ttyd-apply" ;;
+            esac ;;
+    esac
+    ;;
+
+# Keenetic: поставить компонент прошивки «Модули ядра подсистемы Netfilter»
+# (TPROXY для «UDP через VPN»). Роутер скачивает прошивку с компонентом и
+# перезагружается — detached, ход пишется в apply_log, пока сеть жива.
+udp_vpn_component)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ "$PLATFORM" = keenetic ] || { json_err "только для Keenetic"; exit 0; }
+    [ -x "$OPT/sbin/detour-tproxy" ] || { json_err "detour-tproxy не установлен"; exit 0; }
+    start_apply "\"$OPT/sbin/detour-tproxy\" component-install"
     ;;
 
 mihomo_remove)

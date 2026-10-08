@@ -98,6 +98,7 @@ FILES = [
     (os.path.join(ROUTER_FILES, "detour-bypass"), "opt/sbin/detour-bypass", 0o755, True),
     # Полная остановка панели («полный bypass») и её бесследное удаление.
     (os.path.join(ROUTER_FILES, "detour-power"), "opt/sbin/detour-power", 0o755, True),
+    (os.path.join(ROUTER_FILES, "detour-console"), "opt/sbin/detour-console", 0o755, True),
     # VPN endpoint health probe (shared source, /opt shim). Driven by the
     # S90detour-cron loop below (KeeneticOS kills crond's job shell — see below).
     (os.path.join(ROUTER_FILES, "vpn-keepalive"), "opt/sbin/vpn-keepalive", 0o755, True),
@@ -146,6 +147,8 @@ FILES = [
     # Standalone scheduler daemon (Keenetic-only): replaces the broken crond for
     # detour's periodic jobs — keep-alive, subscription-refresh, update auto-check.
     (os.path.join(HERE, "sbin", "detour-cron"), "opt/sbin/detour-cron", 0o755, False),
+    # Детект TPROXY для «UDP через VPN» (модуль из компонента KeeneticOS + расширение iptables).
+    (os.path.join(HERE, "sbin", "detour-tproxy"), "opt/sbin/detour-tproxy", 0o755, False),
     # Syslog log-bridge (shared source, /opt shim): tails Detour's log files →
     # `logger` so KeeneticOS remote-log forwarding picks them up. Gated by the
     # log_to_syslog setting (off by default). fix_shebang → /opt/bin/sh.

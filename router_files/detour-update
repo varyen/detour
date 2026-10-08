@@ -47,6 +47,7 @@
 #   mihomo-apply           — install or upgrade mihomo (AmneziaWG sidecar) from the feed
 #   mihomo-check           — check the feed for a newer mihomo
 #   mihomo-remove          — stop the AWG sidecar and remove mihomo
+#   ttyd-apply             — поставить ttyd (консоль роутера в панели) из штатного фида
 #   nfqueue-ensure         — поставить NFQUEUE (iptables-mod-nfqueue) для zapret2
 #   mihomo-ensure          — поставить mihomo, если есть AWG-профили и движок не «singbox»
 #   netfilter-ensure       — поставить iptables-nft (+tproxy), если iptables нет вовсе
@@ -1089,6 +1090,31 @@ cmd_tpws_apply() {
     log "tpws-zapret now at $(tpws_installed_version)"
 }
 
+# ---- ttyd (консоль роутера в панели, detour-console) ----
+# Пакет из штатного фида дистрибутива (OpenWrt / Entware), не из нашего. Пакет
+# OpenWrt заводит свой сервис ttyd с /bin/login на всём LAN — выключаем его:
+# консоль поднимает только detour-console, по запросу и одноразово.
+cmd_ttyd_apply() {
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    log "$PKGM update + install ttyd..."
+    opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
+    if pkg_is_installed ttyd; then
+        pkg_upgrade ttyd 2>&1 || true
+    else
+        pkg_install ttyd 2>&1 || die "install of ttyd failed"
+    fi
+    local s
+    for s in /etc/init.d/ttyd /opt/etc/init.d/S*ttyd*; do
+        [ -f "$s" ] || continue
+        "$s" stop >/dev/null 2>&1
+        if [ "$KEENETIC" = 1 ]; then chmod 0644 "$s"; else "$s" disable >/dev/null 2>&1; fi
+        log "штатный сервис $s выключен"
+    done
+    log "ttyd now at $(pkg_installed_version ttyd)"
+}
+
 # ---- mihomo (сайдкар AmneziaWG) ----
 # Ставится/обновляется одной командой: тот же фидовый путь, что у tpws. После
 # установки сайдкар пересобирается — AWG-профили, добавленные до mihomo, сразу
@@ -1641,6 +1667,7 @@ case "$ACTION" in
     mihomo-apply)      cmd_mihomo_apply ;;
     mihomo-check)      cmd_mihomo_check ;;
     mihomo-remove)     cmd_mihomo_remove ;;
+    ttyd-apply)        cmd_ttyd_apply ;;
     netfilter-ensure)  cmd_netfilter_ensure ;;
     mihomo-ensure)     cmd_mihomo_ensure ;;
     nfqueue-ensure)    cmd_nfqueue_ensure ;;

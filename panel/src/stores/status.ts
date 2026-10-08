@@ -50,7 +50,14 @@ export const useStatusStore = defineStore("status", () => {
   );
   /** nfqws2 стоит, но в ядре или iptables нет NFQUEUE — чистая OpenWrt без iptables-mod-nfqueue. */
   const nfqueueMissing = computed(() => bypass.value?.zapret2_reason === "no_nfqueue");
-  const udpVpnSupported = computed(() => udp.value?.supported !== false && !isKeenetic.value);
+  const udpVpnSupported = computed(() => udp.value?.supported !== false);
+  /** Что сказать, когда UDP через VPN недоступен. На Keenetic TPROXY приносит компонент прошивки. */
+  const udpVpnUnsupportedText = computed(() => {
+    if (!isKeenetic.value) return "Недоступно на этой платформе: нужен TPROXY.";
+    if (udp.value?.reason === "no_ext")
+      return "Модуль TPROXY есть, но iptables на роутере не знает цель TPROXY.";
+    return "Нужен TPROXY — его даёт компонент KeeneticOS «Модули ядра подсистемы Netfilter».";
+  });
 
   /** Реально работающий движок обхода DPI — «none», если ни один. */
   const bypassRunning = computed(() => bypass.value?.running ?? "none");
@@ -146,6 +153,7 @@ export const useStatusStore = defineStore("status", () => {
     bypassRunning,
     bypassAutostart,
     udpVpnSupported,
+    udpVpnUnsupportedText,
     singboxRunning,
     activeProfile,
     activeChain,
