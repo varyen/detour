@@ -67,6 +67,7 @@ start() {
         -x "$SINGBOX_BIN" -- run -c "$SINGBOX_CONF" >>"$SINGBOX_LOG" 2>&1
     sleep 1
     dns_up          # ensure ipset/dnsmasq is up + regenerated for domain routing
+    [ -x /opt/sbin/detour-vpnservers ] && /opt/sbin/detour-vpnservers load >/dev/null 2>&1
     apply_fw
 }
 

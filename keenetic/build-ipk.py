@@ -99,6 +99,7 @@ FILES = [
     # Полная остановка панели («полный bypass») и её бесследное удаление.
     (os.path.join(ROUTER_FILES, "detour-power"), "opt/sbin/detour-power", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-console"), "opt/sbin/detour-console", 0o755, True),
+    (os.path.join(ROUTER_FILES, "detour-vpnservers"), "opt/sbin/detour-vpnservers", 0o755, True),
     # VPN endpoint health probe (shared source, /opt shim). Driven by the
     # S90detour-cron loop below (KeeneticOS kills crond's job shell — see below).
     (os.path.join(ROUTER_FILES, "vpn-keepalive"), "opt/sbin/vpn-keepalive", 0o755, True),

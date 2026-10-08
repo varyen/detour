@@ -87,6 +87,7 @@ UDP_VPN_TABLE=106                         # policy-routing table (local default 
 UDP_VPN_CHAIN=UDP_VPN                     # mangle-цепочка с TPROXY-правилами
 UDP_VPN_IPSET=singbox_udp_vpn             # ipset для IP/CIDR/доменов списка
 UDP_VPN_LEGACY_CHAIN=DISCORD_VPN          # чистим при апгрейде с v1.27.0
+VPNSERVERS_IPSET=singbox_vpnservers       # ip,порт серверов всех профилей (detour-vpnservers)
 
 # Detect whether nftables (fw4) is available on this router.
 # OpenWrt 23.05+ uses nftables; older firmwares (e.g. GL.iNet 21.02 builds) use fw3+iptables only.
@@ -705,6 +706,7 @@ devices_up() {
                     [ -n "$ip" ] && iptables -t nat -A "$c" -d "$ip" -j ACCEPT
                 done
             fi
+            iptables -t nat -A "$c" -m set --match-set "$VPNSERVERS_IPSET" dst,dst -j ACCEPT 2>/dev/null
             if [ "$ROUTING_MODE" = "all-except" ]; then
                 iptables -t nat -A "$c" -p tcp -m set --match-set $IPSET_WL dst -j ACCEPT
                 iptables -t nat -A "$c" -p tcp -j REDIRECT --to-ports "$port"
@@ -858,6 +860,9 @@ udp_vpn_up() {
             [ -n "$ip" ] && iptables -t mangle -A "$UDP_VPN_CHAIN" -d "$ip" -j RETURN
         done
     fi
+    # Серверы НЕактивных профилей (detour-vpnservers): VPN-клиент устройства идёт к
+    # ним напрямую, а не туннелем в туннеле.
+    iptables -t mangle -A "$UDP_VPN_CHAIN" -m set --match-set "$VPNSERVERS_IPSET" dst,dst -j RETURN 2>/dev/null
 
     # Цели маршрута — СРАЗУ после исключений: явный маршрут обязан выиграть и у
     # whitelist-RETURN, и у catch-all ниже. Без этого QUIC размеченного сайта
@@ -1102,6 +1107,14 @@ start_service() {
 
     open_port_lan 12345
 
+    # Серверы всех профилей — мимо перехвата (правила ниже ссылаются на набор).
+    # Быстрое переключение профиля список профилей не меняет — пересобираем, только
+    # если набор пуст.
+    ipset create "$VPNSERVERS_IPSET" hash:ip,port -exist 2>/dev/null
+    if [ "$FAST" != 1 ] || [ "$(ipset list -t "$VPNSERVERS_IPSET" 2>/dev/null | awk '/^Number of entries/ { print $4 }')" = 0 ]; then
+        [ -x /usr/sbin/detour-vpnservers ] && /usr/sbin/detour-vpnservers load
+    fi
+
     # ---- default-instance iptables (capture SB_POS for per-target rules) ----
     if [ "$ROUTING_MODE" = "all-except" ]; then
         # Mode: proxy ALL traffic EXCEPT whitelist
@@ -1122,6 +1135,7 @@ start_service() {
                 [ -n "$ip" ] && iptables -t nat -A SINGBOX_ALL -d "$ip" -j RETURN
             done
         fi
+        iptables -t nat -A SINGBOX_ALL -m set --match-set "$VPNSERVERS_IPSET" dst,dst -j RETURN 2>/dev/null
         iptables -t nat -A SINGBOX_ALL -p tcp -m set --match-set $IPSET_WL dst -j RETURN
         iptables -t nat -A SINGBOX_ALL -p tcp -j REDIRECT --to-ports 12345 \
             || logger -p daemon.err -t sing-box "REDIRECT не встал (нет kmod-ipt-nat?) — трафик пойдёт мимо VPN; detour-update netfilter-ensure"

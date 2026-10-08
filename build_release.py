@@ -182,6 +182,8 @@ PANEL_FILES = [
     (("router_files", "detour-power"), "usr/sbin/detour-power", 0o755),
     # Консоль роутера в панели (ttyd по запросу, одноразово, только LAN).
     (("router_files", "detour-console"), "usr/sbin/detour-console", 0o755),
+    # Набор singbox_vpnservers: серверы всех профилей мимо перехвата.
+    (("router_files", "detour-vpnservers"), "usr/sbin/detour-vpnservers", 0o755),
     # Syslog log-bridge: tails Detour's log files → `logger` so a remote-log
     # target captures them. Gated by the log_to_syslog setting (off by default).
     (("router_files", "detour-logbridge"), "usr/sbin/detour-logbridge", 0o755),

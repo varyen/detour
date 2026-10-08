@@ -85,6 +85,14 @@ UPSTREAM_IPS=$(sed -n 's/.*"upstream_ips"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/
 ipset create "$SINGBOX_IPSET" hash:net -exist 2>/dev/null
 ipset create "$ZAPRET_IPSET"  hash:net -exist 2>/dev/null
 ipset create "$WL_IPSET"      hash:net -exist 2>/dev/null
+# Серверы ВСЕХ профилей (ip,порт) — мимо перехвата: VPN-клиент устройства в сети
+# иначе попадал бы туннелем в туннель. Набор переживает реконфиг NDM, поэтому
+# собираем его здесь только если его нет; обновляют S52 и detour-geo.
+VS_IPSET=singbox_vpnservers
+ipset list -n 2>/dev/null | grep -qx "$VS_IPSET" || {
+    ipset create "$VS_IPSET" hash:ip,port -exist 2>/dev/null
+    [ -x /opt/sbin/detour-vpnservers ] && /opt/sbin/detour-vpnservers load >/dev/null 2>&1
+}
 
 # add <table> <chain> <rule...> — insert once (idempotent via -C).
 add() {
@@ -275,6 +283,7 @@ if [ -f /opt/etc/detour/singbox.enabled ]; then
                 [ -n "$ip" ] && iptables -t nat -A SINGBOX_ALL -d "$ip" -j RETURN
             done
         fi
+        iptables -t nat -A SINGBOX_ALL -m set --match-set "$VS_IPSET" dst,dst -j RETURN 2>/dev/null
         # Whitelist ipset bypass (tolerated if xt_set is unavailable — sing-box still
         # routes whitelist domains direct internally).
         iptables -t nat -A SINGBOX_ALL -p tcp -m set --match-set "$WL_IPSET" dst -j RETURN 2>/dev/null
@@ -329,6 +338,7 @@ if [ -f "$ALLVPN_MARK" ] && [ -f /opt/etc/detour/singbox.enabled ]; then
             [ -n "$ip" ] && iptables -t nat -A SINGBOX_ALLVPN -d "$ip" -j RETURN
         done
     fi
+    iptables -t nat -A SINGBOX_ALLVPN -m set --match-set "$VS_IPSET" dst,dst -j RETURN 2>/dev/null
     iptables -t nat -A SINGBOX_ALLVPN -p tcp -j REDIRECT --to-ports "$SINGBOX_PORT"
     for IF in $IFACES; do
         [ -n "$IF" ] || continue
@@ -379,6 +389,7 @@ if [ -f /opt/etc/detour/singbox.enabled ] && [ -s "$DEV_MAP" ]; then
                     [ -n "$ip" ] && iptables -t nat -A "$c" -d "$ip" -j ACCEPT
                 done
             fi
+            iptables -t nat -A "$c" -m set --match-set "$VS_IPSET" dst,dst -j ACCEPT 2>/dev/null
             if [ "$ROUTING_MODE" = "all-except" ]; then
                 iptables -t nat -A "$c" -p tcp -m set --match-set "$WL_IPSET" dst -j ACCEPT 2>/dev/null
                 iptables -t nat -A "$c" -p tcp -j REDIRECT --to-ports "$port"
@@ -493,6 +504,7 @@ if [ -n "$TP_STATUS" ]; then
             [ -n "$ip" ] && iptables -t mangle -A "$UDP_VPN_CHAIN" -d "$ip" -j RETURN
         done
     fi
+    iptables -t mangle -A "$UDP_VPN_CHAIN" -m set --match-set "$VS_IPSET" dst,dst -j RETURN 2>/dev/null
 
     echo "$UDP_SLOTS" | while read -r n id port ipset; do
         [ -n "$ipset" ] || continue

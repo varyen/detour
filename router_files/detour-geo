@@ -292,6 +292,10 @@ do_scan() {
         mkdir -p "$DETOUR_DIR" 2>/dev/null
         mv "$WORK/db" "$GEO_DB" 2>/dev/null
         chmod 0644 "$GEO_DB" 2>/dev/null
+        # Адреса серверов знаем только отсюда — освежаем набор «мимо перехвата».
+        for _vs in /usr/sbin/detour-vpnservers /opt/sbin/detour-vpnservers; do
+            [ -x "$_vs" ] && { "$_vs" load >/dev/null 2>&1; break; }
+        done
     fi
     [ "$UPDATED" = "0" ] && UPDATED="$NOW"
     LAST_ERR=""

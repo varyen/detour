@@ -3801,6 +3801,9 @@ allvpn_on)
             [ -n "$ip" ] && iptables -t nat -A SINGBOX_ALLVPN -d "$ip" -j RETURN
         done
     fi
+    # Серверы всех профилей (detour-vpnservers) — напрямую, без туннеля в туннеле.
+    ipset create singbox_vpnservers hash:ip,port -exist 2>/dev/null
+    iptables -t nat -A SINGBOX_ALLVPN -m set --match-set singbox_vpnservers dst,dst -j RETURN 2>/dev/null
     iptables -t nat -A SINGBOX_ALLVPN -p tcp -j REDIRECT --to-ports 12345
     iptables -t nat -D PREROUTING -i $LAN_IF -j SINGBOX_ALLVPN 2>/dev/null
     iptables -t nat -I PREROUTING 1 -i $LAN_IF -j SINGBOX_ALLVPN
