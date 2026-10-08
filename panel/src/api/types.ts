@@ -142,6 +142,8 @@ export interface StatusResponse {
   zapret: ZapretStatus;
   system: SystemStatus;
   wan_link?: WanLink;
+  /** Свой dnsmasq Keenetic (S50detour-dns). На OpenWrt `managed: false`. */
+  dns?: { managed: boolean; running: boolean; error: string };
   /** Панель остановлена целиком (detour-power off): все правила сняты. */
   power_off?: boolean;
 }

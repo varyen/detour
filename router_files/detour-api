@@ -2696,6 +2696,21 @@ status)
         [ -n "$_WL" ] && WANLINK_JSON="$_WL"
     fi
 
+    # Keenetic: свой dnsmasq на боковом порту (S50detour-dns). Если он не
+    # поднялся, init снимает перехват :53 и пишет причину в .down — без этого
+    # домены маршрутов не попадают в наборы и такой трафик идёт мимо них.
+    # На OpenWrt DNS системный — блок всегда «ок».
+    DNS_JSON='{"managed":false,"running":true,"error":""}'
+    if [ "$PLATFORM" = keenetic ]; then
+        _dp=$(cat /opt/var/run/detour-dnsmasq.pid 2>/dev/null)
+        _dr=false
+        [ -n "$_dp" ] && kill -0 "$_dp" 2>/dev/null && _dr=true
+        _de=$(cut -d'|' -f2- /opt/var/run/detour-dns.down 2>/dev/null | head -1)
+        _dm=false
+        { [ -f "$DETOUR_DIR/singbox.enabled" ] || [ -f "$DETOUR_DIR/zapret.enabled" ] || [ -f "$DETOUR_DIR/dns.enabled" ]; } && _dm=true
+        DNS_JSON="{\"managed\":$_dm,\"running\":$_dr,\"error\":\"$(printf '%s' "$_de" | json_escape)\"}"
+    fi
+
     cat <<EOF
 {
   "platform": "$PLATFORM",
@@ -2754,6 +2769,7 @@ status)
     "cpu_cores": $CPU_CORES
     },
     "wan_link": $WANLINK_JSON,
+    "dns": $DNS_JSON,
     "power_off": $([ -f "$DETOUR_DIR/power.off" ] && echo true || echo false)
 }
 EOF

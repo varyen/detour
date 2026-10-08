@@ -34,6 +34,9 @@ export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 
 PIDF="/opt/var/run/detour-dnsmasq.pid"
 MARK="/opt/etc/detour/dns.enabled"
+# «время|причина», пока dnsmasq не поднялся (читает панель); stderr последнего запуска.
+DOWNF="/opt/var/run/detour-dns.down"
+ERRF="/opt/var/log/detour-dns.err"
 HOOK="/opt/etc/ndm/netfilter.d/50-detour.sh"
 
 apply_fw() { [ -x "$HOOK" ] && "$HOOK" iptables nat >/dev/null 2>&1; }
@@ -224,14 +227,22 @@ regen() {
     fi
 }
 
-running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; }
+running() {
+    p=$(cat "$PIDF" 2>/dev/null)
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && grep -q dnsmasq "/proc/$p/comm" 2>/dev/null
+}
+
+wanted() {
+    [ ! -f /opt/etc/detour/power.off ] && \
+        { [ -f /opt/etc/detour/singbox.enabled ] || [ -f /opt/etc/detour/zapret.enabled ] || has_strict_routes; }
+}
 
 start() {
     # Only run while a proxy is active. rc.unslung auto-starts every S* at boot, but
     # S52/S53 (which set these markers) re-invoke us via dns_up — so the standalone
     # boot start no-ops here unless a strict route must still fail closed.
     if [ ! -f /opt/etc/detour/singbox.enabled ] && [ ! -f /opt/etc/detour/zapret.enabled ] && ! has_strict_routes; then
-        rm -f "$MARK"; apply_fw; return 0
+        rm -f "$MARK" "$DOWNF"; apply_fw; return 0
     fi
     [ -x "$DNSMASQ_BIN" ] || { echo "detour-dns: missing $DNSMASQ_BIN (opkg install dnsmasq-full)"; exit 1; }
     mkdir -p /opt/var/run "$DNSMASQ_CONF_DIR" "$DNSMASQ_HOSTS_DIR"
@@ -246,6 +257,8 @@ start() {
         UPSTREAM="127.0.0.1#5353"
     fi
     echo "Starting detour-dns (dnsmasq :$DETOUR_DNS_PORT, upstream $UPSTREAM) ..."
+    rm -f "$PIDF"
+    mkdir -p "${ERRF%/*}"
     # Standalone instance: ignore the Entware system dnsmasq.conf, own pid/port,
     # wildcard-bind so iptables-REDIRECTed :53 packets (dst = br0 IP) reach it.
     "$DNSMASQ_BIN" \
@@ -256,14 +269,30 @@ start() {
         --addn-hosts="$DNSMASQ_HOSTS_DIR" \
         --no-resolv --no-hosts \
         --server="$UPSTREAM" \
-        --cache-size=1000
-    sleep 1
+        --cache-size=1000 2>"$ERRF"
+    i=0
+    while ! running && [ $i -lt 5 ]; do sleep 1; i=$((i + 1)); done
+    # Метка оставляет перехват LAN :53 на наш порт. Если dnsmasq не поднялся, там
+    # никто не слушает и у всей сети пропадает DNS — устройства уходят в сотовую
+    # сеть или просто «нет интернета». Поэтому без живого dnsmasq перехват снимаем:
+    # клиенты резолвят через сам Keenetic, а домены маршрутов до подъёма dnsmasq
+    # (его перезапускает detour-cron) в наборы не попадают.
+    if ! running; then
+        reason=$(grep -v '^[[:space:]]*$' "$ERRF" 2>/dev/null | tail -n 2 | tr '\n|' '  ')
+        [ -n "$reason" ] || reason="dnsmasq exited right after start"
+        echo "$(date +%s)|$reason" > "$DOWNF"
+        logger -t detour-dns "dnsmasq failed to start: $reason; LAN :53 interception dropped"
+        echo "detour-dns: dnsmasq failed to start: $reason"
+        rm -f "$MARK" "$PIDF"
+        apply_fw
+        return 1
+    fi
+    rm -f "$DOWNF"
     apply_fw
 }
 
 stop() {
-    if [ ! -f /opt/etc/detour/power.off ] && \
-       { [ -f /opt/etc/detour/singbox.enabled ] || [ -f /opt/etc/detour/zapret.enabled ] || has_strict_routes; }; then
+    if wanted; then
         touch "$MARK"
         regen
         if running; then
@@ -274,7 +303,7 @@ stop() {
         return 0
     fi
     echo "Stopping detour-dns ..."
-    rm -f "$MARK"
+    rm -f "$MARK" "$DOWNF"
     [ -f "$PIDF" ] && kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null
     rm -f "$PIDF"
     apply_fw   # hook drops the :53 redirect once the marker is gone
@@ -301,6 +330,19 @@ case "$1" in
         rm -f "$PIDF"; sleep 1; start ;;
     reload) reload ;;
     regen) regen ;;
-    status) running && echo "detour-dns running (pid $(cat "$PIDF"))" || echo "detour-dns stopped" ;;
-    *) echo "usage: $0 {start|stop|restart|restart-daemon|reload|regen|status}"; exit 1 ;;
+    # Зовёт detour-cron раз в минуту: dnsmasq мог умереть уже после старта.
+    watchdog)
+        if wanted && ! running; then
+            # Сломанный конфиг не перезапускаем каждую минуту: regen тяжёлый.
+            last=$(cut -d'|' -f1 "$DOWNF" 2>/dev/null)
+            case "$last" in ''|*[!0-9]*) last=0 ;; esac
+            [ $(( $(date +%s) - last )) -lt 300 ] && exit 0
+            logger -t detour-dns "watchdog: dnsmasq is not running, restarting"
+            start
+        fi ;;
+    status)
+        if running; then echo "detour-dns running (pid $(cat "$PIDF"))"
+        elif [ -f "$DOWNF" ]; then echo "detour-dns down: $(cut -d'|' -f2- "$DOWNF")"
+        else echo "detour-dns stopped"; fi ;;
+    *) echo "usage: $0 {start|stop|restart|restart-daemon|reload|regen|watchdog|status}"; exit 1 ;;
 esac

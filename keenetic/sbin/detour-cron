@@ -43,6 +43,19 @@ update_enabled() {
 }
 
 log "detour-cron started (tick=${TICK}s, first pass in ${BOOT_DELAY}s)"
+
+# Сторож DNS — отдельным циклом раз в минуту: основной тик 5 мин и занят долгими
+# задачами, а умерший detour-dns оставляет всю сеть без DNS. Цикл выходит сам,
+# когда умирает родитель (S90 stop гасит только его PID).
+CRON_PID=$$
+(
+    while kill -0 "$CRON_PID" 2>/dev/null; do
+        sleep 60
+        [ -x /opt/etc/init.d/S50detour-dns ] && \
+            /opt/etc/init.d/S50detour-dns watchdog >"$LOGDIR/detour-dns-watchdog.log" 2>&1
+    done
+) &
+
 sleep "$BOOT_DELAY"
 
 # n cycles 0..71 (LCM of the 1/12/72 intervals) so it never grows unbounded;

@@ -104,6 +104,14 @@ const mptcpBroken = computed(() => {
   return Number(s) !== 0;
 });
 
+/* Без нашего dnsmasq на Keenetic домены маршрутов не попадают в наборы:
+   такой трафик идёт мимо выбранного пути. Скрывать нельзя — это поломка. */
+const dnsDown = computed(() => {
+  const d = status.data?.dns;
+  if (!d?.managed || d.running || status.data?.power_off) return null;
+  return { error: d.error };
+});
+
 /* Предупреждение о деградации WAN-порта прячется до тех пор, пока диагноз не
    изменится: ключ — сам текст диагноза. Скрыть навсегда нельзя намеренно, иначе
    новая проблема (уже другая) молча унаследует старое «не показывать». */
@@ -612,6 +620,19 @@ onBeforeUnmount(() => {
       Обновить
     </UiButton>
     <UiButton @click="dismissUpdates">Скрыть</UiButton>
+  </div>
+
+  <div v-if="dnsDown" class="wanwarn bad">
+    <div>
+      <b>DNS Detour не работает</b>
+      <p>
+        Домены из списков и отдельных маршрутов сейчас не попадают в перехват,
+        поэтому такие сайты идут не тем путём, что для них задан. Устройства
+        резолвят через сам роутер, интернет работает. DNS перезапускается
+        автоматически раз в несколько минут.
+      </p>
+      <p v-if="dnsDown.error">{{ dnsDown.error }}</p>
+    </div>
   </div>
 
   <div v-if="mptcpBroken" class="wanwarn bad">
