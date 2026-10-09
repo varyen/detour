@@ -84,6 +84,13 @@ const LOG_SOURCES: { value: LogName; label: string }[] = [
   { value: "health", label: "проверка" },
   { value: "update", label: "обновления" },
   { value: "apply", label: "установка" },
+  /* Журналы своего VPN-сервера — только у роутера (в приложении свой awgsrv.log). */
+  ...(__CLIENT__
+    ? []
+    : [
+        { value: "server" as LogName, label: "VPN-сервер" },
+        { value: "vless" as LogName, label: "VPN-сервер: VLESS" },
+      ]),
 ];
 const LOG_TITLE: Record<LogName, string> = {
   singbox: "sing-box",
@@ -91,6 +98,8 @@ const LOG_TITLE: Record<LogName, string> = {
   health: "проверка профилей",
   update: "проверка обновлений",
   apply: "установка обновлений",
+  server: "свой VPN-сервер",
+  vless: "свой VPN-сервер: вход VLESS",
 };
 
 const logName = ref<LogName>("singbox");

@@ -8,7 +8,7 @@ import type {
   UpdatesOverview,
 } from "./types";
 
-export type LogName = "singbox" | "zapret" | "health" | "update" | "apply";
+export type LogName = "singbox" | "zapret" | "health" | "update" | "apply" | "server" | "vless";
 
 export const diag = {
   /* --- сервис sing-box --- */

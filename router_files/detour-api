@@ -68,6 +68,8 @@ LOGBRIDGE_INITD="/etc/init.d/detour-logbridge"   # syslog log-bridge service (ga
 ZAPRET_LOG="/var/log/zapret-tpws.log"
 UPDATE_LOG="/var/log/detour-update.log"      # self-update / bins cron output
 HEALTH_LOG="/var/log/detour-health.log"      # functional VPN health checker
+SERVER_LOG="/var/log/detour-server.log"      # свой VPN-сервер (detour-server)
+VLESS_LOG="/var/run/detour-vless.log"        # sing-box входа VLESS своего сервера
 
 KEEPALIVE_STATE="/var/state/vpn-keepalive.json"
 KEEPALIVE_BIN="/usr/sbin/vpn-keepalive"
@@ -209,6 +211,8 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     ZAPRET_LOG="$OPT/var/log/zapret-tpws.log"
     UPDATE_LOG="$OPT/var/log/detour-update.log"
     HEALTH_LOG="$OPT/var/log/detour-health.log"
+    SERVER_LOG="$OPT/var/log/detour-server.log"
+    VLESS_LOG="$OPT/var/run/detour-vless.log"
     KEEPALIVE_STATE="$OPT/var/state/vpn-keepalive.json"
     KEEPALIVE_BIN="$OPT/sbin/vpn-keepalive"
     UPDATE_BIN="$OPT/sbin/detour-update"
@@ -3749,6 +3753,8 @@ logs_view)
         health)  LF="$HEALTH_LOG" ;;
         update)  LF="$UPDATE_LOG" ;;
         apply)   LF="$APPLY_LOG" ;;
+        server)  LF="$SERVER_LOG" ;;
+        vless)   LF="$VLESS_LOG" ;;
         *) json_err "unknown log"; exit 0 ;;
     esac
     if [ -f "$LF" ]; then
@@ -3770,6 +3776,8 @@ logs_clear)
         health)  LF="$HEALTH_LOG" ;;
         update)  LF="$UPDATE_LOG" ;;
         apply)   LF="$APPLY_LOG" ;;
+        server)  LF="$SERVER_LOG" ;;
+        vless)   LF="$VLESS_LOG" ;;
         *) json_err "unknown log"; exit 0 ;;
     esac
     > "$LF" 2>/dev/null
