@@ -724,7 +724,9 @@ esac
 [ -x /etc/init.d/detour-awg ] && /etc/init.d/detour-awg stop >/dev/null 2>&1
 # VPN-сервер на обновлении не гасим: панель могут обновлять через него же.
 case "$1" in
-    remove|purge) ip link del dsrv0 2>/dev/null ;;
+    remove|purge)
+        [ -x /usr/sbin/detour-server ] && /usr/sbin/detour-server down >/dev/null 2>&1
+        ip link del dsrv0 2>/dev/null ;;
 esac
 # Stop the bypass engine (nfqws2/tpws + its firewall) WITHOUT changing the
 # persisted mode — postinst re-applies it. Falls back to a direct tpws stop.

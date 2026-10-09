@@ -1403,11 +1403,29 @@ compute_route_extras() {
 # (мимо VPN) или vpn (через профиль или цепочку target). Печатает валидные строки
 # «mac|mode|target» с MAC в нижнем регистре.
 devices_conf_lines() {
-    [ -f "$DETOUR_DIR/devices.conf" ] || return 0
-    tr -d '\r' < "$DETOUR_DIR/devices.conf" | awk -F'|' '
+    [ -f "$DETOUR_DIR/devices.conf" ] && tr -d '\r' < "$DETOUR_DIR/devices.conf" | awk -F'|' '
         $1 ~ /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]$/ && ($2 == "direct" || ($2 == "vpn" && $3 != "")) {
             print tolower($1) "|" $2 "|" $3
         }'
+    server_device_lines
+}
+
+# Клиенты своего VPN-сервера с маршрутом (поле route в clients.list detour-server):
+# MAC у туннеля нет, поэтому ключ — адрес клиента в подсети AWG и VLESS. Init
+# матчит такие ключи по источнику (-s) на интерфейсах сервера.
+server_device_lines() {
+    local srv="$DETOUR_DIR/server" sn vn
+    [ -s "$srv/clients.list" ] && [ -f "$srv/server.conf" ] || return 0
+    sn=$(sed -n 's/^NET=//p' "$srv/server.conf" | head -1)
+    vn=$(sed -n 's/^VNET=//p' "$srv/server.conf" | head -1)
+    awk -F'|' -v n="$sn" -v v="$vn" '
+        $2 == 1 && $11 != "" && $4 ~ /^[0-9]+$/ {
+            if ($11 == "direct") { m = "direct"; t = "" }
+            else if ($11 ~ /^vpn:[A-Za-z0-9_.-]+$/) { m = "vpn"; t = substr($11, 5) }
+            else next
+            if (n ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print n "." $4 "|" m "|" t
+            if (v ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print v "." $4 "|" m "|" t
+        }' "$srv/clients.list"
 }
 
 # Цели устройств «через VPN X»: вход in_dev_K (+ in_dev_udp_K) и правило «вход →
@@ -5393,7 +5411,7 @@ console_status|console_start|console_stop|console_install)
 # Обёртка над detour-server: вся валидация и запись конфига — в нём. Значения
 # уходят argv'ом, id проверяется по charset. Конфиг клиента несёт приватный
 # ключ — только POST, чтобы не осесть в логах веб-сервера и кэше.
-server_status|server_sessions|server_install|server_set|server_client_add|server_client_set|server_client_del|server_client_conf|server_regen)
+server_status|server_sessions|server_install|server_set|server_client_add|server_client_set|server_client_del|server_client_conf|server_client_link|server_regen)
     SERVER_BIN="${OPT}/usr/sbin/detour-server"
     [ "$PLATFORM" = keenetic ] && SERVER_BIN="$OPT/sbin/detour-server"
     [ -x "$SERVER_BIN" ] || { json_err "detour-server не установлен"; exit 0; }
@@ -5410,8 +5428,18 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
         printf '%s' "$POST_DATA" | grep -q "\"$1\"[[:space:]]*:[[:space:]]*true" && { echo 1; return; }
         printf '%s' "$POST_DATA" | grep -q "\"$1\"[[:space:]]*:[[:space:]]*false" && echo 0
     }
+    # Маршрут клиента исполняет механизм устройств — после его смены нужна
+    # пересборка конфига, как в действии devices.
+    srv_has_route() {
+        awk -F'|' -v id="$1" '$1 == id && $11 != "" { f = 1 } END { exit !f }' "$DETOUR_DIR/server/clients.list" 2>/dev/null
+    }
+    srv_rebuild() {
+        SRV_CHAIN=$(get_active_chain)
+        [ -n "$SRV_CHAIN" ] && build_config "$(get_singbox_mode)" "$SRV_CHAIN" >/dev/null 2>&1
+        [ -n "$(engine_pid)" ] && $SINGBOX_INITD restart >/dev/null 2>&1
+    }
     SRV_ID=$(srv_str id)
-    case "$ACTION" in server_client_set|server_client_del|server_client_conf)
+    case "$ACTION" in server_client_set|server_client_del|server_client_conf|server_client_link)
         case "$SRV_ID" in ''|*[!a-f0-9]*) json_err "bad id"; exit 0 ;; esac ;;
     esac
     case "$ACTION" in
@@ -5422,7 +5450,11 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             # Только присланные поля; пустая строка у endpoint/dns = «авто».
             set --
             v=$(srv_bool enabled); [ -n "$v" ] && set -- "$@" "enabled=$v"
+            v=$(srv_bool awg);     [ -n "$v" ] && set -- "$@" "awg=$v"
+            v=$(srv_bool vless);   [ -n "$v" ] && set -- "$@" "vless=$v"
             v=$(srv_num port);     [ -n "$v" ] && set -- "$@" "port=$v"
+            v=$(srv_num vport);    [ -n "$v" ] && set -- "$@" "vport=$v"
+            v=$(srv_str sni);      [ -n "$v" ] && set -- "$@" "sni=$v"
             v=$(srv_num mtu);      [ -n "$v" ] && set -- "$@" "mtu=$v"
             v=$(srv_str net);      [ -n "$v" ] && set -- "$@" "net=$v"
             printf '%s' "$POST_DATA" | grep -q '"endpoint"' && set -- "$@" "endpoint=$(srv_str endpoint)"
@@ -5436,13 +5468,28 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             v=$(srv_str name);     [ -n "$v" ] && set -- "$@" "name=$v"
             v=$(srv_str mode);     [ -n "$v" ] && set -- "$@" "mode=$v"
             v=$(srv_bool enabled); [ -n "$v" ] && set -- "$@" "enabled=$v"
+            SRV_ROUTE=0
+            if printf '%s' "$POST_DATA" | grep -q '"route"'; then
+                set -- "$@" "route=$(srv_str route)"; SRV_ROUTE=1
+            fi
+            # Выключенный клиент выпадает из devices.map — тоже пересборка.
+            [ -n "$(srv_bool enabled)" ] && srv_has_route "$SRV_ID" && SRV_ROUTE=1
             [ $# -gt 0 ] || { json_err "нечего менять"; exit 0; }
-            "$SERVER_BIN" client-set "$SRV_ID" "$@" ;;
+            SRV_OUT=$("$SERVER_BIN" client-set "$SRV_ID" "$@")
+            case "$SRV_OUT" in *'"ok":true'*) [ "$SRV_ROUTE" = 1 ] && srv_rebuild ;; esac
+            printf '%s\n' "$SRV_OUT" ;;
         server_client_del)
-            "$SERVER_BIN" client-del "$SRV_ID" ;;
+            SRV_ROUTE=0; srv_has_route "$SRV_ID" && SRV_ROUTE=1
+            SRV_OUT=$("$SERVER_BIN" client-del "$SRV_ID")
+            case "$SRV_OUT" in *'"ok":true'*) [ "$SRV_ROUTE" = 1 ] && srv_rebuild ;; esac
+            printf '%s\n' "$SRV_OUT" ;;
         server_client_conf)
             SRV_CONF=$("$SERVER_BIN" client-conf "$SRV_ID" 2>/dev/null) || { json_err "клиент не найден"; exit 0; }
             printf '{"ok":true,"conf":"%s"}\n' "$(printf '%s' "$SRV_CONF" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{ printf "%s\\n", $0 }')" ;;
+        server_client_link)
+            SRV_LINK=$("$SERVER_BIN" client-link "$SRV_ID" 2>/dev/null) || { json_err "у клиента нет VLESS или вход не настроен"; exit 0; }
+            # Имя в ссылке percent-encoded — кавычек и обратных слэшей там нет.
+            printf '{"ok":true,"link":"%s"}\n' "$(printf '%s' "$SRV_LINK" | tr -d '\n"\\')" ;;
         server_regen)
             "$SERVER_BIN" regen-obf ;;
     esac

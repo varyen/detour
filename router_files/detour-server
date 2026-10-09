@@ -5,11 +5,22 @@
 #   detour-server start | stop | apply   — поднять / погасить / пересобрать
 #   detour-server set КЛЮЧ=ЗНАЧ…         — enabled port net endpoint dns mtu
 #   detour-server client-add <имя> [full|lan]
-#   detour-server client-set <id> КЛЮЧ=ЗНАЧ…   — name mode enabled
+#   detour-server client-set <id> КЛЮЧ=ЗНАЧ…   — name mode enabled route
 #   detour-server client-del <id>
 #   detour-server client-conf <id>       — .conf для приложения AmneziaWG/AmneziaVPN
 #   detour-server regen-obf              — новые параметры обфускации (все клиенты
 #                                          должны заново импортировать конфиг)
+#   detour-server client-link <id>       — ссылка vless:// (VLESS-Reality)
+#   detour-server down                   — снять всё (удаление пакета)
+#
+# Два входа, один набор клиентов: AmneziaWG (UDP, интерфейс $IFACE) и
+# VLESS-Reality (TCP). VLESS принимает отдельный sing-box в своём сетевом
+# пространстве $NS: его исходящий трафик выходит в роутер через veth $VIF и
+# попадает под те же правила перехвата, что AWG-клиенты и LAN (zapret,
+# «Отдельные маршруты», торренты, режим VPN) — отдельный стек правил для VLESS
+# не нужен. Каждый клиент выходит со своего адреса $VNET.<octet>: по нему
+# считается его трафик (цепочки mangle $ACCT_IN/$ACCT_OUT). Вход с WAN —
+# DNAT на $VNET.254:$VPORT (uci redirect), адрес клиента сохраняется.
 #
 # Маршрутизация. Интерфейс сервера ($IFACE) кладётся в "vpn_redirect_ifaces"
 # settings.json — тот же механизм, что и для WG-сервера GL: sing-box, zapret,
@@ -23,12 +34,27 @@
 # своя подсистема; там сервер честно сообщает «не поддерживается».
 #
 # Хранение: $DIR/server.conf (shell KEY=VAL) и $DIR/clients.list:
-#   id|enabled|name|octet|pubkey|privkey|psk|mode|created
+#   id|enabled|name|octet|pubkey|privkey|psk|mode|created|uuid|route
+# (pubkey пуст, пока на платформе нет AWG; uuid — пользователь VLESS; route —
+# пусто = правила роутера, direct = мимо VPN, vpn:<профиль|цепочка>. Маршрут
+# исполняет механизм «Правила → Устройства»: detour-api добавляет клиента в
+# devices.map по его адресам $NET.N и $VNET.N.)
 # Приватный ключ клиента хранится, чтобы конфиг/QR можно было показать повторно
 # (так же делает GL). Каталог 0700, под /etc/detour → keeplist sysupgrade.
 
 IFACE=dsrv0
 ZONE=detour_srv
+NS=detour-srv
+VIF=dsrv1
+VPEER=dsrv1p
+VIF2=dsrv2
+VPEER2=dsrv2p
+LINKNET=169.254.67
+NS_TABLE=166
+ACCT_IN=DSRV_VIN
+ACCT_OUT=DSRV_VOUT
+CLASH=127.0.0.1:9095
+RULE_PREF=11990
 
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     KEENETIC=1
@@ -50,18 +76,31 @@ else
     WANPIN_BIN=/usr/sbin/detour-wanpin
     CERT_CONF=/etc/detour/cert.conf
 fi
+# Нет утилиты awg (чистая OpenWrt с userspace-пакетом detour-awg-go) — её
+# подмножество встроено в наш amneziawg-go.
+if ! command -v awg >/dev/null 2>&1 && command -v amneziawg-go >/dev/null 2>&1 && \
+        amneziawg-go awg genpsk 2>/dev/null | grep -qE '^[A-Za-z0-9+/]{43}=$'; then
+    awg() { amneziawg-go awg "$@"; }
+fi
+
 CONF="$DIR/server.conf"
 CLIENTS="$DIR/clients.list"
 RENDER="$RUN/detour-server.conf"
 LOCK="$RUN/detour-server.lock"
 # Статистика. Рабочая копия — в RAM (tick раз в минуту), на флеш — раз в
 # $FLUSH_MIN минут и на каждом событии сессии, чтобы не изнашивать флеш.
-#   traffic: id|lrx|ltx|trx|ttx|mon|mrx|mtx|day|drx|dtx|online|sstart|srx|stx|seen|remote
-#   (lrx/ltx — последние показания счётчиков ядра; rx — от клиента, tx — к клиенту)
+#   traffic: id|lrx|ltx|trx|ttx|mon|mrx|mtx|day|drx|dtx|online|sstart|srx|stx|seen|remote|vlrx|vltx
+#   (lrx/ltx — последние показания счётчиков AWG, vlrx/vltx — VLESS; rx — от
+#   клиента, tx — к клиенту)
 #   sessions.log: id|start|end|rx|tx|remote — последние $SESS_KEEP сессий
 TRAFFIC="$DIR/traffic"
 SESSIONS="$DIR/sessions.log"
 STATS_RAM="$RUN/detour-server.traffic"
+VRENDER="$RUN/detour-vless.json"
+VPID="$RUN/detour-vless.pid"
+VLOG="$RUN/detour-vless.log"
+VACT="$RUN/detour-server.vact"
+VACCT_SIG="$RUN/detour-server.vacct"
 ONLINE_SEC=180
 FLUSH_MIN=30
 SESS_KEEP=500
@@ -112,9 +151,51 @@ backend() {
 installable() {
     [ "$KEENETIC" = 1 ] && return 1
     if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; then
-        apk search -e kmod-amneziawg 2>/dev/null | grep -q .
+        apk search -e kmod-amneziawg 2>/dev/null | grep -q . && return 0
     else
-        opkg list kmod-amneziawg 2>/dev/null | grep -q .
+        opkg list kmod-amneziawg 2>/dev/null | grep -q . && return 0
+    fi
+    # Модуля в фиде прошивки нет — detour-update поставит userspace
+    # detour-awg-go из фида Detour; ему нужен только TUN.
+    [ -c /dev/net/tun ] || modprobe tun 2>/dev/null
+}
+
+awg_ok() { [ -z "$(unsupported_reason)" ]; }
+
+# VLESS: нужен sing-box и ip с netns (ip-full; у busybox ip его нет).
+# Пустой вывод = поддерживается; netns — не хватает ip-full.
+vless_reason() {
+    if [ "$KEENETIC" = 1 ]; then
+        echo "На Keenetic сервер пока не поддерживается"
+        return
+    fi
+    sb=$(vless_sb)
+    [ -n "$sb" ] || { echo "sing-box не установлен"; return; }
+    # Reality-сервер sing-box 1.13.x отвергает всех клиентов («processed
+    # invalid connection», проверено и на upstream 1.13.21), 1.14 — работает.
+    # Родной фид OpenWrt 25.12 пока даёт 1.13.x.
+    v=$("$sb" version 2>/dev/null | sed -n '1s/.*version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+    set -- $v
+    if [ -n "$2" ] && [ "$1" -eq 1 ] && [ "$2" -lt 14 ]; then
+        echo "Для VLESS-Reality нужен sing-box 1.14 или новее, здесь $1.$2"
+        return
+    fi
+    ip netns list >/dev/null 2>&1 || echo netns
+}
+
+# Бинарник входа VLESS: отдельный sing-box-vless (образ Linux-сервера кладёт
+# upstream 1.14, не трогая пакет прошивки), иначе общий.
+vless_sb() {
+    command -v sing-box-vless 2>/dev/null || command -v sing-box 2>/dev/null
+}
+
+vless_ok() { [ -z "$(vless_reason)" ]; }
+
+ipfull_installable() {
+    if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; then
+        apk search -e ip-full 2>/dev/null | grep -q .
+    else
+        opkg list ip-full 2>/dev/null | grep -q .
     fi
 }
 
@@ -132,6 +213,15 @@ rand_range() {  # $1 min $2 max
 
 port_busy() {
     netstat -lnu 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" { f = 1 } END { exit !f }'
+}
+
+# TCP-порт VLESS: DNAT с WAN перекрыл бы снаружи любой слушающий его сервис
+# роутера (nginx на 443 и т. п.) и любой чужой проброс того же порта.
+tcp_port_busy() {
+    netstat -lnt 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" { f = 1 } END { exit !f }' && return 0
+    command -v uci >/dev/null 2>&1 || return 1
+    uci -q show firewall 2>/dev/null | grep -v "^firewall\.${ZONE}_vin\." | \
+        grep -qE "\.(src_dport|dest_port)='$1'$"
 }
 
 gen_obf() {
@@ -171,13 +261,22 @@ H1=$H1
 H2=$H2
 H3=$H3
 H4=$H4
+AWG=$AWG
+VLESS=$VLESS
+VPORT=$VPORT
+VNET=$VNET
+VSNI=$VSNI
+VPRIV=$VPRIV
+VPUB=$VPUB
+VSID=$VSID
 EOF
     mv "$CONF.tmp" "$CONF"
 }
 
 # Свободная /24 из 10.66–10.99, не пересекающаяся с маршрутами роутера.
-pick_net() {
+pick_net() {  # $1 — подсеть, которую тоже обходить
     for b in 66 67 68 69 77 88 99; do
+        [ "10.$b.0" = "$1" ] && continue
         ip -4 route 2>/dev/null | grep -q "^10\.$b\." && continue
         ip -4 addr 2>/dev/null | grep -q "inet 10\.$b\." && continue
         echo "10.$b.0"; return
@@ -188,44 +287,103 @@ pick_net() {
 load_conf() {
     ENABLED=0; PORT=""; NET=""; ENDPOINT=""; DNS=""; MTU=""
     PRIVKEY=""; PUBKEY=""
+    AWG=1; VLESS=0; VPORT=""; VNET=""; VSNI=""; VPRIV=""; VPUB=""; VSID=""
     [ -f "$CONF" ] && . "$CONF"
 }
 
-# Первичная инициализация: ключи, порт, подсеть, обфускация. Требует awg.
-ensure_conf() {
-    load_conf
-    r=$(unsupported_reason)
-    case "$r" in
-        '') ;;
-        not_installed) err "AmneziaWG не установлен — сначала установите его в панели" ;;
-        *) err "$r" ;;
-    esac
-    [ -n "$PRIVKEY" ] && return 0
-    mkdir -p "$DIR"; chmod 700 "$DIR"
-    PRIVKEY=$(awg genkey) || err "awg genkey не сработал"
-    PUBKEY=$(printf '%s' "$PRIVKEY" | awg pubkey)
-    # Detour в контейнере (linux/): порт обязан совпасть с опубликованным, а
+load_defaults() {
+    # Detour в контейнере (linux/): порты обязаны совпасть с опубликованными, а
     # адрес — быть внешним адресом хоста. Их кладёт стартовый скрипт контейнера.
-    DEF_PORT=""; DEF_ENDPOINT=""
+    DEF_PORT=""; DEF_VPORT=""; DEF_ENDPOINT=""
     [ -f "$DIR/defaults" ] && . "$DIR/defaults"
     case "$DEF_PORT" in ''|*[!0-9]*) DEF_PORT="" ;; esac
-    if [ -n "$DEF_PORT" ]; then
-        PORT=$DEF_PORT
-    else
-        while :; do
-            PORT=$(rand_range 20000 60000)
-            port_busy "$PORT" || break
-        done
-    fi
-    valid_ipv4_host "$DEF_ENDPOINT" && ENDPOINT=$DEF_ENDPOINT
-    NET=$(pick_net)
-    MTU=1376
-    gen_obf
-    ENABLED=0
-    save_conf
-    : > "$CLIENTS"; chmod 600 "$CLIENTS"
-    log "init: port=$PORT net=$NET.0/24"
+    case "$DEF_VPORT" in ''|*[!0-9]*) DEF_VPORT="" ;; esac
 }
+
+# Первичная инициализация: порт, подсеть, обфускация, затем ключи того входа,
+# который на этой платформе доступен (AWG и VLESS независимы: на OpenWrt без
+# kmod-amneziawg работает один VLESS).
+ensure_conf() {
+    load_conf
+    ar=$(unsupported_reason)
+    if [ -n "$ar" ] && ! vless_ok; then
+        case "$ar" in
+            not_installed) err "AmneziaWG не установлен — сначала установите его в панели" ;;
+            *) err "$ar" ;;
+        esac
+    fi
+    mkdir -p "$DIR"; chmod 700 "$DIR"
+    load_defaults
+    changed=0
+    if [ -z "$PORT" ]; then
+        if [ -n "$DEF_PORT" ]; then
+            PORT=$DEF_PORT
+        else
+            while :; do
+                PORT=$(rand_range 20000 60000)
+                port_busy "$PORT" || break
+            done
+        fi
+        valid_ipv4_host "$DEF_ENDPOINT" && ENDPOINT=$DEF_ENDPOINT
+        NET=$(pick_net)
+        MTU=1376
+        gen_obf
+        ENABLED=0
+        [ -f "$CLIENTS" ] || { : > "$CLIENTS"; chmod 600 "$CLIENTS"; }
+        changed=1
+        log "init: port=$PORT net=$NET.0/24"
+    fi
+    if [ -z "$ar" ] && [ -z "$PRIVKEY" ]; then
+        PRIVKEY=$(awg genkey) || err "awg genkey не сработал"
+        PUBKEY=$(printf '%s' "$PRIVKEY" | awg pubkey)
+        changed=1
+    fi
+    if vless_ok && [ -z "$VPRIV" ]; then
+        kp=$("$(vless_sb)" generate reality-keypair 2>/dev/null)
+        VPRIV=$(printf '%s\n' "$kp" | sed -n 's/^PrivateKey: *//p')
+        VPUB=$(printf '%s\n' "$kp" | sed -n 's/^PublicKey: *//p')
+        [ -n "$VPRIV" ] && [ -n "$VPUB" ] || err "sing-box generate reality-keypair не сработал"
+        VSID=$("$(vless_sb)" generate rand 8 --hex 2>/dev/null | tr -cd '0-9a-f')
+        [ -n "$VSID" ] || VSID=$(new_id)$(new_id)
+        VSNI=${VSNI:-www.microsoft.com}
+        VNET=$(pick_net "$NET")
+        if [ -n "$DEF_VPORT" ]; then
+            VPORT=$DEF_VPORT
+        elif ! tcp_port_busy 443; then
+            VPORT=443
+        else
+            while :; do
+                VPORT=$(rand_range 20000 60000)
+                tcp_port_busy "$VPORT" || break
+            done
+        fi
+        changed=1
+        log "init vless: port=$VPORT net=$VNET.0/24"
+    fi
+    [ "$changed" = 1 ] && save_conf
+    fill_clients
+}
+
+# Ключи AWG и uuid VLESS у клиентов, заведённых, пока соответствующий вход был
+# недоступен (или до версии с VLESS).
+fill_clients() {
+    [ -s "$CLIENTS" ] || return 0
+    need_awg=0; awg_ok && need_awg=1
+    awk -F'|' -v a="$need_awg" '(a == 1 && $5 == "") || $10 == "" { f = 1 } END { exit !f }' "$CLIENTS" || return 0
+    umask 077
+    : > "$CLIENTS.tmp"
+    while IFS='|' read -r id en name octet pub priv psk mode created uuid route; do
+        [ -n "$id" ] || continue
+        if [ "$need_awg" = 1 ] && [ -z "$pub" ]; then
+            priv=$(awg genkey); pub=$(printf '%s' "$priv" | awg pubkey); psk=$(awg genpsk)
+        fi
+        [ -n "$uuid" ] || uuid=$(new_uuid)
+        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$en" "$name" "$octet" "$pub" "$priv" "$psk" "$mode" "$created" "$uuid" "$route" >> "$CLIENTS.tmp"
+    done < "$CLIENTS"
+    mv "$CLIENTS.tmp" "$CLIENTS"
+}
+
+new_uuid() { cat /proc/sys/kernel/random/uuid; }
 
 server_ip() { echo "$NET.1"; }
 
@@ -294,31 +452,39 @@ render() {
         printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n' "$PRIVKEY" "$PORT"
         printf 'Jc = %s\nJmin = %s\nJmax = %s\nS1 = %s\nS2 = %s\n' "$JC" "$JMIN" "$JMAX" "$S1" "$S2"
         printf 'H1 = %s\nH2 = %s\nH3 = %s\nH4 = %s\n' "$H1" "$H2" "$H3" "$H4"
-        awk -F'|' -v net="$NET" '$2 == 1 {
+        awk -F'|' -v net="$NET" '$2 == 1 && $5 != "" {
             printf "\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s.%s/32\n", $5, $7, net, $4
         }' "$CLIENTS" 2>/dev/null
     } > "$RENDER"
 }
 
-redirect_has_iface() {
-    sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | \
-        tr ', ' '\n\n' | grep -qx "$IFACE"
+redirect_ifaces_cur() {
+    sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -1
 }
 
-# Добавить интерфейс в vpn_redirect_ifaces и перевесить правила перехвата.
+redirect_has_iface() {  # $1 — интерфейс (по умолчанию AWG)
+    redirect_ifaces_cur | tr ', ' '\n\n' | grep -qx "${1:-$IFACE}"
+}
+
+# Добавить интерфейсы в vpn_redirect_ifaces и перевесить правила перехвата
+# (одним reconfigure на все).
 redirect_attach() {
     [ -f "$SETTINGS" ] || return 0
-    redirect_has_iface && return 0
+    add=""
+    for i in "$@"; do redirect_has_iface "$i" || add="$add $i"; done
+    [ -n "$add" ] || return 0
     if grep -q '"vpn_redirect_ifaces"' "$SETTINGS"; then
-        cur=$(sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" | head -1)
-        new=$(echo "$cur $IFACE" | tr ',' ' ' | awk '{ $1 = $1; print }')
+        new=$(echo "$(redirect_ifaces_cur) $add" | tr ',' ' ' | awk '{ $1 = $1; print }')
         sed -i "s/\(\"vpn_redirect_ifaces\"[[:space:]]*:[[:space:]]*\"\)[^\"]*\"/\1$new\"/" "$SETTINGS"
     else
-        awk -v i="$IFACE" '!d && /\{/ { sub(/\{/, "{\n  \"vpn_redirect_ifaces\": \"" i "\","); d = 1 } { print }' \
+        new=$(echo "$add" | awk '{ $1 = $1; print }')
+        awk -v i="$new" '!d && /\{/ { sub(/\{/, "{\n  \"vpn_redirect_ifaces\": \"" i "\","); d = 1 } { print }' \
             "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
     fi
-    redirect_has_iface || { log "не удалось вписать $IFACE в $SETTINGS"; return 1; }
-    log "vpn_redirect_ifaces += $IFACE, перевешиваю перехват"
+    for i in $add; do
+        redirect_has_iface "$i" || { log "не удалось вписать $i в $SETTINGS"; return 1; }
+    done
+    log "vpn_redirect_ifaces +=$add, перевешиваю перехват"
     # reconfigure — отказоустойчивый перезапуск (правила LAN не снимаются).
     if [ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box running >/dev/null 2>&1; then
         /etc/init.d/sing-box reconfigure >/dev/null 2>&1
@@ -330,8 +496,11 @@ redirect_attach() {
     return 0
 }
 
-# Зона файрвола + вход с WAN на порт. Пишем uci только при расхождении, чтобы
-# не дёргать reload firewall на каждом apply.
+awg_on() { [ "$ENABLED" = 1 ] && [ "$AWG" = 1 ] && [ -n "$PRIVKEY" ]; }
+vless_on() { [ "$ENABLED" = 1 ] && [ "$VLESS" = 1 ] && [ -n "$VPRIV" ] && [ -n "$VPORT" ]; }
+
+# Зона файрвола + вход с WAN (UDP AWG, DNAT TCP на VLESS). Пишем uci только при
+# расхождении, чтобы не дёргать reload firewall на каждом apply.
 fw_apply() {
     changed=0
     want() {  # $1 key  $2 value
@@ -340,9 +509,11 @@ fw_apply() {
     }
     want "$ZONE" zone
     want "$ZONE.name" "$ZONE"
-    if [ "$(uci -q get "firewall.$ZONE.device")" != "$IFACE" ]; then
+    if [ "$(uci -q get "firewall.$ZONE.device")" != "$IFACE $VIF $VIF2" ]; then
         uci -q delete "firewall.$ZONE.device"
         uci -q add_list "firewall.$ZONE.device=$IFACE"
+        uci -q add_list "firewall.$ZONE.device=$VIF"
+        uci -q add_list "firewall.$ZONE.device=$VIF2"
         changed=1
     fi
     want "$ZONE.input" ACCEPT
@@ -361,38 +532,43 @@ fw_apply() {
     want "${ZONE}_in.proto" udp
     want "${ZONE}_in.dest_port" "$PORT"
     want "${ZONE}_in.target" ACCEPT
-    want "${ZONE}_in.enabled" "$ENABLED"
+    want "${ZONE}_in.enabled" "$(awg_on && echo 1 || echo 0)"
+    if [ -n "$VPORT" ] && [ -n "$VNET" ]; then
+        want "${ZONE}_vin" redirect
+        want "${ZONE}_vin.name" detour-server-vless
+        want "${ZONE}_vin.src" wan
+        want "${ZONE}_vin.proto" tcp
+        want "${ZONE}_vin.src_dport" "$VPORT"
+        want "${ZONE}_vin.dest" "$ZONE"
+        want "${ZONE}_vin.dest_ip" "$VNET.254"
+        want "${ZONE}_vin.dest_port" "$VPORT"
+        want "${ZONE}_vin.target" DNAT
+        want "${ZONE}_vin.enabled" "$(vless_on && echo 1 || echo 0)"
+    fi
     if [ "$changed" = 1 ]; then
         uci commit firewall
         /etc/init.d/firewall reload >/dev/null 2>&1
-        log "firewall: зона $ZONE обновлена (порт $PORT, enabled=$ENABLED)"
+        log "firewall: зона $ZONE обновлена (awg $PORT, vless ${VPORT:-—}, enabled=$ENABLED)"
     fi
 }
 
 fw_remove() {
     uci -q get "firewall.$ZONE" >/dev/null || return 0
-    uci -q delete "firewall.$ZONE"
-    uci -q delete "firewall.${ZONE}_wan"
-    uci -q delete "firewall.${ZONE}_lan"
-    uci -q delete "firewall.${ZONE}_in"
+    for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_in" "${ZONE}_vin"; do
+        uci -q delete "firewall.$s"
+    done
     uci commit firewall
     /etc/init.d/firewall reload >/dev/null 2>&1
 }
 
 iface_up() { ip link show "$IFACE" >/dev/null 2>&1; }
 
-do_stop() {
+awg_down() {
     iface_up && ip link del "$IFACE" 2>/dev/null
     rm -f "$RENDER"
-    [ "$KEENETIC" = 0 ] && [ -f "$CONF" ] && { load_conf; ENABLED=0; fw_apply; }
 }
 
-do_apply() {
-    load_conf
-    if [ "$ENABLED" != 1 ] || [ -z "$PRIVKEY" ]; then
-        do_stop
-        return 0
-    fi
+awg_up() {
     r=$(unsupported_reason)
     [ -z "$r" ] || { log "apply: $r"; return 1; }
     render
@@ -403,7 +579,7 @@ do_apply() {
             # Демонизируется сам; интерфейс удалили — процесс выходит.
             amneziawg-go "$IFACE" >>"$LOG" 2>&1 || { log "amneziawg-go не запустился"; return 1; }
             i=0
-            while [ ! -S "/var/run/amneziawg/$IFACE.sock" ] && [ "$i" -lt 30 ]; do sleep 0.2; i=$((i + 1)); done
+            while [ ! -S "/var/run/amneziawg/$IFACE.sock" ] && [ "$i" -lt 30 ]; do sleep 0.2 2>/dev/null || sleep 1; i=$((i + 1)); done
         fi
         awg setconf "$IFACE" "$RENDER" || { log "awg setconf не удался"; ip link del "$IFACE"; return 1; }
     else
@@ -412,22 +588,281 @@ do_apply() {
     fi
     ip addr replace "$(server_ip)/24" dev "$IFACE"
     ip link set "$IFACE" mtu "${MTU:-1376}" up
+}
+
+# ---------- VLESS-Reality ----------
+
+vless_pid() {
+    [ -f "$VPID" ] || return 1
+    p=$(cat "$VPID" 2>/dev/null)
+    [ -n "$p" ] && [ -d "/proc/$p" ] && grep -q sing-box "/proc/$p/cmdline" 2>/dev/null && echo "$p"
+}
+
+vless_running() { [ -n "$(vless_pid)" ]; }
+
+vless_dns() { echo "${DNS:-$VNET.1}"; }
+
+# Конфиг sing-box сервера. Пользователь = id клиента; у каждого свой direct-
+# выход с адреса $VNET.<octet> (по нему роутер считает трафик и узнаёт клиента).
+# DNS клиентов перехватывается и уходит в dnsmasq роутера — так наполняются
+# ipset'ы доменных маршрутов, как у устройств LAN.
+vless_render() {  # $1 — 1 = с clash API (онлайн/адрес клиента)
+    lan=$(lan_cidr)
+    {
+        printf '{"log":{"level":"warn","timestamp":true},'
+        printf '"dns":{"servers":[{"type":"udp","tag":"r","server":"%s"}]},' "$(vless_dns)"
+        printf '"inbounds":[{"type":"vless","tag":"in","listen":"0.0.0.0","listen_port":%s,"users":[' "$VPORT"
+        awk -F'|' '$2 == 1 && $10 != "" {
+            printf "%s{\"name\":\"%s\",\"uuid\":\"%s\",\"flow\":\"xtls-rprx-vision\"}", (n++ ? "," : ""), $1, $10
+        }' "$CLIENTS"
+        printf '],"tls":{"enabled":true,"server_name":"%s","reality":{"enabled":true,' "$VSNI"
+        printf '"handshake":{"server":"%s","server_port":443},"private_key":"%s","short_id":["%s"]}}}],' "$VSNI" "$VPRIV" "$VSID"
+        printf '"outbounds":[{"type":"direct","tag":"d"}'
+        awk -F'|' -v vnet="$VNET" '$2 == 1 && $10 != "" {
+            printf ",{\"type\":\"direct\",\"tag\":\"u-%s\",\"inet4_bind_address\":\"%s.%s\"}", $1, vnet, $4
+        }' "$CLIENTS"
+        printf '],"route":{"rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"}'
+        # «Только сеть дома»: всё, кроме LAN и подсетей сервера, — отказ.
+        awk -F'|' -v net="$NET" -v vnet="$VNET" -v lan="$lan" '$2 == 1 && $10 != "" {
+            if ($8 == "lan") {
+                c = "\"" net ".0/24\",\"" vnet ".0/24\""
+                if (lan != "") c = c ",\"" lan "\""
+                printf ",{\"auth_user\":[\"%s\"],\"ip_cidr\":[%s],\"outbound\":\"u-%s\"}", $1, c, $1
+                printf ",{\"auth_user\":[\"%s\"],\"action\":\"reject\"}", $1
+            } else {
+                printf ",{\"auth_user\":[\"%s\"],\"outbound\":\"u-%s\"}", $1, $1
+            }
+        }' "$CLIENTS"
+        printf '],"final":"d","default_domain_resolver":"r"}'
+        [ "$1" = 1 ] && printf ',"experimental":{"clash_api":{"external_controller":"%s"}}' "$CLASH"
+        printf '}\n'
+    }
+}
+
+vless_net_up() {
+    ip netns list 2>/dev/null | grep -qw "^$NS" || ip netns add "$NS" || { log "ip netns add $NS не удался"; return 1; }
+    if ! ip link show "$VIF" >/dev/null 2>&1; then
+        ip -n "$NS" link del "$VPEER" 2>/dev/null
+        ip link add "$VIF" type veth peer name "$VPEER" || { log "veth $VIF не создан"; return 1; }
+        ip link set "$VPEER" netns "$NS" || { log "veth $VPEER не перенесён в $NS"; ip link del "$VIF"; return 1; }
+    fi
+    ip addr replace "$VNET.1/24" dev "$VIF"
+    ip link set "$VIF" up
+    # Мульти-WAN GL (kmwan) метит входящее с WAN и по метке шлёт в таблицу,
+    # где есть только default через этот WAN: DNAT на $VNET.254 уходил обратно
+    # в интернет. Подсеть сервера — всегда по main, раньше правил по меткам.
+    ip -4 rule del to "$VNET.0/24" lookup main pref "$RULE_PREF" 2>/dev/null
+    ip -4 rule add to "$VNET.0/24" lookup main pref "$RULE_PREF"
+    # MPTCP — своё у каждого netns, а сломанный MPTCP ядра QSDK вешает любой
+    # TCP-сервер в SYN_RECV (см. 99-mptcp.conf). Выключаем и здесь.
+    ip netns exec "$NS" sh -c 'f=/proc/sys/net/mptcp/enabled; [ -f $f ] && echo 0 > $f' 2>/dev/null
+    ip -n "$NS" link set lo up
+    ip -n "$NS" link set "$VPEER" up
+    ip -n "$NS" addr replace "$VNET.254/24" dev "$VPEER"
+    want=$(awk -F'|' -v vnet="$VNET" '$10 != "" { print vnet "." $4 "/32" }' "$CLIENTS")
+    have=$(ip -n "$NS" -4 -o addr show dev "$VPEER" 2>/dev/null | awk '{ print $4 }' | grep '/32$')
+    for a in $want; do
+        printf '%s\n' "$have" | grep -qx "$a" || ip -n "$NS" addr add "$a" dev "$VPEER"
+    done
+    for a in $have; do
+        printf '%s\n' "$want" | grep -qx "$a" || ip -n "$NS" addr del "$a" dev "$VPEER"
+    done
+    # Свой трафик сервера (рукопожатие Reality с сайтом-маской, DNS sing-box)
+    # идёт через $VIF2 — его нет в vpn_redirect_ifaces, перехват его не
+    # трогает: маска отвечает напрямую, даже если она в списке VPN или VPN
+    # лежит. Клиенты (их адреса $VNET.N) — через $VIF правилом по источнику.
+    if ! ip link show "$VIF2" >/dev/null 2>&1; then
+        ip -n "$NS" link del "$VPEER2" 2>/dev/null
+        ip link add "$VIF2" type veth peer name "$VPEER2" || { log "veth $VIF2 не создан"; return 1; }
+        ip link set "$VPEER2" netns "$NS" || { log "veth $VPEER2 не перенесён в $NS"; ip link del "$VIF2"; return 1; }
+    fi
+    ip addr replace "$LINKNET.1/30" dev "$VIF2"
+    ip link set "$VIF2" up
+    ip -4 rule del to "$LINKNET.0/30" lookup main pref "$RULE_PREF" 2>/dev/null
+    ip -4 rule add to "$LINKNET.0/30" lookup main pref "$RULE_PREF"
+    ip -n "$NS" link set "$VPEER2" up
+    ip -n "$NS" addr replace "$LINKNET.2/30" dev "$VPEER2"
+    ip -n "$NS" route replace default via "$LINKNET.1" dev "$VPEER2"
+    ip -n "$NS" route replace default via "$VNET.1" dev "$VPEER" table "$NS_TABLE"
+    ip -n "$NS" rule del from "$VNET.0/24" lookup "$NS_TABLE" 2>/dev/null
+    ip -n "$NS" rule add from "$VNET.0/24" lookup "$NS_TABLE" pref 100
+}
+
+# Счётчики по клиенту: всё, что пришло с его адреса (rx), и всё, что ушло на
+# него (tx), включая ответы перехватившего соединение sing-box роутера.
+# Пересобираются только при смене состава — иначе обнулялись бы на каждом apply.
+vless_acct_up() {
+    sig=$(awk -F'|' -v vnet="$VNET" '$10 != "" { print vnet "." $4 }' "$CLIENTS" | sort | tr '\n' ' ')
+    iptables -t mangle -N "$ACCT_IN" 2>/dev/null
+    iptables -t mangle -N "$ACCT_OUT" 2>/dev/null
+    iptables -t mangle -C PREROUTING -i "$VIF" -j "$ACCT_IN" 2>/dev/null || \
+        iptables -t mangle -I PREROUTING 1 -i "$VIF" -j "$ACCT_IN"
+    iptables -t mangle -C POSTROUTING -o "$VIF" -j "$ACCT_OUT" 2>/dev/null || \
+        iptables -t mangle -I POSTROUTING 1 -o "$VIF" -j "$ACCT_OUT"
+    [ "$sig" = "$(cat "$VACCT_SIG" 2>/dev/null)" ] && return 0
+    iptables -t mangle -F "$ACCT_IN"
+    iptables -t mangle -F "$ACCT_OUT"
+    for a in $sig; do
+        iptables -t mangle -A "$ACCT_IN" -s "$a" -j RETURN
+        iptables -t mangle -A "$ACCT_OUT" -d "$a" -j RETURN
+    done
+    echo "$sig" > "$VACCT_SIG"
+}
+
+vless_acct_down() {
+    iptables -t mangle -D PREROUTING -i "$VIF" -j "$ACCT_IN" 2>/dev/null
+    iptables -t mangle -D POSTROUTING -o "$VIF" -j "$ACCT_OUT" 2>/dev/null
+    for c in "$ACCT_IN" "$ACCT_OUT"; do
+        iptables -t mangle -F "$c" 2>/dev/null
+        iptables -t mangle -X "$c" 2>/dev/null
+    done
+    rm -f "$VACCT_SIG"
+}
+
+vless_start() {
+    # Полный путь: busybox setsid (OpenWrt 25.12) сначала ищет одноимённый
+    # апплет, а у busybox ip нет netns.
+    ipbin=$(command -v ip)
+    case "$ipbin" in /*) ;; *) ipbin=/sbin/ip ;; esac
+    # setsid — чтобы процесс не умер вместе с CGI, из которого его запустили.
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$ipbin" netns exec "$NS" "$(vless_sb)" run -c "$VRENDER" >>"$VLOG" 2>&1 </dev/null &
+    else
+        "$ipbin" netns exec "$NS" "$(vless_sb)" run -c "$VRENDER" >>"$VLOG" 2>&1 </dev/null &
+    fi
+    echo $! > "$VPID"
+}
+
+vless_up() {
+    vless_ok || { log "vless: $(vless_reason)"; return 1; }
+    vless_net_up || return 1
+    vless_acct_up
+    umask 077
+    vless_render 1 > "$VRENDER.new"
+    # clash API есть не в каждой сборке sing-box — без него теряется только
+    # «онлайн» и адрес клиента.
+    if ! "$(vless_sb)" check -c "$VRENDER.new" >/dev/null 2>&1; then
+        vless_render 0 > "$VRENDER.new"
+        if ! out=$("$(vless_sb)" check -c "$VRENDER.new" 2>&1); then
+            log "vless: конфиг не прошёл проверку: $out"
+            rm -f "$VRENDER.new"
+            return 1
+        fi
+    fi
+    if vless_running && cmp -s "$VRENDER.new" "$VRENDER"; then
+        rm -f "$VRENDER.new"
+        return 0
+    fi
+    mv "$VRENDER.new" "$VRENDER"
+    p=$(vless_pid)
+    if [ -n "$p" ]; then
+        kill "$p" 2>/dev/null
+        i=0; while [ -d "/proc/$p" ] && [ "$i" -lt 20 ]; do sleep 0.2 2>/dev/null || sleep 1; i=$((i + 1)); done
+        kill -9 "$p" 2>/dev/null
+    fi
+    [ -f "$VLOG" ] && [ "$(wc -c < "$VLOG")" -gt 262144 ] && tail -c 65536 "$VLOG" > "$VLOG.tmp" && mv "$VLOG.tmp" "$VLOG"
+    vless_start
+    sleep 1
+    vless_running || { log "vless: sing-box не запустился, см. $VLOG"; return 1; }
+    log "vless: sing-box запущен (порт $VPORT)"
+}
+
+vless_down() {
+    p=$(vless_pid)
+    [ -n "$p" ] && kill "$p" 2>/dev/null
+    rm -f "$VPID" "$VRENDER"
+    vless_acct_down
+    [ -n "$VNET" ] && ip -4 rule del to "$VNET.0/24" lookup main pref "$RULE_PREF" 2>/dev/null
+    ip -4 rule del to "$LINKNET.0/30" lookup main pref "$RULE_PREF" 2>/dev/null
+    ip link del "$VIF" 2>/dev/null
+    ip link del "$VIF2" 2>/dev/null
+    ip netns del "$NS" 2>/dev/null
+}
+
+do_stop() {
+    awg_down
+    vless_down
+    [ "$KEENETIC" = 0 ] && [ -f "$CONF" ] && { load_conf; ENABLED=0; fw_apply; }
+}
+
+do_apply() {
+    load_conf
+    if [ "$ENABLED" != 1 ] || { [ -z "$PRIVKEY" ] && [ -z "$VPRIV" ]; }; then
+        do_stop
+        return 0
+    fi
+    rc=0
+    if awg_on; then awg_up || rc=1; else awg_down; fi
+    if vless_on; then vless_up || rc=1; else vless_down; fi
     fw_apply
-    redirect_attach
-    return 0
+    set --
+    awg_on && set -- "$@" "$IFACE"
+    vless_on && set -- "$@" "$VIF"
+    redirect_attach "$@"
+    return $rc
 }
 
 # ---------- статистика ----------
 
-# Снимок счётчиков ядра → накопительный трафик и сессии. Сброс счётчиков
+# Строки в формате `awg show dump` (ключ\t\tадрес\t\tрукопожатие\trx\ttx) для
+# VLESS-клиентов: ключ "v:<id>", «рукопожатие» — последняя активность (есть
+# открытое соединение или сдвинулись счётчики). Состояние — $VACT в RAM.
+vless_dump() {
+    vless_running || return 0
+    [ -n "$VNET" ] || return 0
+    vnow=$(date +%s)
+    touch "$VACT"
+    { iptables -t mangle -L "$ACCT_IN" -nvx 2>/dev/null | awk 'NR > 2 { print "i", $8, $2 }'
+      iptables -t mangle -L "$ACCT_OUT" -nvx 2>/dev/null | awk 'NR > 2 { print "o", $9, $2 }'
+    } > "$RUN/detour-server.vcnt"
+    ip netns exec "$NS" wget -qO- -T 2 "http://$CLASH/connections" 2>/dev/null | lua -e '
+        local ok, c = pcall(require, "cjson"); if not ok then return end
+        local ok2, t = pcall(c.decode, io.read("*a")); if not ok2 or type(t) ~= "table" then return end
+        local cs = t.connections; if type(cs) ~= "table" then return end
+        for _, x in ipairs(cs) do
+            local m = type(x.metadata) == "table" and x.metadata or {}
+            for _, o in ipairs(type(x.chains) == "table" and x.chains or {}) do
+                if type(o) == "string" and o:sub(1, 2) == "u-" then
+                    print(o:sub(3) .. " " .. tostring(m.sourceIP or "") .. ":" .. tostring(m.sourcePort or ""))
+                    break
+                end
+            end
+        end' > "$RUN/detour-server.vconn" 2>/dev/null
+    awk -v vnet="$VNET" -v now="$vnow" -v act="$VACT.new" '
+        FILENAME == ARGV[1] { if ($1 == "i") rx[$2] = $3; else tx[$2] = $3; next }
+        FILENAME == ARGV[2] { if ($1 != "") { cn[$1] = 1; rem[$1] = $2 } next }
+        FILENAME == ARGV[3] { prx[$1] = $2; ptx[$1] = $3; last[$1] = $4; next }
+        {
+            split($0, f, "|")
+            if (f[10] == "") next
+            id = f[1]; ip = vnet "." f[4]
+            r = rx[ip] + 0; t = tx[ip] + 0; l = last[id] + 0
+            if ((id in prx) && (r != prx[id] || t != ptx[id])) l = now
+            if (cn[id]) l = now
+            print id, r, t, l > act
+            if (!(ip in rx)) next
+            printf "v:%s\t\t%s\t\t%d\t%.0f\t%.0f\n", id, rem[id], l, r, t
+        }' "$RUN/detour-server.vcnt" "$RUN/detour-server.vconn" "$VACT" "$CLIENTS"
+    [ -f "$VACT.new" ] && mv "$VACT.new" "$VACT"
+    rm -f "$RUN/detour-server.vcnt" "$RUN/detour-server.vconn"
+}
+
+# Оба входа одним потоком: AWG по ключу клиента, VLESS по "v:<id>".
+server_dump() {
+    iface_up && awg show "$IFACE" dump 2>/dev/null | tail -n +2
+    vless_dump
+}
+
+# Снимок счётчиков → накопительный трафик и сессии. Сброс счётчиков
 # (пересоздан интерфейс, перезагрузка) распознаётся по уменьшению: тогда
-# дельта = текущее значение.
+# дельта = текущее значение. AWG и VLESS считаются раздельно (сбрасываются
+# независимо), в итог идёт сумма дельт.
 stats_tick() {
     [ -f "$CLIENTS" ] || return 0
     mkdir -p "$RUN"
     [ -f "$STATS_RAM" ] || cp "$TRAFFIC" "$STATS_RAM" 2>/dev/null || : > "$STATS_RAM"
     dump="$RUN/detour-server.dump"
-    if iface_up; then awg show "$IFACE" dump 2>/dev/null | tail -n +2 > "$dump"; else : > "$dump"; fi
+    server_dump > "$dump"
     now=$(date +%s)
     ev="$RUN/detour-server.events"
     : > "$ev"
@@ -442,24 +877,28 @@ stats_tick() {
         { T[$1] = $0 }
         END {
             for (i = 1; i <= n; i++) {
-                id = ids[i]; k = pk[id]
+                id = ids[i]; k = pk[id]; vk = "v:" id
                 if (id in T) split(T[id], a, "|")
-                else { for (j = 1; j <= 17; j++) a[j] = 0; a[1] = id; a[17] = "" }
+                else { for (j = 1; j <= 19; j++) a[j] = 0; a[1] = id; a[17] = "" }
                 crx = rx[k] + 0; ctx = tx[k] + 0
                 drx = (crx < a[2]) ? crx : crx - a[2]
                 dtx = (ctx < a[3]) ? ctx : ctx - a[3]
-                a[2] = crx; a[3] = ctx
+                vrx = rx[vk] + 0; vtx = tx[vk] + 0
+                drx += (vrx < a[18] + 0) ? vrx : vrx - a[18]
+                dtx += (vtx < a[19] + 0) ? vtx : vtx - a[19]
+                a[2] = crx; a[3] = ctx; a[18] = vrx; a[19] = vtx
                 a[4] += drx; a[5] += dtx
                 if (a[6] != mon) { a[6] = mon; a[7] = 0; a[8] = 0 }
                 a[7] += drx; a[8] += dtx
                 if (a[9] != day) { a[9] = day; a[10] = 0; a[11] = 0 }
                 a[10] += drx; a[11] += dtx
-                h = hs[k] + 0
+                h = hs[k] + 0; e = ep[k]
+                if (hs[vk] + 0 > h) { h = hs[vk] + 0; e = ep[vk] }
                 # Handshake обновляется лишь раз в 2 минуты; клиент шлёт keepalive
                 # каждые 25 с, так что рост счётчиков — точнее «последний раз в сети».
                 if (h > a[16]) a[16] = h
                 if (drx + dtx > 0 && now > a[16]) a[16] = now
-                if (ep[k] != "" && ep[k] != "(none)") a[17] = ep[k]
+                if (e != "" && e != "(none)") a[17] = e
                 online = (h > 0 && now - h < on_sec) ? 1 : 0
                 if (online) {
                     if (a[12] != 1) { a[13] = h; a[14] = 0; a[15] = 0; print "start" > ev }
@@ -470,7 +909,7 @@ stats_tick() {
                 }
                 a[12] = online
                 line = a[1]
-                for (j = 2; j <= 17; j++) line = line "|" a[j]
+                for (j = 2; j <= 19; j++) line = line "|" (a[j] == "" && j != 17 ? 0 : a[j])
                 print line
             }
         }' "$dump" "$CLIENTS" "$STATS_RAM" > "$STATS_RAM.tmp" && mv "$STATS_RAM.tmp" "$STATS_RAM"
@@ -521,6 +960,7 @@ client_conf() {
     priv=$(echo "$line" | cut -d'|' -f6)
     psk=$(echo "$line" | cut -d'|' -f7)
     mode=$(echo "$line" | cut -d'|' -f8)
+    [ -n "$priv" ] && [ -n "$PUBKEY" ] || return 1
     if [ "$mode" = lan ]; then
         allowed="$NET.0/24"
         lc=$(lan_cidr); [ -n "$lc" ] && allowed="$allowed, $lc"
@@ -537,6 +977,29 @@ client_conf() {
         "$PUBKEY" "$psk" "$allowed" "$host" "$PORT"
 }
 
+urlenc() {
+    printf '%s' "$1" | hexdump -v -e '/1 "%02x\n"' | awk '
+        BEGIN {
+            for (i = 48; i <= 57; i++) ok[sprintf("%02x", i)] = sprintf("%c", i)
+            for (i = 65; i <= 90; i++) ok[sprintf("%02x", i)] = sprintf("%c", i)
+            for (i = 97; i <= 122; i++) ok[sprintf("%02x", i)] = sprintf("%c", i)
+            ok["2d"] = "-"; ok["2e"] = "."; ok["5f"] = "_"
+        }
+        { h = tolower($1); s = s ((h in ok) ? ok[h] : "%" toupper(h)) }
+        END { printf "%s", s }'
+}
+
+# Ссылка для v2rayN/v2rayNG/Hiddify/Streisand/sing-box и самого Detour.
+client_link() {
+    line=$(client_line "$1")
+    [ -n "$line" ] || return 1
+    uuid=$(echo "$line" | cut -d'|' -f10)
+    [ -n "$uuid" ] && [ -n "$VPUB" ] && [ -n "$VPORT" ] || return 1
+    name=$(echo "$line" | cut -d'|' -f3)
+    printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s\n' \
+        "$uuid" "$(endpoint_host)" "$VPORT" "$VSNI" "$VPUB" "$VSID" "$(urlenc "$name")"
+}
+
 status_json() {
     load_conf
     reason=$(unsupported_reason)
@@ -550,7 +1013,16 @@ status_json() {
     elif [ -n "$reason" ]; then
         supported=false; installed=false
     fi
-    running=false; iface_up && running=true
+    vr=$(vless_reason); vsup=true; vinst=false
+    if [ "$vr" = netns ]; then
+        vsup=false; vr="Нужен пакет ip-full (сетевые пространства)"
+        ipfull_installable && vinst=true
+    elif [ -n "$vr" ]; then
+        vsup=false
+    fi
+    arun=false; iface_up && arun=true
+    vrun=false; vless_running && vrun=true
+    running=false; { [ "$arun" = true ] || [ "$vrun" = true ]; } && running=true
     wip=$(wan_ip)
     wpriv=false; [ -n "$wip" ] && ip_private "$wip" && wpriv=true
     dom=$(panel_domain)
@@ -558,18 +1030,21 @@ status_json() {
     printf '{"ok":true,"platform":"%s","supported":%s,"reason":"%s","installed":%s,"can_install":%s,"backend":"%s",' \
         "$([ "$KEENETIC" = 1 ] && echo keenetic || echo openwrt)" "$supported" "$(json_esc "$reason")" "$installed" "$can_install" \
         "$([ "$installed" = true ] && backend)"
-    printf '"configured":%s,"enabled":%s,"running":%s,"routed":%s,' \
-        "$([ -n "$PRIVKEY" ] && echo true || echo false)" "$([ "$ENABLED" = 1 ] && echo true || echo false)" "$running" "$redir"
+    printf '"configured":%s,"enabled":%s,"running":%s,"routed":%s,"awg_enabled":%s,"awg_running":%s,' \
+        "$({ [ -n "$PRIVKEY" ] || [ -n "$VPRIV" ]; } && echo true || echo false)" "$([ "$ENABLED" = 1 ] && echo true || echo false)" \
+        "$running" "$redir" "$([ "$AWG" = 1 ] && echo true || echo false)" "$arun"
+    printf '"vless":{"supported":%s,"reason":"%s","can_install":%s,"enabled":%s,"running":%s,"port":%s,"sni":"%s","pubkey":"%s","short_id":"%s","net":"%s"},' \
+        "$vsup" "$(json_esc "$vr")" "$vinst" "$([ "$VLESS" = 1 ] && echo true || echo false)" "$vrun" "${VPORT:-0}" \
+        "$(json_esc "$VSNI")" "$VPUB" "$VSID" "${VNET:+$VNET.0/24}"
     printf '"iface":"%s","port":%s,"net":"%s","server_ip":"%s","endpoint":"%s","endpoint_effective":"%s",' \
         "$IFACE" "${PORT:-0}" "${NET:+$NET.0/24}" "${NET:+$(server_ip)}" "$(json_esc "$ENDPOINT")" "$(json_esc "$(endpoint_host)")"
     printf '"wan_ip":"%s","wan_private":%s,"panel_domain":"%s","dns":"%s","mtu":%s,"pubkey":"%s","clients":[' \
         "$wip" "$wpriv" "$(json_esc "$dom")" "$(json_esc "$DNS")" "${MTU:-1376}" "$PUBKEY"
-    dump=""
-    [ "$running" = true ] && dump=$(awg show "$IFACE" dump 2>/dev/null | tail -n +2)
+    dump=$(server_dump)
     now=$(date +%s)
-    # rx/tx — живые счётчики ядра (скорость панель считает по их разнице между
-    # опросами); total/month/day/session — накопленное tick'ом (+ ещё не
-    # учтённая дельта, чтобы цифры не отставали на минуту).
+    # rx/tx — живые счётчики (AWG + VLESS; скорость панель считает по их
+    # разнице между опросами); total/month/day/session — накопленное tick'ом
+    # (+ ещё не учтённая дельта, чтобы цифры не отставали на минуту).
     [ -f "$CLIENTS" ] && printf '%s\n' "$dump" | awk -F'|' -v net="$NET" -v now="$now" -v on_sec="$ONLINE_SEC" \
         -v mon="$(date +%Y%m)" -v day="$(date +%Y%m%d)" '
         function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
@@ -580,16 +1055,23 @@ status_json() {
         }
         FILENAME == ARGV[2] { S[$1] = $0; next }
         {
-            k = $5; h = hs[k] + 0
-            for (j = 1; j <= 17; j++) a[j] = 0
+            k = $5; vk = "v:" $1
+            for (j = 1; j <= 19; j++) a[j] = 0
             a[17] = ""
             if ($1 in S) split(S[$1], a, "|")
             crx = rx[k] + 0; ctx = tx[k] + 0
             drx = (crx < a[2]) ? crx : crx - a[2]
             dtx = (ctx < a[3]) ? ctx : ctx - a[3]
-            if (!(k in rx)) { drx = 0; dtx = 0 }
+            if (k == "" || !(k in rx)) { drx = 0; dtx = 0 }
+            vrx = rx[vk] + 0; vtx = tx[vk] + 0
+            if (vk in rx) {
+                drx += (vrx < a[18] + 0) ? vrx : vrx - a[18]
+                dtx += (vtx < a[19] + 0) ? vtx : vtx - a[19]
+            }
             mrx = (a[6] == mon ? a[7] : 0) + drx; mtx = (a[6] == mon ? a[8] : 0) + dtx
             dyrx = (a[9] == day ? a[10] : 0) + drx; dytx = (a[9] == day ? a[11] : 0) + dtx
+            h = hs[k] + 0; rem = ep[k]
+            if (hs[vk] + 0 > h) { h = hs[vk] + 0; rem = ep[vk] }
             online = (h > 0 && now - h < on_sec) ? 1 : 0
             seen = (h > a[16] + 0) ? h : a[16] + 0
             sst = 0; srx = 0; stx = 0
@@ -597,11 +1079,12 @@ status_json() {
                 if (a[12] == 1) { sst = a[13]; srx = a[14] + drx; stx = a[15] + dtx }
                 else { sst = h; srx = drx; stx = dtx }
             }
-            rem = ep[k]; if (rem == "" || rem == "(none)") rem = a[17]
-            printf "%s{\"id\":\"%s\",\"enabled\":%s,\"name\":\"%s\",\"ip\":\"%s.%s\",\"mode\":\"%s\",\"created\":%d,",
-                (n++ ? "," : ""), $1, ($2 == 1 ? "true" : "false"), esc($3), net, $4, ($8 == "" ? "full" : $8), $9 + 0
+            if (rem == "" || rem == "(none)") rem = a[17]
+            printf "%s{\"id\":\"%s\",\"enabled\":%s,\"name\":\"%s\",\"ip\":\"%s.%s\",\"mode\":\"%s\",\"created\":%d,\"awg\":%s,\"vless\":%s,\"route\":\"%s\",",
+                (n++ ? "," : ""), $1, ($2 == 1 ? "true" : "false"), esc($3), net, $4, ($8 == "" ? "full" : $8), $9 + 0,
+                ($5 != "" ? "true" : "false"), ($10 != "" ? "true" : "false"), esc($11)
             printf "\"online\":%s,\"handshake\":%d,\"handshake_ago\":%d,\"last_seen\":%d,\"rx\":%.0f,\"tx\":%.0f,\"remote\":\"%s\",",
-                (online ? "true" : "false"), h, (h > 0 ? now - h : -1), seen, crx, ctx, rem
+                (online ? "true" : "false"), h, (h > 0 ? now - h : -1), seen, crx + vrx, ctx + vtx, rem
             printf "\"session_start\":%d,\"session_rx\":%.0f,\"session_tx\":%.0f,", sst, srx, stx
             printf "\"day_rx\":%.0f,\"day_tx\":%.0f,\"month_rx\":%.0f,\"month_tx\":%.0f,\"total_rx\":%.0f,\"total_tx\":%.0f}",
                 dyrx, dytx, mrx, mtx, a[4] + drx, a[5] + dtx
@@ -624,15 +1107,36 @@ cmd_set() {
         k=${kv%%=*}; v=${kv#*=}
         case "$k" in
             enabled) case "$v" in 0|1) ENABLED=$v ;; *) err "enabled: 0 или 1" ;; esac ;;
+            awg)
+                case "$v" in 0|1) ;; *) err "awg: 0 или 1" ;; esac
+                [ "$v" = 1 ] && ! awg_ok && err "AmneziaWG на этом роутере недоступен"
+                AWG=$v ;;
+            vless)
+                case "$v" in 0|1) ;; *) err "vless: 0 или 1" ;; esac
+                if [ "$v" = 1 ] && ! vless_ok; then
+                    r=$(vless_reason); [ "$r" = netns ] && r="нужен пакет ip-full"
+                    err "VLESS недоступен: $r"
+                fi
+                VLESS=$v ;;
             port)
                 case "$v" in ''|*[!0-9]*) err "порт — число" ;; esac
                 [ "$v" -ge 1024 ] && [ "$v" -le 65535 ] || err "порт 1024–65535"
                 if [ "$v" != "$PORT" ] && port_busy "$v"; then err "UDP-порт $v уже занят"; fi
                 PORT=$v ;;
+            vport)
+                case "$v" in ''|*[!0-9]*) err "порт — число" ;; esac
+                [ "$v" -ge 1 ] && [ "$v" -le 65535 ] || err "порт 1–65535"
+                if [ "$v" != "$VPORT" ] && tcp_port_busy "$v"; then err "TCP-порт $v уже занят на роутере"; fi
+                VPORT=$v ;;
+            sni)
+                valid_ipv4_host "$v" && echo "$v" | grep -q '[A-Za-z]' && echo "$v" | grep -q '\.' || \
+                    err "маскировочный сайт: домен, например www.microsoft.com"
+                VSNI=$v ;;
             net)
                 v=${v%.0/24}; v=${v%.0}
                 echo "$v" | grep -qE '^10\.[0-9]{1,3}\.[0-9]{1,3}$|^192\.168\.[0-9]{1,3}$|^172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}$' || \
                     err "подсеть: частная /24, например 10.66.0.0/24"
+                [ "$v" = "$VNET" ] && err "подсеть $v.0/24 занята входом VLESS"
                 if [ "$v" != "$NET" ] && ip -4 route | grep -q "^$v\.0/"; then err "подсеть $v.0/24 уже занята"; fi
                 NET=$v ;;
             endpoint)
@@ -663,10 +1167,14 @@ cmd_client_add() {
     mode=${2:-full}; case "$mode" in full|lan) ;; *) err "режим: full или lan" ;; esac
     octet=$(free_octet); [ -n "$octet" ] || err "в подсети нет свободных адресов"
     id=$(new_id)
-    priv=$(awg genkey); pub=$(printf '%s' "$priv" | awg pubkey); psk=$(awg genpsk)
-    [ -n "$pub" ] && [ -n "$psk" ] || err "не удалось сгенерировать ключи"
+    priv=""; pub=""; psk=""
+    if awg_ok; then
+        priv=$(awg genkey); pub=$(printf '%s' "$priv" | awg pubkey); psk=$(awg genpsk)
+        [ -n "$pub" ] && [ -n "$psk" ] || err "не удалось сгенерировать ключи"
+    fi
+    uuid=$(new_uuid); [ -n "$uuid" ] || err "не удалось получить uuid"
     umask 077
-    printf '%s|1|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$name" "$octet" "$pub" "$priv" "$psk" "$mode" "$(date +%s)" >> "$CLIENTS"
+    printf '%s|1|%s|%s|%s|%s|%s|%s|%s|%s|\n' "$id" "$name" "$octet" "$pub" "$priv" "$psk" "$mode" "$(date +%s)" "$uuid" >> "$CLIENTS"
     do_apply
     log "client-add $id ($name) $NET.$octet $mode"
     printf '{"ok":true,"id":"%s"}\n' "$id"
@@ -694,6 +1202,14 @@ cmd_client_set() {
             enabled)
                 case "$v" in 0|1) ;; *) err "enabled: 0 или 1" ;; esac
                 rewrite_client "$id" '$1 == id { $2 = v } { print }' -v v="$v" ;;
+            route)
+                case "$v" in
+                    ''|direct) ;;
+                    vpn:*) case "${v#vpn:}" in ''|*[!A-Za-z0-9_.-]*) err "маршрут: id профиля или цепочки" ;; esac ;;
+                    *) err "маршрут: пусто, direct или vpn:<id>" ;;
+                esac
+                [ "$KEENETIC" = 1 ] && [ -n "$v" ] && err "на Keenetic маршруты клиентов недоступны"
+                rewrite_client "$id" '$1 == id { $11 = v } { print }' -v v="$v" ;;
             *) err "неизвестный параметр: $k" ;;
         esac
     done
@@ -711,6 +1227,13 @@ cmd_client_del() {
     echo '{"ok":true}'
 }
 
+attach_all() {
+    set --
+    awg_on && set -- "$@" "$IFACE"
+    vless_on && set -- "$@" "$VIF"
+    redirect_attach "$@"
+}
+
 case "$1" in
     status) status_json ;;
     sessions) sessions_json "$2" ;;
@@ -718,26 +1241,40 @@ case "$1" in
         # Сервер ни разу не настраивался — cron стоит на всех роутерах, выходим сразу.
         [ -f "$CLIENTS" ] || exit 0
         lock; load_conf
-        # Самолечение: интерфейс пропал (упал amneziawg-go, кто-то удалил) —
-        # поднимаем заново, иначе клиенты молча остались бы без сервера.
-        if [ "$ENABLED" = 1 ] && ! iface_up; then
+        # Самолечение: интерфейс или процесс пропал (упал amneziawg-go или
+        # sing-box, кто-то удалил) — поднимаем заново, иначе клиенты молча
+        # остались бы без сервера.
+        if awg_on && ! iface_up; then
             log "tick: $IFACE нет при включённом сервере — поднимаю"
+            do_apply
+        elif vless_on && ! vless_running; then
+            log "tick: sing-box VLESS не запущен при включённом сервере — поднимаю"
             do_apply
         fi
         # settings.json появился позже сервера (свежая установка) или его
         # переписали без нашего интерфейса — без этого клиенты шли бы мимо
         # маршрутов роутера.
-        [ "$ENABLED" = 1 ] && redirect_attach
+        [ "$ENABLED" = 1 ] && attach_all
         stats_tick ;;
-    start|apply) lock; do_apply; [ "$1" = apply ] && echo '{"ok":true}' ;;
+    start|apply)
+        lock; [ -f "$CONF" ] && ensure_conf >/dev/null
+        do_apply
+        [ "$1" = apply ] && echo '{"ok":true}'
+        exit 0 ;;
     stop) lock; load_conf; stats_tick; stats_flush; do_stop ;;
+    down)
+        # Удаление пакета: снять всё, файрвол чистит вызывающий.
+        load_conf; stats_tick; stats_flush; awg_down; vless_down ;;
     set) shift; lock; cmd_set "$@" ;;
     client-add) shift; lock; cmd_client_add "$@" ;;
     client-set) shift; lock; cmd_client_set "$@" ;;
     client-del) lock; cmd_client_del "$2" ;;
     client-conf)
         load_conf
-        client_conf "$2" || { echo "клиент не найден" >&2; exit 1; } ;;
+        client_conf "$2" || { echo "клиент не найден или у него нет ключей AmneziaWG" >&2; exit 1; } ;;
+    client-link)
+        load_conf
+        client_link "$2" || { echo "клиент не найден или VLESS не настроен" >&2; exit 1; } ;;
     regen-obf)
         lock; ensure_conf; gen_obf; save_conf
         # Параметры интерфейса syncconf не меняет надёжно — пересоздаём.
@@ -746,6 +1283,6 @@ case "$1" in
         log "regen-obf"
         echo '{"ok":true}' ;;
     *)
-        echo "usage: $0 {status|start|stop|apply|set k=v…|client-add <name> [full|lan]|client-set <id> k=v…|client-del <id>|client-conf <id>|regen-obf}" >&2
+        echo "usage: $0 {status|start|stop|down|apply|set k=v…|client-add <name> [full|lan]|client-set <id> k=v…|client-del <id>|client-conf <id>|client-link <id>|regen-obf}" >&2
         exit 2 ;;
 esac

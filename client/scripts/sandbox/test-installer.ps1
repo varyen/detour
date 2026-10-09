@@ -63,6 +63,21 @@ $s = Pipe 'status'
 L "winws2 после установки: поддерживается=$($s.binaries.nfqws2_supported) версия=$($s.binaries.nfqws2_version)"
 
 # Профиль-заглушка: локальный SOCKS, чтобы поднять TUN и проверить связку.
+# Сам «VPN-сервер» — отдельный sing-box, его исходящие привязаны к физическому
+# адаптеру, мимо TUN (как в test-tun.ps1). Без него в режиме «всё, кроме
+# исключений» всё несписочное упиралось в мёртвый прокси — отсюда были 000.
+$alias = (Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Sort-Object RouteMetric | Select-Object -First 1).InterfaceAlias
+$up = @{
+  log = @{ level = 'info'; output = "$out\upstream.log"; timestamp = $true }
+  dns = @{ servers = @(@{ type = 'https'; tag = 'd'; server = '1.1.1.1'; bind_interface = $alias }) }
+  inbounds = @(@{ type = 'mixed'; listen = '127.0.0.1'; listen_port = 18181 })
+  outbounds = @(@{ type = 'direct'; tag = 'direct'; bind_interface = $alias })
+  route = @{ default_domain_resolver = 'd' }
+}
+New-Item -ItemType Directory -Force "$out\up" | Out-Null
+$up | ConvertTo-Json -Depth 6 | Out-File "$out\up\c.json" -Encoding ascii
+$null = Start-Process "$st\sing-box.exe" -ArgumentList 'run', '-c', "$out\up\c.json", '-D', "$out\up" -WindowStyle Hidden -PassThru
+L "VPN-заглушка на 18181 через $alias"
 $null = Pipe 'profile_save' @{} '{"id":"main","name":"main","outbound":{"type":"socks","server":"127.0.0.1","server_port":18181,"version":"5"}}'
 $null = Pipe 'domains' @{} "speed.cloudflare.com`n"
 $null = Pipe 'zapret_domains' @{} "example.com`n"

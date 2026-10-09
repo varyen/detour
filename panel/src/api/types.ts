@@ -367,6 +367,11 @@ export interface ServerClient {
   ip: string;
   mode: ServerClientMode;
   created: number;
+  /** Есть ключи AmneziaWG / uuid VLESS (нет — вход на платформе недоступен). */
+  awg?: boolean;
+  vless?: boolean;
+  /** Маршрут клиента (роутер): "" — правила роутера, "direct", "vpn:<профиль|цепочка>". */
+  route?: string;
   online: boolean;
   handshake: number;
   handshake_ago: number;
@@ -400,6 +405,11 @@ export interface ServerStatus {
   engine_running?: boolean;
   /** Интерфейс сервера в vpn_redirect_ifaces — клиенты получают маршруты роутера. */
   routed: boolean;
+  /** Вход AmneziaWG включён / поднят (нет поля — старый роутер или приложение: только AWG). */
+  awg_enabled?: boolean;
+  awg_running?: boolean;
+  /** Вход VLESS-Reality (только роутер, с 2.7.0). */
+  vless?: ServerVless;
   iface: string;
   port: number;
   net: string;
@@ -417,6 +427,21 @@ export interface ServerStatus {
   now: number;
 }
 
+export interface ServerVless {
+  supported: boolean;
+  reason: string;
+  /** Не хватает ip-full, и он есть в фиде — ставится кнопкой «Установить». */
+  can_install: boolean;
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  /** Сайт, под который маскируется сервер (Reality). */
+  sni: string;
+  pubkey: string;
+  short_id: string;
+  net: string;
+}
+
 export interface ServerSession {
   id: string;
   start: number;
@@ -428,7 +453,11 @@ export interface ServerSession {
 
 export interface ServerSettingsPatch {
   enabled?: boolean;
+  awg?: boolean;
+  vless?: boolean;
   port?: number;
+  vport?: number;
+  sni?: string;
   net?: string;
   endpoint?: string;
   dns?: string;

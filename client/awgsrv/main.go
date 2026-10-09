@@ -49,6 +49,7 @@ func main() {
 	socksAddr := flag.String("socks", "127.0.0.1:19485", "SOCKS5-вход sing-box")
 	socksUser := flag.String("socks-user", "", "логин SOCKS5")
 	socksPass := flag.String("socks-pass", "", "пароль SOCKS5")
+	perClient := flag.Bool("socks-per-client", false, "логин SOCKS5 по клиенту: <socks-user>-<последний октет его адреса>")
 	bindIP := flag.String("bind-ip", "", "IPv4 физического интерфейса для UDP-сокета сервера")
 	watchStdin := flag.Bool("watch-stdin", true, "выйти, когда закроется stdin")
 	flag.BoolVar(&verbose, "v", false, "подробный журнал")
@@ -62,7 +63,7 @@ func main() {
 		log.Fatalf("-addr: нужен IPv4/маска, получено %q", *addr)
 	}
 
-	socks := &Socks{Addr: *socksAddr, User: *socksUser, Pass: *socksPass}
+	socks := &Socks{Addr: *socksAddr, User: *socksUser, Pass: *socksPass, PerClient: *perClient}
 	tunDev, err := newNetTun(prefix, *mtu, socks)
 	if err != nil {
 		log.Fatalf("сетевой стек: %v", err)

@@ -79,6 +79,7 @@ SINGBOX_PKG=sing-box
 TPWS_PKG=tpws-zapret
 NFQWS2_PKG=nfqws2
 MIHOMO_PKG=mihomo   # сайдкар AmneziaWG (detour-awg); ставится по кнопке, не зависимость панели
+AWGGO_PKG=detour-awg-go   # userspace AmneziaWG для своего VPN-сервера там, где нет kmod-amneziawg
 BINS_STATE_FILE=/var/state/detour-bins.json     # sing-box update state (panel reads this path)
 TPWS_STATE_FILE=/var/state/detour-tpws.json     # tpws-zapret update state (panel reads this path)
 NFQWS2_STATE_FILE=/var/state/detour-nfqws2.json # nfqws2 (zapret2) update state (panel reads this)
@@ -1125,19 +1126,40 @@ cmd_server_apply() {
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
-    log "$PKGM update + install kmod-amneziawg amneziawg-tools..."
+    log "$PKGM update + install ip-full kmod-amneziawg amneziawg-tools..."
     opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
-    local p
+    # ip-full — для входа VLESS (ip netns; у busybox ip его нет). Независим от
+    # AmneziaWG: на OpenWrt без kmod-amneziawg сервер работает одним VLESS.
+    if ip netns list >/dev/null 2>&1; then
+        log "ip netns уже есть"
+    else
+        pkg_install ip-full 2>&1 || log "WARNING: ip-full не установился — вход VLESS будет недоступен"
+    fi
+    local p awg_err=""
     for p in kmod-amneziawg amneziawg-tools; do
         if pkg_is_installed "$p"; then
             log "$p уже установлен ($(pkg_installed_version "$p"))"
         else
-            pkg_install "$p" 2>&1 || die "install of $p failed"
+            pkg_install "$p" 2>&1 || { awg_err="install of $p failed"; break; }
         fi
     done
-    modprobe amneziawg 2>&1 || die "модуль amneziawg не загрузился (ядро не совпало?)"
-    log "AmneziaWG готов"
+    [ -z "$awg_err" ] && { modprobe amneziawg 2>&1 || awg_err="модуль amneziawg не загрузился (ядро не совпало?)"; }
+    # Модуля нет (чистая OpenWrt) — userspace AmneziaWG из нашего фида.
+    if [ -n "$awg_err" ] && bypass_feed_available; then
+        log "$awg_err — ставлю userspace AmneziaWG ($AWGGO_PKG) из фида Detour"
+        ensure_feed
+        if use_curl_feed; then
+            feed_curl_install "$AWGGO_PKG" && awg_err=""
+        else
+            pkg_index_update >/dev/null 2>&1
+            pkg_install "$AWGGO_PKG" 2>&1 && awg_err=""
+        fi
+        modprobe tun 2>/dev/null
+        [ -z "$awg_err" ] && [ ! -c /dev/net/tun ] && awg_err="нет /dev/net/tun (kmod-tun) — userspace AmneziaWG не поднимется"
+    fi
     [ -x /usr/sbin/detour-server ] && /usr/sbin/detour-server start >/dev/null 2>&1
+    [ -z "$awg_err" ] || die "$awg_err"
+    log "AmneziaWG готов"
 }
 
 # ---- mihomo (сайдкар AmneziaWG) ----

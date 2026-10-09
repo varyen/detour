@@ -70,6 +70,7 @@ mv /etc/crontabs/root.new /etc/crontabs/root
 mkdir -p /etc/detour/server
 {
     [ -n "${DETOUR_SERVER_PORT:-}" ] && echo "DEF_PORT=$DETOUR_SERVER_PORT"
+    [ -n "${DETOUR_VLESS_PORT:-}" ] && echo "DEF_VPORT=$DETOUR_VLESS_PORT"
     [ -n "${DETOUR_ENDPOINT:-}" ] && echo "DEF_ENDPOINT=$DETOUR_ENDPOINT"
 } > /etc/detour/server/defaults
 

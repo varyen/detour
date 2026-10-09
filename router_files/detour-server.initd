@@ -13,6 +13,7 @@ start() {
 }
 
 stop() {
+    [ -x "$PROG" ] && "$PROG" down >/dev/null 2>&1
     ip link del dsrv0 2>/dev/null
     return 0
 }

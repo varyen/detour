@@ -524,9 +524,10 @@ cmd_uninstall() {
         done
         # VPN-сервер при «полной остановке» не гасится (иначе выключение через
         # этот же VPN отрезало бы доступ к дому) — снимаем его только здесь.
+        [ -x /usr/sbin/detour-server ] && /usr/sbin/detour-server down >/dev/null 2>&1
         ip link del dsrv0 2>/dev/null
         if have uci; then
-            for _s in detour_srv detour_srv_wan detour_srv_lan detour_srv_in; do
+            for _s in detour_srv detour_srv_wan detour_srv_lan detour_srv_in detour_srv_vin; do
                 uci -q delete "firewall.$_s"
             done
             # Правила проброса (detour-pm-*) уже сняты `detour-portmap apply` в teardown.

@@ -217,9 +217,13 @@ def main():
     # does NOT (no NFQUEUE on Keenetic). They publish sequentially; publish_feed
     # preserves the sibling arch dir on the feed branch, so neither drops the other.
     runs = []
+    # detour-awg-go собирается из исходников (tools/awg-go), апстрима у него нет:
+    # пересобираем ту же версию, иначе каталог, собранный с нуля, его потерял бы.
+    awg_a = ["--awg-go-version", feed["detour-awg-go"]] if feed.get("detour-awg-go") else []
+    awg_apk = ["--awg-go-version", apkfeed["detour-awg-go"]] if apkfeed.get("detour-awg-go") else []
     if aarch64_changed:
         runs.append(["--fetch-upstream", "--version", sb_t,
-                     "--tpws-version", tpws_t, "--nfqws2-version", nfq_t])
+                     "--tpws-version", tpws_t, "--nfqws2-version", nfq_t, *awg_a])
     if mips_changed:
         runs.append(["--arch", "mipsel", "--fetch-upstream",
                      "--version", sb_t, "--tpws-version", tpws_t])
@@ -228,7 +232,7 @@ def main():
         # каждой платформы из релизного тарбола zapret/zapret2 и опубликует их
         # каталоги за один force-push (сиблинги на ветке при этом сохраняются).
         runs.append(["--arch", "apk-all",
-                     "--tpws-version", tpws_t, "--nfqws2-version", nfq_t])
+                     "--tpws-version", tpws_t, "--nfqws2-version", nfq_t, *awg_apk])
 
     mih_args = ["--mihomo-version", mih_t] if mih_t else []
     for extra in runs:

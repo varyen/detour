@@ -72,6 +72,9 @@ pub struct Backend {
     awg: Sidecar,
     /// Помощник detour-awgsrv своего VPN-сервера.
     server: server::Proc,
+    /// Второй sing-box — вход VLESS-Reality своего сервера — и его счётчики.
+    vless: server::Proc,
+    vmeter: std::sync::Mutex<crate::server::VlessMeter>,
     apply_lock: Mutex<()>,
     /// Одно обновление подписок за раз: плановое и ручное не должны
     /// одновременно переписывать одни и те же профили.
@@ -127,6 +130,8 @@ impl Backend {
             dpi,
             awg,
             server: server::Proc::default(),
+            vless: server::Proc::default(),
+            vmeter: std::sync::Mutex::new(crate::server::VlessMeter::default()),
             apply_lock: Mutex::new(()),
             subs_lock: Mutex::new(()),
             health_lock: Mutex::new(()),
@@ -250,7 +255,7 @@ impl Backend {
             "torrent_action" => self.torrent_action(body()?).await?,
             "server_status" => self.server_status().await,
             "server_sessions" => self.server_sessions(req),
-            "server_set" | "server_client_add" | "server_client_set" | "server_client_del" | "server_client_conf"
+            "server_set" | "server_client_add" | "server_client_set" | "server_client_del" | "server_client_conf" | "server_client_link"
             | "server_regen" | "server_install" => self.server_action(req, body()?).await?,
 
             "route_map" => self.text_file(req, store::ROUTE_MAP, "routemap", body()?, true).await?,

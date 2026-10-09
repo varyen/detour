@@ -23,7 +23,9 @@ cargo build -p detour-svc --target-dir target\static
 if ($LASTEXITCODE) { throw "сборка не прошла" }
 Pop-Location
 Copy-Item (Join-Path $root 'target\static\debug\detour-svc.exe') $stand -Force
-Copy-Item $SingBox $stand -Force
+# Сценарии зовут именно sing-box.exe — копия под исходным именем (sing-box-1.14.1.exe)
+# оставляла их «VPN-заглушку» мёртвой.
+Copy-Item $SingBox (Join-Path $stand 'sing-box.exe') -Force
 Copy-Item (Join-Path $PSScriptRoot '*.ps1') $stand -Force
 if ($Setup) { Copy-Item $Setup $stand -Force }
 if ($Only -eq 'installer' -and -not $Setup) { throw "для -Only installer нужен -Setup <detour-setup-*.exe>" }

@@ -135,6 +135,21 @@ NFQWS_LUA_FILES = ("zapret-lib.lua", "zapret-antidpi.lua", "zapret-auto.lua")
 SB_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "sing-box")
 TPWS_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "sbin", "tpws-zapret")
 MIHOMO_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "mihomo")
+# detour-awg-go — userspace AmneziaWG для своего VPN-сервера там, где в фиде
+# прошивки нет kmod-amneziawg (чистая OpenWrt). Собирается из tools/awg-go
+# (amneziawg-go + встроенное подмножество awg) Go-компилятором на месте.
+AWGGO_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "amneziawg-go")
+AWGGO_SRC = os.path.join(HERE, "tools", "awg-go")
+# CPU-семейство фида → GOARCH и уточнения. Мягкая плавающая точка там, где у
+# роутеров её может не быть: такой бинарник работает и на железе с FPU.
+GO_TARGETS = {
+    "x86_64":  ("amd64", {}),
+    "x86":     ("386", {"GO386": "softfloat"}),
+    "aarch64": ("arm64", {}),
+    "arm":     ("arm", {"GOARM": "5"}),
+    "mipsel":  ("mipsle", {"GOMIPS": "softfloat"}),
+    "mips":    ("mips", {"GOMIPS": "softfloat"}),
+}
 MIHOMO_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "mihomo")
 
 # Upstream source repos for --fetch-upstream (CI auto-publish needs no
@@ -235,6 +250,21 @@ _MIHOMO_PRERM_MIPSEL = """#!/bin/sh
 set +e
 exit 0
 """
+# Пересоздать сервер на новом бинарнике, только если он сейчас на userspace:
+# клиенты переподключатся сами (keepalive 25 с).
+_AWGGO_POSTINST = """#!/bin/sh
+set +e
+chmod 0755 /usr/bin/amneziawg-go 2>/dev/null
+if [ -x /usr/sbin/detour-server ] && pgrep -f 'amneziawg-go dsrv0' >/dev/null 2>&1; then
+    ip link del dsrv0 2>/dev/null
+    /usr/sbin/detour-server start >/dev/null 2>&1
+fi
+exit 0
+"""
+_AWGGO_PRERM = """#!/bin/sh
+set +e
+exit 0
+"""
 _MIHOMO_DESC = ("mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar "
                 "for AmneziaWG profiles (sing-box has no AmneziaWG).")
 
@@ -270,6 +300,13 @@ PKG_SPECS = {
         "postinst": _MIHOMO_POSTINST,
         "prerm": _MIHOMO_PRERM,
         "description": _MIHOMO_DESC,
+    },
+    "detour-awg-go": {
+        "files": [(AWGGO_BINARY, "usr/bin/amneziawg-go", 0o755)],
+        "postinst": _AWGGO_POSTINST,
+        "prerm": _AWGGO_PRERM,
+        "description": ("Userspace AmneziaWG (amneziawg-go + awg subset) for the Detour "
+                        "VPN server on OpenWrt without kmod-amneziawg."),
     },
 }
 
@@ -365,6 +402,10 @@ def apk_pkg_specs(cpu):
         "mihomo": dict(
             PKG_SPECS_OPENWRT["mihomo"],
             files=[(apk_bin_path(cpu, "mihomo"), "usr/bin/mihomo", 0o755)],
+        ),
+        "detour-awg-go": dict(
+            PKG_SPECS_OPENWRT["detour-awg-go"],
+            files=[(apk_bin_path(cpu, "amneziawg-go"), "usr/bin/amneziawg-go", 0o755)],
         ),
     }
 
@@ -564,6 +605,20 @@ def _assert_static_elf(data, label, want):
     if interp:
         die(f"{label}: dynamically linked (PT_INTERP present) — need the static build")
     return True
+
+
+def build_awggo(cpu, dest):
+    """Собрать detour-awg-go под CPU-семейство и проверить ELF."""
+    goarch, extra = GO_TARGETS[cpu]
+    env = dict(os.environ, CGO_ENABLED="0", GOOS="linux", GOARCH=goarch, **extra)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    print(f"  go build detour-awg-go [{cpu}: GOARCH={goarch} {' '.join(f'{k}={v}' for k, v in extra.items())}]")
+    r = subprocess.run(["go", "build", "-trimpath", "-ldflags", "-s -w", "-o", dest, "."],
+                       cwd=AWGGO_SRC, env=env)
+    if r.returncode != 0:
+        die(f"detour-awg-go: go build для {cpu} не удался (нужен Go)")
+    with open(dest, "rb") as f:
+        _assert_static_elf(f.read(), f"detour-awg-go [{cpu}]", APK_TARGETS[cpu]["elf"])
 
 
 def fetch_apk_binaries(cpu, tpws_version=None, nfqws2_rel=None):
@@ -1113,9 +1168,19 @@ def build_arch(arch, args, sb_ver, tpws_ver, nfqws2_ver, mihomo_ver=None):
         fetch_mihomo(mihomo_ver, t["mihomo"], t["elf"], dest)
         build_versions["mihomo"] = f"{mihomo_ver}-{args.revision}"
 
+    awggo_ver = getattr(args, "awg_go_version", None)
+    if awggo_ver:
+        # Keenetic — свой VPN-сервер там не поддерживается, пакет не нужен.
+        if arch == "mipsel":
+            print("  [mipsel] detour-awg-go пропущен — на Keenetic сервер недоступен")
+        else:
+            build_awggo(cpu if is_apk else "aarch64",
+                        apk_bin_path(cpu, "amneziawg-go") if is_apk else AWGGO_BINARY)
+            build_versions["detour-awg-go"] = f"{awggo_ver}-{args.revision}"
+
     if not build_versions and not os.path.isdir(FEED_OUT):
         die(f"nothing to build for {arch}: pass --version / --tpws-version / "
-            "--nfqws2-version / --mihomo-version")
+            "--nfqws2-version / --mihomo-version / --awg-go-version")
 
     label = ", ".join(f"{k} {v}" for k, v in build_versions.items()) or "(re-index only)"
     fmt = "apk" if is_apk else "opkg"
@@ -1133,6 +1198,8 @@ def main():
                     f"(fetched from {ZAPRET2_REPO}@{ZAPRET2_REL})")
     ap.add_argument("--mihomo-version", help="mihomo (MetaCubeX) version to build, e.g. 1.19.31 "
                     "— сайдкар AmneziaWG; всегда качается из апстрима")
+    ap.add_argument("--awg-go-version", help="версия пакета detour-awg-go (userspace AmneziaWG "
+                    "для своего VPN-сервера), e.g. 1.0.0 — собирается из tools/awg-go")
     ap.add_argument("--revision", default=DEFAULT_REVISION,
                     help=f"opkg package revision suffix (default {DEFAULT_REVISION})")
     ap.add_argument("--publish", action="store_true",

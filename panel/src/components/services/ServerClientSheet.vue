@@ -1,7 +1,7 @@
 <script setup lang="ts">
-/* Клиент VPN-сервера: конфиг для приложения (QR + файл) и история подключений.
-   Конфиг несёт приватный ключ клиента, поэтому запрашивается только при
-   открытии шторки и в памяти страницы не задерживается после закрытия. */
+/* Клиент VPN-сервера: конфиг AmneziaWG (QR + файл), ссылка VLESS-Reality
+   (QR + текст) и история подключений. Конфиг и ссылка — ключи клиента, поэтому
+   запрашиваются только при открытии шторки и не задерживаются после закрытия. */
 import { computed, ref, watch } from "vue";
 import qrcode from "qrcode-generator";
 import DrawerSheet from "@/components/DrawerSheet.vue";
@@ -12,24 +12,42 @@ import type { ServerClient, ServerSession } from "@/api";
 import { fmtBytes } from "@/lib/format";
 import { useToastStore } from "@/stores/toast";
 
-type Tab = "conf" | "history";
+type Tab = "conf" | "vless" | "history";
 
-const props = defineProps<{ open: boolean; client: ServerClient | null; tab: Tab }>();
+const props = defineProps<{
+  open: boolean;
+  client: ServerClient | null;
+  tab: Tab;
+  /** Какие входы сейчас включены на сервере — вкладки только для них. */
+  awg: boolean;
+  vless: boolean;
+}>();
 const emit = defineEmits<{ close: [] }>();
 const toast = useToastStore();
 
 const view = ref<Tab>("conf");
 const conf = ref("");
+const link = ref("");
 const loading = ref(false);
 const error = ref("");
 const sessions = ref<ServerSession[]>([]);
 
-const qrSvg = computed(() => {
-  if (!conf.value) return "";
+function qrOf(text: string): string {
+  if (!text) return "";
   const qr = qrcode(0, "L");
-  qr.addData(conf.value, "Byte");
+  qr.addData(text, "Byte");
   qr.make();
   return qr.createSvgTag({ cellSize: 4, margin: 3, scalable: true });
+}
+const qrSvg = computed(() => qrOf(conf.value));
+const linkQr = computed(() => qrOf(link.value));
+
+const tabs = computed(() => {
+  const t: { value: Tab; label: string }[] = [];
+  if (props.awg && props.client?.awg !== false) t.push({ value: "conf", label: "AmneziaWG" });
+  if (props.vless && props.client?.vless) t.push({ value: "vless", label: "VLESS" });
+  t.push({ value: "history", label: "История" });
+  return t;
 });
 
 /* Имя туннеля в WireGuard/AmneziaWG берётся из имени файла: только
@@ -56,6 +74,19 @@ async function loadConf() {
   }
 }
 
+async function loadLink() {
+  if (!props.client) return;
+  loading.value = true;
+  error.value = "";
+  try {
+    link.value = (await services.serverClientLink(props.client.id)).link;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Не удалось получить ссылку";
+  } finally {
+    loading.value = false;
+  }
+}
+
 async function loadSessions() {
   if (!props.client) return;
   loading.value = true;
@@ -71,6 +102,7 @@ async function loadSessions() {
 
 function load() {
   if (view.value === "conf" && !conf.value) void loadConf();
+  if (view.value === "vless" && !link.value) void loadLink();
   if (view.value === "history") void loadSessions();
 }
 
@@ -78,10 +110,12 @@ watch(
   () => props.open,
   (open) => {
     if (open) {
-      view.value = props.tab;
+      const avail = tabs.value.map((t) => t.value);
+      view.value = avail.includes(props.tab) ? props.tab : avail[0];
       load();
     } else {
       conf.value = "";
+      link.value = "";
       sessions.value = [];
       error.value = "";
     }
@@ -98,10 +132,10 @@ function download() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function copy() {
+async function copy(text: string, what: string) {
   try {
-    await navigator.clipboard.writeText(conf.value);
-    toast.ok("Конфиг скопирован");
+    await navigator.clipboard.writeText(text);
+    toast.ok(`${what} скопирован${what === "Ссылка" ? "а" : ""}`);
   } catch {
     toast.error("Браузер не дал скопировать — скачайте файл");
   }
@@ -136,10 +170,7 @@ function host(remote: string): string {
       <SegmentedControl
         v-model="view"
         label="Раздел"
-        :options="[
-          { value: 'conf', label: 'Подключение' },
-          { value: 'history', label: 'История' },
-        ]"
+        :options="tabs"
       />
 
       <p v-if="error" class="note bad">{{ error }}</p>
@@ -155,11 +186,32 @@ function host(remote: string): string {
           <div class="qr" v-html="qrSvg"></div>
           <div class="actions">
             <UiButton variant="primary" @click="download">Скачать {{ fileName }}</UiButton>
-            <UiButton @click="copy">Скопировать</UiButton>
+            <UiButton @click="copy(conf, 'Конфиг')">Скопировать</UiButton>
           </div>
           <details class="raw">
             <summary>Показать текст конфига</summary>
             <pre>{{ conf }}</pre>
+          </details>
+        </template>
+      </template>
+
+      <template v-else-if="view === 'vless'">
+        <p class="lead">
+          Отсканируйте код или вставьте ссылку в v2rayNG, Hiddify, v2rayN,
+          Streisand, FoXray или в приложение Detour. VLESS-Reality идёт по TCP и
+          выглядит как обычный HTTPS к сайту-маске — пригодится там, где UDP
+          режут. Ссылка даёт доступ в домашнюю сеть — не пересылайте её чужим.
+        </p>
+        <p v-if="loading" class="note">Готовлю ссылку…</p>
+        <template v-else-if="link">
+          <!-- SVG собирает qrcode-generator из наших же данных: только rect/path. -->
+          <div class="qr" v-html="linkQr"></div>
+          <div class="actions">
+            <UiButton variant="primary" @click="copy(link, 'Ссылка')">Скопировать ссылку</UiButton>
+          </div>
+          <details class="raw">
+            <summary>Показать ссылку</summary>
+            <pre>{{ link }}</pre>
           </details>
         </template>
       </template>

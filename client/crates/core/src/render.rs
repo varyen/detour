@@ -289,6 +289,9 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
         let out = if matches!(p.dpi, DpiRoute::Socks(_)) { "dpi" } else { "direct" };
         rules.push(json!({ "rule_set": ["dpi"], "outbound": out }));
     }
+    // Маршруты клиентов своего сервера встают отсюда: карта маршрутов и обход
+    // DPI главнее, как и у правил устройств роутера.
+    let server_at = rules.len();
 
     let mode = settings.routing_mode();
     let allvpn = settings.allvpn();
@@ -350,6 +353,18 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
         }
         ("direct", "local")
     };
+
+    server_client_rules(store, &mut b, &mut rules, server_at, final_out, p.awg_inline)?;
+    // Клиенты VLESS присылают имя, а не адрес: без резолва правила по подсетям
+    // («напрямую» для российских адресов и т. п.) их не видят, и сайт уходил в
+    // VPN или в цель клиента. Домен для доменных правил при этом сохраняется.
+    let srv_on = {
+        let srv = crate::server::load(store);
+        crate::server::SUPPORTED && srv.enabled && !srv.socks_pass.is_empty()
+    };
+    if srv_on {
+        rules.insert(1, json!({ "inbound": ["server-in"], "action": "resolve", "strategy": "ipv4_only" }));
+    }
 
     b.outbounds.push(json!({ "type": "direct", "tag": "direct" }));
 
@@ -426,7 +441,7 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
                 "tag": "server-in",
                 "listen": "127.0.0.1",
                 "listen_port": crate::server::SOCKS_PORT,
-                "users": [{ "username": crate::server::SOCKS_USER, "password": srv.socks_pass }],
+                "users": server_users(&srv.socks_pass),
             }));
         }
     }
@@ -487,6 +502,73 @@ fn torrent_rules(store: &Store, settings: &Settings, b: &mut Builder, rules: &mu
         m.extend(v.clone());
     }
     rules.push(sniffed);
+    Ok(())
+}
+
+/// Логины входа `server-in`: общий и `server-<октет>` на каждый адрес подсети,
+/// пароль один. Сразу все — иначе каждый новый клиент требовал бы пересборки
+/// и перезапуска движка.
+fn server_users(pass: &str) -> Vec<Value> {
+    let mut users = vec![json!({ "username": crate::server::SOCKS_USER, "password": pass })];
+    for octet in 2u8..=254 {
+        users.push(json!({ "username": crate::server::socks_user(octet), "password": pass }));
+    }
+    users
+}
+
+/// Маршрут клиента своего сервера — как правило устройства на роутере.
+/// «Мимо VPN» — всё напрямую; «через X» — каждое правило, ведущее в `proxy`,
+/// для этого клиента ведёт в X (и `final`, если он `proxy`): в режиме «по
+/// списку» несписочное у него, как у всех, идёт напрямую. Пропавшая цель —
+/// клиент идёт общим путём, через основной VPN.
+fn server_client_rules(store: &Store, b: &mut Builder, rules: &mut Vec<Value>, at: usize, final_out: &str, inline: bool) -> Result<()> {
+    let srv = crate::server::load(store);
+    if !crate::server::SUPPORTED || !srv.enabled || srv.socks_pass.is_empty() {
+        return Ok(());
+    }
+    let mut n = 0usize;
+    for cl in crate::server::clients(store).into_iter().filter(|c| c.enabled && !c.route.is_empty()) {
+        let who = |extra: Value| {
+            let mut r = json!({ "inbound": ["server-in"], "auth_user": [crate::server::socks_user(cl.octet)] });
+            if let (Some(m), Some(e)) = (r.as_object_mut(), extra.as_object()) {
+                m.extend(e.clone());
+            }
+            r
+        };
+        if cl.route == "direct" {
+            rules.insert(at, who(json!({ "outbound": "direct" })));
+            continue;
+        }
+        let Some(target) = cl.route.strip_prefix("vpn:") else { continue };
+        let hops = crate::torrent::target_hops(store, target);
+        if hops.is_empty() {
+            continue;
+        }
+        n += 1;
+        let base = format!("srv_{n}");
+        let last = hops.len();
+        for (i, h) in hops.iter().enumerate() {
+            let tag = if i + 1 == last { base.clone() } else { format!("{base}_{}", i + 1) };
+            let detour = (i > 0).then(|| format!("{base}_{i}"));
+            let hop = hop(store, h, &tag, detour.as_deref(), &mut b.awg, inline)?;
+            b.push(hop);
+        }
+        let mut out = Vec::with_capacity(rules.len() + 4);
+        for (i, r) in rules.drain(..).enumerate() {
+            if i >= at && r.get("outbound").and_then(Value::as_str) == Some("proxy") && r.get("auth_user").is_none() {
+                let mut copy = r.clone();
+                if let Some(m) = copy.as_object_mut() {
+                    m.insert("outbound".into(), json!(base));
+                }
+                out.push(who(copy));
+            }
+            out.push(r);
+        }
+        *rules = out;
+        if final_out == "proxy" {
+            rules.push(who(json!({ "outbound": base })));
+        }
+    }
     Ok(())
 }
 
@@ -672,6 +754,38 @@ mod tests {
             dns.iter().any(|x| x["rule_set"] == json!(["dpi-dns"]) && x["server"] == "local"),
             "домены обхода резолвятся мимо туннеля и при «всё, кроме исключений»"
         );
+    }
+
+    #[test]
+    fn server_client_route_direct_or_via_profile() {
+        let s = tmp_store("srvroute");
+        put_profile(&s, "main", json!({ "type": "trojan", "server": "vpn.example.com", "server_port": 443 }));
+        put_profile(&s, "alt", json!({ "type": "trojan", "server": "alt.example.com", "server_port": 443 }));
+        s.write_text(store::PROXY_DOMAINS, "example.org\n").unwrap();
+        let conf = crate::server::Conf { enabled: true, socks_pass: "pw".into(), net: "10.66.0".into(), ..Default::default() };
+        crate::server::save(&s, &conf).unwrap();
+        let mk = |octet: u8, route: &str| crate::server::Client {
+            id: format!("c{octet}"), enabled: true, name: "x".into(), octet, pubkey: String::new(), privkey: String::new(),
+            psk: String::new(), mode: "full".into(), created: 0, uuid: String::new(), route: route.into(),
+        };
+        crate::server::save_clients(&s, &[mk(2, "direct"), mk(3, "vpn:alt"), mk(4, "")]).unwrap();
+        let chain = vec!["main".to_owned()];
+        let r = render(&s, &Settings::default(), &params(&chain, s.root())).unwrap();
+        if !crate::server::SUPPORTED {
+            return;
+        }
+        let ins = r.config["inbounds"].as_array().unwrap();
+        let srv_in = ins.iter().find(|x| x["tag"] == "server-in").unwrap();
+        assert_eq!(srv_in["users"].as_array().unwrap().len(), 254, "общий логин + по адресу подсети");
+        let rules = r.config["route"]["rules"].as_array().unwrap();
+        let pos = |f: &dyn Fn(&Value) -> bool| rules.iter().position(|x| f(x));
+        let direct = pos(&|x| x["auth_user"] == json!(["server-2"]) && x["outbound"] == "direct").expect("мимо VPN");
+        let via = pos(&|x| x["auth_user"] == json!(["server-3"]) && x["outbound"] == "srv_1" && x["rule_set"] == json!(["proxy-domains"]))
+            .expect("списочное клиента — через alt");
+        let general = pos(&|x| x.get("auth_user").is_none() && x["rule_set"] == json!(["proxy-domains"])).unwrap();
+        assert!(direct < general && via < general);
+        assert!(!rules.iter().any(|x| x["auth_user"] == json!(["server-4"])), "без маршрута — общие правила");
+        assert!(r.config["outbounds"].as_array().unwrap().iter().any(|o| o["tag"] == "srv_1"));
     }
 
     #[test]

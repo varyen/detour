@@ -678,8 +678,10 @@ teardown_intercept() {
 # маршруты» роутера (их набор адресов → их порт), затем zapret, и только потом
 # решает за устройство. ACCEPT в nat — «больше ничего не перенаправлять».
 devices_down() {
-    local c
-    iptables -t nat -D PREROUTING -i br-lan -j $DEV_CHAIN 2>/dev/null
+    local c i
+    for i in br-lan $(vpn_redirect_ifaces); do
+        [ -n "$i" ] && iptables -t nat -D PREROUTING -i "$i" -j $DEV_CHAIN 2>/dev/null
+    done
     iptables -t nat -F $DEV_CHAIN 2>/dev/null
     for c in $(iptables -t nat -S 2>/dev/null | awk '$1 == "-N" && $2 ~ /^SINGBOX_DEV_[0-9]+$/ { print $2 }'); do
         iptables -t nat -F "$c"
@@ -733,10 +735,21 @@ devices_up() {
             open_port_lan "$port"
         fi
         iptables -t nat -A "$c" -j ACCEPT
-        iptables -t nat -A $DEV_CHAIN -m mac --mac-source "$mac" -j "$c" \
+        iptables -t nat -A $DEV_CHAIN $(device_match "$mac") -j "$c" \
             || logger -p daemon.err -t sing-box "правило устройства $mac не встало (нет xt_mac?)"
     done < "$DEV_MAP"
-    iptables -t nat -I PREROUTING 1 -i br-lan -j $DEV_CHAIN
+    # Клиенты своего VPN-сервера приходят на его интерфейсы (ключ — адрес).
+    for i in br-lan $(vpn_redirect_ifaces); do
+        [ -n "$i" ] && iptables -t nat -I PREROUTING 1 -i "$i" -j $DEV_CHAIN
+    done
+}
+
+# Ключ устройства: MAC (LAN) или IPv4-адрес клиента своего VPN-сервера.
+device_match() {
+    case "$1" in
+        *.*) echo "-s $1" ;;
+        *) echo "-m mac --mac-source $1" ;;
+    esac
 }
 
 # UDP устройств — в цепочке UDP_VPN сразу после целей маршрутов: «мимо VPN» —
@@ -747,7 +760,7 @@ udp_device_rules() {
     [ -s "$DEV_MAP" ] || return 0
     while read -r mac dmode port uport; do
         [ -n "$mac" ] || continue
-        m="-m mac --mac-source $mac"
+        m=$(device_match "$mac")
         if [ "$dmode" = direct ]; then
             iptables -t mangle -A "$UDP_VPN_CHAIN" $m -j RETURN
         elif [ -n "$uport" ] && [ "$uport" != 0 ]; then
@@ -770,7 +783,7 @@ udp_device_rules() {
 # MAC устройств «мимо VPN» — через запятую, для исключения из блокировки IPv6.
 direct_device_macs() {
     [ -s "$DEV_MAP" ] || return 0
-    awk '$2 == "direct" { printf "%s%s", (n++ ? ", " : ""), $1 }' "$DEV_MAP"
+    awk '$2 == "direct" && $1 ~ /:/ { printf "%s%s", (n++ ? ", " : ""), $1 }' "$DEV_MAP"
 }
 
 # ---- UDP через VPN (TPROXY) ----

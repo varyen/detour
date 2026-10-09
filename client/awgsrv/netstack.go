@@ -98,7 +98,7 @@ func (t *netTun) handleTCP(r *tcp.ForwarderRequest) {
 	id := r.ID()
 	dst := netip.AddrPortFrom(addrOf(id.LocalAddress), id.LocalPort)
 	debugf("tcp %s -> %s", addrOf(id.RemoteAddress), dst)
-	upstream, err := t.socks.DialTCP(dst.String())
+	upstream, err := t.socks.For(addrOf(id.RemoteAddress)).DialTCP(dst.String())
 	if err != nil {
 		r.Complete(true) // RST — клиент сразу узнает, что не вышло
 		return
@@ -128,7 +128,7 @@ func (t *netTun) handleUDP(r *udp.ForwarderRequest) {
 	local := gonet.NewUDPConn(t.stack, &wq, ep)
 	go func() {
 		defer local.Close()
-		assoc, err := t.socks.Associate()
+		assoc, err := t.socks.For(addrOf(id.RemoteAddress)).Associate()
 		if err != nil {
 			return
 		}

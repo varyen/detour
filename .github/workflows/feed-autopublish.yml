@@ -47,6 +47,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # detour-awg-go (userspace AmneziaWG) собирается из tools/awg-go при каждой
+      # пересборке каталога — иначе он выпал бы из индекса.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/awg-go/go.mod
+          cache-dependency-path: tools/awg-go/go.sum
+
       - name: Install Python dependencies
         run: python -m pip install --upgrade cryptography
 

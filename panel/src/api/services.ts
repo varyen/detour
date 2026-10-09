@@ -63,13 +63,15 @@ export const services = {
     }),
   serverClientSet: (
     id: string,
-    patch: { name?: string; mode?: ServerClientMode; enabled?: boolean },
-  ) => requestJson<{ ok: boolean }>("server_client_set", { body: { id, ...patch } }),
+    patch: { name?: string; mode?: ServerClientMode; enabled?: boolean; route?: string },
+  ) => requestJson<{ ok: boolean }>("server_client_set", { body: { id, ...patch }, timeoutMs: 120_000 }),
   serverClientDel: (id: string) =>
     requestJson<{ ok: boolean }>("server_client_del", { body: { id } }),
   /** Конфиг несёт приватный ключ клиента — только POST. */
   serverClientConf: (id: string) =>
     requestJson<{ ok: boolean; conf: string }>("server_client_conf", { body: { id } }),
+  serverClientLink: (id: string) =>
+    requestJson<{ ok: boolean; link: string }>("server_client_link", { body: { id } }),
   serverRegen: () =>
     requestJson<{ ok: boolean }>("server_regen", { method: "POST", timeoutMs: 120_000 }),
   serverSessions: (id?: string) =>

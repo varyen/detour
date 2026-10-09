@@ -1,9 +1,10 @@
 #!/bin/sh
 # Установка Detour на обычный Linux-сервер (Debian/Ubuntu и любой другой с
-# Docker): VPN-сервер AmneziaWG, клиенты которого выходят в интернет через
-# профили и цепочки Detour, с его маршрутами.
+# Docker): VPN-сервер (AmneziaWG и VLESS-Reality), клиенты которого выходят в
+# интернет через профили и цепочки Detour, с его маршрутами.
 #
-#   sh install.sh [--port 51820] [--endpoint <IP или домен>] [--panel-port 8080]
+#   sh install.sh [--port 51820] [--vless-port 443] [--endpoint <IP или домен>]
+#                 [--panel-port 8080]
 #                 [--panel-public] [--name detour] [--uninstall]
 #
 # Что делает:
@@ -23,6 +24,7 @@ set -eu
 
 NAME=detour
 PORT=51820
+VPORT=""
 PANEL_PORT=8080
 ENDPOINT=""
 PANEL_PUBLIC=0
@@ -32,6 +34,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 while [ $# -gt 0 ]; do
     case "$1" in
         --port) PORT=$2; shift 2 ;;
+        --vless-port) VPORT=$2; shift 2 ;;
         --endpoint) ENDPOINT=$2; shift 2 ;;
         --panel-port) PANEL_PORT=$2; shift 2 ;;
         --panel-public) PANEL_PUBLIC=1; shift ;;
@@ -65,7 +68,7 @@ esac
 
 say "Модули ядра для перехвата трафика"
 MODS="tun ip_set ip_set_hash_ip ip_set_hash_net xt_set xt_REDIRECT xt_TPROXY nft_tproxy
-xt_mark xt_multiport xt_recent xt_comment xt_conntrack nf_nat nft_chain_nat iptable_nat iptable_mangle"
+xt_mark xt_multiport xt_recent xt_comment xt_conntrack nf_nat nft_chain_nat iptable_nat iptable_mangle veth"
 missing=""
 for m in $MODS; do
     modprobe "$m" 2>/dev/null || missing="$missing $m"
@@ -77,7 +80,19 @@ if [ -z "$ENDPOINT" ]; then
     ENDPOINT=$(curl -fsS4 --max-time 8 https://api.ipify.org 2>/dev/null || true)
     [ -n "$ENDPOINT" ] || die "не удалось узнать внешний IP — укажите --endpoint"
 fi
-say "Внешний адрес для клиентов: $ENDPOINT:$PORT/udp"
+# VLESS-Reality лучше всего прячется на 443; занят на хосте — 8443.
+tcp_busy() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -Hltn "sport = :$1" 2>/dev/null | grep -q .
+    else
+        netstat -lnt 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" { f = 1 } END { exit !f }'
+    fi
+}
+if [ -z "$VPORT" ]; then
+    VPORT=443
+    tcp_busy 443 && VPORT=8443
+fi
+say "Внешний адрес для клиентов: $ENDPOINT — AmneziaWG $PORT/udp, VLESS $VPORT/tcp"
 
 say "Сборка образа (OpenWrt $OWRT + Detour + AmneziaWG) — несколько минут"
 docker build --build-arg OWRT="$OWRT" -t "$NAME-box" "$HERE"
@@ -93,8 +108,8 @@ say "Запуск контейнера $NAME"
 # ipset, iptables) — без него procd/fw4 не поднимутся. Сеть при этом своя.
 docker run -d --name "$NAME" --hostname "$NAME" --restart unless-stopped \
     --privileged --network "$NAME-net" \
-    -p "${PANEL_BIND}${PANEL_PORT}:80/tcp" -p "$PORT:$PORT/udp" \
-    -e DETOUR_SERVER_PORT="$PORT" -e DETOUR_ENDPOINT="$ENDPOINT" -e DETOUR_PANEL_WAN="$PANEL_PUBLIC" \
+    -p "${PANEL_BIND}${PANEL_PORT}:80/tcp" -p "$PORT:$PORT/udp" -p "$VPORT:$VPORT/tcp" \
+    -e DETOUR_SERVER_PORT="$PORT" -e DETOUR_VLESS_PORT="$VPORT" -e DETOUR_ENDPOINT="$ENDPOINT" -e DETOUR_PANEL_WAN="$PANEL_PUBLIC" \
     -v "$NAME-detour:/etc/detour" -v "$NAME-singbox:/etc/sing-box" -v "$NAME-config:/etc/config" \
     -v "$NAME-zapret:/etc/zapret-tpws" \
     "$NAME-box" >/dev/null
@@ -119,6 +134,6 @@ EOF
 cat <<EOF
   Дальше:   задайте пароль панели, добавьте профиль или подписку, затем
             «Сервисы → Свой VPN-сервер» — включить и завести клиентов.
-            Порт сервера уже совпадает с опубликованным ($PORT/udp).
+            Порты сервера уже совпадают с опубликованными ($PORT/udp, $VPORT/tcp).
   Удалить:  sh $0 --uninstall
 EOF

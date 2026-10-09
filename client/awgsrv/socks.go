@@ -16,6 +16,19 @@ import (
 // в golang.org/x/net/proxy.
 type Socks struct {
 	Addr, User, Pass string
+	// PerClient: логин «User-<октет>» — по нему движок узнаёт клиента и ведёт
+	// его своим маршрутом (auth_user), пароль общий.
+	PerClient bool
+}
+
+// For — тот же вход под логином клиента с адресом src.
+func (s *Socks) For(src netip.Addr) *Socks {
+	if !s.PerClient || !src.Is4() {
+		return s
+	}
+	c := *s
+	c.User = fmt.Sprintf("%s-%d", s.User, src.As4()[3])
+	return &c
 }
 
 func (s *Socks) handshake(c net.Conn, cmd byte, target string) (netip.AddrPort, error) {
