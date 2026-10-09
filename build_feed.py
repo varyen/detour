@@ -151,6 +151,7 @@ GO_TARGETS = {
     "mips":    ("mips", {"GOMIPS": "softfloat"}),
 }
 MIHOMO_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "mihomo")
+AWGGO_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "amneziawg-go")
 
 # Upstream source repos for --fetch-upstream (CI auto-publish needs no
 # router-backup). sing-box ships the binary in a per-libc tarball; zapret/zapret2
@@ -265,6 +266,13 @@ _AWGGO_PRERM = """#!/bin/sh
 set +e
 exit 0
 """
+# Keenetic: своего VPN-сервера там пока нет — пакет только кладёт бинарник
+# (для живых тестов на устройстве и будущего detour-server).
+_AWGGO_POSTINST_MIPSEL = """#!/bin/sh
+set +e
+chmod 0755 /opt/bin/amneziawg-go 2>/dev/null
+exit 0
+"""
 _MIHOMO_DESC = ("mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar "
                 "for AmneziaWG profiles (sing-box has no AmneziaWG).")
 
@@ -372,6 +380,13 @@ PKG_SPECS_MIPSEL = {
         "postinst": _MIHOMO_POSTINST_MIPSEL,
         "prerm": _MIHOMO_PRERM_MIPSEL,
         "description": _MIHOMO_DESC + " Keenetic/Entware (mipsel soft-float).",
+    },
+    "detour-awg-go": {
+        "files": [(AWGGO_BINARY_MIPSEL, "opt/bin/amneziawg-go", 0o755)],
+        "postinst": _AWGGO_POSTINST_MIPSEL,
+        "prerm": _AWGGO_PRERM,
+        "description": ("Userspace AmneziaWG (amneziawg-go + awg subset) for the Detour "
+                        "VPN server. Keenetic/Entware (mipsel soft-float)."),
     },
 }
 
@@ -1170,13 +1185,12 @@ def build_arch(arch, args, sb_ver, tpws_ver, nfqws2_ver, mihomo_ver=None):
 
     awggo_ver = getattr(args, "awg_go_version", None)
     if awggo_ver:
-        # Keenetic — свой VPN-сервер там не поддерживается, пакет не нужен.
         if arch == "mipsel":
-            print("  [mipsel] detour-awg-go пропущен — на Keenetic сервер недоступен")
+            build_awggo("mipsel", AWGGO_BINARY_MIPSEL)
         else:
             build_awggo(cpu if is_apk else "aarch64",
                         apk_bin_path(cpu, "amneziawg-go") if is_apk else AWGGO_BINARY)
-            build_versions["detour-awg-go"] = f"{awggo_ver}-{args.revision}"
+        build_versions["detour-awg-go"] = f"{awggo_ver}-{args.revision}"
 
     if not build_versions and not os.path.isdir(FEED_OUT):
         die(f"nothing to build for {arch}: pass --version / --tpws-version / "

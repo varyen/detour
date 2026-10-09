@@ -221,12 +221,13 @@ def main():
     # пересобираем ту же версию, иначе каталог, собранный с нуля, его потерял бы.
     awg_a = ["--awg-go-version", feed["detour-awg-go"]] if feed.get("detour-awg-go") else []
     awg_apk = ["--awg-go-version", apkfeed["detour-awg-go"]] if apkfeed.get("detour-awg-go") else []
+    awg_m = ["--awg-go-version", mips["detour-awg-go"]] if mips.get("detour-awg-go") else []
     if aarch64_changed:
         runs.append(["--fetch-upstream", "--version", sb_t,
                      "--tpws-version", tpws_t, "--nfqws2-version", nfq_t, *awg_a])
     if mips_changed:
         runs.append(["--arch", "mipsel", "--fetch-upstream",
-                     "--version", sb_t, "--tpws-version", tpws_t])
+                     "--version", sb_t, "--tpws-version", tpws_t, *awg_m])
     if apk_changed:
         # Все шесть CPU-семейств одной командой: build_feed сам скачает бинарники
         # каждой платформы из релизного тарбола zapret/zapret2 и опубликует их
