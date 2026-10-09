@@ -183,7 +183,16 @@ vless_reason() {
     # Reality-сервер sing-box 1.13.x отвергает всех клиентов («processed
     # invalid connection», проверено и на upstream 1.13.21), 1.14 — работает.
     # Родной фид OpenWrt 25.12 пока даёт 1.13.x.
-    v=$("$sb" version 2>/dev/null | sed -n '1s/.*version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+    # Запуск sing-box ради версии на MT7621 — секунды, а status зовёт это на
+    # каждый опрос панели: кэш по пути и времени изменения бинарника.
+    vc="$RUN/detour-server.sbver"
+    key="$sb $(date -r "$sb" +%s 2>/dev/null)"
+    v=""
+    [ -f "$vc" ] && [ "$(sed -n 1p "$vc")" = "$key" ] && v=$(sed -n 2p "$vc")
+    if [ -z "$v" ]; then
+        v=$("$sb" version 2>/dev/null | sed -n '1s/.*version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+        [ -n "$v" ] && mkdir -p "$RUN" && printf '%s\n%s\n' "$key" "$v" > "$vc"
+    fi
     set -- $v
     if [ -n "$2" ] && [ "$1" -eq 1 ] && [ "$2" -lt 14 ]; then
         echo "Для VLESS-Reality нужен sing-box 1.14 или новее, здесь $1.$2"
@@ -435,9 +444,18 @@ lan_cidr() {
 }
 
 wan_ip() {
+    [ -n "$WAN_IP_C" ] && { printf '%s' "$WAN_IP_C"; return; }
     _ip=$([ -x "$WANPIN_BIN" ] && "$WANPIN_BIN" public-ip 2>/dev/null)
     case "$_ip" in ''|*[!0-9.]*) _ip="" ;; esac
     [ -n "$_ip" ] || _ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -1)
+    # Маршрут в интернет бывает через серый интерфейс, а белый адрес — на
+    # другом (у российских провайдеров IPoE 100.64/10 + PPPoE с белым IP на
+    # Keenetic): тогда клиентам нужен белый.
+    if [ -z "$_ip" ] || ip_private "$_ip"; then
+        for _a in $(ip -4 -o addr show 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4 }'); do
+            ip_private "$_a" || { _ip=$_a; break; }
+        done
+    fi
     printf '%s' "$_ip"
 }
 
@@ -1342,6 +1360,7 @@ status_json() {
     vrun=false; vless_running && vrun=true
     running=false; { [ "$arun" = true ] || [ "$vrun" = true ]; } && running=true
     wip=$(wan_ip)
+    WAN_IP_C=$wip
     wpriv=false; [ -n "$wip" ] && ip_private "$wip" && wpriv=true
     dom=$(panel_domain)
     redir=false; redirect_has_iface && redir=true
