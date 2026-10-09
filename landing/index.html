@@ -259,16 +259,17 @@ footer .logo svg{width:20px;height:20px}
   </div>
   <div class="wrap"><div class="in">
     <h1>Обход блокировок — для всей сети или одного устройства</h1>
-    <p class="lead">Detour — одна панель над двумя движками: прокси sing-box и DPI-обход zapret. На роутере она работает для всего дома — телевизору и консоли ничего ставить не нужно. Приложение для Windows, macOS и Android делает то же самое на самом устройстве, где бы вы ни были. А свой VPN-сервер пускает телефон домой из любой сети.</p>
+    <p class="lead">Detour — одна панель над двумя движками: прокси sing-box и DPI-обход zapret. На роутере она работает для всего дома — телевизору и консоли ничего ставить не нужно. Приложение для Windows, macOS и Android делает то же самое на самом устройстве, где бы вы ни были. А свой VPN-сервер пускает телефон домой из любой сети — с приложением-спутником Detour Home Auto VPN до дома включается сам, как только вы ушли из домашней Wi-Fi.</p>
     <div class="cta">
       <a class="btn btn-p" href="#get">Скачать приложение</a>
       <a class="btn" href="#router">Поставить на роутер</a>
     </div>
     <dl class="spec">
-      <dt>версия</dt><dd>2.8.5 · MIT · открытый код</dd>
+      <dt>версия</dt><dd>2.8.7 · MIT · открытый код</dd>
       <dt>приложение</dt><dd>Windows · macOS · Android</dd>
       <dt>роутер</dt><dd>OpenWrt / GL.iNet · OpenWrt 25.12+ · Keenetic</dd>
-      <dt>сервер</dt><dd>Linux VPS (Docker) · AmneziaWG · VLESS-Reality</dd>
+      <dt>сервер</dt><dd>роутер · Linux VPS (Docker) · ПК · AmneziaWG · VLESS-Reality</dd>
+      <dt>телефон</dt><dd>Detour Home Auto — VPN до дома вне домашней Wi-Fi</dd>
       <dt>протоколы</dt><dd>VLESS (Reality, xhttp) · Trojan · VMess · Shadowsocks · WireGuard · AmneziaWG · Hysteria2 · TUIC · AnyTLS · SOCKS/HTTP</dd>
     </dl>
   </div></div>
@@ -302,7 +303,7 @@ footer .logo svg{width:20px;height:20px}
         <li>Телевизор, консоль, колонка — всё, куда VPN-клиент не поставить</li>
         <li>Гости подключаются к Wi-Fi, и всё просто работает</li>
         <li>Уведомление на телефон, если VPN упал, и автопереключение на живой сервер</li>
-        <li>Свой VPN-сервер: телефон вне дома ходит через домашний роутер и его правила</li>
+        <li>Свой VPN-сервер: телефон вне дома ходит через домашний роутер и его правила, а Detour Home Auto включает этот VPN сам</li>
         <li>Публикация домашних сервисов наружу с сертификатом Let's Encrypt</li>
       </ul>
       <div class="go"><a class="btn" href="#router">OpenWrt / GL.iNet, Keenetic →</a></div>
@@ -419,7 +420,7 @@ footer .logo svg{width:20px;height:20px}
   <div class="row"><div class="txt"><span class="tag r">только роутер</span><h3>Пустить в дом: публикация сервисов наружу</h3><p>Обратная задача — зайти домой снаружи. Панель выпускает сертификат Let's Encrypt для вашего домена, в том числе wildcard, и публикует сервис: по имени, по порту или пробросом.</p></div>
     <div class="pair"><figure><img src="img/portmap.webp?v=20260907" width="1560" height="900" loading="lazy" alt="Проброс сервисов"><figcaption>проброс сервисов</figcaption></figure><figure><img src="img/cert.webp?v=20260907" width="1560" height="900" loading="lazy" alt="Сертификат Let's Encrypt"><figcaption>сертификат</figcaption></figure></div></div>
 
-  <div class="row"><div class="txt"><span class="tag">роутер · Keenetic · Linux-сервер · Windows · macOS</span><h3>Свой VPN-сервер</h3><p>Завели клиента — отдали ему конфиг AmneziaWG и ссылку VLESS-Reality по QR: подойдут AmneziaVPN, v2rayNG, Hiddify, Streisand или само приложение Detour. У каждого клиента свой ключ, режим «весь трафик» или «только домашняя сеть» и свой маршрут: по общим правилам, мимо VPN или через выбранный профиль. Видно, кто в сети, скорость, трафик за день и месяц, история подключений.</p><p>Сервер переживает «Полную остановку» и обновление панели: выключая Detour через этот же VPN, доступ к дому не потерять.</p></div>
+  <div class="row"><div class="txt"><span class="tag">роутер · Keenetic · Linux-сервер · Windows · macOS</span><h3>Свой VPN-сервер</h3><p>Завели клиента — отдали ему конфиг AmneziaWG и ссылку VLESS-Reality по QR: подойдут Detour Home Auto, AmneziaVPN, v2rayNG, Hiddify, Streisand или само приложение Detour. У каждого клиента свой ключ, режим «весь трафик» или «только домашняя сеть» и свой маршрут: по общим правилам, мимо VPN или через выбранный профиль. Видно, кто в сети, скорость, трафик за день и месяц, история подключений; журналы сервера и входа VLESS — в «Журнале».</p><p>На Keenetic сервер работает на встроенном WireGuard KeeneticOS — до скорости канала. Объём трафика по клиентам там не виден: ускорение KeeneticOS проводит его мимо любых счётчиков. VLESS-Reality на Keenetic — только если ядро прошивки это позволяет.</p><p>Сервер переживает «Полную остановку» и обновление панели: выключая Detour через этот же VPN, доступ к дому не потерять.</p></div>
     <figure><div class="mock" role="img" aria-label="Иллюстрация: карточка клиента своего VPN-сервера">
       <div class="hd"><b>Телефон</b><span class="on">в сети · 1 ч 12 мин</span></div>
       <dl>
@@ -487,15 +488,16 @@ footer .logo svg{width:20px;height:20px}
     </div>
   </div>
   <p class="fine">Сборки не подписаны сертификатами Microsoft и Apple — отсюда предупреждения при первом запуске. Подлинность файла проверяется подписью <code>.sig</code>, которая лежит рядом в <a href="https://github.com/varyen/detour/releases/tag/v2.7.0">релизе на GitHub</a>; открытый ключ — <code>keys/release.usign.pub</code> в репозитории. Версии для iOS пока нет.</p>
+  <p class="bridge"><b>Нужен только VPN до дома на телефоне?</b> <a href="https://github.com/varyen/detour-home-auto/releases/latest">Detour Home Auto</a> — отдельное приложение для Android: само выключает VPN в домашней Wi-Fi и включает в остальных сетях, профиль — QR-код клиента из панели. Подробнее — в <a href="#mob">листе «Телефон»</a>.</p>
 </section>
 
 <section class="sheet inst" id="router" data-sheet="ЛИСТ 6 — РОУТЕР">
   <h2>На роутер или VPS: один пакет, дальше всё само</h2>
   <p>Пакет ставит панель, прописывает фид проекта и сам подтягивает движки sing-box и tpws. Выберите файл под свою прошивку. На обычном Linux-сервере тот же пакет работает в контейнере с настоящим OpenWrt.</p>
   <div class="plat">
-    <div><h3>OpenWrt / GL.iNet</h3><p>OpenWrt до 24.10 и прошивки GL.iNet — пакет <code>detour_2.8.5_all.ipk</code>. Референс — GL-BE9300 (Flint 3), проверялось на GL-MT6000 (Flint 2).</p></div>
-    <div><h3>OpenWrt 25.12+</h3><p>Там вместо opkg пакетный менеджер apk — пакет <code>detour_2.8.5_noarch.apk</code>. Движки обхода DPI собраны под шесть семейств процессоров.</p></div>
-    <div><h3>Keenetic / Entware</h3><p>Пакет <code>detour-keenetic_2.8.5_all.ipk</code>. Нет nftables и NFQUEUE — часть механик сделана иначе, часть возможностей на живом устройстве ещё не проверена. Свой VPN-сервер — на встроенном WireGuard KeeneticOS (компонент «WireGuard VPN»).</p></div>
+    <div><h3>OpenWrt / GL.iNet</h3><p>OpenWrt до 24.10 и прошивки GL.iNet — пакет <code>detour_2.8.7_all.ipk</code>. Референс — GL-BE9300 (Flint 3), проверялось на GL-MT6000 (Flint 2).</p></div>
+    <div><h3>OpenWrt 25.12+</h3><p>Там вместо opkg пакетный менеджер apk — пакет <code>detour_2.8.7_noarch.apk</code>. Движки обхода DPI собраны под шесть семейств процессоров.</p></div>
+    <div><h3>Keenetic / Entware</h3><p>Пакет <code>detour-keenetic_2.8.7_all.ipk</code>. Нет nftables и NFQUEUE — часть механик сделана иначе, часть возможностей на живом устройстве ещё не проверена. Свой VPN-сервер — на встроенном WireGuard KeeneticOS (компонент «WireGuard VPN»), проверен на Keenetic Ultra; VLESS — где ядро прошивки позволяет.</p></div>
     <div><h3>Linux-сервер</h3><p>Любой VPS с Docker, x86_64 или arm64: <code>install.sh</code> собирает образ с OpenWrt 25.12 и Detour и публикует порты VPN-сервера. Файрвол хоста не трогается, панель — через SSH-туннель.</p></div>
   </div>
   <div class="steps">
@@ -504,14 +506,14 @@ footer .logo svg{width:20px;height:20px}
     <div><h3>Открыть панель</h3><p>http://192.168.8.1:8080/detour/ (адрес вашего роутера), придумать логин и пароль. Дальше всё мышкой, обновления — кнопкой в шапке.</p></div>
   </div>
 <pre><b># OpenWrt / GL.iNet (opkg)</b>
-scp detour_2.8.5_all.ipk root@192.168.8.1:/tmp/
-ssh root@192.168.8.1 'opkg install /tmp/detour_2.8.5_all.ipk'
+scp detour_2.8.7_all.ipk root@192.168.8.1:/tmp/
+ssh root@192.168.8.1 'opkg install /tmp/detour_2.8.7_all.ipk'
 
 <b># OpenWrt 25.12+ (apk)</b>
-apk add --allow-untrusted /tmp/detour_2.8.5_noarch.apk
+apk add --allow-untrusted /tmp/detour_2.8.7_noarch.apk
 
 <b># Keenetic / Entware (Entware смонтирован в /opt)</b>
-opkg install /tmp/detour-keenetic_2.8.5_all.ipk
+opkg install /tmp/detour-keenetic_2.8.7_all.ipk
 
 <b># Linux-сервер (Docker, root)</b>
 git clone https://github.com/varyen/detour
