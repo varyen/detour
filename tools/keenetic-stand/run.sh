@@ -56,3 +56,5 @@ grep '^raw' /opt/var/run/detour-server.fw
 rm -f /opt/var/run/detour-server.raw
 t0=$(date +%s); $S status | python3 -c 'import json,sys; d=json.load(sys.stdin)["vless"]; print(d["supported"], d["reason"])'
 echo "за $(( $(date +%s) - t0 )) с; повторно (из кэша):"; t0=$(date +%s); $S status >/dev/null; echo "$(( $(date +%s) - t0 )) с"
+echo "== сторож не оставляет сирот-sleep"
+sleep 11; before=$(pgrep -x sleep | wc -l); $S fw; sleep 1; echo "sleep до: $before, после fw: $(pgrep -x sleep | wc -l) (ожидаю равно)"

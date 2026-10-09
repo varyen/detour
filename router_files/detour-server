@@ -116,8 +116,28 @@ SESS_KEEP=500
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
 # Keenetic: iptables из Entware на ядре 4.9-ndm умеет зависнуть навсегда с
-# 100% CPU (замечено на KN-1810 на правиле в raw) — и держать за собой
+# 100% CPU (на KN-1810 — любой вызов к таблице raw) — и держать за собой
 # CGI, cron и postinst вместе с замком opkg. Каждый вызов — со сторожем.
+
+# run_limited <сек> <команда>… — код команды; зависшая снимается kill -9 (код 137).
+run_limited() {
+    _rl=$1; shift
+    "$@" &
+    _ip=$!
+    # Сторож гасит и свой sleep, иначе на каждый вызов оставался бы сирота;
+    # вывод — мимо stdout, иначе висящий sleep держал бы ответ CGI.
+    (
+        trap 'kill "$_s" 2>/dev/null; exit 0' TERM
+        sleep "$_rl" & _s=$!
+        wait "$_s" && kill -9 "$_ip" 2>/dev/null
+    ) </dev/null >/dev/null 2>&1 &
+    _iw=$!
+    wait "$_ip"
+    _irc=$?
+    kill "$_iw" 2>/dev/null
+    return "$_irc"
+}
+
 if [ "$KEENETIC" = 1 ]; then
     iptables() {
         if [ "$1" = -t ] && [ "$2" = raw ]; then
@@ -126,15 +146,16 @@ if [ "$KEENETIC" = 1 ]; then
         else
             _ib=$IPT_BIN
         fi
-        "$_ib" "$@" &
-        _ip=$!
-        # Вывод сторожа — мимо stdout: иначе висящий sleep держал бы ответ CGI.
-        ( sleep "${IPT_LIMIT:-10}"; kill -9 "$_ip" 2>/dev/null && log "iptables $* завис — снят через ${IPT_LIMIT:-10} с" ) \
-            </dev/null >/dev/null 2>&1 &
-        _iw=$!
-        wait "$_ip"
+        # NDM перестраивает таблицы параллельно с хуком: без -w вызов в этот
+        # момент сразу падает «xtables lock», и правило молча не встаёт.
+        [ -n "$IPT_W" ] || { "$IPT_BIN" --help 2>&1 | grep -q -- '--wait' && IPT_W=-w || IPT_W=none; }
+        if [ "$IPT_W" = -w ] && [ "$_ib" = "$IPT_BIN" ]; then
+            run_limited 10 "$_ib" -w "$@"
+        else
+            run_limited 10 "$_ib" "$@"
+        fi
         _irc=$?
-        kill "$_iw" 2>/dev/null
+        [ "$_irc" = 137 ] && log "iptables $* завис — снят через 10 с"
         return "$_irc"
     }
 fi
@@ -151,8 +172,7 @@ raw_ok() {
             RAW_STATE=bad
             for b in "$IPT_BIN" /usr/sbin/iptables; do
                 [ -x "$b" ] || continue
-                RAW_IPT=$b
-                if IPT_LIMIT=5 _raw_probe; then RAW_STATE=$b; break; fi
+                if run_limited 5 "$b" -t raw -S OUTPUT >/dev/null 2>&1; then RAW_STATE=$b; break; fi
             done
             [ "$RAW_STATE" = bad ] && log "таблица raw не отвечает ни в одном iptables — VLESS недоступен"
             mkdir -p "$RUN" && printf '%s\n%s\n' "$boot" "$RAW_STATE" > "$f"
@@ -160,17 +180,6 @@ raw_ok() {
     fi
     [ "$RAW_STATE" = bad ] && return 1
     RAW_IPT=$RAW_STATE
-}
-
-_raw_probe() {
-    "$RAW_IPT" -t raw -S OUTPUT >/dev/null 2>&1 &
-    _ip=$!
-    ( sleep "$IPT_LIMIT"; kill -9 "$_ip" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
-    _iw=$!
-    wait "$_ip"
-    _irc=$?
-    kill "$_iw" 2>/dev/null
-    return "$_irc"
 }
 
 # Снять iptables, которые висят дольше минуты (остались от прошлых версий или
@@ -812,6 +821,12 @@ ndm_dump() {
             for _, v in pairs(o) do if iskey(v) then return v end end
         end
         local function ep(o)
+            -- KeeneticOS: remote-endpoint-address + remote-port (0.0.0.0 — пира не было).
+            local ra = o["remote-endpoint-address"]
+            if type(ra) == "string" and ra ~= "" and ra ~= "0.0.0.0" then
+                local rp = tonumber(o["remote-port"]) or 0
+                return ra .. (rp > 0 and (":" .. rp) or "")
+            end
             local e = o.endpoint or o.remote
             if type(e) == "table" then
                 local a = e.address or e.ip or e.host

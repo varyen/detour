@@ -27,7 +27,8 @@ def run(cmd):
         i = IFS.get(w[2])
         if not i:
             return err('unable to find "%s"' % w[2])
-        peers = [{"public-key": k, "endpoint": {"address": "203.0.113.7", "port": 40000},
+        # Поля пира — как у KeeneticOS 5.1.7 (`show interface WireguardN`).
+        peers = [{"public-key": k, "remote-endpoint-address": "203.0.113.7", "remote-port": 40000,
                   "rxbytes": 1000 * (n + 1), "txbytes": 5000 * (n + 1), "last-handshake": 12, "online": True}
                  for n, k in enumerate(i["peers"])]
         return {"id": w[2], "state": "up" if i["up"] else "down", "wireguard": {"public-key": i.get("key", ""),
