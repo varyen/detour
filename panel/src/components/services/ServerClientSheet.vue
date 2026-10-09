@@ -21,6 +21,8 @@ const props = defineProps<{
   /** Какие входы сейчас включены на сервере — вкладки только для них. */
   awg: boolean;
   vless: boolean;
+  /** false — объём трафика клиента роутер не видит (встроенный WireGuard KeeneticOS). */
+  traffic?: boolean;
 }>();
 const emit = defineEmits<{ close: [] }>();
 const toast = useToastStore();
@@ -229,7 +231,7 @@ function host(remote: string): string {
               <span class="dim">{{ fmtDuration(Math.max(0, s.end - s.start)) }}</span>
             </div>
             <div class="s-meta">
-              <span>↓ {{ fmtBytes(s.tx) }} · ↑ {{ fmtBytes(s.rx) }}</span>
+              <span v-if="props.traffic !== false">↓ {{ fmtBytes(s.tx) }} · ↑ {{ fmtBytes(s.rx) }}</span>
               <span v-if="s.remote" class="mono">{{ host(s.remote) }}</span>
             </div>
           </li>

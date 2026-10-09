@@ -523,6 +523,11 @@ function hint(c: ServerClient): string {
             можно отключить или удалить, не трогая остальных.
           </p>
 
+          <p v-if="clients.length && st.awg_traffic === false" class="note faint">
+            Объём и скорость по клиентам здесь не видны: KeeneticOS ускоряет трафик встроенного
+            WireGuard мимо всех счётчиков. Онлайн, адрес и время подключения — точные.
+          </p>
+
           <div v-for="c in clients" :key="c.id" class="client" :class="{ live: c.online }">
             <SwitchToggle
               :model-value="c.enabled"
@@ -532,11 +537,13 @@ function hint(c: ServerClient): string {
               @update:model-value="toggleClient(c, $event)"
             />
             <div v-if="c.online" class="speed">
-              <span>↓ {{ fmtBitrate(speed[c.id]?.down ?? 0) }}</span>
-              <span>↑ {{ fmtBitrate(speed[c.id]?.up ?? 0) }}</span>
+              <template v-if="st.awg_traffic !== false">
+                <span>↓ {{ fmtBitrate(speed[c.id]?.down ?? 0) }}</span>
+                <span>↑ {{ fmtBitrate(speed[c.id]?.up ?? 0) }}</span>
+              </template>
               <span v-if="c.remote" class="mono">{{ c.remote.replace(/:\d+$/, "") }}</span>
             </div>
-            <dl class="traffic">
+            <dl v-if="st.awg_traffic !== false" class="traffic">
               <div v-if="c.online">
                 <dt>сессия</dt>
                 <dd>↓ {{ fmtBytes(c.session_tx) }} · ↑ {{ fmtBytes(c.session_rx) }}</dd>
@@ -675,6 +682,7 @@ function hint(c: ServerClient): string {
     :tab="sheet.tab"
     :awg="awgOn"
     :vless="vlessOn"
+    :traffic="st?.awg_traffic"
     @close="sheet.open = false"
   />
 </template>

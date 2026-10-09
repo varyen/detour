@@ -401,6 +401,8 @@ export interface ServerStatus {
   reason?: string;
   /** Подсказка о бэкенде (Keenetic: userspace медленнее встроенного WireGuard). */
   note?: string;
+  /** false — объём и скорость AWG-клиентов роутер не видит (встроенный WireGuard KeeneticOS с ускорением). */
+  awg_traffic?: boolean;
   installed: boolean;
   can_install: boolean;
   configured: boolean;

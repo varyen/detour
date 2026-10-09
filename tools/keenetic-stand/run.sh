@@ -58,3 +58,4 @@ t0=$(date +%s); $S status | python3 -c 'import json,sys; d=json.load(sys.stdin)[
 echo "за $(( $(date +%s) - t0 )) с; повторно (из кэша):"; t0=$(date +%s); $S status >/dev/null; echo "$(( $(date +%s) - t0 )) с"
 echo "== сторож не оставляет сирот-sleep"
 sleep 11; before=$(pgrep -x sleep | wc -l); $S fw; sleep 1; echo "sleep до: $before, после fw: $(pgrep -x sleep | wc -l) (ожидаю равно)"
+echo "== объём по AWG-клиентам на встроенном WG недоступен"; rm -f /tmp/no-wg; $S set enabled=1 >/dev/null; $S status | j backend awg_traffic

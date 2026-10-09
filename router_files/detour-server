@@ -1469,6 +1469,12 @@ status_json() {
         "$([ "$KEENETIC" = 1 ] && echo keenetic || echo openwrt)" "$supported" "$(json_esc "$reason")" "$installed" "$can_install" \
         "$([ "$installed" = true ] && backend)"
     printf '"note":"%s",' "$(json_esc "$note")"
+    # Встроенный WireGuard KeeneticOS с ускорением (PPE) гонит потоки TCP/UDP
+    # мимо счётчиков пира, интерфейса и даже netfilter (проверено на KN-1810):
+    # видны только рукопожатия, keepalive и ICMP. Объём по клиенту не считаем.
+    awg_traffic=true
+    [ "$installed" = true ] && [ "$(backend)" = ndm ] && awg_traffic=false
+    printf '"awg_traffic":%s,' "$awg_traffic"
     printf '"configured":%s,"enabled":%s,"running":%s,"routed":%s,"awg_enabled":%s,"awg_running":%s,' \
         "$({ [ -n "$PRIVKEY" ] || [ -n "$VPRIV" ]; } && echo true || echo false)" "$([ "$ENABLED" = 1 ] && echo true || echo false)" \
         "$running" "$redir" "$([ "$AWG" = 1 ] && echo true || echo false)" "$arun"
