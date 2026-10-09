@@ -1481,10 +1481,13 @@ cmd_apply() {
     ipk="$tmp/${PACKAGE_NAME}_${newver}_${ARCH}.${PKG_EXT}"
     sig="$ipk.sig"
     log "downloading $ipk_url ..."
-    gh_curl_retry -fsSL --max-time 600 \
+    # Пакет меньше мегабайта: 180 с с запасом. Keenetic — только IPv4: загрузка
+    # с GitHub там виснет на IPv6 (как и фид, см. feed_curl_v4), а 600 с × 4
+    # попытки держали панель в «устанавливается» до 40 минут.
+    gh_curl_retry $(feed_curl_v4) -fsSL --max-time 180 \
         -H "Accept: application/octet-stream" \
         -o "$ipk" "$ipk_url" || { rm -rf "$tmp"; die "package download failed"; }
-    gh_curl_retry -fsSL --max-time 60 \
+    gh_curl_retry $(feed_curl_v4) -fsSL --max-time 60 \
         -H "Accept: application/octet-stream" \
         -o "$sig" "$sig_url" || { rm -rf "$tmp"; die "sig download failed"; }
 

@@ -34,3 +34,25 @@ tail -5 /opt/var/log/detour-server.log
 echo "== fw после «перестройки NDM»"; iptables -F INPUT; iptables -t nat -F POSTROUTING; $S fw; iptables -S INPUT | head -5
 echo "== stop"; $S set enabled=0; $S status | j enabled running; ip link show nwg7 2>&1 | head -1; iptables -S INPUT | grep -c ACCEPT
 echo "== без компонента (userspace нет) "; touch /tmp/no-wg; $S status | j supported installed backend reason note can_install
+echo "== iptables виснет на raw (как Entware на 4.9-ndm)"
+REAL=$(command -v iptables)
+cat > /opt/sbin/iptables <<SPIN
+#!/bin/sh
+[ "\$1 \$2" = "-t raw" ] && while :; do :; done
+exec $REAL "\$@"
+SPIN
+chmod +x /opt/sbin/iptables
+rm -f /opt/var/run/detour-server.raw
+t0=$(date +%s); $S set enabled=1; $S set vless=1 >/dev/null; $S status | python3 -c 'import json,sys; d=json.load(sys.stdin)["vless"]; print(d["supported"], d["reason"])'
+echo "за $(( $(date +%s) - t0 )) с (ожидаю < 30); висящих: $(pgrep -f 'opt/sbin/iptables' | wc -l)"
+grep -E "raw|завис" /opt/var/log/detour-server.log | tail -3
+echo "== снятие зависшего iptables (ждём 62 с)"
+/opt/sbin/iptables -t raw -S >/dev/null 2>&1 &
+sleep 62; $S fw; sleep 1
+echo "висящих после fw: $(pgrep -f 'opt/sbin/iptables' | wc -l)"; grep "снят зависший" /opt/var/log/detour-server.log | tail -1
+echo "== raw не отвечает нигде: VLESS недоступен с причиной"
+grep '^raw' /opt/var/run/detour-server.fw
+[ -e /usr/sbin/iptables ] && mv /usr/sbin/iptables /usr/sbin/iptables.off
+rm -f /opt/var/run/detour-server.raw
+t0=$(date +%s); $S status | python3 -c 'import json,sys; d=json.load(sys.stdin)["vless"]; print(d["supported"], d["reason"])'
+echo "за $(( $(date +%s) - t0 )) с; повторно (из кэша):"; t0=$(date +%s); $S status >/dev/null; echo "$(( $(date +%s) - t0 )) с"

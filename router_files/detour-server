@@ -73,6 +73,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     RCI=http://localhost:79/rci/
     KIP=/opt/sbin/ip
     HOOK=/opt/etc/ndm/netfilter.d/50-detour.sh
+    IPT_BIN=$(command -v iptables)
 else
     KEENETIC=0
     DIR=/etc/detour/server
@@ -113,6 +114,78 @@ FLUSH_MIN=30
 SESS_KEEP=500
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+# Keenetic: iptables из Entware на ядре 4.9-ndm умеет зависнуть навсегда с
+# 100% CPU (замечено на KN-1810 на правиле в raw) — и держать за собой
+# CGI, cron и postinst вместе с замком opkg. Каждый вызов — со сторожем.
+if [ "$KEENETIC" = 1 ]; then
+    iptables() {
+        if [ "$1" = -t ] && [ "$2" = raw ]; then
+            raw_ok || return 1
+            _ib=$RAW_IPT
+        else
+            _ib=$IPT_BIN
+        fi
+        "$_ib" "$@" &
+        _ip=$!
+        # Вывод сторожа — мимо stdout: иначе висящий sleep держал бы ответ CGI.
+        ( sleep "${IPT_LIMIT:-10}"; kill -9 "$_ip" 2>/dev/null && log "iptables $* завис — снят через ${IPT_LIMIT:-10} с" ) \
+            </dev/null >/dev/null 2>&1 &
+        _iw=$!
+        wait "$_ip"
+        _irc=$?
+        kill "$_iw" 2>/dev/null
+        return "$_irc"
+    }
+fi
+
+# Отвечает ли таблица raw (на неё опирается NOTRACK входа VLESS). Проба — раз
+# за загрузку: сначала iptables Entware, затем системный NDM.
+raw_ok() {
+    [ "$KEENETIC" = 1 ] || return 0
+    if [ -z "$RAW_STATE" ]; then
+        f="$RUN/detour-server.raw"
+        boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+        [ -f "$f" ] && [ "$(sed -n 1p "$f")" = "$boot" ] && RAW_STATE=$(sed -n 2p "$f")
+        if [ -z "$RAW_STATE" ]; then
+            RAW_STATE=bad
+            for b in "$IPT_BIN" /usr/sbin/iptables; do
+                [ -x "$b" ] || continue
+                RAW_IPT=$b
+                if IPT_LIMIT=5 _raw_probe; then RAW_STATE=$b; break; fi
+            done
+            [ "$RAW_STATE" = bad ] && log "таблица raw не отвечает ни в одном iptables — VLESS недоступен"
+            mkdir -p "$RUN" && printf '%s\n%s\n' "$boot" "$RAW_STATE" > "$f"
+        fi
+    fi
+    [ "$RAW_STATE" = bad ] && return 1
+    RAW_IPT=$RAW_STATE
+}
+
+_raw_probe() {
+    "$RAW_IPT" -t raw -S OUTPUT >/dev/null 2>&1 &
+    _ip=$!
+    ( sleep "$IPT_LIMIT"; kill -9 "$_ip" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+    _iw=$!
+    wait "$_ip"
+    _irc=$?
+    kill "$_iw" 2>/dev/null
+    return "$_irc"
+}
+
+# Снять iptables, которые висят дольше минуты (остались от прошлых версий или
+# ушли в цикл на ядре): живой вызов столько не работает.
+kill_stuck_ipt() {
+    [ "$KEENETIC" = 1 ] || return 0
+    up=$(cut -d. -f1 /proc/uptime)
+    for d in /proc/[0-9]*; do
+        [ "$(cat "$d/comm" 2>/dev/null)" = iptables ] || continue
+        st=$(awk '{ print int($22 / 100) }' "$d/stat" 2>/dev/null)
+        [ -n "$st" ] && [ $((up - st)) -gt 60 ] || continue
+        log "снят зависший iptables (pid ${d#/proc/}, $((up - st)) с): $(tr '\000' ' ' < "$d/cmdline" 2>/dev/null)"
+        kill -9 "${d#/proc/}" 2>/dev/null
+    done
+}
 
 json_esc() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'
@@ -201,7 +274,8 @@ vless_reason() {
     # Keenetic: сетевых пространств в ядре нет — вход живёт в общем, а нужны
     # veth, onlink и `ip rule … iif lo` из ip-full (у busybox ip их нет).
     if [ "$KEENETIC" = 1 ]; then
-        [ -x "$KIP" ] || echo netns
+        [ -x "$KIP" ] || { echo netns; return; }
+        raw_ok || echo "Таблица raw iptables на этой прошивке не отвечает — без неё вход VLESS не принимает трафик"
         return
     fi
     ip netns list >/dev/null 2>&1 || echo netns
@@ -1590,6 +1664,7 @@ case "$1" in
     tick)
         # Сервер ни разу не настраивался — cron стоит на всех роутерах, выходим сразу.
         [ -f "$CLIENTS" ] || exit 0
+        kill_stuck_ipt
         lock; load_conf
         # Самолечение: интерфейс или процесс пропал (упал amneziawg-go или
         # sing-box, кто-то удалил) — поднимаем заново, иначе клиенты молча
@@ -1609,6 +1684,7 @@ case "$1" in
         [ "$KEENETIC" = 1 ] && vless_on && vless_running && vless_net_up >/dev/null 2>&1
         stats_tick ;;
     start|apply)
+        kill_stuck_ipt
         lock; [ -f "$CONF" ] && ensure_conf >/dev/null
         do_apply
         [ "$1" = apply ] && echo '{"ok":true}'
@@ -1627,6 +1703,7 @@ case "$1" in
         # (зовёт netfilter-хук 50-detour.sh).
         [ "$KEENETIC" = 1 ] || exit 0
         [ -f "$CONF" ] || exit 0
+        kill_stuck_ipt
         load_conf; keen_fw ;;
     set) shift; lock; cmd_set "$@" ;;
     client-add) shift; lock; cmd_client_add "$@" ;;
