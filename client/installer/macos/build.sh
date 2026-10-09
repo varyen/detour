@@ -34,9 +34,14 @@ cp "$SINGBOX" "$APP/Contents/MacOS/sing-box"
 # mihomo — сайдкар AmneziaWG (sing-box этот протокол не умеет)
 MIHOMO_VERSION=${MIHOMO_VERSION:-1.19.31}
 case "$(uname -m)" in arm64) MARCH=arm64 ;; *) MARCH=amd64-v1 ;; esac
-curl -sfL --max-time 600 \
-    "https://github.com/MetaCubeX/mihomo/releases/download/v$MIHOMO_VERSION/mihomo-darwin-$MARCH-v$MIHOMO_VERSION.gz" \
-    | gunzip > "$APP/Contents/MacOS/mihomo"
+# MIHOMO=<путь> — готовый бинарник, если GitHub с этой машины не отвечает.
+if [ -n "${MIHOMO:-}" ]; then
+    cp "$MIHOMO" "$APP/Contents/MacOS/mihomo"
+else
+    curl -sfL --max-time 600 \
+        "https://github.com/MetaCubeX/mihomo/releases/download/v$MIHOMO_VERSION/mihomo-darwin-$MARCH-v$MIHOMO_VERSION.gz" \
+        | gunzip > "$APP/Contents/MacOS/mihomo"
+fi
 chmod 0755 "$APP/Contents/MacOS/mihomo"
 # detour-awgsrv — свой VPN-сервер AmneziaWG. Чистый Go: можно собрать здесь
 # или подложить кросс-сборку (AWGSRV=<путь>), если Go на машине нет.
