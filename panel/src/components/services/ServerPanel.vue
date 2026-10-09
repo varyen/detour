@@ -331,7 +331,7 @@ async function setMode(c: ServerClient, mode: ServerClientMode) {
 /* На роутере маршрут исполняет механизм «Правила → Устройства» по адресам
    клиента, в приложении — правила движка по логину клиента во входе сервера.
    В обоих «Отдельные маршруты» и обход DPI главнее. */
-const canRoute = computed(() => st.value?.platform !== "keenetic");
+const canRoute = computed(() => true);
 watch(
   () => open.value && canRoute.value,
   (v) => {
@@ -435,6 +435,7 @@ function hint(c: ServerClient): string {
     <p v-if="loadError && !st" class="note bad">{{ loadError }}</p>
 
     <template v-if="st">
+      <p v-if="st.note" class="note">{{ st.note }}</p>
       <p v-if="!anyReady && !canInstall" class="note warn">
         {{ st.reason || vl?.reason || "На этом роутере сервер недоступен." }}
       </p>
@@ -492,7 +493,7 @@ function hint(c: ServerClient): string {
         </p>
         <p v-else-if="st.enabled && !st.running" class="note bad">
           Сервер включён, но не поднялся. Подробности — в журнале<template v-if="status.isClient">
-          службы (awgsrv.log)</template><template v-else> /var/log/detour-server.log</template>.
+          службы (awgsrv.log)</template><template v-else-if="st.platform === 'keenetic'"> /opt/var/log/detour-server.log</template><template v-else> /var/log/detour-server.log</template>.
         </p>
         <p v-if="status.isClient && st.wan_private && !st.endpoint" class="note warn">
           Компьютер в локальной сети ({{ st.wan_ip }}). Из этой же сети к нему

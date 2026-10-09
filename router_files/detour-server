@@ -30,8 +30,12 @@
 # sing-box перебирает ТЕКУЩИЙ список).
 #
 # Ядро. На GL.iNet kmod-amneziawg + amneziawg-tools лежат в штатном фиде
-# прошивки (AWG 2.0). На чистой OpenWrt этого модуля в фидах нет, на Keenetic —
-# своя подсистема; там сервер честно сообщает «не поддерживается».
+# прошивки (AWG 2.0). На чистой OpenWrt — userspace detour-awg-go из фида Detour.
+# На Keenetic — встроенный WireGuard KeeneticOS с обфускацией ASC (компонент
+# «WireGuard VPN»): интерфейс WireguardN (в ядре nwgN) собирается командами CLI
+# через RCI на localhost:79, а без компонента — тот же userspace detour-awg-go
+# (на MT7621 замерено ~30 Мбит/с против ~80 у встроенного). Файрвол Keenetic —
+# свои правила (`fw`), их же переставляет netfilter-хук после перестроек NDM.
 #
 # Хранение: $DIR/server.conf (shell KEY=VAL) и $DIR/clients.list:
 #   id|enabled|name|octet|pubkey|privkey|psk|mode|created|uuid|route
@@ -66,6 +70,9 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     LAN_IF=br0
     WANPIN_BIN=/opt/sbin/detour-wanpin
     CERT_CONF=/opt/etc/detour/cert.conf
+    RCI=http://localhost:79/rci/
+    KIP=/opt/sbin/ip
+    HOOK=/opt/etc/ndm/netfilter.d/50-detour.sh
 else
     KEENETIC=0
     DIR=/etc/detour/server
@@ -129,27 +136,33 @@ lock() {
 
 # Пустой вывод = поддерживается; иначе причина.
 unsupported_reason() {
-    if [ "$KEENETIC" = 1 ]; then
-        echo "На Keenetic сервер пока не поддерживается"
-        return
+    if [ "$KEENETIC" = 0 ]; then
+        command -v awg >/dev/null 2>&1 || { echo "not_installed"; return; }
     fi
-    command -v awg >/dev/null 2>&1 || { echo "not_installed"; return; }
     [ -n "$(backend)" ] || echo "not_installed"
 }
 
-# kernel — модуль amneziawg (GL.iNet); userspace — amneziawg-go на /dev/net/tun
-# (Detour в контейнере на обычном Linux-сервере, где модуля в ядре хоста нет).
+# kernel — модуль amneziawg (GL.iNet); ndm — встроенный WireGuard KeeneticOS;
+# userspace — amneziawg-go на /dev/net/tun (чистая OpenWrt, Detour в контейнере
+# на Linux-сервере, Keenetic без компонента WireGuard).
 backend() {
-    if lsmod 2>/dev/null | grep -q '^amneziawg ' || modprobe amneziawg 2>/dev/null; then
-        echo kernel
-    elif command -v amneziawg-go >/dev/null 2>&1 && [ -c /dev/net/tun ]; then
+    if [ "$KEENETIC" = 1 ]; then
+        if ndm_wg; then echo ndm; return; fi
+    elif lsmod 2>/dev/null | grep -q '^amneziawg ' || modprobe amneziawg 2>/dev/null; then
+        echo kernel; return
+    fi
+    if command -v amneziawg-go >/dev/null 2>&1 && [ -c /dev/net/tun ]; then
         echo userspace
     fi
 }
 
 # Есть ли пакеты в доступных фидах (для кнопки «Установить»).
 installable() {
-    [ "$KEENETIC" = 1 ] && return 1
+    if [ "$KEENETIC" = 1 ]; then
+        # detour-awg-go лежит в mipsel-фиде Detour; ставит detour-update curl'ом.
+        [ -c /dev/net/tun ]
+        return
+    fi
     if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; then
         apk search -e kmod-amneziawg 2>/dev/null | grep -q . && return 0
     else
@@ -165,10 +178,6 @@ awg_ok() { [ -z "$(unsupported_reason)" ]; }
 # VLESS: нужен sing-box и ip с netns (ip-full; у busybox ip его нет).
 # Пустой вывод = поддерживается; netns — не хватает ip-full.
 vless_reason() {
-    if [ "$KEENETIC" = 1 ]; then
-        echo "На Keenetic сервер пока не поддерживается"
-        return
-    fi
     sb=$(vless_sb)
     [ -n "$sb" ] || { echo "sing-box не установлен"; return; }
     # Reality-сервер sing-box 1.13.x отвергает всех клиентов («processed
@@ -178,6 +187,12 @@ vless_reason() {
     set -- $v
     if [ -n "$2" ] && [ "$1" -eq 1 ] && [ "$2" -lt 14 ]; then
         echo "Для VLESS-Reality нужен sing-box 1.14 или новее, здесь $1.$2"
+        return
+    fi
+    # Keenetic: сетевых пространств в ядре нет — вход живёт в общем, а нужны
+    # veth, onlink и `ip rule … iif lo` из ip-full (у busybox ip их нет).
+    if [ "$KEENETIC" = 1 ]; then
+        [ -x "$KIP" ] || echo netns
         return
     fi
     ip netns list >/dev/null 2>&1 || echo netns
@@ -192,10 +207,31 @@ vless_sb() {
 vless_ok() { [ -z "$(vless_reason)" ]; }
 
 ipfull_installable() {
+    [ "$KEENETIC" = 1 ] && return 0
     if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; then
         apk search -e ip-full 2>/dev/null | grep -q .
     else
         opkg list ip-full 2>/dev/null | grep -q .
+    fi
+}
+
+# Ключи WireGuard: awg, а без него (встроенный WireGuard Keenetic) — sing-box.
+# Результат — в KP_PRIV/KP_PUB.
+wg_keypair() {
+    KP_PRIV=""; KP_PUB=""
+    if command -v awg >/dev/null 2>&1; then
+        KP_PRIV=$(awg genkey) && KP_PUB=$(printf '%s' "$KP_PRIV" | awg pubkey)
+    else
+        kp=$(sing-box generate wg-keypair 2>/dev/null)
+        KP_PRIV=$(printf '%s\n' "$kp" | sed -n 's/^PrivateKey: *//p')
+        KP_PUB=$(printf '%s\n' "$kp" | sed -n 's/^PublicKey: *//p')
+    fi
+    [ -n "$KP_PRIV" ] && [ -n "$KP_PUB" ]
+}
+
+wg_psk() {
+    if command -v awg >/dev/null 2>&1; then awg genpsk
+    else sing-box generate rand 32 --base64 2>/dev/null
     fi
 }
 
@@ -269,6 +305,7 @@ VSNI=$VSNI
 VPRIV=$VPRIV
 VPUB=$VPUB
 VSID=$VSID
+NDMIF=$NDMIF
 EOF
     mv "$CONF.tmp" "$CONF"
 }
@@ -287,8 +324,9 @@ pick_net() {  # $1 — подсеть, которую тоже обходить
 load_conf() {
     ENABLED=0; PORT=""; NET=""; ENDPOINT=""; DNS=""; MTU=""
     PRIVKEY=""; PUBKEY=""
-    AWG=1; VLESS=0; VPORT=""; VNET=""; VSNI=""; VPRIV=""; VPUB=""; VSID=""
+    AWG=1; VLESS=0; VPORT=""; VNET=""; VSNI=""; VPRIV=""; VPUB=""; VSID=""; NDMIF=""
     [ -f "$CONF" ] && . "$CONF"
+    set_iface
 }
 
 load_defaults() {
@@ -334,8 +372,8 @@ ensure_conf() {
         log "init: port=$PORT net=$NET.0/24"
     fi
     if [ -z "$ar" ] && [ -z "$PRIVKEY" ]; then
-        PRIVKEY=$(awg genkey) || err "awg genkey не сработал"
-        PUBKEY=$(printf '%s' "$PRIVKEY" | awg pubkey)
+        wg_keypair || err "не удалось сгенерировать ключ сервера"
+        PRIVKEY=$KP_PRIV; PUBKEY=$KP_PUB
         changed=1
     fi
     if vless_ok && [ -z "$VPRIV" ]; then
@@ -374,8 +412,8 @@ fill_clients() {
     : > "$CLIENTS.tmp"
     while IFS='|' read -r id en name octet pub priv psk mode created uuid route; do
         [ -n "$id" ] || continue
-        if [ "$need_awg" = 1 ] && [ -z "$pub" ]; then
-            priv=$(awg genkey); pub=$(printf '%s' "$priv" | awg pubkey); psk=$(awg genpsk)
+        if [ "$need_awg" = 1 ] && [ -z "$pub" ] && wg_keypair; then
+            priv=$KP_PRIV; pub=$KP_PUB; psk=$(wg_psk)
         fi
         [ -n "$uuid" ] || uuid=$(new_uuid)
         printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$en" "$name" "$octet" "$pub" "$priv" "$psk" "$mode" "$created" "$uuid" "$route" >> "$CLIENTS.tmp"
@@ -485,6 +523,10 @@ redirect_attach() {
         redirect_has_iface "$i" || { log "не удалось вписать $i в $SETTINGS"; return 1; }
     done
     log "vpn_redirect_ifaces +=$add, перевешиваю перехват"
+    if [ "$KEENETIC" = 1 ]; then
+        [ -x "$HOOK" ] && "$HOOK" iptables nat >/dev/null 2>&1
+        return 0
+    fi
     # reconfigure — отказоустойчивый перезапуск (правила LAN не снимаются).
     if [ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box running >/dev/null 2>&1; then
         /etc/init.d/sing-box reconfigure >/dev/null 2>&1
@@ -502,6 +544,7 @@ vless_on() { [ "$ENABLED" = 1 ] && [ "$VLESS" = 1 ] && [ -n "$VPRIV" ] && [ -n "
 # Зона файрвола + вход с WAN (UDP AWG, DNAT TCP на VLESS). Пишем uci только при
 # расхождении, чтобы не дёргать reload firewall на каждом apply.
 fw_apply() {
+    [ "$KEENETIC" = 1 ] && { keen_fw; return 0; }
     changed=0
     want() {  # $1 key  $2 value
         [ "$(uci -q get "firewall.$1")" = "$2" ] && return
@@ -553,6 +596,7 @@ fw_apply() {
 }
 
 fw_remove() {
+    [ "$KEENETIC" = 1 ] && { ENABLED=0; keen_fw; return 0; }
     uci -q get "firewall.$ZONE" >/dev/null || return 0
     for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_in" "${ZONE}_vin"; do
         uci -q delete "firewall.$s"
@@ -564,18 +608,26 @@ fw_remove() {
 iface_up() { ip link show "$IFACE" >/dev/null 2>&1; }
 
 awg_down() {
-    iface_up && ip link del "$IFACE" 2>/dev/null
+    if [ "$KEENETIC" = 1 ] && [ -n "$NDMIF" ] && ndm_wg; then
+        ndm_cli "no interface $NDMIF" >/dev/null 2>&1
+    fi
+    ip link show dsrv0 >/dev/null 2>&1 && ip link del dsrv0 2>/dev/null
     rm -f "$RENDER"
 }
 
 awg_up() {
     r=$(unsupported_reason)
     [ -z "$r" ] || { log "apply: $r"; return 1; }
+    if [ "$(backend)" = ndm ]; then
+        ndm_up
+        return
+    fi
     render
     if ! iface_up; then
         if [ "$(backend)" = kernel ]; then
             ip link add "$IFACE" type amneziawg || { log "ip link add $IFACE не удался"; return 1; }
         else
+            mkdir -p /var/run/amneziawg
             # Демонизируется сам; интерфейс удалили — процесс выходит.
             amneziawg-go "$IFACE" >>"$LOG" 2>&1 || { log "amneziawg-go не запустился"; return 1; }
             i=0
@@ -586,8 +638,170 @@ awg_up() {
         # syncconf не рвёт сессии подключённых клиентов.
         awg syncconf "$IFACE" "$RENDER" 2>/dev/null || awg setconf "$IFACE" "$RENDER" || return 1
     fi
-    ip addr replace "$(server_ip)/24" dev "$IFACE"
+    # У busybox ip (Keenetic) нет replace.
+    ip addr replace "$(server_ip)/24" dev "$IFACE" 2>/dev/null || \
+        ip addr add "$(server_ip)/24" dev "$IFACE" 2>/dev/null
     ip link set "$IFACE" mtu "${MTU:-1376}" up
+}
+
+# ---------- Keenetic: встроенный WireGuard через RCI ----------
+
+# Интерфейс AWG: встроенный WireGuard KeeneticOS зовёт WireguardN в ядре nwgN.
+set_iface() {
+    IFACE=dsrv0
+    [ "$KEENETIC" = 1 ] && [ -n "$NDMIF" ] && ndm_wg && IFACE="nwg${NDMIF#Wireguard}"
+}
+
+rci() {  # $1 — тело запроса (JSON)
+    wget -q -T 20 -O - --header 'Content-Type: application/json' --post-data "$1" "$RCI" 2>/dev/null
+}
+
+# Установлен ли компонент «WireGuard VPN» (ответ кэшируется на вызов скрипта).
+ndm_wg() {
+    [ "$KEENETIC" = 1 ] || return 1
+    [ -n "$NDM_COMP" ] || NDM_COMP=",$(wget -q -T 10 -O - "${RCI}show/version" 2>/dev/null | \
+        sed -n 's/.*"components": *"\([^"]*\)".*/\1/p' | head -1),"
+    case "$NDM_COMP" in *,wireguard,*) return 0 ;; esac
+    return 1
+}
+
+# ndm_cli <команда CLI>… — одним запросом; код 1, если роутер ответил ошибкой
+# хотя бы на одну (тексты ошибок — в лог).
+ndm_cli() {
+    body=""
+    for c in "$@"; do body="$body${body:+,}{\"parse\":\"$(json_esc "$c")\"}"; done
+    r=$(rci "[$body]")
+    [ -n "$r" ] || { log "ndm: RCI на localhost:79 не ответил"; return 1; }
+    if printf '%s' "$r" | grep -q '"status": *"error"'; then
+        log "ndm: $(printf '%s' "$r" | grep -A3 '"status": *"error"' | sed -n 's/.*"message": *"\([^"]*\)".*/\1/p' | head -3 | tr '\n' ';')"
+        return 1
+    fi
+}
+
+# Свободное имя WireguardN (верхние номера — чтобы не путаться с туннелями,
+# которые владелец заводит в веб-интерфейсе с нуля).
+ndm_pick_if() {
+    for n in 7 8 9 6 5 4 3 2; do
+        r=$(rci "{\"parse\":\"show interface Wireguard$n\"}")
+        [ -n "$r" ] || return
+        printf '%s' "$r" | grep -q '"status": *"error"' && { echo "Wireguard$n"; return; }
+    done
+}
+
+# Пиры интерфейса строками `awg show dump` (без первой): ключ, psk, адрес,
+# allowed, рукопожатие (unix-время), rx, tx. KeeneticOS отдаёт рукопожатие как
+# «секунд назад»; имена полей ищем по всему ответу, а не по фиксированному пути.
+ndm_dump() {
+    [ -n "$NDMIF" ] || return 0
+    rci "{\"parse\":\"show interface $NDMIF\"}" | SRVPUB="$PUBKEY" lua -e '
+        local ok, c = pcall(require, "cjson.safe"); if not ok then ok, c = pcall(require, "cjson") end
+        if not ok then return end
+        local t = c.decode(io.read("*a")); if type(t) ~= "table" then return end
+        local now, srv = os.time(), os.getenv("SRVPUB") or ""
+        local function iskey(v) return type(v) == "string" and #v == 44 and v:match("^[%w+/]+=$") end
+        local function key(o)
+            for _, k in ipairs({"public-key", "key", "peer"}) do if iskey(o[k]) then return o[k] end end
+            for _, v in pairs(o) do if iskey(v) then return v end end
+        end
+        local function ep(o)
+            local e = o.endpoint or o.remote
+            if type(e) == "table" then
+                local a = e.address or e.ip or e.host
+                if a then return a .. (e.port and (":" .. e.port) or "") end
+            elseif type(e) == "string" then return e end
+            return ""
+        end
+        local function walk(o)
+            if type(o) ~= "table" then return end
+            local k = o.rxbytes ~= nil and key(o)
+            if k and k ~= srv then
+                local h = tonumber(o["last-handshake"]) or 0
+                local hs = (h > 0 and h < 315360000) and (now - h) or 0
+                io.write(k, "\t\t", ep(o), "\t\t", hs, "\t", string.format("%.0f", tonumber(o.rxbytes) or 0),
+                    "\t", string.format("%.0f", tonumber(o.txbytes) or 0), "\n")
+                return
+            end
+            for _, v in pairs(o) do walk(v) end
+        end
+        walk(t)'
+}
+
+ndm_up() {
+    if [ -z "$NDMIF" ]; then
+        NDMIF=$(ndm_pick_if)
+        [ -n "$NDMIF" ] || { log "ndm: нет свободного WireguardN (или RCI не отвечает)"; return 1; }
+        save_conf; set_iface
+        log "ndm: интерфейс сервера — $NDMIF ($IFACE)"
+    fi
+    # Остался userspace-интерфейс от времени до установки компонента.
+    ip link show dsrv0 >/dev/null 2>&1 && ip link del dsrv0 2>/dev/null
+    # Лишний пир (клиента выключили или удалили) снимается пересозданием
+    # интерфейса: так не зависим от синтаксиса удаления пира в CLI.
+    want=$(awk -F'|' '$2 == 1 && $5 != "" { print $5 }' "$CLIENTS" 2>/dev/null)
+    if iface_up; then
+        for k in $(ndm_dump | cut -f1); do
+            printf '%s\n' "$want" | grep -qxF "$k" && continue
+            log "ndm: пир $(printf '%.8s' "$k")… больше не нужен — пересоздаю $NDMIF"
+            ndm_cli "no interface $NDMIF"
+            break
+        done
+    fi
+    i="interface $NDMIF"
+    set -- "$i" "$i description detour-server" "$i security-level private" \
+        "$i ip address $NET.1 255.255.255.0" "$i ip mtu ${MTU:-1376}" \
+        "$i wireguard listen-port $PORT" "$i wireguard private-key $PRIVKEY" \
+        "$i wireguard asc $JC $JMIN $JMAX $S1 $S2 $H1 $H2 $H3 $H4"
+    # Свои имена: id/pub/… — глобальные у вызывающих (client-add печатает id
+    # после do_apply).
+    while IFS='|' read -r _id _en _nm _oc _pub _pv _psk _rest; do
+        [ "$_en" = 1 ] && [ -n "$_pub" ] || continue
+        set -- "$@" "$i wireguard peer $_pub" "$i wireguard peer $_pub preshared-key $_psk" \
+            "$i wireguard peer $_pub allow-ips $NET.$_oc 255.255.255.255"
+    done < "$CLIENTS"
+    set -- "$@" "$i up"
+    ndm_cli "$@" || { log "ndm: $NDMIF не собран"; return 1; }
+    ndm_cli "$i ip tcp adjust-mss pmtu" || :
+    n=0; while ! iface_up && [ "$n" -lt 10 ]; do sleep 1; n=$((n + 1)); done
+    iface_up || { log "ndm: $NDMIF создан, но $IFACE в ядре не появился"; return 1; }
+}
+
+# Файрвол Keenetic. INPUT у NDM по умолчанию DROP, NAT для чужого интерфейса он
+# не делает: открываем порт сервера, пускаем клиентов к службам роутера (DNS,
+# перехват sing-box/zapret) и наружу. Применённые правила — в $FWSTATE, чтобы
+# снять ровно их. NDM при перестройке сносит всё — хук 50-detour.sh зовёт `fw`.
+FWSTATE="$RUN/detour-server.fw"
+keen_fw_add() {  # $1 таблица $2 цепочка, дальше правило
+    t=$1; ch=$2; shift 2
+    iptables -t "$t" -C "$ch" "$@" 2>/dev/null || iptables -t "$t" -I "$ch" 1 "$@" 2>/dev/null || \
+        { log "fw: не удалось добавить $t $ch $*"; return 1; }
+    echo "$t $ch $*" >> "$FWSTATE"
+}
+
+keen_fw() {
+    mkdir -p "$RUN"
+    if [ -f "$FWSTATE" ]; then
+        while read -r t ch rule; do
+            [ -n "$ch" ] || continue
+            while iptables -t "$t" -C "$ch" $rule 2>/dev/null; do iptables -t "$t" -D "$ch" $rule; done
+        done < "$FWSTATE"
+    fi
+    : > "$FWSTATE"
+    if awg_on && [ -n "$PORT" ] && [ -n "$NET" ]; then
+        keen_fw_add filter INPUT -p udp --dport "$PORT" -j ACCEPT
+        keen_fw_add filter INPUT -i "$IFACE" -j ACCEPT
+        keen_fw_add filter FORWARD -i "$IFACE" -j ACCEPT
+        keen_fw_add filter FORWARD -o "$IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
+        keen_fw_add nat POSTROUTING -s "$NET.0/24" ! -o "$IFACE" -j MASQUERADE
+    fi
+    if vless_on && [ -n "$VNET" ]; then
+        keen_fw_add filter INPUT -p tcp --dport "$VPORT" -j ACCEPT
+        keen_fw_add filter INPUT -i "$VIF" -j ACCEPT
+        keen_fw_add filter FORWARD -i "$VIF" -j ACCEPT
+        keen_fw_add raw OUTPUT -o "$VPEER" -j NOTRACK 2>/dev/null || \
+            keen_fw_add raw OUTPUT -o "$VPEER" -j CT --notrack
+        keen_fw_add nat POSTROUTING -s "$VNET.0/24" ! -o "$VIF" -j MASQUERADE
+        vless_acct_up
+    fi
 }
 
 # ---------- VLESS-Reality ----------
@@ -610,7 +824,17 @@ vless_render() {  # $1 — 1 = с clash API (онлайн/адрес клиен�
     lan=$(lan_cidr)
     {
         printf '{"log":{"level":"warn","timestamp":true},'
-        printf '"dns":{"servers":[{"type":"udp","tag":"r","server":"%s"}]},' "$(vless_dns)"
+        if [ "$KEENETIC" = 1 ]; then
+            # Свой трафик входа в PREROUTING не попадает — DNS сразу в dnsmasq
+            # Detour (он наполняет наборы маршрутов), без него — в DNS KeeneticOS.
+            if [ -f /opt/etc/detour/dns.enabled ]; then
+                printf '"dns":{"servers":[{"type":"udp","tag":"r","server":"127.0.0.1","server_port":%s}]},' "${DETOUR_DNS_PORT:-5354}"
+            else
+                printf '"dns":{"servers":[{"type":"udp","tag":"r","server":"127.0.0.1"}]},'
+            fi
+        else
+            printf '"dns":{"servers":[{"type":"udp","tag":"r","server":"%s"}]},' "$(vless_dns)"
+        fi
         printf '"inbounds":[{"type":"vless","tag":"in","listen":"0.0.0.0","listen_port":%s,"users":[' "$VPORT"
         awk -F'|' '$2 == 1 && $10 != "" {
             printf "%s{\"name\":\"%s\",\"uuid\":\"%s\",\"flow\":\"xtls-rprx-vision\"}", (n++ ? "," : ""), $1, $10
@@ -639,7 +863,49 @@ vless_render() {  # $1 — 1 = с clash API (онлайн/адрес клиен�
     }
 }
 
+# Keenetic: сетевых пространств нет. Пара veth в общем пространстве: исходящие
+# клиентов (адреса $VNET.N на $VPEER) правилом `from $VNET.0/24 iif lo`
+# уходят в $VPEER и возвращаются в роутер через $VIF — он в vpn_redirect_ifaces,
+# там их ловит обычный перехват. Пакет с собственным адресом источника ядро
+# принимает с accept_local; conntrack на выходе в $VPEER выключен (NOTRACK в
+# keen_fw), иначе вернувшийся пакет считался бы уже известным соединением и
+# REDIRECT на $VIF не срабатывал бы. Шлюз — несуществующий $VNET.254 со
+# статической записью соседа на MAC $VIF (свой адрес шлюзом ядро не берёт).
+# Свой трафик входа (Reality-маска, DNS) идёт без привязки — мимо всего этого.
+# Проверено на Linux-стенде; на ядре 4.9-ndm — нет.
+vless_net_up_keen() {
+    modprobe veth 2>/dev/null || insmod "/lib/modules/$(uname -r)/veth.ko" 2>/dev/null
+    if ! $KIP link show "$VIF" >/dev/null 2>&1; then
+        $KIP link del "$VPEER" 2>/dev/null
+        $KIP link add "$VIF" type veth peer name "$VPEER" || { log "veth $VIF не создан"; return 1; }
+    fi
+    echo 1 > "/proc/sys/net/ipv4/conf/$VIF/accept_local"
+    echo 0 > "/proc/sys/net/ipv4/conf/$VIF/rp_filter"
+    # rp_filter берётся как максимум all и интерфейса: строгий all сам по себе
+    # отбросил бы пакет с локальным источником — ослабляем до loose.
+    if [ "$(cat /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null)" = 1 ]; then
+        echo 2 > /proc/sys/net/ipv4/conf/all/rp_filter
+        log "vless: rp_filter all 1 → 2"
+    fi
+    $KIP addr replace "$VNET.1/24" dev "$VIF"
+    $KIP link set "$VIF" up
+    $KIP link set "$VPEER" up
+    want=$(awk -F'|' -v vnet="$VNET" '$10 != "" { print vnet "." $4 "/32" }' "$CLIENTS")
+    have=$($KIP -4 -o addr show dev "$VPEER" 2>/dev/null | awk '{ print $4 }')
+    for a in $want; do
+        printf '%s\n' "$have" | grep -qx "$a" || $KIP addr add "$a" dev "$VPEER"
+    done
+    for a in $have; do
+        printf '%s\n' "$want" | grep -qx "$a" || $KIP addr del "$a" dev "$VPEER"
+    done
+    $KIP neigh replace "$VNET.254" lladdr "$(cat "/sys/class/net/$VIF/address")" dev "$VPEER" nud permanent
+    $KIP route replace default via "$VNET.254" dev "$VPEER" onlink table "$NS_TABLE"
+    $KIP rule del from "$VNET.0/24" iif lo lookup "$NS_TABLE" 2>/dev/null
+    $KIP rule add from "$VNET.0/24" iif lo lookup "$NS_TABLE" pref "$RULE_PREF"
+}
+
 vless_net_up() {
+    [ "$KEENETIC" = 1 ] && { vless_net_up_keen; return; }
     ip netns list 2>/dev/null | grep -qw "^$NS" || ip netns add "$NS" || { log "ip netns add $NS не удался"; return 1; }
     if ! ip link show "$VIF" >/dev/null 2>&1; then
         ip -n "$NS" link del "$VPEER" 2>/dev/null
@@ -691,14 +957,26 @@ vless_net_up() {
 # Счётчики по клиенту: всё, что пришло с его адреса (rx), и всё, что ушло на
 # него (tx), включая ответы перехватившего соединение sing-box роутера.
 # Пересобираются только при смене состава — иначе обнулялись бы на каждом apply.
+# Ответы клиенту на Keenetic в $VIF не уходят: адрес клиента там локальный,
+# они доставляются сразу — считаем их в INPUT.
+acct_out_set() {
+    if [ "$KEENETIC" = 1 ]; then set -- INPUT; else set -- POSTROUTING -o "$VIF"; fi
+    ACCT_OUT_HOOK="$*"
+}
+
 vless_acct_up() {
     sig=$(awk -F'|' -v vnet="$VNET" '$10 != "" { print vnet "." $4 }' "$CLIENTS" | sort | tr '\n' ' ')
+    acct_out_set
+    # NDM при перестройке сносит и mangle — тогда цепочки собираются заново.
+    iptables -t mangle -L "$ACCT_IN" -n >/dev/null 2>&1 || rm -f "$VACCT_SIG"
     iptables -t mangle -N "$ACCT_IN" 2>/dev/null
     iptables -t mangle -N "$ACCT_OUT" 2>/dev/null
     iptables -t mangle -C PREROUTING -i "$VIF" -j "$ACCT_IN" 2>/dev/null || \
         iptables -t mangle -I PREROUTING 1 -i "$VIF" -j "$ACCT_IN"
-    iptables -t mangle -C POSTROUTING -o "$VIF" -j "$ACCT_OUT" 2>/dev/null || \
-        iptables -t mangle -I POSTROUTING 1 -o "$VIF" -j "$ACCT_OUT"
+    set -- $ACCT_OUT_HOOK
+    hook=$1; shift
+    iptables -t mangle -C "$hook" "$@" -j "$ACCT_OUT" 2>/dev/null || \
+        iptables -t mangle -I "$hook" 1 "$@" -j "$ACCT_OUT"
     [ "$sig" = "$(cat "$VACCT_SIG" 2>/dev/null)" ] && return 0
     iptables -t mangle -F "$ACCT_IN"
     iptables -t mangle -F "$ACCT_OUT"
@@ -711,7 +989,10 @@ vless_acct_up() {
 
 vless_acct_down() {
     iptables -t mangle -D PREROUTING -i "$VIF" -j "$ACCT_IN" 2>/dev/null
-    iptables -t mangle -D POSTROUTING -o "$VIF" -j "$ACCT_OUT" 2>/dev/null
+    acct_out_set
+    set -- $ACCT_OUT_HOOK
+    hook=$1; shift
+    iptables -t mangle -D "$hook" "$@" -j "$ACCT_OUT" 2>/dev/null
     for c in "$ACCT_IN" "$ACCT_OUT"; do
         iptables -t mangle -F "$c" 2>/dev/null
         iptables -t mangle -X "$c" 2>/dev/null
@@ -720,6 +1001,15 @@ vless_acct_down() {
 }
 
 vless_start() {
+    if [ "$KEENETIC" = 1 ]; then
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "$(vless_sb)" run -c "$VRENDER" >>"$VLOG" 2>&1 </dev/null &
+        else
+            "$(vless_sb)" run -c "$VRENDER" >>"$VLOG" 2>&1 </dev/null &
+        fi
+        echo $! > "$VPID"
+        return
+    fi
     # Полный путь: busybox setsid (OpenWrt 25.12) сначала ищет одноимённый
     # апплет, а у busybox ip нет netns.
     ipbin=$(command -v ip)
@@ -772,6 +1062,12 @@ vless_down() {
     [ -n "$p" ] && kill "$p" 2>/dev/null
     rm -f "$VPID" "$VRENDER"
     vless_acct_down
+    if [ "$KEENETIC" = 1 ]; then
+        [ -n "$VNET" ] && $KIP rule del from "$VNET.0/24" iif lo lookup "$NS_TABLE" 2>/dev/null
+        $KIP route flush table "$NS_TABLE" 2>/dev/null
+        $KIP link del "$VIF" 2>/dev/null
+        return 0
+    fi
     [ -n "$VNET" ] && ip -4 rule del to "$VNET.0/24" lookup main pref "$RULE_PREF" 2>/dev/null
     ip -4 rule del to "$LINKNET.0/30" lookup main pref "$RULE_PREF" 2>/dev/null
     ip link del "$VIF" 2>/dev/null
@@ -782,7 +1078,7 @@ vless_down() {
 do_stop() {
     awg_down
     vless_down
-    [ "$KEENETIC" = 0 ] && [ -f "$CONF" ] && { load_conf; ENABLED=0; fw_apply; }
+    [ -f "$CONF" ] && { load_conf; ENABLED=0; fw_apply; }
 }
 
 do_apply() {
@@ -815,7 +1111,11 @@ vless_dump() {
     { iptables -t mangle -L "$ACCT_IN" -nvx 2>/dev/null | awk 'NR > 2 { print "i", $8, $2 }'
       iptables -t mangle -L "$ACCT_OUT" -nvx 2>/dev/null | awk 'NR > 2 { print "o", $9, $2 }'
     } > "$RUN/detour-server.vcnt"
-    ip netns exec "$NS" wget -qO- -T 2 "http://$CLASH/connections" 2>/dev/null | lua -e '
+    if [ "$KEENETIC" = 1 ]; then
+        wget -qO- -T 2 "http://$CLASH/connections" 2>/dev/null
+    else
+        ip netns exec "$NS" wget -qO- -T 2 "http://$CLASH/connections" 2>/dev/null
+    fi | lua -e '
         local ok, c = pcall(require, "cjson"); if not ok then return end
         local ok2, t = pcall(c.decode, io.read("*a")); if not ok2 or type(t) ~= "table" then return end
         local cs = t.connections; if type(cs) ~= "table" then return end
@@ -849,7 +1149,11 @@ vless_dump() {
 
 # Оба входа одним потоком: AWG по ключу клиента, VLESS по "v:<id>".
 server_dump() {
-    iface_up && awg show "$IFACE" dump 2>/dev/null | tail -n +2
+    if [ "$(backend)" = ndm ]; then
+        iface_up && ndm_dump
+    else
+        iface_up && awg show "$IFACE" dump 2>/dev/null | tail -n +2
+    fi
     vless_dump
 }
 
@@ -1013,9 +1317,19 @@ status_json() {
     elif [ -n "$reason" ]; then
         supported=false; installed=false
     fi
+    note=""
+    if [ "$KEENETIC" = 1 ]; then
+        be=$(backend)
+        if [ "$be" = userspace ]; then
+            note="Сервер работает на userspace AmneziaWG: скорость упирается в процессор роутера (на MT7621 около 30 Мбит/с). Поставьте компонент KeeneticOS «WireGuard VPN» (Общие настройки → Изменить набор компонентов) — сервер перейдёт на встроенный WireGuard, это в разы быстрее."
+        elif [ -z "$be" ]; then
+            note="Лучший вариант — компонент KeeneticOS «WireGuard VPN» (Общие настройки → Изменить набор компонентов): сервер возьмёт встроенный WireGuard с обфускацией. Без него — userspace AmneziaWG из фида Detour, он медленнее."
+            [ "$can_install" = true ] || reason="Поставьте компонент KeeneticOS «WireGuard VPN» (Общие настройки → Изменить набор компонентов)"
+        fi
+    fi
     vr=$(vless_reason); vsup=true; vinst=false
     if [ "$vr" = netns ]; then
-        vsup=false; vr="Нужен пакет ip-full (сетевые пространства)"
+        vsup=false; vr="Нужен пакет ip-full"
         ipfull_installable && vinst=true
     elif [ -n "$vr" ]; then
         vsup=false
@@ -1030,6 +1344,7 @@ status_json() {
     printf '{"ok":true,"platform":"%s","supported":%s,"reason":"%s","installed":%s,"can_install":%s,"backend":"%s",' \
         "$([ "$KEENETIC" = 1 ] && echo keenetic || echo openwrt)" "$supported" "$(json_esc "$reason")" "$installed" "$can_install" \
         "$([ "$installed" = true ] && backend)"
+    printf '"note":"%s",' "$(json_esc "$note")"
     printf '"configured":%s,"enabled":%s,"running":%s,"routed":%s,"awg_enabled":%s,"awg_running":%s,' \
         "$({ [ -n "$PRIVKEY" ] || [ -n "$VPRIV" ]; } && echo true || echo false)" "$([ "$ENABLED" = 1 ] && echo true || echo false)" \
         "$running" "$redir" "$([ "$AWG" = 1 ] && echo true || echo false)" "$arun"
@@ -1155,7 +1470,7 @@ cmd_set() {
     oldnet=$(sed -n 's/^NET=//p' "$CONF")
     save_conf
     # Смена подсети требует нового адреса на интерфейсе — проще пересоздать.
-    [ "$oldnet" != "$NET" ] && iface_up && ip link del "$IFACE"
+    [ "$oldnet" != "$NET" ] && iface_up && awg_down
     do_apply || err "не удалось применить, см. $LOG"
     log "set: $*"
     echo '{"ok":true}'
@@ -1169,8 +1484,9 @@ cmd_client_add() {
     id=$(new_id)
     priv=""; pub=""; psk=""
     if awg_ok; then
-        priv=$(awg genkey); pub=$(printf '%s' "$priv" | awg pubkey); psk=$(awg genpsk)
-        [ -n "$pub" ] && [ -n "$psk" ] || err "не удалось сгенерировать ключи"
+        wg_keypair || err "не удалось сгенерировать ключи"
+        priv=$KP_PRIV; pub=$KP_PUB; psk=$(wg_psk)
+        [ -n "$psk" ] || err "не удалось сгенерировать ключи"
     fi
     uuid=$(new_uuid); [ -n "$uuid" ] || err "не удалось получить uuid"
     umask 077
@@ -1208,7 +1524,6 @@ cmd_client_set() {
                     vpn:*) case "${v#vpn:}" in ''|*[!A-Za-z0-9_.-]*) err "маршрут: id профиля или цепочки" ;; esac ;;
                     *) err "маршрут: пусто, direct или vpn:<id>" ;;
                 esac
-                [ "$KEENETIC" = 1 ] && [ -n "$v" ] && err "на Keenetic маршруты клиентов недоступны"
                 rewrite_client "$id" '$1 == id { $11 = v } { print }' -v v="$v" ;;
             *) err "неизвестный параметр: $k" ;;
         esac
@@ -1255,6 +1570,8 @@ case "$1" in
         # переписали без нашего интерфейса — без этого клиенты шли бы мимо
         # маршрутов роутера.
         [ "$ENABLED" = 1 ] && attach_all
+        # Keenetic: NDM при переподключениях WAN может снести наши ip rule/neigh.
+        [ "$KEENETIC" = 1 ] && vless_on && vless_running && vless_net_up >/dev/null 2>&1
         stats_tick ;;
     start|apply)
         lock; [ -f "$CONF" ] && ensure_conf >/dev/null
@@ -1263,8 +1580,19 @@ case "$1" in
         exit 0 ;;
     stop) lock; load_conf; stats_tick; stats_flush; do_stop ;;
     down)
-        # Удаление пакета: снять всё, файрвол чистит вызывающий.
-        load_conf; stats_tick; stats_flush; awg_down; vless_down ;;
+        # Удаление пакета: снять всё, файрвол чистит вызывающий (на Keenetic
+        # своих правил у NDM нет — снимаем сами).
+        load_conf; stats_tick; stats_flush; awg_down; vless_down
+        if [ "$KEENETIC" = 1 ]; then
+            fw_remove
+            [ -n "$NDMIF" ] && ndm_wg && ndm_cli "system configuration save" >/dev/null 2>&1
+        fi ;;
+    fw)
+        # Keenetic: правила сервера заново после перестройки iptables NDM
+        # (зовёт netfilter-хук 50-detour.sh).
+        [ "$KEENETIC" = 1 ] || exit 0
+        [ -f "$CONF" ] || exit 0
+        load_conf; keen_fw ;;
     set) shift; lock; cmd_set "$@" ;;
     client-add) shift; lock; cmd_client_add "$@" ;;
     client-set) shift; lock; cmd_client_set "$@" ;;
@@ -1278,7 +1606,7 @@ case "$1" in
     regen-obf)
         lock; ensure_conf; gen_obf; save_conf
         # Параметры интерфейса syncconf не меняет надёжно — пересоздаём.
-        iface_up && ip link del "$IFACE"
+        iface_up && awg_down
         do_apply
         log "regen-obf"
         echo '{"ok":true}' ;;

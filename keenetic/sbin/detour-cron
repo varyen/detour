@@ -79,6 +79,12 @@ while :; do
     [ -x /opt/sbin/detour-torrent ] && \
         /opt/sbin/detour-torrent tick >"$LOGDIR/detour-torrent.log" 2>&1
 
+    # Свой VPN-сервер: статистика клиентов и самолечение (интерфейс WireguardN
+    # не сохраняется в конфиг KeeneticOS — после перезагрузки его поднимает
+    # этот tick). Без настроенного сервера выходит сразу.
+    [ -x /opt/sbin/detour-server ] && \
+        /opt/sbin/detour-server tick >"$LOGDIR/detour-server-tick.log" 2>&1
+
     # WAN PHY watchdog — detect a physical downgrade to 100 Mbps and send a push
     # alert with the cable/peer-port guidance. Distinct from offload issues.
     [ -x /opt/sbin/detour-wan-link ] && \

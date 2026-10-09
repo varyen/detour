@@ -448,6 +448,11 @@ echo "=== detour-keenetic prerm start pid=$$ args:$* ==="
 # mode — the new postinst's `detour-bypass boot` re-applies it. Falls back to S53.
 [ -x /opt/sbin/detour-bypass ] && /opt/sbin/detour-bypass stop 2>/dev/null
 /opt/etc/init.d/S53detour-zapret stop 2>/dev/null
+# Свой VPN-сервер обновление не гасит (через него может идти доступ к дому);
+# снимаем его — интерфейс WireguardN и свои правила — только при удалении.
+if [ "$1" != upgrade ] && [ -x /opt/sbin/detour-server ]; then
+    /opt/sbin/detour-server down 2>/dev/null
+fi
 # On an UPGRADE keep the REDIRECT rules up (upgrade-stop): the gap until postinst
 # fails CLOSED instead of sending every flow, routes included, direct.
 if [ "$1" = upgrade ]; then

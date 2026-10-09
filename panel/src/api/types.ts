@@ -399,6 +399,8 @@ export interface ServerStatus {
   platform?: Platform;
   supported: boolean;
   reason?: string;
+  /** Подсказка о бэкенде (Keenetic: userspace медленнее встроенного WireGuard). */
+  note?: string;
   installed: boolean;
   can_install: boolean;
   configured: boolean;

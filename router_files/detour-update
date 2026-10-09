@@ -1119,13 +1119,37 @@ cmd_ttyd_apply() {
 
 # ---- AmneziaWG для VPN-сервера (detour-server) ----
 # kmod-amneziawg + amneziawg-tools — из штатного фида прошивки (у GL.iNet они
-# собраны под её ядро). Модуль ядра из чужого фида не загрузится, поэтому
-# своего пакета нет: нет в фиде прошивки — сервер недоступен.
+# собраны под её ядро). Нет модуля — userspace detour-awg-go из фида Detour.
 cmd_server_apply() {
-    [ "$KEENETIC" = 1 ] && die "на Keenetic VPN-сервер пока не поддерживается"
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    # Keenetic: основной путь — встроенный WireGuard (компонент KeeneticOS «WireGuard
+    # VPN», его ставит владелец в веб-интерфейсе); здесь — запасной userspace.
+    if [ "$KEENETIC" = 1 ]; then
+        local kerr=""
+        # ip-full — для входа VLESS (veth, onlink, ip rule iif); из фида Entware.
+        if [ -x /opt/sbin/ip ]; then
+            log "ip-full уже есть"
+        else
+            pkg_index_update >/dev/null 2>&1
+            pkg_install ip-full 2>&1 || log "WARNING: ip-full не установился — вход VLESS будет недоступен"
+        fi
+        if wget -q -T 10 -O - http://localhost:79/rci/show/version 2>/dev/null | grep -q '"components":.*wireguard'; then
+            log "компонент KeeneticOS «WireGuard VPN» есть — AmneziaWG пойдёт через него"
+        elif pkg_is_installed "$AWGGO_PKG"; then
+            log "$AWGGO_PKG уже установлен ($(pkg_installed_version "$AWGGO_PKG"))"
+        elif [ ! -c /dev/net/tun ]; then
+            kerr="нет /dev/net/tun — userspace AmneziaWG не поднимется; поставьте компонент «WireGuard VPN»"
+        else
+            ensure_feed
+            feed_curl_install "$AWGGO_PKG" || kerr="$AWGGO_PKG не установился из фида Detour"
+        fi
+        [ -x /opt/sbin/detour-server ] && /opt/sbin/detour-server start >/dev/null 2>&1
+        [ -z "$kerr" ] || die "$kerr"
+        log "VPN-сервер: компоненты готовы"
+        return 0
+    fi
     log "$PKGM update + install ip-full kmod-amneziawg amneziawg-tools..."
     opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
     # ip-full — для входа VLESS (ip netns; у busybox ip его нет). Независим от

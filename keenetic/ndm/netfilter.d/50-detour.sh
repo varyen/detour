@@ -43,6 +43,18 @@ vpn_ifaces() {
 
 TYPE="${1:-$type}"     # iptables | ip6tables
 
+# Свой VPN-сервер: порт с WAN, доступ клиентов к роутеру и NAT наружу. Раньше
+# проверки power.off — «Полная остановка» сервер не гасит (доступ к дому).
+[ "$TYPE" != ip6tables ] && [ -x /opt/sbin/detour-server ] && /opt/sbin/detour-server fw >/dev/null 2>&1
+
+# Ключ устройства: MAC (LAN) или IPv4-адрес клиента своего VPN-сервера.
+device_match() {
+    case "$1" in
+        *.*) echo "-s $1" ;;
+        *) echo "-m mac --mac-source $1" ;;
+    esac
+}
+
 # Панель остановлена целиком (detour-power off): снимаем всё своё и оставляем
 # только доступ к самой панели — иначе её не включить обратно.
 if [ -f /opt/etc/detour/power.off ]; then
@@ -69,7 +81,7 @@ if [ "$TYPE" = "ip6tables" ]; then
     ip6tables -S FORWARD 2>/dev/null | grep -- '--mac-source .* -m comment --comment detour-dev' | \
         sed 's/^-A/-D/' | while IFS= read -r rule; do ip6tables $rule 2>/dev/null; done
     if [ -f /opt/etc/detour/singbox.enabled ] && [ -s /opt/etc/sing-box/devices.map ]; then
-        awk '$2 == "direct" { print $1 }' /opt/etc/sing-box/devices.map | while read -r mac; do
+        awk '$2 == "direct" && $1 !~ /\./ { print $1 }' /opt/etc/sing-box/devices.map | while read -r mac; do
             ip6tables -I FORWARD 1 -m mac --mac-source "$mac" -m comment --comment detour-dev -j ACCEPT 2>/dev/null
         done
     fi
@@ -407,7 +419,7 @@ if [ -f /opt/etc/detour/singbox.enabled ] && [ -s "$DEV_MAP" ]; then
             fi
         fi
         iptables -t nat -A "$c" -j ACCEPT
-        iptables -t nat -A SINGBOX_DEVICES -m mac --mac-source "$mac" -j "$c"
+        iptables -t nat -A SINGBOX_DEVICES $(device_match "$mac") -j "$c"
     done < "$DEV_MAP"
     for IF in $IFACES; do
         [ -n "$IF" ] || continue
@@ -528,17 +540,17 @@ if [ -n "$TP_STATUS" ]; then
         while read -r mac dmode port uport; do
             [ -n "$mac" ] || continue
             if [ "$dmode" = direct ]; then
-                iptables -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -j RETURN
+                iptables -t mangle -A "$UDP_VPN_CHAIN" $(device_match "$mac") -j RETURN
             elif [ -n "$uport" ] && [ "$uport" != 0 ]; then
                 DTP="-j TPROXY --on-ip 127.0.0.1 --on-port $uport --tproxy-mark $UDP_VPN_MARK/$UDP_VPN_MARK"
                 if [ "$UDP_MODE" = all ]; then
-                    iptables -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -p udp --dport 53 -j RETURN
-                    iptables -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -m set --match-set "$WL_IPSET" dst -j RETURN
-                    $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -p udp $DTP
+                    iptables -t mangle -A "$UDP_VPN_CHAIN" $(device_match "$mac") -p udp --dport 53 -j RETURN
+                    iptables -t mangle -A "$UDP_VPN_CHAIN" $(device_match "$mac") -m set --match-set "$WL_IPSET" dst -j RETURN
+                    $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" $(device_match "$mac") -p udp $DTP
                 else
-                    $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -p udp \
+                    $IPT_TP -t mangle -A "$UDP_VPN_CHAIN" $(device_match "$mac") -p udp \
                         -m set --match-set "$UDP_VPN_IPSET" dst $DTP
-                    iptables -t mangle -A "$UDP_VPN_CHAIN" -m mac --mac-source "$mac" -j RETURN
+                    iptables -t mangle -A "$UDP_VPN_CHAIN" $(device_match "$mac") -j RETURN
                 fi
             fi
         done < "$DEV_MAP"
