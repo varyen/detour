@@ -102,6 +102,17 @@ sing-box работает в режиме TUN. Файлы лежат в том �
 покажут предупреждение. Подробности об устройстве клиента — в
 [`client/README.md`](client/README.md).
 
+### Detour Home Auto — VPN на телефоне до своего роутера
+
+[Detour Home Auto](https://github.com/varyen/detour-home-auto) — отдельное
+приложение-спутник для Android (и экспериментально iOS). Оно само выключает VPN
+в домашней Wi-Fi и включает во всех остальных сетях, чтобы вне дома телефон
+ходил через ваш роутер с Detour. Профиль берётся прямо из панели: «Сервисы» → «Свой
+VPN-сервер» → клиент → QR-код AmneziaWG или VLESS сканируется кнопкой
+«Сканировать QR-код»; подходят и `.conf`, и ссылки `vless://`. Внутри — ядро
+mihomo: WireGuard, AmneziaWG, VLESS (Reality, ws, xhttp), Trojan, Shadowsocks,
+Hysteria2. APK — в [релизах](https://github.com/varyen/detour-home-auto/releases/latest).
+
 ## Что это
 
 Detour — самохостируемая система обхода блокировок для роутеров GL.iNet
