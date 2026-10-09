@@ -4,7 +4,7 @@
 #   wget -qO- https://raw.githubusercontent.com/varyen/detour/main/keenetic/test-server-live.sh | sh -s -- setup
 #   wget -qO- https://raw.githubusercontent.com/varyen/detour/main/keenetic/test-server-live.sh | sh -s -- cleanup
 #
-# setup: кладёт новые detour-server, detour-update и netfilter-хук из ветки
+# setup: кладёт detour-server, detour-update и netfilter-хук из ветки
 # main поверх установленной панели (старые — в /opt/var/detour-srvtest), ставит
 # ip-full, включает сервер (AmneziaWG + VLESS) и заводит клиента srvtest.
 # Печатает его конфиг и ссылку — их нужно прислать целиком, по ним к роутеру
@@ -65,7 +65,9 @@ setup)
     iptables -S INPUT 2>/dev/null | head -6 | sed 's/^/    /'
 
     hdr "4. Прислать целиком (одноразовый тестовый клиент)"
-    echo "AWG-CONF-B64: $("$SRV" client-conf "$ID" | base64 | tr -d '\n')"
+    echo "----- AWG-CONF -----"
+    "$SRV" client-conf "$ID"
+    echo "----- /AWG-CONF -----"
     echo "VLESS-LINK: $("$SRV" client-link "$ID")"
 
     hdr "5. Журнал сервера"
