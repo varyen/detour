@@ -14,3 +14,6 @@ require (
 	golang.org/x/net v0.41.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 )
+
+// Невыровненное чтение ifreq в tun_linux.go падает SIGBUS на MIPS — см. third_party/README.md.
+replace github.com/amnezia-vpn/amneziawg-go => ./third_party/amneziawg-go
