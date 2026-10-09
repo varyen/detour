@@ -265,7 +265,7 @@ footer .logo svg{width:20px;height:20px}
       <a class="btn" href="#router">Поставить на роутер</a>
     </div>
     <dl class="spec">
-      <dt>версия</dt><dd>2.8.1 · MIT · открытый код</dd>
+      <dt>версия</dt><dd>2.8.2 · MIT · открытый код</dd>
       <dt>приложение</dt><dd>Windows · macOS · Android</dd>
       <dt>роутер</dt><dd>OpenWrt / GL.iNet · OpenWrt 25.12+ · Keenetic</dd>
       <dt>сервер</dt><dd>Linux VPS (Docker) · AmneziaWG · VLESS-Reality</dd>
@@ -492,9 +492,9 @@ footer .logo svg{width:20px;height:20px}
   <h2>На роутер или VPS: один пакет, дальше всё само</h2>
   <p>Пакет ставит панель, прописывает фид проекта и сам подтягивает движки sing-box и tpws. Выберите файл под свою прошивку. На обычном Linux-сервере тот же пакет работает в контейнере с настоящим OpenWrt.</p>
   <div class="plat">
-    <div><h3>OpenWrt / GL.iNet</h3><p>OpenWrt до 24.10 и прошивки GL.iNet — пакет <code>detour_2.8.1_all.ipk</code>. Референс — GL-BE9300 (Flint 3), проверялось на GL-MT6000 (Flint 2).</p></div>
-    <div><h3>OpenWrt 25.12+</h3><p>Там вместо opkg пакетный менеджер apk — пакет <code>detour_2.8.1_noarch.apk</code>. Движки обхода DPI собраны под шесть семейств процессоров.</p></div>
-    <div><h3>Keenetic / Entware</h3><p>Пакет <code>detour-keenetic_2.8.1_all.ipk</code>. Нет nftables и NFQUEUE — часть механик сделана иначе, часть возможностей на живом устройстве ещё не проверена. Свой VPN-сервер — на встроенном WireGuard KeeneticOS (компонент «WireGuard VPN»).</p></div>
+    <div><h3>OpenWrt / GL.iNet</h3><p>OpenWrt до 24.10 и прошивки GL.iNet — пакет <code>detour_2.8.2_all.ipk</code>. Референс — GL-BE9300 (Flint 3), проверялось на GL-MT6000 (Flint 2).</p></div>
+    <div><h3>OpenWrt 25.12+</h3><p>Там вместо opkg пакетный менеджер apk — пакет <code>detour_2.8.2_noarch.apk</code>. Движки обхода DPI собраны под шесть семейств процессоров.</p></div>
+    <div><h3>Keenetic / Entware</h3><p>Пакет <code>detour-keenetic_2.8.2_all.ipk</code>. Нет nftables и NFQUEUE — часть механик сделана иначе, часть возможностей на живом устройстве ещё не проверена. Свой VPN-сервер — на встроенном WireGuard KeeneticOS (компонент «WireGuard VPN»).</p></div>
     <div><h3>Linux-сервер</h3><p>Любой VPS с Docker, x86_64 или arm64: <code>install.sh</code> собирает образ с OpenWrt 25.12 и Detour и публикует порты VPN-сервера. Файрвол хоста не трогается, панель — через SSH-туннель.</p></div>
   </div>
   <div class="steps">
@@ -503,14 +503,14 @@ footer .logo svg{width:20px;height:20px}
     <div><h3>Открыть панель</h3><p>http://192.168.8.1:8080/detour/ (адрес вашего роутера), придумать логин и пароль. Дальше всё мышкой, обновления — кнопкой в шапке.</p></div>
   </div>
 <pre><b># OpenWrt / GL.iNet (opkg)</b>
-scp detour_2.8.1_all.ipk root@192.168.8.1:/tmp/
-ssh root@192.168.8.1 'opkg install /tmp/detour_2.8.1_all.ipk'
+scp detour_2.8.2_all.ipk root@192.168.8.1:/tmp/
+ssh root@192.168.8.1 'opkg install /tmp/detour_2.8.2_all.ipk'
 
 <b># OpenWrt 25.12+ (apk)</b>
-apk add --allow-untrusted /tmp/detour_2.8.1_noarch.apk
+apk add --allow-untrusted /tmp/detour_2.8.2_noarch.apk
 
 <b># Keenetic / Entware (Entware смонтирован в /opt)</b>
-opkg install /tmp/detour-keenetic_2.8.1_all.ipk
+opkg install /tmp/detour-keenetic_2.8.2_all.ipk
 
 <b># Linux-сервер (Docker, root)</b>
 git clone https://github.com/varyen/detour
