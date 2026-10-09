@@ -1,0 +1,60 @@
+Package: detour-awg-go
+Version: 1.0.1-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 4260031
+Description: Userspace AmneziaWG (amneziawg-go + awg subset) for the Detour VPN server. Keenetic/Entware (mipsel soft-float). (1.0.1-1)
+Filename: detour-awg-go_1.0.1-1_all.ipk
+Size: 1542822
+MD5Sum: fab39ec9d052138bf447e00b4748f3dd
+SHA256sum: 531efee99394896a588b131657061b41285131defe65cc2ba976d3c2ad25321c
+
+Package: mihomo
+Version: 1.19.32-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 63701149
+Description: mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar for AmneziaWG profiles (sing-box has no AmneziaWG). Keenetic/Entware (mipsel soft-float). (1.19.32-1)
+Filename: mihomo_1.19.32-1_all.ipk
+Size: 20120404
+MD5Sum: 666d45142ba97fda6adc4c8cf59ad3c5
+SHA256sum: 0cb4857a1539157176e0ed35178a75528968f54f3261c7c3623163ed0f315261
+
+Package: sing-box
+Version: 1.14.3-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 102215296
+Description: sing-box universal proxy platform. Detour feed build for Keenetic/Entware (mipsel soft-float, musl-static). (1.14.3-1)
+Filename: sing-box_1.14.3-1_all.ipk
+Size: 29648439
+MD5Sum: cea4d8d391b81d37fbeabe3719a5edfb
+SHA256sum: ce0c4391a618677d2233a80a045a8e1cf005998a0a3890ebf9de9bd251c21df5
+
+Package: tpws-zapret
+Version: 72.13-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 127024
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build for Keenetic/Entware (mipsel). (72.13-1)
+Filename: tpws-zapret_72.13-1_all.ipk
+Size: 126777
+MD5Sum: 314e24a267b97be11f01da730c7edea2
+SHA256sum: 62a162cb9ee242336f2109eb3e139e8350e8ba27ffd3021e5df8c26faff15c8a
+
