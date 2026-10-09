@@ -9,6 +9,10 @@ import type {
   PortmapEntry,
   PortmapStatus,
   PushConfig,
+  ServerClientMode,
+  ServerSession,
+  ServerSettingsPatch,
+  ServerStatus,
   SwapStatus,
   WanpinMode,
   WanpinStatus,
@@ -45,6 +49,33 @@ export const services = {
       "portmap_check_external",
       { body: { id }, timeoutMs: 60_000 },
     ),
+
+  /* --- свой VPN-сервер (AmneziaWG) --- */
+  serverStatus: () => requestJsonTolerant<ServerStatus>("server_status"),
+  /** Ставит kmod-amneziawg из фида прошивки; отсоединено, следить через applyLog. */
+  serverInstall: () => requestJson<{ ok: boolean }>("server_install", { method: "POST" }),
+  serverSet: (patch: ServerSettingsPatch) =>
+    requestJson<{ ok: boolean }>("server_set", { body: patch, timeoutMs: 120_000 }),
+  serverClientAdd: (name: string, mode: ServerClientMode) =>
+    requestJson<{ ok: boolean; id: string }>("server_client_add", {
+      body: { name, mode },
+      timeoutMs: 120_000,
+    }),
+  serverClientSet: (
+    id: string,
+    patch: { name?: string; mode?: ServerClientMode; enabled?: boolean },
+  ) => requestJson<{ ok: boolean }>("server_client_set", { body: { id, ...patch } }),
+  serverClientDel: (id: string) =>
+    requestJson<{ ok: boolean }>("server_client_del", { body: { id } }),
+  /** Конфиг несёт приватный ключ клиента — только POST. */
+  serverClientConf: (id: string) =>
+    requestJson<{ ok: boolean; conf: string }>("server_client_conf", { body: { id } }),
+  serverRegen: () =>
+    requestJson<{ ok: boolean }>("server_regen", { method: "POST", timeoutMs: 120_000 }),
+  serverSessions: (id?: string) =>
+    requestJson<{ ok: boolean; sessions: ServerSession[] }>("server_sessions", {
+      params: id ? { id } : undefined,
+    }),
 
   /* --- сертификат Let's Encrypt --- */
   certDetect: () => requestJsonTolerant<Record<string, unknown>>("cert_detect"),

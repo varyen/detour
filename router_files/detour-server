@@ -1,0 +1,751 @@
+#!/bin/sh
+# Detour — свой VPN-сервер на роутере: AmneziaWG, клиенты получают маршруты роутера.
+#
+#   detour-server status                 — JSON: поддержка, состояние, клиенты
+#   detour-server start | stop | apply   — поднять / погасить / пересобрать
+#   detour-server set КЛЮЧ=ЗНАЧ…         — enabled port net endpoint dns mtu
+#   detour-server client-add <имя> [full|lan]
+#   detour-server client-set <id> КЛЮЧ=ЗНАЧ…   — name mode enabled
+#   detour-server client-del <id>
+#   detour-server client-conf <id>       — .conf для приложения AmneziaWG/AmneziaVPN
+#   detour-server regen-obf              — новые параметры обфускации (все клиенты
+#                                          должны заново импортировать конфиг)
+#
+# Маршрутизация. Интерфейс сервера ($IFACE) кладётся в "vpn_redirect_ifaces"
+# settings.json — тот же механизм, что и для WG-сервера GL: sing-box, zapret,
+# «Отдельные маршруты», запрет торрентов вешают на него те же правила, что на
+# br-lan. Из списка он больше не убирается: правила на несуществующий интерфейс
+# ничего не ловят, а снятие потребовало бы снимать их до правки списка (стоп
+# sing-box перебирает ТЕКУЩИЙ список).
+#
+# Ядро. На GL.iNet kmod-amneziawg + amneziawg-tools лежат в штатном фиде
+# прошивки (AWG 2.0). На чистой OpenWrt этого модуля в фидах нет, на Keenetic —
+# своя подсистема; там сервер честно сообщает «не поддерживается».
+#
+# Хранение: $DIR/server.conf (shell KEY=VAL) и $DIR/clients.list:
+#   id|enabled|name|octet|pubkey|privkey|psk|mode|created
+# Приватный ключ клиента хранится, чтобы конфиг/QR можно было показать повторно
+# (так же делает GL). Каталог 0700, под /etc/detour → keeplist sysupgrade.
+
+IFACE=dsrv0
+ZONE=detour_srv
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    KEENETIC=1
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DIR=/opt/etc/detour/server
+    SETTINGS=/opt/etc/sing-box/settings.json
+    RUN=/opt/var/run
+    LOG=/opt/var/log/detour-server.log
+    LAN_IF=br0
+    WANPIN_BIN=/opt/sbin/detour-wanpin
+    CERT_CONF=/opt/etc/detour/cert.conf
+else
+    KEENETIC=0
+    DIR=/etc/detour/server
+    SETTINGS=/etc/sing-box/settings.json
+    RUN=/var/run
+    LOG=/var/log/detour-server.log
+    LAN_IF=br-lan
+    WANPIN_BIN=/usr/sbin/detour-wanpin
+    CERT_CONF=/etc/detour/cert.conf
+fi
+CONF="$DIR/server.conf"
+CLIENTS="$DIR/clients.list"
+RENDER="$RUN/detour-server.conf"
+LOCK="$RUN/detour-server.lock"
+# Статистика. Рабочая копия — в RAM (tick раз в минуту), на флеш — раз в
+# $FLUSH_MIN минут и на каждом событии сессии, чтобы не изнашивать флеш.
+#   traffic: id|lrx|ltx|trx|ttx|mon|mrx|mtx|day|drx|dtx|online|sstart|srx|stx|seen|remote
+#   (lrx/ltx — последние показания счётчиков ядра; rx — от клиента, tx — к клиенту)
+#   sessions.log: id|start|end|rx|tx|remote — последние $SESS_KEEP сессий
+TRAFFIC="$DIR/traffic"
+SESSIONS="$DIR/sessions.log"
+STATS_RAM="$RUN/detour-server.traffic"
+ONLINE_SEC=180
+FLUSH_MIN=30
+SESS_KEEP=500
+
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+json_esc() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\000-\037'
+}
+
+err() { printf '{"ok":false,"error":"%s"}\n' "$(json_esc "$1")"; exit 0; }
+
+lock() {
+    mkdir -p "$RUN"
+    i=0
+    while ! mkdir "$LOCK" 2>/dev/null; do
+        i=$((i + 1))
+        # Брошенный замок (процесс убит) — не вечная блокировка.
+        [ "$i" -ge 30 ] && { rm -rf "$LOCK"; continue; }
+        sleep 1
+    done
+    trap 'rm -rf "$LOCK"' EXIT INT TERM
+}
+
+# ---------- поддержка платформы ----------
+
+# Пустой вывод = поддерживается; иначе причина.
+unsupported_reason() {
+    if [ "$KEENETIC" = 1 ]; then
+        echo "На Keenetic сервер пока не поддерживается"
+        return
+    fi
+    command -v awg >/dev/null 2>&1 || { echo "not_installed"; return; }
+    [ -n "$(backend)" ] || echo "not_installed"
+}
+
+# kernel — модуль amneziawg (GL.iNet); userspace — amneziawg-go на /dev/net/tun
+# (Detour в контейнере на обычном Linux-сервере, где модуля в ядре хоста нет).
+backend() {
+    if lsmod 2>/dev/null | grep -q '^amneziawg ' || modprobe amneziawg 2>/dev/null; then
+        echo kernel
+    elif command -v amneziawg-go >/dev/null 2>&1 && [ -c /dev/net/tun ]; then
+        echo userspace
+    fi
+}
+
+# Есть ли пакеты в доступных фидах (для кнопки «Установить»).
+installable() {
+    [ "$KEENETIC" = 1 ] && return 1
+    if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; then
+        apk search -e kmod-amneziawg 2>/dev/null | grep -q .
+    else
+        opkg list kmod-amneziawg 2>/dev/null | grep -q .
+    fi
+}
+
+# ---------- конфиг ----------
+
+rand_u32() {
+    hexdump -n 4 -v -e '/4 "%u"' /dev/urandom 2>/dev/null || \
+        od -An -N4 -tu4 /dev/urandom | tr -d ' '
+}
+
+rand_range() {  # $1 min $2 max
+    r=$(rand_u32)
+    echo $(( $1 + r % ($2 - $1 + 1) ))
+}
+
+port_busy() {
+    netstat -lnu 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" { f = 1 } END { exit !f }'
+}
+
+gen_obf() {
+    JC=$(rand_range 4 10)
+    JMIN=$(rand_range 40 80)
+    JMAX=$(rand_range 300 800)
+    S1=$(rand_range 15 120)
+    # S1 + 56 == S2 делает init и response одной длины — запрещено протоколом.
+    while :; do
+        S2=$(rand_range 15 120)
+        [ $((S1 + 56)) -ne "$S2" ] && [ "$S1" -ne "$S2" ] && break
+    done
+    # H1..H4 различны и не попадают в 1..4 (типы сообщений обычного WireGuard).
+    H1=$(rand_range 5 2147483647)
+    while :; do H2=$(rand_range 5 2147483647); [ "$H2" != "$H1" ] && break; done
+    while :; do H3=$(rand_range 5 2147483647); [ "$H3" != "$H1" ] && [ "$H3" != "$H2" ] && break; done
+    while :; do H4=$(rand_range 5 2147483647); [ "$H4" != "$H1" ] && [ "$H4" != "$H2" ] && [ "$H4" != "$H3" ] && break; done
+}
+
+save_conf() {
+    umask 077
+    cat > "$CONF.tmp" <<EOF
+ENABLED=$ENABLED
+PORT=$PORT
+NET=$NET
+ENDPOINT=$ENDPOINT
+DNS=$DNS
+MTU=$MTU
+PRIVKEY=$PRIVKEY
+PUBKEY=$PUBKEY
+JC=$JC
+JMIN=$JMIN
+JMAX=$JMAX
+S1=$S1
+S2=$S2
+H1=$H1
+H2=$H2
+H3=$H3
+H4=$H4
+EOF
+    mv "$CONF.tmp" "$CONF"
+}
+
+# Свободная /24 из 10.66–10.99, не пересекающаяся с маршрутами роутера.
+pick_net() {
+    for b in 66 67 68 69 77 88 99; do
+        ip -4 route 2>/dev/null | grep -q "^10\.$b\." && continue
+        ip -4 addr 2>/dev/null | grep -q "inet 10\.$b\." && continue
+        echo "10.$b.0"; return
+    done
+    echo "10.66.0"
+}
+
+load_conf() {
+    ENABLED=0; PORT=""; NET=""; ENDPOINT=""; DNS=""; MTU=""
+    PRIVKEY=""; PUBKEY=""
+    [ -f "$CONF" ] && . "$CONF"
+}
+
+# Первичная инициализация: ключи, порт, подсеть, обфускация. Требует awg.
+ensure_conf() {
+    load_conf
+    r=$(unsupported_reason)
+    case "$r" in
+        '') ;;
+        not_installed) err "AmneziaWG не установлен — сначала установите его в панели" ;;
+        *) err "$r" ;;
+    esac
+    [ -n "$PRIVKEY" ] && return 0
+    mkdir -p "$DIR"; chmod 700 "$DIR"
+    PRIVKEY=$(awg genkey) || err "awg genkey не сработал"
+    PUBKEY=$(printf '%s' "$PRIVKEY" | awg pubkey)
+    # Detour в контейнере (linux/): порт обязан совпасть с опубликованным, а
+    # адрес — быть внешним адресом хоста. Их кладёт стартовый скрипт контейнера.
+    DEF_PORT=""; DEF_ENDPOINT=""
+    [ -f "$DIR/defaults" ] && . "$DIR/defaults"
+    case "$DEF_PORT" in ''|*[!0-9]*) DEF_PORT="" ;; esac
+    if [ -n "$DEF_PORT" ]; then
+        PORT=$DEF_PORT
+    else
+        while :; do
+            PORT=$(rand_range 20000 60000)
+            port_busy "$PORT" || break
+        done
+    fi
+    valid_ipv4_host "$DEF_ENDPOINT" && ENDPOINT=$DEF_ENDPOINT
+    NET=$(pick_net)
+    MTU=1376
+    gen_obf
+    ENABLED=0
+    save_conf
+    : > "$CLIENTS"; chmod 600 "$CLIENTS"
+    log "init: port=$PORT net=$NET.0/24"
+}
+
+server_ip() { echo "$NET.1"; }
+
+lan_cidr() {
+    ip -4 -o addr show "$LAN_IF" 2>/dev/null | awk '{ print $4; exit }' | \
+        awk -F'[./]' 'NF == 5 {
+            m = $5; n = ($1 * 16777216) + ($2 * 65536) + ($3 * 256) + $4
+            s = 2 ^ (32 - m); n = int(n / s) * s
+            printf "%d.%d.%d.%d/%d\n", int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256, m
+        }'
+}
+
+wan_ip() {
+    _ip=$([ -x "$WANPIN_BIN" ] && "$WANPIN_BIN" public-ip 2>/dev/null)
+    case "$_ip" in ''|*[!0-9.]*) _ip="" ;; esac
+    [ -n "$_ip" ] || _ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -1)
+    printf '%s' "$_ip"
+}
+
+# Серый адрес — снаружи до него не достучаться (нужен белый IP или проброс).
+ip_private() {
+    case "$1" in
+        10.*|192.168.*|127.*|169.254.*) return 0 ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+        100.*)
+            o=$(echo "$1" | cut -d. -f2)
+            [ "$o" -ge 64 ] && [ "$o" -le 127 ] && return 0 ;;
+    esac
+    return 1
+}
+
+panel_domain() {
+    [ -f "$CERT_CONF" ] && ( . "$CERT_CONF" 2>/dev/null; printf '%s' "${DOMAIN#\*.}" )
+}
+
+endpoint_host() {
+    if [ -n "$ENDPOINT" ]; then printf '%s' "$ENDPOINT"; else wan_ip; fi
+}
+
+# ---------- клиенты ----------
+
+new_id() {
+    hexdump -n 4 -v -e '/1 "%02x"' /dev/urandom 2>/dev/null || \
+        od -An -N4 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+clean_name() {
+    printf '%s' "$1" | tr -d '|"\\\000-\037' | cut -c1-48
+}
+
+free_octet() {
+    o=2
+    while [ "$o" -le 254 ]; do
+        awk -F'|' -v o="$o" '$4 == o { f = 1 } END { exit !f }' "$CLIENTS" 2>/dev/null || { echo "$o"; return; }
+        o=$((o + 1))
+    done
+}
+
+client_line() { awk -F'|' -v id="$1" '$1 == id' "$CLIENTS" 2>/dev/null | head -1; }
+
+# ---------- применение ----------
+
+render() {
+    umask 077
+    {
+        printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n' "$PRIVKEY" "$PORT"
+        printf 'Jc = %s\nJmin = %s\nJmax = %s\nS1 = %s\nS2 = %s\n' "$JC" "$JMIN" "$JMAX" "$S1" "$S2"
+        printf 'H1 = %s\nH2 = %s\nH3 = %s\nH4 = %s\n' "$H1" "$H2" "$H3" "$H4"
+        awk -F'|' -v net="$NET" '$2 == 1 {
+            printf "\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s.%s/32\n", $5, $7, net, $4
+        }' "$CLIENTS" 2>/dev/null
+    } > "$RENDER"
+}
+
+redirect_has_iface() {
+    sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | \
+        tr ', ' '\n\n' | grep -qx "$IFACE"
+}
+
+# Добавить интерфейс в vpn_redirect_ifaces и перевесить правила перехвата.
+redirect_attach() {
+    [ -f "$SETTINGS" ] || return 0
+    redirect_has_iface && return 0
+    if grep -q '"vpn_redirect_ifaces"' "$SETTINGS"; then
+        cur=$(sed -n 's/.*"vpn_redirect_ifaces"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" | head -1)
+        new=$(echo "$cur $IFACE" | tr ',' ' ' | awk '{ $1 = $1; print }')
+        sed -i "s/\(\"vpn_redirect_ifaces\"[[:space:]]*:[[:space:]]*\"\)[^\"]*\"/\1$new\"/" "$SETTINGS"
+    else
+        awk -v i="$IFACE" '!d && /\{/ { sub(/\{/, "{\n  \"vpn_redirect_ifaces\": \"" i "\","); d = 1 } { print }' \
+            "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+    fi
+    redirect_has_iface || { log "не удалось вписать $IFACE в $SETTINGS"; return 1; }
+    log "vpn_redirect_ifaces += $IFACE, перевешиваю перехват"
+    # reconfigure — отказоустойчивый перезапуск (правила LAN не снимаются).
+    if [ -x /etc/init.d/sing-box ] && /etc/init.d/sing-box running >/dev/null 2>&1; then
+        /etc/init.d/sing-box reconfigure >/dev/null 2>&1
+    fi
+    if [ -x /usr/sbin/detour-bypass ]; then
+        m=$(/usr/sbin/detour-bypass mode 2>/dev/null)
+        [ -n "$m" ] && [ "$m" != off ] && /usr/sbin/detour-bypass set "$m" >/dev/null 2>&1
+    fi
+    return 0
+}
+
+# Зона файрвола + вход с WAN на порт. Пишем uci только при расхождении, чтобы
+# не дёргать reload firewall на каждом apply.
+fw_apply() {
+    changed=0
+    want() {  # $1 key  $2 value
+        [ "$(uci -q get "firewall.$1")" = "$2" ] && return
+        uci -q set "firewall.$1=$2"; changed=1
+    }
+    want "$ZONE" zone
+    want "$ZONE.name" "$ZONE"
+    if [ "$(uci -q get "firewall.$ZONE.device")" != "$IFACE" ]; then
+        uci -q delete "firewall.$ZONE.device"
+        uci -q add_list "firewall.$ZONE.device=$IFACE"
+        changed=1
+    fi
+    want "$ZONE.input" ACCEPT
+    want "$ZONE.output" ACCEPT
+    want "$ZONE.forward" REJECT
+    want "$ZONE.mtu_fix" 1
+    want "${ZONE}_wan" forwarding
+    want "${ZONE}_wan.src" "$ZONE"
+    want "${ZONE}_wan.dest" wan
+    want "${ZONE}_lan" forwarding
+    want "${ZONE}_lan.src" "$ZONE"
+    want "${ZONE}_lan.dest" lan
+    want "${ZONE}_in" rule
+    want "${ZONE}_in.name" detour-server
+    want "${ZONE}_in.src" wan
+    want "${ZONE}_in.proto" udp
+    want "${ZONE}_in.dest_port" "$PORT"
+    want "${ZONE}_in.target" ACCEPT
+    want "${ZONE}_in.enabled" "$ENABLED"
+    if [ "$changed" = 1 ]; then
+        uci commit firewall
+        /etc/init.d/firewall reload >/dev/null 2>&1
+        log "firewall: зона $ZONE обновлена (порт $PORT, enabled=$ENABLED)"
+    fi
+}
+
+fw_remove() {
+    uci -q get "firewall.$ZONE" >/dev/null || return 0
+    uci -q delete "firewall.$ZONE"
+    uci -q delete "firewall.${ZONE}_wan"
+    uci -q delete "firewall.${ZONE}_lan"
+    uci -q delete "firewall.${ZONE}_in"
+    uci commit firewall
+    /etc/init.d/firewall reload >/dev/null 2>&1
+}
+
+iface_up() { ip link show "$IFACE" >/dev/null 2>&1; }
+
+do_stop() {
+    iface_up && ip link del "$IFACE" 2>/dev/null
+    rm -f "$RENDER"
+    [ "$KEENETIC" = 0 ] && [ -f "$CONF" ] && { load_conf; ENABLED=0; fw_apply; }
+}
+
+do_apply() {
+    load_conf
+    if [ "$ENABLED" != 1 ] || [ -z "$PRIVKEY" ]; then
+        do_stop
+        return 0
+    fi
+    r=$(unsupported_reason)
+    [ -z "$r" ] || { log "apply: $r"; return 1; }
+    render
+    if ! iface_up; then
+        if [ "$(backend)" = kernel ]; then
+            ip link add "$IFACE" type amneziawg || { log "ip link add $IFACE не удался"; return 1; }
+        else
+            # Демонизируется сам; интерфейс удалили — процесс выходит.
+            amneziawg-go "$IFACE" >>"$LOG" 2>&1 || { log "amneziawg-go не запустился"; return 1; }
+            i=0
+            while [ ! -S "/var/run/amneziawg/$IFACE.sock" ] && [ "$i" -lt 30 ]; do sleep 0.2; i=$((i + 1)); done
+        fi
+        awg setconf "$IFACE" "$RENDER" || { log "awg setconf не удался"; ip link del "$IFACE"; return 1; }
+    else
+        # syncconf не рвёт сессии подключённых клиентов.
+        awg syncconf "$IFACE" "$RENDER" 2>/dev/null || awg setconf "$IFACE" "$RENDER" || return 1
+    fi
+    ip addr replace "$(server_ip)/24" dev "$IFACE"
+    ip link set "$IFACE" mtu "${MTU:-1376}" up
+    fw_apply
+    redirect_attach
+    return 0
+}
+
+# ---------- статистика ----------
+
+# Снимок счётчиков ядра → накопительный трафик и сессии. Сброс счётчиков
+# (пересоздан интерфейс, перезагрузка) распознаётся по уменьшению: тогда
+# дельта = текущее значение.
+stats_tick() {
+    [ -f "$CLIENTS" ] || return 0
+    mkdir -p "$RUN"
+    [ -f "$STATS_RAM" ] || cp "$TRAFFIC" "$STATS_RAM" 2>/dev/null || : > "$STATS_RAM"
+    dump="$RUN/detour-server.dump"
+    if iface_up; then awg show "$IFACE" dump 2>/dev/null | tail -n +2 > "$dump"; else : > "$dump"; fi
+    now=$(date +%s)
+    ev="$RUN/detour-server.events"
+    : > "$ev"
+    awk -F'|' -v OFS='|' -v now="$now" -v on_sec="$ONLINE_SEC" \
+        -v mon="$(date +%Y%m)" -v day="$(date +%Y%m%d)" -v ev="$ev" '
+        FILENAME == ARGV[1] {
+            split($0, f, "\t")
+            rx[f[1]] = f[6]; tx[f[1]] = f[7]; hs[f[1]] = f[5]; ep[f[1]] = f[3]
+            next
+        }
+        FILENAME == ARGV[2] { if ($1 != "") { ids[++n] = $1; pk[$1] = $5 } next }
+        { T[$1] = $0 }
+        END {
+            for (i = 1; i <= n; i++) {
+                id = ids[i]; k = pk[id]
+                if (id in T) split(T[id], a, "|")
+                else { for (j = 1; j <= 17; j++) a[j] = 0; a[1] = id; a[17] = "" }
+                crx = rx[k] + 0; ctx = tx[k] + 0
+                drx = (crx < a[2]) ? crx : crx - a[2]
+                dtx = (ctx < a[3]) ? ctx : ctx - a[3]
+                a[2] = crx; a[3] = ctx
+                a[4] += drx; a[5] += dtx
+                if (a[6] != mon) { a[6] = mon; a[7] = 0; a[8] = 0 }
+                a[7] += drx; a[8] += dtx
+                if (a[9] != day) { a[9] = day; a[10] = 0; a[11] = 0 }
+                a[10] += drx; a[11] += dtx
+                h = hs[k] + 0
+                # Handshake обновляется лишь раз в 2 минуты; клиент шлёт keepalive
+                # каждые 25 с, так что рост счётчиков — точнее «последний раз в сети».
+                if (h > a[16]) a[16] = h
+                if (drx + dtx > 0 && now > a[16]) a[16] = now
+                if (ep[k] != "" && ep[k] != "(none)") a[17] = ep[k]
+                online = (h > 0 && now - h < on_sec) ? 1 : 0
+                if (online) {
+                    if (a[12] != 1) { a[13] = h; a[14] = 0; a[15] = 0; print "start" > ev }
+                    a[14] += drx; a[15] += dtx
+                } else if (a[12] == 1) {
+                    print id, a[13], a[16], a[14], a[15], a[17] > ev
+                    a[14] = 0; a[15] = 0
+                }
+                a[12] = online
+                line = a[1]
+                for (j = 2; j <= 17; j++) line = line "|" a[j]
+                print line
+            }
+        }' "$dump" "$CLIENTS" "$STATS_RAM" > "$STATS_RAM.tmp" && mv "$STATS_RAM.tmp" "$STATS_RAM"
+    rm -f "$dump"
+    flush=0
+    if grep -q '|' "$ev" 2>/dev/null; then
+        grep '|' "$ev" >> "$SESSIONS"
+        if [ "$(wc -l < "$SESSIONS")" -gt "$SESS_KEEP" ]; then
+            tail -n "$SESS_KEEP" "$SESSIONS" > "$SESSIONS.tmp" && mv "$SESSIONS.tmp" "$SESSIONS"
+        fi
+        flush=1
+    fi
+    [ -s "$ev" ] && flush=1
+    rm -f "$ev"
+    [ $(( $(date +%M | sed 's/^0//') % FLUSH_MIN )) -eq 0 ] && flush=1
+    [ "$flush" = 1 ] && stats_flush
+    return 0
+}
+
+stats_flush() {
+    [ -f "$STATS_RAM" ] || return 0
+    umask 077
+    cp "$STATS_RAM" "$TRAFFIC.tmp" && mv "$TRAFFIC.tmp" "$TRAFFIC"
+}
+
+stats_src() { if [ -f "$STATS_RAM" ]; then echo "$STATS_RAM"; elif [ -f "$TRAFFIC" ]; then echo "$TRAFFIC"; else echo /dev/null; fi; }
+
+sessions_json() {  # $1 — id клиента или пусто (все)
+    printf '{"ok":true,"sessions":['
+    [ -f "$SESSIONS" ] && awk -F'|' -v id="$1" '
+        id == "" || $1 == id { l[++n] = $0 }
+        END {
+            for (i = n; i >= 1 && n - i < 100; i--) {
+                split(l[i], a, "|")
+                printf "%s{\"id\":\"%s\",\"start\":%d,\"end\":%d,\"rx\":%d,\"tx\":%d,\"remote\":\"%s\"}",
+                    (i < n ? "," : ""), a[1], a[2], a[3], a[4], a[5], a[6]
+            }
+        }' "$SESSIONS"
+    printf ']}\n'
+}
+
+# ---------- выдача ----------
+
+client_conf() {
+    line=$(client_line "$1")
+    [ -n "$line" ] || return 1
+    octet=$(echo "$line" | cut -d'|' -f4)
+    priv=$(echo "$line" | cut -d'|' -f6)
+    psk=$(echo "$line" | cut -d'|' -f7)
+    mode=$(echo "$line" | cut -d'|' -f8)
+    if [ "$mode" = lan ]; then
+        allowed="$NET.0/24"
+        lc=$(lan_cidr); [ -n "$lc" ] && allowed="$allowed, $lc"
+    else
+        # ::/0 — чтобы IPv6 клиента не ушёл мимо туннеля (сервер его не везёт).
+        allowed="0.0.0.0/0, ::/0"
+    fi
+    host=$(endpoint_host)
+    printf '[Interface]\nPrivateKey = %s\nAddress = %s.%s/32\nDNS = %s\nMTU = %s\n' \
+        "$priv" "$NET" "$octet" "${DNS:-$(server_ip)}" "${MTU:-1376}"
+    printf 'Jc = %s\nJmin = %s\nJmax = %s\nS1 = %s\nS2 = %s\n' "$JC" "$JMIN" "$JMAX" "$S1" "$S2"
+    printf 'H1 = %s\nH2 = %s\nH3 = %s\nH4 = %s\n' "$H1" "$H2" "$H3" "$H4"
+    printf '\n[Peer]\nPublicKey = %s\nPresharedKey = %s\nAllowedIPs = %s\nEndpoint = %s:%s\nPersistentKeepalive = 25\n' \
+        "$PUBKEY" "$psk" "$allowed" "$host" "$PORT"
+}
+
+status_json() {
+    load_conf
+    reason=$(unsupported_reason)
+    supported=true; installed=true; can_install=false
+    if [ "$reason" = not_installed ]; then
+        installed=false; reason=""
+        if installable; then can_install=true; else
+            supported=false
+            reason="В фидах прошивки нет kmod-amneziawg — на этом роутере ядерный AmneziaWG недоступен"
+        fi
+    elif [ -n "$reason" ]; then
+        supported=false; installed=false
+    fi
+    running=false; iface_up && running=true
+    wip=$(wan_ip)
+    wpriv=false; [ -n "$wip" ] && ip_private "$wip" && wpriv=true
+    dom=$(panel_domain)
+    redir=false; redirect_has_iface && redir=true
+    printf '{"ok":true,"platform":"%s","supported":%s,"reason":"%s","installed":%s,"can_install":%s,"backend":"%s",' \
+        "$([ "$KEENETIC" = 1 ] && echo keenetic || echo openwrt)" "$supported" "$(json_esc "$reason")" "$installed" "$can_install" \
+        "$([ "$installed" = true ] && backend)"
+    printf '"configured":%s,"enabled":%s,"running":%s,"routed":%s,' \
+        "$([ -n "$PRIVKEY" ] && echo true || echo false)" "$([ "$ENABLED" = 1 ] && echo true || echo false)" "$running" "$redir"
+    printf '"iface":"%s","port":%s,"net":"%s","server_ip":"%s","endpoint":"%s","endpoint_effective":"%s",' \
+        "$IFACE" "${PORT:-0}" "${NET:+$NET.0/24}" "${NET:+$(server_ip)}" "$(json_esc "$ENDPOINT")" "$(json_esc "$(endpoint_host)")"
+    printf '"wan_ip":"%s","wan_private":%s,"panel_domain":"%s","dns":"%s","mtu":%s,"pubkey":"%s","clients":[' \
+        "$wip" "$wpriv" "$(json_esc "$dom")" "$(json_esc "$DNS")" "${MTU:-1376}" "$PUBKEY"
+    dump=""
+    [ "$running" = true ] && dump=$(awg show "$IFACE" dump 2>/dev/null | tail -n +2)
+    now=$(date +%s)
+    # rx/tx — живые счётчики ядра (скорость панель считает по их разнице между
+    # опросами); total/month/day/session — накопленное tick'ом (+ ещё не
+    # учтённая дельта, чтобы цифры не отставали на минуту).
+    [ -f "$CLIENTS" ] && printf '%s\n' "$dump" | awk -F'|' -v net="$NET" -v now="$now" -v on_sec="$ONLINE_SEC" \
+        -v mon="$(date +%Y%m)" -v day="$(date +%Y%m%d)" '
+        function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+        FILENAME == "-" {
+            split($0, f, "\t")
+            if (f[1] != "") { hs[f[1]] = f[5]; rx[f[1]] = f[6]; tx[f[1]] = f[7]; ep[f[1]] = f[3] }
+            next
+        }
+        FILENAME == ARGV[2] { S[$1] = $0; next }
+        {
+            k = $5; h = hs[k] + 0
+            for (j = 1; j <= 17; j++) a[j] = 0
+            a[17] = ""
+            if ($1 in S) split(S[$1], a, "|")
+            crx = rx[k] + 0; ctx = tx[k] + 0
+            drx = (crx < a[2]) ? crx : crx - a[2]
+            dtx = (ctx < a[3]) ? ctx : ctx - a[3]
+            if (!(k in rx)) { drx = 0; dtx = 0 }
+            mrx = (a[6] == mon ? a[7] : 0) + drx; mtx = (a[6] == mon ? a[8] : 0) + dtx
+            dyrx = (a[9] == day ? a[10] : 0) + drx; dytx = (a[9] == day ? a[11] : 0) + dtx
+            online = (h > 0 && now - h < on_sec) ? 1 : 0
+            seen = (h > a[16] + 0) ? h : a[16] + 0
+            sst = 0; srx = 0; stx = 0
+            if (online) {
+                if (a[12] == 1) { sst = a[13]; srx = a[14] + drx; stx = a[15] + dtx }
+                else { sst = h; srx = drx; stx = dtx }
+            }
+            rem = ep[k]; if (rem == "" || rem == "(none)") rem = a[17]
+            printf "%s{\"id\":\"%s\",\"enabled\":%s,\"name\":\"%s\",\"ip\":\"%s.%s\",\"mode\":\"%s\",\"created\":%d,",
+                (n++ ? "," : ""), $1, ($2 == 1 ? "true" : "false"), esc($3), net, $4, ($8 == "" ? "full" : $8), $9 + 0
+            printf "\"online\":%s,\"handshake\":%d,\"handshake_ago\":%d,\"last_seen\":%d,\"rx\":%.0f,\"tx\":%.0f,\"remote\":\"%s\",",
+                (online ? "true" : "false"), h, (h > 0 ? now - h : -1), seen, crx, ctx, rem
+            printf "\"session_start\":%d,\"session_rx\":%.0f,\"session_tx\":%.0f,", sst, srx, stx
+            printf "\"day_rx\":%.0f,\"day_tx\":%.0f,\"month_rx\":%.0f,\"month_tx\":%.0f,\"total_rx\":%.0f,\"total_tx\":%.0f}",
+                dyrx, dytx, mrx, mtx, a[4] + drx, a[5] + dtx
+        }' - "$(stats_src)" "$CLIENTS"
+    printf '],"now":%s}\n' "$now"
+}
+
+# ---------- команды ----------
+
+valid_ipv4_host() {
+    case "$1" in
+        *[!A-Za-z0-9.-]*|'') return 1 ;;
+    esac
+    return 0
+}
+
+cmd_set() {
+    ensure_conf
+    for kv in "$@"; do
+        k=${kv%%=*}; v=${kv#*=}
+        case "$k" in
+            enabled) case "$v" in 0|1) ENABLED=$v ;; *) err "enabled: 0 или 1" ;; esac ;;
+            port)
+                case "$v" in ''|*[!0-9]*) err "порт — число" ;; esac
+                [ "$v" -ge 1024 ] && [ "$v" -le 65535 ] || err "порт 1024–65535"
+                if [ "$v" != "$PORT" ] && port_busy "$v"; then err "UDP-порт $v уже занят"; fi
+                PORT=$v ;;
+            net)
+                v=${v%.0/24}; v=${v%.0}
+                echo "$v" | grep -qE '^10\.[0-9]{1,3}\.[0-9]{1,3}$|^192\.168\.[0-9]{1,3}$|^172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}$' || \
+                    err "подсеть: частная /24, например 10.66.0.0/24"
+                if [ "$v" != "$NET" ] && ip -4 route | grep -q "^$v\.0/"; then err "подсеть $v.0/24 уже занята"; fi
+                NET=$v ;;
+            endpoint)
+                [ -z "$v" ] || valid_ipv4_host "$v" || err "адрес: домен или IPv4"
+                ENDPOINT=$v ;;
+            dns)
+                [ -z "$v" ] || echo "$v" | grep -qE '^[0-9.]+$' || err "DNS: IPv4-адрес"
+                DNS=$v ;;
+            mtu)
+                case "$v" in ''|*[!0-9]*) err "MTU — число" ;; esac
+                [ "$v" -ge 1200 ] && [ "$v" -le 1500 ] || err "MTU 1200–1500"
+                MTU=$v ;;
+            *) err "неизвестный параметр: $k" ;;
+        esac
+    done
+    oldnet=$(sed -n 's/^NET=//p' "$CONF")
+    save_conf
+    # Смена подсети требует нового адреса на интерфейсе — проще пересоздать.
+    [ "$oldnet" != "$NET" ] && iface_up && ip link del "$IFACE"
+    do_apply || err "не удалось применить, см. $LOG"
+    log "set: $*"
+    echo '{"ok":true}'
+}
+
+cmd_client_add() {
+    ensure_conf
+    name=$(clean_name "$1"); [ -n "$name" ] || err "нужно имя клиента"
+    mode=${2:-full}; case "$mode" in full|lan) ;; *) err "режим: full или lan" ;; esac
+    octet=$(free_octet); [ -n "$octet" ] || err "в подсети нет свободных адресов"
+    id=$(new_id)
+    priv=$(awg genkey); pub=$(printf '%s' "$priv" | awg pubkey); psk=$(awg genpsk)
+    [ -n "$pub" ] && [ -n "$psk" ] || err "не удалось сгенерировать ключи"
+    umask 077
+    printf '%s|1|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$name" "$octet" "$pub" "$priv" "$psk" "$mode" "$(date +%s)" >> "$CLIENTS"
+    do_apply
+    log "client-add $id ($name) $NET.$octet $mode"
+    printf '{"ok":true,"id":"%s"}\n' "$id"
+}
+
+rewrite_client() {  # $1 id, остальное — awk-программа над полями
+    id=$1; prog=$2; shift 2
+    umask 077
+    awk -F'|' -v OFS='|' -v id="$id" "$@" "$prog" "$CLIENTS" > "$CLIENTS.tmp" && mv "$CLIENTS.tmp" "$CLIENTS"
+}
+
+cmd_client_set() {
+    load_conf
+    id=$1; shift
+    [ -n "$(client_line "$id")" ] || err "клиент не найден"
+    for kv in "$@"; do
+        k=${kv%%=*}; v=${kv#*=}
+        case "$k" in
+            name)
+                v=$(clean_name "$v"); [ -n "$v" ] || err "пустое имя"
+                rewrite_client "$id" '$1 == id { $3 = v } { print }' -v v="$v" ;;
+            mode)
+                case "$v" in full|lan) ;; *) err "режим: full или lan" ;; esac
+                rewrite_client "$id" '$1 == id { $8 = v } { print }' -v v="$v" ;;
+            enabled)
+                case "$v" in 0|1) ;; *) err "enabled: 0 или 1" ;; esac
+                rewrite_client "$id" '$1 == id { $2 = v } { print }' -v v="$v" ;;
+            *) err "неизвестный параметр: $k" ;;
+        esac
+    done
+    do_apply
+    log "client-set $id $*"
+    echo '{"ok":true}'
+}
+
+cmd_client_del() {
+    load_conf
+    [ -n "$(client_line "$1")" ] || err "клиент не найден"
+    rewrite_client "$1" '$1 != id { print }'
+    do_apply
+    log "client-del $1"
+    echo '{"ok":true}'
+}
+
+case "$1" in
+    status) status_json ;;
+    sessions) sessions_json "$2" ;;
+    tick)
+        # Сервер ни разу не настраивался — cron стоит на всех роутерах, выходим сразу.
+        [ -f "$CLIENTS" ] || exit 0
+        lock; load_conf
+        # Самолечение: интерфейс пропал (упал amneziawg-go, кто-то удалил) —
+        # поднимаем заново, иначе клиенты молча остались бы без сервера.
+        if [ "$ENABLED" = 1 ] && ! iface_up; then
+            log "tick: $IFACE нет при включённом сервере — поднимаю"
+            do_apply
+        fi
+        # settings.json появился позже сервера (свежая установка) или его
+        # переписали без нашего интерфейса — без этого клиенты шли бы мимо
+        # маршрутов роутера.
+        [ "$ENABLED" = 1 ] && redirect_attach
+        stats_tick ;;
+    start|apply) lock; do_apply; [ "$1" = apply ] && echo '{"ok":true}' ;;
+    stop) lock; load_conf; stats_tick; stats_flush; do_stop ;;
+    set) shift; lock; cmd_set "$@" ;;
+    client-add) shift; lock; cmd_client_add "$@" ;;
+    client-set) shift; lock; cmd_client_set "$@" ;;
+    client-del) lock; cmd_client_del "$2" ;;
+    client-conf)
+        load_conf
+        client_conf "$2" || { echo "клиент не найден" >&2; exit 1; } ;;
+    regen-obf)
+        lock; ensure_conf; gen_obf; save_conf
+        # Параметры интерфейса syncconf не меняет надёжно — пересоздаём.
+        iface_up && ip link del "$IFACE"
+        do_apply
+        log "regen-obf"
+        echo '{"ok":true}' ;;
+    *)
+        echo "usage: $0 {status|start|stop|apply|set k=v…|client-add <name> [full|lan]|client-set <id> k=v…|client-del <id>|client-conf <id>|regen-obf}" >&2
+        exit 2 ;;
+esac

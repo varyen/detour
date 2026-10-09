@@ -83,6 +83,25 @@ IPT_CHAIN_DROP=DETOUR_TORRENT_D
 PRIV_SET=detour_private
 PLATFORM=openwrt
 
+# Не запрещать, а увести (torrent-action, пишет панель): «direct» — напрямую,
+# «via <id>» — через профиль, где торренты разрешены (его вход detour-api кладёт
+# в torrent.map). Пойманный на торренте клиент 30 минут считается торрент-
+# клиентом: его соединения на «не-веб» порты метятся $BT_MARK, и nat-цепочка
+# $NAT_CHAIN над общим перехватом пускает их мимо VPN или на вход профиля.
+# Так уходит и зашифрованный TCP между пирами, у которого нет маркера.
+ACTION_FILE=/etc/sing-box/torrent-action
+TMAP=/etc/sing-box/torrent.map
+INSTALLED_ACTION=/var/run/detour-torrent.action
+ALLVPN_FILE=/etc/detour/allvpn.enabled
+BT_MARK=0x8000000         # бит 27; в форме, которую печатает iptables -S (без ведущего 0)
+NAT_CHAIN=DETOUR_TORRENT_NAT
+UDP_VPN_CHAIN=UDP_VPN
+UDP_TPROXY_MARK=0x1e
+# Порты, которые остаются на обычном маршруте и у торрент-клиента: веб, почта,
+# DNS, мессенджеры, push. Пиры на них почти не живут, а браузер — живёт.
+KEEP_TCP="22,53,80,443,465,587,853,993,995,5222,5223,5228,8080,8443"
+KEEP_UDP="53,123,443"
+
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PLATFORM=keenetic
     export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
@@ -94,8 +113,12 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PUSH_BIN=/opt/sbin/detour-push
     LOG=/opt/var/log/detour-torrent.log
     LAN_IF=br0
+    ACTION_FILE=/opt/etc/sing-box/torrent-action
+    TMAP=/opt/etc/sing-box/torrent.map
+    INSTALLED_ACTION=/opt/var/run/detour-torrent.action
+    ALLVPN_FILE=/opt/etc/detour/allvpn.enabled
     [ -f /opt/etc/detour/detour.conf ] && . /opt/etc/detour/detour.conf 2>/dev/null
-    mkdir -p /opt/var/log /opt/var/state 2>/dev/null
+    mkdir -p /opt/var/log /opt/var/state /opt/var/run 2>/dev/null
 fi
 
 # Push no more often than this per episode. A torrent client retries for minutes;
@@ -141,6 +164,28 @@ denying_profile() {
     return 1
 }
 
+# Действие на запрещающем профиле: block | direct | via. «via» без входа в
+# torrent.map (цель потеряла разрешение, multi-режим) и «direct» при «Всё через
+# VPN» откатываются в block — молча увести мимо обещанного нельзя.
+effective_action() {
+    _a=$(head -1 "$ACTION_FILE" 2>/dev/null | tr -d '\r')
+    case "$_a" in
+        direct)
+            if [ -f "$ALLVPN_FILE" ] || iptables -t nat -C PREROUTING -i "$LAN_IF" -j SINGBOX_ALLVPN 2>/dev/null; then
+                echo block
+            else
+                echo direct
+            fi ;;
+        "via "*)
+            if [ -n "$(tmap_port)" ]; then echo via; else echo block; fi ;;
+        *) echo block ;;
+    esac
+}
+
+tmap_port()  { awk '$1 ~ /^[0-9]+$/ && $1 > 0 { print $1; exit }' "$TMAP" 2>/dev/null; }
+tmap_uport() { awk '$2 ~ /^[0-9]+$/ && $2 > 0 { print $2; exit }' "$TMAP" 2>/dev/null; }
+action_via_id() { sed -n 's/^via //p' "$ACTION_FILE" 2>/dev/null | head -1 | tr -cd 'a-zA-Z0-9_-'; }
+
 # NOTE: there is deliberately no "is sing-box running?" gate here. `apply` runs at
 # the END of start_service, before procd has actually spawned the daemon, so a
 # pidof check would look at the gap and remove the rules it was asked to install.
@@ -177,7 +222,20 @@ nft_install() {
         _d=$((_d + 1))
     done
 
+    # block — пакет роняется. direct/via — пакет метится и идёт дальше, а все
+    # «не-веб» соединения пойманного клиента следующие 30 минут метятся заранее,
+    # на первом пакете: nat решает судьбу соединения именно по нему.
+    _final="drop"
+    _steer=""
+    if [ "$1" != block ]; then
+        _final="meta mark set meta mark | $BT_MARK accept"
+        _steer="        iifname { $_ifs } ip saddr @clients4 tcp dport != { $KEEP_TCP } meta mark set meta mark | $BT_MARK
+        iifname { $_ifs } ip saddr @clients4 udp dport != { $KEEP_UDP } meta mark set meta mark | $BT_MARK"
+    fi
+
     nft delete table inet "$TABLE" 2>/dev/null
+    # Приоритет на единицу раньше mangle: метка должна стоять до TPROXY-цепочки
+    # «UDP через VPN» в iptables mangle (тот же хук и приоритет -150).
     nft -f - <<NFT 2>>"$LOG" || return 1
 table inet $TABLE {
     set clients4 { type ipv4_addr; flags timeout; timeout 30m; }
@@ -186,11 +244,11 @@ table inet $TABLE {
     chain verdict {
         iifname { $_ifs } meta nfproto ipv4 add @clients4 { ip saddr timeout 30m }
         iifname { $_ifs } meta nfproto ipv6 add @clients6 { ip6 saddr timeout 30m }
-        drop
+        $_final
     }
 
     chain prerouting {
-        type filter hook prerouting priority mangle; policy accept;
+        type filter hook prerouting priority -151; policy accept;
 
         # LAN↔LAN stays untouched: local peer discovery, a NAS, Resilio and the
         # panel itself are nobody's business here. Router-originated traffic (the
@@ -199,6 +257,7 @@ table inet $TABLE {
         meta nfproto ipv4 ip daddr { 224.0.0.0/4, 255.255.255.255 } return
         meta nfproto ipv6 ip6 saddr { ::1/128, fc00::/7, fe80::/10 } ip6 daddr { ::1/128, fc00::/7, fe80::/10 } return
         meta nfproto ipv6 ip6 daddr ff00::/8 return
+$_steer
 
         udp length 28 @th,64,16 0x4100 @th,128,32 0x00000000 @th,208,16 0x0000 counter jump verdict comment "utp-syn"
         udp length >= 24 @th,64,64 0x0000041727101980 counter jump verdict comment "udp-tracker"
@@ -266,6 +325,12 @@ ipt_install() {
     iptables -t mangle -A "$IPT_CHAIN" -m set --match-set "$PRIV_SET" src \
         -m set --match-set "$PRIV_SET" dst -j RETURN 2>/dev/null
     iptables -t mangle -A "$IPT_CHAIN" -d 224.0.0.0/4 -j RETURN 2>/dev/null
+    if [ "$1" != block ]; then
+        iptables -t mangle -A "$IPT_CHAIN" -m recent --rcheck --seconds 1800 --name detour_bt --rsource \
+            -p tcp -m multiport ! --dports "$KEEP_TCP" -j MARK --set-xmark "$BT_MARK/$BT_MARK" 2>/dev/null
+        iptables -t mangle -A "$IPT_CHAIN" -m recent --rcheck --seconds 1800 --name detour_bt --rsource \
+            -p udp -m multiport ! --dports "$KEEP_UDP" -j MARK --set-xmark "$BT_MARK/$BT_MARK" 2>/dev/null
+    fi
 
     # uTP SYN — length pins the 20-byte header, the three windows pin its shape.
     iptables -t mangle -A "$IPT_CHAIN" -p udp -m length --length 48 \
@@ -300,7 +365,12 @@ ipt_install_drop_chain() {
     iptables -t mangle -F "$IPT_CHAIN_DROP" 2>/dev/null
     iptables -t mangle -A "$IPT_CHAIN_DROP" -i "$LAN_IF" \
         -m recent --name detour_bt --set --rsource 2>/dev/null
-    iptables -t mangle -A "$IPT_CHAIN_DROP" -j DROP
+    if [ "$1" = block ]; then
+        iptables -t mangle -A "$IPT_CHAIN_DROP" -j DROP
+    else
+        iptables -t mangle -A "$IPT_CHAIN_DROP" -j MARK --set-xmark "$BT_MARK/$BT_MARK"
+        iptables -t mangle -A "$IPT_CHAIN_DROP" -j ACCEPT
+    fi
 }
 
 ipt_remove() {
@@ -333,14 +403,72 @@ ipt_clients() {
 
 # ---- platform-neutral wrappers ---------------------------------------------
 
-fw_install() {
+fw_install() {  # $1 — action
     if [ "$PLATFORM" = "keenetic" ]; then
-        ipt_install_drop_chain
-        ipt_install
+        ipt_install_drop_chain "$1"
+        ipt_install "$1"
     else
         nft_present || { log "nft missing — cannot enforce"; return 1; }
-        nft_install
+        nft_install "$1"
     fi
+}
+
+# ---- увод торрент-клиента: nat + UDP (iptables, обе платформы) ---------------
+
+# Цепочка $NAT_CHAIN встаёт на каждом LAN-интерфейсе прямо над общим перехватом
+# sing-box (SINGBOX_ALL или список → :12345) — ниже «Отдельных маршрутов»,
+# устройств и zapret: они главнее. Перехвата нет — в конец.
+nat_apply() {  # $1 — direct | via
+    _port=""
+    [ "$1" = via ] && _port=$(tmap_port)
+    iptables -t nat -N "$NAT_CHAIN" 2>/dev/null
+    iptables -t nat -F "$NAT_CHAIN"
+    if [ "$1" = via ] && [ -n "$_port" ]; then
+        iptables -t nat -A "$NAT_CHAIN" -p tcp -m mark --mark "$BT_MARK/$BT_MARK" -j REDIRECT --to-ports "$_port"
+    else
+        iptables -t nat -A "$NAT_CHAIN" -p tcp -m mark --mark "$BT_MARK/$BT_MARK" -j ACCEPT
+    fi
+    for _i in $(lan_ifaces); do
+        [ -n "$_i" ] || continue
+        while iptables -t nat -D PREROUTING -i "$_i" -j "$NAT_CHAIN" 2>/dev/null; do :; done
+        _pos=$(iptables -t nat -S PREROUTING 2>/dev/null | awk -v i="$_i" '
+            $1 == "-A" { n++ }
+            $1 == "-A" && index($0, " -i " i " ") && (/ -j SINGBOX_ALL$/ || / --to-ports 12345$/) { print n; exit }')
+        if [ -n "$_pos" ]; then
+            iptables -t nat -I PREROUTING "$_pos" -i "$_i" -j "$NAT_CHAIN"
+        else
+            iptables -t nat -A PREROUTING -i "$_i" -j "$NAT_CHAIN"
+        fi
+    done
+    # «UDP через VPN»: помеченный UDP — напрямую или на UDP-вход профиля. Цепочку
+    # пересобирает sing-box на старте, а detour-torrent apply идёт после него.
+    if iptables -t mangle -L "$UDP_VPN_CHAIN" -n >/dev/null 2>&1; then
+        while iptables -t mangle -D "$UDP_VPN_CHAIN" -m mark --mark "$BT_MARK/$BT_MARK" -j RETURN 2>/dev/null; do :; done
+        _up=$(tmap_uport)
+        iptables -t mangle -S "$UDP_VPN_CHAIN" 2>/dev/null | grep -- "--mark $BT_MARK/$BT_MARK" | grep TPROXY | \
+            sed 's/^-A/-D/' | while IFS= read -r _r; do eval "iptables -t mangle $_r" 2>/dev/null; done
+        if [ "$1" = via ] && [ -n "$_up" ] && [ "$PLATFORM" != keenetic ]; then
+            iptables -t mangle -I "$UDP_VPN_CHAIN" 1 -p udp -m mark --mark "$BT_MARK/$BT_MARK" \
+                -j TPROXY --on-ip 127.0.0.1 --on-port "$_up" --tproxy-mark "$UDP_TPROXY_MARK/$UDP_TPROXY_MARK" 2>/dev/null
+        else
+            iptables -t mangle -I "$UDP_VPN_CHAIN" 1 -m mark --mark "$BT_MARK/$BT_MARK" -j RETURN
+        fi
+    fi
+}
+
+nat_remove() {
+    for _i in $(lan_ifaces); do
+        [ -n "$_i" ] || continue
+        while iptables -t nat -D PREROUTING -i "$_i" -j "$NAT_CHAIN" 2>/dev/null; do :; done
+    done
+    iptables -t nat -F "$NAT_CHAIN" 2>/dev/null
+    iptables -t nat -X "$NAT_CHAIN" 2>/dev/null
+    if iptables -t mangle -L "$UDP_VPN_CHAIN" -n >/dev/null 2>&1; then
+        while iptables -t mangle -D "$UDP_VPN_CHAIN" -m mark --mark "$BT_MARK/$BT_MARK" -j RETURN 2>/dev/null; do :; done
+        iptables -t mangle -S "$UDP_VPN_CHAIN" 2>/dev/null | grep -- "--mark $BT_MARK/$BT_MARK" | grep TPROXY | \
+            sed 's/^-A/-D/' | while IFS= read -r _r; do eval "iptables -t mangle $_r" 2>/dev/null; done
+    fi
+    return 0
 }
 fw_remove()   { if [ "$PLATFORM" = "keenetic" ]; then ipt_remove; else nft_remove; fi; }
 fw_active()   { if [ "$PLATFORM" = "keenetic" ]; then ipt_active; else nft_active; fi; }
@@ -356,20 +484,31 @@ total_hits() { fw_counters | awk '{ s += $2 } END { print s + 0 }'; }
 cmd_apply() {
     _deny=$(denying_profile)
     if [ -n "$_deny" ]; then
+        _act=$(effective_action)
         # Only build when absent. Rebuilding zeroes the counters, and `tick` reads
         # a counter DROP as "chain was rebuilt" → the next rise would be reported
         # from zero and double-counted. Callers that really need fresh rules
-        # (interface list changed) run `clear` first.
-        if ! fw_active; then
-            fw_install || { echo '{"ok":false,"error":"failed to install rules"}'; return 1; }
-            log "enforcing: profile '$_deny' forbids torrents"
+        # (interface list changed) run `clear` first. Сменилось действие
+        # (block ⇄ direct/via) — пересобираем: вердикт другой.
+        if fw_active && [ "$(cat "$INSTALLED_ACTION" 2>/dev/null)" != "$_act" ]; then
+            fw_remove
         fi
+        if ! fw_active; then
+            fw_install "$_act" || { echo '{"ok":false,"error":"failed to install rules"}'; return 1; }
+            echo "$_act" > "$INSTALLED_ACTION"
+            log "enforcing ($_act): profile '$_deny' forbids torrents"
+        fi
+        # nat-часть дешёвая и без счётчиков — переставляем всегда: sing-box на
+        # старте вставляет свой перехват заново, и наша позиция над ним съезжает.
+        if [ "$_act" = block ]; then nat_remove; else nat_apply "$_act"; fi
         write_state "$_deny"
     else
         if fw_active; then
             fw_remove
             log "released (active profile allows torrents)"
         fi
+        nat_remove
+        rm -f "$INSTALLED_ACTION"
         write_state ""
     fi
     echo '{"ok":true}'
@@ -377,6 +516,8 @@ cmd_apply() {
 
 cmd_clear() {
     fw_remove
+    nat_remove
+    rm -f "$INSTALLED_ACTION"
     write_state ""
     echo '{"ok":true}'
 }
@@ -397,10 +538,16 @@ write_state() {
         [ -z "$_prev_event" ] && _prev_event="null"
     fi
     _enf=false; fw_active && _enf=true
+    _act=block; _via=""; _vname=""
+    if [ -n "$_deny" ]; then
+        _act=$(effective_action)
+        [ "$_act" = via ] && { _via=$(action_via_id); _vname=$(profile_name "$_via"); }
+    fi
     mkdir -p "$(dirname "$STATE")" 2>/dev/null
     {
-        printf '{"enforcing":%s,"profile":%s,"profile_name":%s,"hits":%s,"clients":[' \
-            "$_enf" "$(json_str "$_deny")" "$(json_str "$_pname")" "$(total_hits)"
+        printf '{"enforcing":%s,"action":"%s","via":%s,"via_name":%s,"profile":%s,"profile_name":%s,"hits":%s,"clients":[' \
+            "$_enf" "$_act" "$(json_str "$_via")" "$(json_str "$_vname")" \
+            "$(json_str "$_deny")" "$(json_str "$_pname")" "$(total_hits)"
         _first=1
         for _c in $(fw_clients); do
             [ "$_first" = 1 ] && _first=0 || printf ','
@@ -464,7 +611,12 @@ cmd_tick() {
         "$(json_str "$_clients")" "$(json_str "$_sigs")")
     write_state "$_deny" "$_evt"
 
-    if [ "$_new_episode" = 1 ] || [ $((_now - _last_push)) -ge "$PUSH_COOLDOWN" ]; then
+    # Пуш — только о запрете: увод в direct/via и есть то, что попросили, будить
+    # телефон каждые полчаса из-за работающей закачки незачем.
+    _act=$(effective_action)
+    if [ "$_act" != block ]; then
+        [ "$_new_episode" = 1 ] && log "steered ($_act) $_delta pkt from ${_clients:-?} ($_sigs) on profile $_deny"
+    elif [ "$_new_episode" = 1 ] || [ $((_now - _last_push)) -ge "$PUSH_COOLDOWN" ]; then
         _who="$_clients"; [ -z "$_who" ] && _who="клиент в сети"
         push_alert "Detour: торренты заблокированы" \
             "На профиле «$_pname» торренты запрещены. Трафик заблокирован ($_who)."

@@ -6,6 +6,8 @@ import type {
   GeoStatus,
   ProfilesListResponse,
   Subscription,
+  TorrentAction,
+  TorrentActionMode,
   TorrentStatus,
   WarpStatus,
 } from "./types";
@@ -93,6 +95,13 @@ export const profiles = {
 
   /** Состояние блокировки торрентов: включена ли и последнее событие. */
   torrentStatus: () => requestJsonTolerant<TorrentStatus>("torrent_status"),
+  /** Запрет, «напрямую» или «через профиль, где торренты разрешены». */
+  torrentAction: () => requestJsonTolerant<TorrentAction>("torrent_action"),
+  setTorrentAction: (mode: TorrentActionMode, via = "") =>
+    requestJson<TorrentAction>("torrent_action", {
+      body: { mode, via },
+      timeoutMs: 180_000,
+    }),
 
   /* --- страна эндпоинта (detour-geo) --- */
   geoStatus: () => requestJsonTolerant<GeoStatus>("geo_status"),

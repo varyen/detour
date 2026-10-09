@@ -176,8 +176,24 @@ export interface ProfileSummary {
  * цепочки (первый без разрешения). `last_event` появляется, когда счётчики
  * выросли: именно его панель показывает как «торрент заблокирован».
  */
+/** Что делать с торрентами на профиле, где они запрещены. */
+export type TorrentActionMode = "block" | "direct" | "via";
+
+export interface TorrentAction {
+  ok: boolean;
+  mode: TorrentActionMode;
+  /** id профиля «для торрентов» (mode=via). */
+  via: string;
+  /** На нём торренты всё ещё разрешены — иначе роутер откатится в запрет. */
+  via_ok: boolean;
+}
+
 export interface TorrentStatus {
   enforcing?: boolean;
+  /** Действие, которое реально применено сейчас (с откатами в block). */
+  action?: TorrentActionMode;
+  via?: string;
+  via_name?: string;
   profile?: string;
   profile_name?: string;
   /** Суммарно отброшено пакетов с момента установки правил. */
@@ -337,6 +353,84 @@ export interface PowerCheck {
   ok?: boolean;
   off: boolean;
   items: PowerCheckItem[];
+}
+
+/* ---------- VPN-сервер (AmneziaWG на роутере) ---------- */
+
+export type ServerClientMode = "full" | "lan";
+
+/** rx — пришло от клиента (его отдача), tx — ушло к клиенту (его загрузка). */
+export interface ServerClient {
+  id: string;
+  enabled: boolean;
+  name: string;
+  ip: string;
+  mode: ServerClientMode;
+  created: number;
+  online: boolean;
+  handshake: number;
+  handshake_ago: number;
+  last_seen: number;
+  /** Живые счётчики ядра — скорость считается по их разнице между опросами. */
+  rx: number;
+  tx: number;
+  remote: string;
+  session_start: number;
+  session_rx: number;
+  session_tx: number;
+  day_rx: number;
+  day_tx: number;
+  month_rx: number;
+  month_tx: number;
+  total_rx: number;
+  total_tx: number;
+}
+
+export interface ServerStatus {
+  ok: boolean;
+  platform?: Platform;
+  supported: boolean;
+  reason?: string;
+  installed: boolean;
+  can_install: boolean;
+  configured: boolean;
+  enabled: boolean;
+  running: boolean;
+  /** Интерфейс сервера в vpn_redirect_ifaces — клиенты получают маршруты роутера. */
+  routed: boolean;
+  iface: string;
+  port: number;
+  net: string;
+  server_ip: string;
+  endpoint: string;
+  endpoint_effective: string;
+  wan_ip: string;
+  /** Внешний адрес серый (CGNAT/частный) — снаружи до сервера не достучаться. */
+  wan_private: boolean;
+  panel_domain: string;
+  dns: string;
+  mtu: number;
+  pubkey: string;
+  clients: ServerClient[];
+  now: number;
+}
+
+export interface ServerSession {
+  id: string;
+  start: number;
+  end: number;
+  rx: number;
+  tx: number;
+  remote: string;
+}
+
+export interface ServerSettingsPatch {
+  enabled?: boolean;
+  port?: number;
+  net?: string;
+  endpoint?: string;
+  dns?: string;
+  mtu?: number;
 }
 
 export interface ApplyLogResponse {

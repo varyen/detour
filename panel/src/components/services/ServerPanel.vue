@@ -1,0 +1,633 @@
+<script setup lang="ts">
+/* Свой VPN-сервер на роутере (AmneziaWG). Клиенты попадают на отдельный
+   интерфейс, на который роутер вешает те же правила, что и на домашнюю сеть:
+   заблокированное идёт через VPN, российское — напрямую, zapret и «Отдельные
+   маршруты» тоже работают. Пока область раскрыта, статус опрашивается каждые
+   три секунды — по разнице счётчиков считается скорость клиентов. */
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
+import ServicePanel from "@/components/services/ServicePanel.vue";
+import ServerClientSheet from "@/components/services/ServerClientSheet.vue";
+import FormField from "@/components/services/FormField.vue";
+import UiButton from "@/components/UiButton.vue";
+import SwitchToggle from "@/components/SwitchToggle.vue";
+import SegmentedControl from "@/components/SegmentedControl.vue";
+import { diag, poll, services } from "@/api";
+import type { ApplyLogResponse, ServerClient, ServerClientMode, ServerStatus } from "@/api";
+import { fmtAgo, fmtBitrate, fmtBytes } from "@/lib/format";
+import { useToastStore } from "@/stores/toast";
+
+const open = defineModel<boolean>("open", { required: true });
+const toast = useToastStore();
+
+const st = ref<ServerStatus | null>(null);
+const loadError = ref("");
+const busy = ref("");
+const confirmDelete = ref("");
+const confirmRegen = ref(false);
+
+const MODE_OPTIONS: { value: ServerClientMode; label: string; hint: string }[] = [
+  { value: "full", label: "Весь трафик", hint: "Через роутер идёт всё, с его маршрутами" },
+  { value: "lan", label: "Только домашняя сеть", hint: "Через роутер — только доступ к дому" },
+];
+
+/* ---------------- загрузка и скорость ---------------- */
+
+interface Sample {
+  rx: number;
+  tx: number;
+  t: number;
+}
+const prev = new Map<string, Sample>();
+/** Байт/с к клиенту (down) и от клиента (up). */
+const speed = reactive<Record<string, { down: number; up: number }>>({});
+
+async function load() {
+  try {
+    const s = await services.serverStatus();
+    if (!s) {
+      loadError.value = "Роутер не отдал состояние сервера — обновите панель";
+      return;
+    }
+    const t = Date.now() / 1000;
+    for (const c of s.clients ?? []) {
+      const p = prev.get(c.id);
+      if (p && t > p.t && c.rx >= p.rx && c.tx >= p.tx) {
+        speed[c.id] = { down: (c.tx - p.tx) / (t - p.t), up: (c.rx - p.rx) / (t - p.t) };
+      } else if (!c.online) {
+        speed[c.id] = { down: 0, up: 0 };
+      }
+      prev.set(c.id, { rx: c.rx, tx: c.tx, t });
+    }
+    st.value = s;
+    loadError.value = "";
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : "Не удалось прочитать состояние сервера";
+  }
+}
+
+let timer: ReturnType<typeof setInterval> | undefined;
+function startPolling() {
+  stopPolling();
+  timer = setInterval(() => {
+    if (document.visibilityState === "visible" && !busy.value) void load();
+  }, 3000);
+}
+function stopPolling() {
+  if (timer) clearInterval(timer);
+  timer = undefined;
+}
+
+watch(
+  open,
+  (o) => {
+    if (o) {
+      void load();
+      startPolling();
+    } else {
+      stopPolling();
+    }
+  },
+  { immediate: true },
+);
+onBeforeUnmount(stopPolling);
+/* Сводка в свёрнутом виде нужна сразу, без раскрытия. */
+if (!open.value) void load();
+
+/* ---------------- сводка ---------------- */
+
+const clients = computed<ServerClient[]>(() => st.value?.clients ?? []);
+const onlineCount = computed(() => clients.value.filter((c) => c.online).length);
+
+const summary = computed(() => {
+  const s = st.value;
+  if (!s) return loadError.value || "Читаю состояние…";
+  if (!s.supported) return s.reason || "Недоступно на этом роутере";
+  if (!s.installed) return "Нужно установить AmneziaWG";
+  if (!s.enabled) return "Выключен";
+  const n = clients.value.length;
+  if (!n) return "Включён, клиентов пока нет";
+  return `Клиентов: ${n}, в сети: ${onlineCount.value}`;
+});
+
+const chip = computed(() => {
+  const s = st.value;
+  if (!s || !s.supported) return undefined;
+  if (s.enabled && s.running) return onlineCount.value ? `${onlineCount.value} в сети` : "включён";
+  if (s.enabled && !s.running) return "не запущен";
+  return "выключен";
+});
+const tone = computed(() => {
+  const s = st.value;
+  if (s?.enabled && s.running) return "ok" as const;
+  if (s?.enabled && !s.running) return "bad" as const;
+  return undefined;
+});
+
+/* ---------------- установка ---------------- */
+
+const installLog = ref("");
+async function install() {
+  busy.value = "install";
+  installLog.value = "";
+  try {
+    await services.serverInstall();
+    const r = await poll<ApplyLogResponse | null>(() => diag.applyLog(), {
+      done: (v) => v?.done === true,
+      intervalMs: 2000,
+      timeoutMs: 300_000,
+      onTick: (v) => {
+        if (v && typeof v.log === "string") installLog.value = v.log;
+      },
+    });
+    if (r?.done && Number(r.rc) === 0) toast.ok("AmneziaWG установлен");
+    else toast.error("Установка не удалась — подробности в журнале ниже");
+  } catch (e) {
+    toast.fromError(e, "Не удалось установить AmneziaWG");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
+/* ---------------- сервер ---------------- */
+
+async function toggleServer(on: boolean) {
+  busy.value = "server";
+  try {
+    await services.serverSet({ enabled: on });
+    toast.ok(on ? "VPN-сервер включён" : "VPN-сервер выключен");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить сервер");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
+const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "" });
+const showSettings = ref(false);
+watch(showSettings, (v) => {
+  if (!v || !st.value) return;
+  form.endpoint = st.value.endpoint;
+  form.port = String(st.value.port || "");
+  form.net = st.value.net;
+  form.dns = st.value.dns;
+  form.mtu = String(st.value.mtu || "");
+});
+
+async function saveSettings() {
+  const s = st.value;
+  if (!s) return;
+  const patch: Parameters<typeof services.serverSet>[0] = {};
+  if (form.endpoint.trim() !== s.endpoint) patch.endpoint = form.endpoint.trim();
+  if (form.dns.trim() !== s.dns) patch.dns = form.dns.trim();
+  if (Number(form.port) && Number(form.port) !== s.port) patch.port = Number(form.port);
+  if (Number(form.mtu) && Number(form.mtu) !== s.mtu) patch.mtu = Number(form.mtu);
+  if (form.net.trim() && form.net.trim() !== s.net) patch.net = form.net.trim();
+  if (!Object.keys(patch).length) {
+    showSettings.value = false;
+    return;
+  }
+  busy.value = "settings";
+  try {
+    await services.serverSet(patch);
+    toast.ok("Настройки сервера сохранены");
+    showSettings.value = false;
+    if (patch.port || patch.net || patch.endpoint || patch.dns || patch.mtu) {
+      toast.push("Конфиги клиентов изменились — импортируйте их заново", "info", 8000);
+    }
+  } catch (e) {
+    toast.fromError(e, "Не удалось сохранить настройки");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
+async function regen() {
+  busy.value = "regen";
+  try {
+    await services.serverRegen();
+    toast.push("Маскировка обновлена — всем клиентам нужно импортировать конфиг заново", "info", 8000);
+  } catch (e) {
+    toast.fromError(e, "Не удалось обновить маскировку");
+  } finally {
+    confirmRegen.value = false;
+    busy.value = "";
+    await load();
+  }
+}
+
+/* ---------------- клиенты ---------------- */
+
+const newName = ref("");
+const newMode = ref<ServerClientMode>("full");
+
+const sheet = reactive<{ open: boolean; id: string; tab: "conf" | "history" }>({
+  open: false,
+  id: "",
+  tab: "conf",
+});
+const sheetClient = computed(() => clients.value.find((c) => c.id === sheet.id) ?? null);
+function openSheet(c: ServerClient, tab: "conf" | "history") {
+  sheet.id = c.id;
+  sheet.tab = tab;
+  sheet.open = true;
+}
+
+async function addClient() {
+  const name = newName.value.trim();
+  if (!name) {
+    toast.error("Введите имя клиента — например, «Телефон»");
+    return;
+  }
+  busy.value = "add";
+  try {
+    const r = await services.serverClientAdd(name, newMode.value);
+    newName.value = "";
+    await load();
+    const c = clients.value.find((x) => x.id === r.id);
+    if (c) openSheet(c, "conf");
+  } catch (e) {
+    toast.fromError(e, "Не удалось добавить клиента");
+  } finally {
+    busy.value = "";
+  }
+}
+
+async function toggleClient(c: ServerClient, on: boolean) {
+  busy.value = `c:${c.id}`;
+  try {
+    await services.serverClientSet(c.id, { enabled: on });
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить клиента");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
+async function setMode(c: ServerClient, mode: ServerClientMode) {
+  if (mode === c.mode) return;
+  busy.value = `c:${c.id}`;
+  try {
+    await services.serverClientSet(c.id, { mode });
+    toast.push(`«${c.name}»: импортируйте конфиг заново — режим меняется на стороне клиента`, "info", 8000);
+  } catch (e) {
+    toast.fromError(e, "Не удалось сменить режим");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
+async function removeClient(c: ServerClient) {
+  busy.value = `c:${c.id}`;
+  try {
+    await services.serverClientDel(c.id);
+    toast.ok(`«${c.name}» удалён — его конфиг больше не работает`);
+  } catch (e) {
+    toast.fromError(e, "Не удалось удалить клиента");
+  } finally {
+    confirmDelete.value = "";
+    busy.value = "";
+    await load();
+  }
+}
+
+function fmtDuration(sec: number): string {
+  if (sec < 60) return "меньше минуты";
+  const m = Math.round(sec / 60);
+  if (m < 60) return `${m} мин`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} ч ${m % 60} мин`;
+  return `${Math.floor(h / 24)} д ${h % 24} ч`;
+}
+
+function presence(c: ServerClient): string {
+  if (!c.enabled) return "отключён";
+  if (c.online) {
+    const since = c.session_start ? fmtDuration((st.value?.now ?? Date.now() / 1000) - c.session_start) : "";
+    return since ? `в сети ${since}` : "в сети";
+  }
+  return c.last_seen ? `был ${fmtAgo(c.last_seen)}` : "ещё не подключался";
+}
+
+function hint(c: ServerClient): string {
+  const mode = c.mode === "lan" ? "только дом" : "весь трафик";
+  return `${c.ip} · ${mode} · ${presence(c)}`;
+}
+</script>
+
+<template>
+  <ServicePanel
+    id="svc-server"
+    v-model:open="open"
+    title="Свой VPN-сервер"
+    :summary="summary"
+    :chip="chip"
+    :tone="tone"
+  >
+    <p class="lead">
+      Подключайтесь к дому из любой сети по AmneziaWG — протоколу, который
+      маскируется от блокировок. Клиенты получают маршруты роутера: заблокированное
+      идёт через ваш VPN, остальное — напрямую, домашние устройства доступны.
+    </p>
+
+    <p v-if="loadError && !st" class="note bad">{{ loadError }}</p>
+
+    <template v-if="st">
+      <p v-if="!st.supported" class="note warn">{{ st.reason || "На этом роутере сервер недоступен." }}</p>
+
+      <template v-else-if="!st.installed">
+        <p class="note">
+          Для сервера нужен модуль ядра AmneziaWG. Он есть в фиде прошивки этого
+          роутера — установка займёт около минуты.
+        </p>
+        <div class="actions">
+          <UiButton variant="primary" :busy="busy === 'install'" @click="install">
+            Установить AmneziaWG
+          </UiButton>
+        </div>
+        <pre v-if="installLog" class="log">{{ installLog }}</pre>
+      </template>
+
+      <template v-else>
+        <SwitchToggle
+          :model-value="st.enabled"
+          label="Сервер включён"
+          :hint="st.configured ? `UDP-порт ${st.port} · сеть ${st.net}` : 'Ключи и порт создадутся при первом включении'"
+          :busy="busy === 'server'"
+          @update:model-value="toggleServer"
+        />
+
+        <p v-if="st.enabled && !st.running" class="note bad">
+          Сервер включён, но интерфейс не поднялся. Подробности — в журнале
+          /var/log/detour-server.log.
+        </p>
+        <p v-if="st.wan_private && !st.endpoint" class="note warn">
+          Внешний адрес роутера {{ st.wan_ip }} — серый (провайдерский NAT): из
+          интернета до сервера не достучаться. Нужен белый IP или проброс порта
+          {{ st.port }}/UDP на стороне провайдера.
+        </p>
+        <p v-if="st.enabled" class="note faint">
+          Клиенты подключаются к {{ st.endpoint_effective || "—" }}:{{ st.port }}<template
+            v-if="!st.endpoint"
+          > (внешний адрес роутера; если он меняется — укажите домен в настройках)</template>.
+        </p>
+
+        <template v-if="st.configured">
+          <h3 class="sub">Клиенты</h3>
+          <p v-if="!clients.length" class="note">
+            Добавьте первого клиента — телефон, ноутбук. У каждого свой ключ: его
+            можно отключить или удалить, не трогая остальных.
+          </p>
+
+          <div v-for="c in clients" :key="c.id" class="client" :class="{ live: c.online }">
+            <SwitchToggle
+              :model-value="c.enabled"
+              :label="c.name"
+              :hint="hint(c)"
+              :busy="busy === `c:${c.id}`"
+              @update:model-value="toggleClient(c, $event)"
+            />
+            <div v-if="c.online" class="speed">
+              <span>↓ {{ fmtBitrate(speed[c.id]?.down ?? 0) }}</span>
+              <span>↑ {{ fmtBitrate(speed[c.id]?.up ?? 0) }}</span>
+              <span v-if="c.remote" class="mono">{{ c.remote.replace(/:\d+$/, "") }}</span>
+            </div>
+            <dl class="traffic">
+              <div v-if="c.online">
+                <dt>сессия</dt>
+                <dd>↓ {{ fmtBytes(c.session_tx) }} · ↑ {{ fmtBytes(c.session_rx) }}</dd>
+              </div>
+              <div>
+                <dt>сегодня</dt>
+                <dd>↓ {{ fmtBytes(c.day_tx) }} · ↑ {{ fmtBytes(c.day_rx) }}</dd>
+              </div>
+              <div>
+                <dt>месяц</dt>
+                <dd>↓ {{ fmtBytes(c.month_tx) }} · ↑ {{ fmtBytes(c.month_rx) }}</dd>
+              </div>
+              <div>
+                <dt>всего</dt>
+                <dd>↓ {{ fmtBytes(c.total_tx) }} · ↑ {{ fmtBytes(c.total_rx) }}</dd>
+              </div>
+            </dl>
+            <div class="row-actions">
+              <UiButton @click="openSheet(c, 'conf')">Конфиг и QR</UiButton>
+              <UiButton @click="openSheet(c, 'history')">История</UiButton>
+              <UiButton
+                :busy="busy === `c:${c.id}`"
+                @click="setMode(c, c.mode === 'full' ? 'lan' : 'full')"
+              >
+                {{ c.mode === "full" ? "Только дом" : "Весь трафик" }}
+              </UiButton>
+              <template v-if="confirmDelete === c.id">
+                <UiButton variant="danger" :busy="busy === `c:${c.id}`" @click="removeClient(c)">
+                  Точно удалить
+                </UiButton>
+                <UiButton @click="confirmDelete = ''">Отмена</UiButton>
+              </template>
+              <UiButton v-else variant="danger" @click="confirmDelete = c.id">Удалить</UiButton>
+            </div>
+          </div>
+
+          <div class="add">
+            <FormField label="Новый клиент">
+              <input
+                v-model="newName"
+                type="text"
+                maxlength="48"
+                placeholder="Телефон"
+                @keydown.enter.prevent="addClient"
+              />
+            </FormField>
+            <SegmentedControl v-model="newMode" label="Что пускать через сервер" :options="MODE_OPTIONS" />
+            <div class="actions">
+              <UiButton variant="primary" :busy="busy === 'add'" @click="addClient">
+                Добавить клиента
+              </UiButton>
+            </div>
+          </div>
+
+          <details class="settings" :open="showSettings" @toggle="showSettings = ($event.target as HTMLDetailsElement).open">
+            <summary>Настройки сервера</summary>
+            <div class="settings-body">
+              <FormField
+                label="Адрес для клиентов"
+                :hint="st.panel_domain ? `Пусто — внешний IP ${st.wan_ip}. Можно указать домен, например ${st.panel_domain}` : `Пусто — внешний IP ${st.wan_ip}`"
+              >
+                <input v-model="form.endpoint" type="text" placeholder="авто" />
+              </FormField>
+              <FormField label="UDP-порт">
+                <input v-model="form.port" type="number" min="1024" max="65535" />
+              </FormField>
+              <FormField label="Подсеть клиентов" hint="Частная /24, не пересекающаяся с домашней сетью">
+                <input v-model="form.net" type="text" />
+              </FormField>
+              <FormField label="DNS для клиентов" :hint="`Пусто — роутер (${st.server_ip}); тогда работают списки доменов`">
+                <input v-model="form.dns" type="text" placeholder="авто" />
+              </FormField>
+              <FormField label="MTU">
+                <input v-model="form.mtu" type="number" min="1200" max="1500" />
+              </FormField>
+              <div class="actions">
+                <UiButton variant="primary" :busy="busy === 'settings'" @click="saveSettings">
+                  Сохранить
+                </UiButton>
+              </div>
+              <p class="note faint">
+                Смена адреса, порта, подсети, DNS или MTU меняет конфиги клиентов —
+                после неё их нужно импортировать заново.
+              </p>
+              <div class="actions">
+                <template v-if="confirmRegen">
+                  <UiButton variant="danger" :busy="busy === 'regen'" @click="regen">
+                    Да, сменить — все переподключат
+                  </UiButton>
+                  <UiButton @click="confirmRegen = false">Отмена</UiButton>
+                </template>
+                <UiButton v-else @click="confirmRegen = true">Сменить параметры маскировки</UiButton>
+              </div>
+            </div>
+          </details>
+        </template>
+      </template>
+    </template>
+  </ServicePanel>
+
+  <ServerClientSheet
+    :open="sheet.open"
+    :client="sheetClient"
+    :tab="sheet.tab"
+    @close="sheet.open = false"
+  />
+</template>
+
+<style scoped>
+.lead {
+  font-size: 13px;
+  color: var(--dim);
+}
+.note {
+  font-size: 12.5px;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  overflow-wrap: anywhere;
+}
+.note.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.note.bad {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+}
+.note.faint {
+  color: var(--faint);
+  border-color: transparent;
+  padding: 0 2px;
+}
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.log {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+}
+.sub {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 4px 0 0;
+}
+.client {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  background: var(--panel-2);
+}
+.client.live {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--line));
+}
+.client :deep(.lbl) {
+  font-weight: 600;
+}
+.client :deep(.text small) {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+.speed {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--ok);
+  font-variant-numeric: tabular-nums;
+}
+.mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.traffic {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 4px 14px;
+  font-size: 12px;
+}
+.traffic div {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.traffic dt {
+  color: var(--faint);
+  min-width: 52px;
+}
+.traffic dd {
+  margin: 0;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.row-actions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.add {
+  display: grid;
+  gap: 10px;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius-sm);
+  padding: 11px 12px;
+}
+.settings summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--dim);
+  padding: 4px 0;
+}
+.settings-body {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+</style>

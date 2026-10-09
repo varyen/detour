@@ -52,6 +52,12 @@ SPEEDCHECK_EXCLUDE="/etc/sing-box/speedcheck-exclude.list"
 TORRENT_ALLOW="/etc/sing-box/torrent-allow.list"
 TORRENT_BIN="/usr/sbin/detour-torrent"
 TORRENT_STATE="/var/state/detour-torrent.json"
+# Что делать с торрентами на запрещающем профиле: «block» (по умолчанию),
+# «direct» или «via <id профиля/цепочки, где торренты разрешены>». Для «via»
+# сборка конфига заводит вход на свой порт и пишет его в torrent.map
+# («порт udp-порт») — по нему detour-torrent заворачивает трафик торрент-клиента.
+TORRENT_ACTION_FILE="/etc/sing-box/torrent-action"
+TORRENT_MAP="/etc/sing-box/torrent.map"
 SINGBOX_WHITELIST="/etc/sing-box/whitelist-domains.list"
 ZAPRET_INITD="/etc/init.d/zapret-tpws"
 ZAPRET_CONF="/etc/zapret-tpws.conf"
@@ -192,6 +198,8 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     TORRENT_ALLOW="$OPT/etc/sing-box/torrent-allow.list"
     TORRENT_BIN="$OPT/sbin/detour-torrent"
     TORRENT_STATE="$OPT/var/state/detour-torrent.json"
+    TORRENT_ACTION_FILE="$OPT/etc/sing-box/torrent-action"
+    TORRENT_MAP="$OPT/etc/sing-box/torrent.map"
     SINGBOX_WHITELIST="$OPT/etc/sing-box/whitelist-domains.list"
     ZAPRET_INITD="$OPT/etc/init.d/S53detour-zapret"
     ZAPRET_CONF="$OPT/etc/zapret-tpws.conf"
@@ -781,6 +789,14 @@ write_settings() {
     # this function emits a fixed key set, so re-read and re-emit it or it's lost.
     local vpn_ifaces
     vpn_ifaces=$(get_settings_val "vpn_redirect_ifaces")
+    # Свой VPN-сервер включён до того, как появился settings.json, — его
+    # интерфейс обязан быть в списке, иначе клиенты сервера идут мимо маршрутов.
+    if grep -qs '^ENABLED=1' "$DETOUR_DIR/server/server.conf"; then
+        case " $(printf '%s' "$vpn_ifaces" | tr ',' ' ') " in
+            *" dsrv0 "*) ;;
+            *) vpn_ifaces=$(echo "$vpn_ifaces dsrv0" | awk '{ $1 = $1; print }') ;;
+        esac
+    fi
 
     # Health-check flags: same deal. Re-read from the current file so a profile
     # switch / settings POST doesn't wipe them; callers (health_config action)
@@ -1402,10 +1418,13 @@ devices_conf_lines() {
 # RX_INBOUNDS, заполняет DX_RULES и DX_MAP (текст devices.map).
 compute_device_extras() {
     local udp_mode mac mode target k k_old tag thops payload ptype port uport seen inb
-    DX_RULES=""; DX_MAP=""
+    DX_RULES=""; DX_MAP=""; TORRENT_PORT=""; TORRENT_UPORT=""
     udp_mode=$(udp_vpn_mode_val)
     k=0; seen=" "
     devices_conf_lines > "/tmp/detour-devices.$$"
+    # Профиль для торрентов — та же цель «через X», что у устройства, только трафик
+    # на её вход заворачивает detour-torrent по метке, а не правило по MAC.
+    [ -n "$TORRENT_VIA" ] && echo "torrent|vpn|$TORRENT_VIA" >> "/tmp/detour-devices.$$"
     while IFS='|' read -r mac mode target; do
         if [ "$mode" = direct ]; then
             DX_MAP="$DX_MAP$mac direct 0 0
@@ -1416,6 +1435,11 @@ compute_device_extras() {
         case "$seen" in
             *" $target="*)
                 k_old=${seen#*" $target="}; k_old=${k_old%% *}
+                if [ "$mac" = torrent ]; then
+                    TORRENT_OUT="dv_$k_old"; TORRENT_PORT=$((DEV_PORT_BASE + k_old))
+                    TORRENT_UPORT=$(dev_udp_port "$udp_mode" "$k_old")
+                    continue
+                fi
                 DX_MAP="$DX_MAP$mac vpn $((DEV_PORT_BASE + k_old)) $(dev_udp_port "$udp_mode" "$k_old")
 "
                 continue ;;
@@ -1455,6 +1479,10 @@ compute_device_extras() {
             inb="$inb,\"in_dev_udp_$k\""
         fi
         DX_RULES="$DX_RULES${DX_RULES:+,}{\"action\":\"route\",\"inbound\":[$inb],\"outbound\":\"$tag\"}"
+        if [ "$mac" = torrent ]; then
+            TORRENT_OUT="$tag"; TORRENT_PORT=$port; TORRENT_UPORT=$uport
+            continue
+        fi
         DX_MAP="$DX_MAP$mac vpn $port $uport
 "
     done < "/tmp/detour-devices.$$"
@@ -1481,6 +1509,39 @@ append_device_rules() {
         printf '%s,%s],\n' "$body" "$DX_RULES"
     else
         printf '    "rules": [{"action":"sniff"},%s],\n' "$DX_RULES"
+    fi
+}
+
+# Режим торрентов на запрещающем профиле: TA_MODE block|direct|via, TA_VIA — id.
+torrent_action_read() {
+    local l
+    TA_MODE=block; TA_VIA=""
+    l=$(head -1 "$TORRENT_ACTION_FILE" 2>/dev/null | tr -d '\r')
+    case "$l" in
+        direct) TA_MODE=direct ;;
+        "via "*)
+            TA_VIA=$(printf '%s' "${l#via }" | tr -cd 'a-zA-Z0-9_-')
+            [ -n "$TA_VIA" ] && TA_MODE=via ;;
+    esac
+}
+
+# Разрешены ли торренты на ВСЕХ хопах цели (профиль или именованная цепочка).
+target_allows_torrents() {
+    local hops h
+    if [ -f "$SINGBOX_PROFILES_DIR/$1.json" ]; then hops=$1; else hops=$(chain_hops_csv "$1"); fi
+    [ -n "$hops" ] || return 1
+    for h in $(printf '%s' "$hops" | tr ',' ' '); do
+        grep -qxF "$h" "$TORRENT_ALLOW" 2>/dev/null || return 1
+    done
+    return 0
+}
+
+# «порт udp-порт» входа профиля для торрентов; нет цели — файла нет.
+write_torrent_map() {
+    if [ -n "$TORRENT_PORT" ]; then
+        printf '%s %s\n' "$TORRENT_PORT" "${TORRENT_UPORT:-0}" > "$TORRENT_MAP.tmp" && mv "$TORRENT_MAP.tmp" "$TORRENT_MAP"
+    else
+        rm -f "$TORRENT_MAP"
     fi
 }
 
@@ -1746,11 +1807,14 @@ render_chain_config() {
     # «UDP через VPN» чужой WireGuard клиента улетел бы в reject как «торрент».
     # UDP закрывает detour-torrent: там матч прибит к полной форме uTP-SYN
     # (длина + 4 поля), и такой промах невозможен.
+    # Режим «напрямую»/«через профиль» (torrent-action): тот же матч, но вместо
+    # reject — outbound direct или выход профиля, где торренты разрешены.
     if [ "$TORRENT_REJECT" = "1" ]; then
-        local _sniff_head='    "rules": [{"action":"sniff"}'
+        local _sniff_head='    "rules": [{"action":"sniff"}' _bt_act='"action":"reject"'
+        [ -n "$TORRENT_OUT" ] && _bt_act="\"action\":\"route\",\"outbound\":\"$TORRENT_OUT\""
         case "$route_block_rules" in
             "$_sniff_head"*)
-                route_block_rules="$_sniff_head,{\"protocol\":[\"bittorrent\"],\"network\":[\"tcp\"],\"action\":\"reject\"}${route_block_rules#"$_sniff_head"}"
+                route_block_rules="$_sniff_head,{\"protocol\":[\"bittorrent\"],\"network\":[\"tcp\"],$_bt_act}${route_block_rules#"$_sniff_head"}"
                 ;;
         esac
     fi
@@ -1916,6 +1980,7 @@ build_config_mihomo() {
     fi
     mv "$tmp_mh" "$MIHOMO_CONF"
     write_devices_map "$DX_MAP"
+    write_torrent_map
     echo mihomo > "$ENGINE_FILE"
     # сайдкар больше не нужен: AWG-профили в основном конфиге
     [ -x "$AWG_BIN" ] && "$AWG_BIN" sync >/dev/null 2>&1
@@ -1955,6 +2020,22 @@ build_config() {
         grep -qxF "$_tid" "$TORRENT_ALLOW" 2>/dev/null || TORRENT_REJECT=1
     done
     IFS=$_oifs
+    # Куда вместо запрета. «via» — только в single-режиме (в multi у целей свои
+    # процессы и входа цели нет) и только на цель, где торренты разрешены на
+    # всех хопах; иначе остаётся запрет. «direct» при «Всё через VPN» тоже
+    # запрет: этот режим обещает, что напрямую не уходит ничего.
+    TORRENT_OUT=""; TORRENT_VIA=""; TORRENT_PORT=""; TORRENT_UPORT=""
+    if [ "$TORRENT_REJECT" = 1 ]; then
+        torrent_action_read
+        case "$TA_MODE" in
+            direct)
+                if ! { [ -n "$ALLVPN_MARK" ] && [ -f "$ALLVPN_MARK" ]; } && \
+                   ! iptables -t nat -C PREROUTING -i "$LAN_IF" -j SINGBOX_ALLVPN 2>/dev/null; then
+                    TORRENT_OUT=direct
+                fi ;;
+            via) [ "$mode" != multi ] && target_allows_torrents "$TA_VIA" && TORRENT_VIA=$TA_VIA ;;
+        esac
+    fi
 
     eff_engine=singbox
     if [ "$engine_mode" = mihomo ]; then
@@ -2082,6 +2163,7 @@ build_config() {
     done
     write_devices_map "$DX_MAP${DX_MAP:+
 }"
+    write_torrent_map
     # singbox — чистый sing-box, hybrid — плюс сайдкар AmneziaWG/xhttp (mihomo в
     # режиме «mihomo», откатившемся из-за запрета торрентов, — тоже гибрид).
     if [ "$engine_mode" = singbox ]; then echo singbox > "$ENGINE_FILE"; else echo hybrid > "$ENGINE_FILE"; fi
@@ -4077,6 +4159,14 @@ torrent_set)
         [ -n "$BT_CID" ] && grep -qxF "$BT_CID" "$BT_IDS" 2>/dev/null && BT_TOUCHED=1
     done
     IFS=$BT_OIFS
+    # Профиль «для торрентов» потерял или получил разрешение — вход для них
+    # появляется/исчезает только пересборкой.
+    torrent_action_read
+    if [ "$TA_MODE" = via ]; then
+        for BT_CID in $TA_VIA $(chain_hops_csv "$TA_VIA" 2>/dev/null | tr ',' ' '); do
+            grep -qxF "$BT_CID" "$BT_IDS" 2>/dev/null && BT_TOUCHED=1
+        done
+    fi
     rm -f "$BT_IDS"
     if [ "$BT_TOUCHED" = "1" ]; then
         SBMODE=$(get_singbox_mode)
@@ -4096,6 +4186,47 @@ torrent_set)
     fi
     BT_CNT=$(grep -c . "$TORRENT_ALLOW" 2>/dev/null); [ -z "$BT_CNT" ] && BT_CNT=0
     printf '{"ok":true,"allowed":%s}' "$BT_CNT"
+    ;;
+
+torrent_action)
+    # GET → {mode, via, via_ok}; POST {"mode":"block|direct|via","via":"<id>"}.
+    # «via» допустим только на цель, где торренты разрешены на всех хопах.
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        TA_NEW=$(printf '%s' "$POST_DATA" | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' | head -1)
+        TA_NEWVIA=$(printf '%s' "$POST_DATA" | sed -n 's/.*"via"[[:space:]]*:[[:space:]]*"\([a-zA-Z0-9_-]*\)".*/\1/p' | head -1)
+        case "$TA_NEW" in
+            block|direct) TA_LINE=$TA_NEW ;;
+            via)
+                [ -n "$TA_NEWVIA" ] || { json_err "не выбран профиль для торрентов"; exit 0; }
+                target_allows_torrents "$TA_NEWVIA" || { json_err "на выбранном профиле торренты не разрешены"; exit 0; }
+                TA_LINE="via $TA_NEWVIA" ;;
+            *) json_err "режим: block, direct или via"; exit 0 ;;
+        esac
+        mkdir -p "$(dirname "$TORRENT_ACTION_FILE")" 2>/dev/null
+        echo "$TA_LINE" > "$TORRENT_ACTION_FILE"
+        # Действует, только пока активная цепочка торренты запрещает.
+        TA_CHAIN=$(get_active_chain)
+        TA_DENY=0
+        for TA_H in $(printf '%s' "$TA_CHAIN" | tr ',' ' '); do
+            grep -qxF "$TA_H" "$TORRENT_ALLOW" 2>/dev/null || TA_DENY=1
+        done
+        if [ "$TA_DENY" = 1 ] && [ -n "$TA_CHAIN" ]; then
+            BUILD_ERR=$(build_config "$(get_singbox_mode)" "$TA_CHAIN")
+            if [ $? -ne 0 ]; then
+                json_err "режим сохранён, но конфиг не собрался: $(printf '%s' "$BUILD_ERR" | json_escape)"
+                exit 0
+            fi
+            $SINGBOX_INITD reconfigure >/dev/null 2>&1
+        fi
+        if [ -x "$TORRENT_BIN" ]; then
+            "$TORRENT_BIN" clear >/dev/null 2>&1
+            "$TORRENT_BIN" apply >/dev/null 2>&1
+        fi
+    fi
+    torrent_action_read
+    TA_OK=false
+    [ "$TA_MODE" = via ] && target_allows_torrents "$TA_VIA" && TA_OK=true
+    printf '{"ok":true,"mode":"%s","via":"%s","via_ok":%s}\n' "$TA_MODE" "$TA_VIA" "$TA_OK"
     ;;
 
 torrent_status)
@@ -5255,6 +5386,65 @@ console_status|console_start|console_stop|console_install)
                     [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
                     start_apply "\"$UPDATE_BIN\" ttyd-apply" ;;
             esac ;;
+    esac
+    ;;
+
+# ==================== VPN-СЕРВЕР (AmneziaWG) ====================
+# Обёртка над detour-server: вся валидация и запись конфига — в нём. Значения
+# уходят argv'ом, id проверяется по charset. Конфиг клиента несёт приватный
+# ключ — только POST, чтобы не осесть в логах веб-сервера и кэше.
+server_status|server_sessions|server_install|server_set|server_client_add|server_client_set|server_client_del|server_client_conf|server_regen)
+    SERVER_BIN="${OPT}/usr/sbin/detour-server"
+    [ "$PLATFORM" = keenetic ] && SERVER_BIN="$OPT/sbin/detour-server"
+    [ -x "$SERVER_BIN" ] || { json_err "detour-server не установлен"; exit 0; }
+    if [ "$ACTION" = server_status ]; then "$SERVER_BIN" status; exit 0; fi
+    if [ "$ACTION" = server_sessions ]; then
+        SRV_ID=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]id=\([^&]*\).*/\1/p' | head -1)
+        case "$SRV_ID" in *[!a-f0-9]*) json_err "bad id"; exit 0 ;; esac
+        "$SERVER_BIN" sessions "$SRV_ID"; exit 0
+    fi
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    srv_str() { printf '%s' "$POST_DATA" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
+    srv_num() { printf '%s' "$POST_DATA" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" | head -1; }
+    srv_bool() {
+        printf '%s' "$POST_DATA" | grep -q "\"$1\"[[:space:]]*:[[:space:]]*true" && { echo 1; return; }
+        printf '%s' "$POST_DATA" | grep -q "\"$1\"[[:space:]]*:[[:space:]]*false" && echo 0
+    }
+    SRV_ID=$(srv_str id)
+    case "$ACTION" in server_client_set|server_client_del|server_client_conf)
+        case "$SRV_ID" in ''|*[!a-f0-9]*) json_err "bad id"; exit 0 ;; esac ;;
+    esac
+    case "$ACTION" in
+        server_install)
+            [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+            start_apply "\"$UPDATE_BIN\" server-apply" ;;
+        server_set)
+            # Только присланные поля; пустая строка у endpoint/dns = «авто».
+            set --
+            v=$(srv_bool enabled); [ -n "$v" ] && set -- "$@" "enabled=$v"
+            v=$(srv_num port);     [ -n "$v" ] && set -- "$@" "port=$v"
+            v=$(srv_num mtu);      [ -n "$v" ] && set -- "$@" "mtu=$v"
+            v=$(srv_str net);      [ -n "$v" ] && set -- "$@" "net=$v"
+            printf '%s' "$POST_DATA" | grep -q '"endpoint"' && set -- "$@" "endpoint=$(srv_str endpoint)"
+            printf '%s' "$POST_DATA" | grep -q '"dns"' && set -- "$@" "dns=$(srv_str dns)"
+            [ $# -gt 0 ] || { json_err "нечего менять"; exit 0; }
+            "$SERVER_BIN" set "$@" ;;
+        server_client_add)
+            "$SERVER_BIN" client-add "$(srv_str name)" "$(srv_str mode)" ;;
+        server_client_set)
+            set --
+            v=$(srv_str name);     [ -n "$v" ] && set -- "$@" "name=$v"
+            v=$(srv_str mode);     [ -n "$v" ] && set -- "$@" "mode=$v"
+            v=$(srv_bool enabled); [ -n "$v" ] && set -- "$@" "enabled=$v"
+            [ $# -gt 0 ] || { json_err "нечего менять"; exit 0; }
+            "$SERVER_BIN" client-set "$SRV_ID" "$@" ;;
+        server_client_del)
+            "$SERVER_BIN" client-del "$SRV_ID" ;;
+        server_client_conf)
+            SRV_CONF=$("$SERVER_BIN" client-conf "$SRV_ID" 2>/dev/null) || { json_err "клиент не найден"; exit 0; }
+            printf '{"ok":true,"conf":"%s"}\n' "$(printf '%s' "$SRV_CONF" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{ printf "%s\\n", $0 }')" ;;
+        server_regen)
+            "$SERVER_BIN" regen-obf ;;
     esac
     ;;
 

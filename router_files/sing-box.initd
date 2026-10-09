@@ -973,6 +973,13 @@ start_service() {
         echo "sing-box binary missing ($PROG) — run: detour-update bins-apply (панель: «Обновить sing-box»)" >&2
         logger -t sing-box "binary missing ($PROG); not starting — traffic stays direct"
         return 1
+    elif ! grep -q '"listen_port": *12345' "$CONF" 2>/dev/null; then
+        # Конфиг не собран Detour'ом — профиль ещё не выбран. На OpenWrt 25.12 на
+        # этом месте лежит пример из родного пакета sing-box: shadowsocks-сервер
+        # на :8080 с паролем из шаблона. Запускать его — открыть всей сети прокси
+        # с публичным паролем.
+        logger -t sing-box "config.json is not a Detour config (no profile activated yet); not starting"
+        return 1
     fi
 
     local MODE=$(get_singbox_mode)

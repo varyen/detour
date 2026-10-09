@@ -527,6 +527,12 @@ async function checkTorrentBlock(seed: boolean) {
   const st = await profilesApi.torrentStatus().catch(() => null);
   const evt = st?.last_event;
   if (!evt?.ts) return;
+  /* Торренты не блокируются, а уводятся напрямую/через другой профиль — это и
+     есть то, что попросили; тост «заблокировано» соврал бы. */
+  if (st?.action && st.action !== "block") {
+    torrentSeen.value = Math.max(torrentSeen.value, evt.ts);
+    return;
+  }
   if (seed || evt.ts <= torrentSeen.value) {
     torrentSeen.value = Math.max(torrentSeen.value, evt.ts);
     return;

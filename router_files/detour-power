@@ -155,10 +155,11 @@ cron_strip() {
     if [ "$KEENETIC" = 1 ]; then return 0; fi   # на Keenetic расписание — демон S90
     have crontab || return 0
     _cur=$(crontab -l 2>/dev/null)
-    _ours=$(printf '%s\n' "$_cur" | grep -E "$CRON_PAT")
+    # Статистика VPN-сервера остаётся: сам сервер при остановке не гасится.
+    _ours=$(printf '%s\n' "$_cur" | grep -E "$CRON_PAT" | grep -v 'detour-server')
     [ -n "$_ours" ] || return 0
     printf '%s\n' "$_ours" > "$CRON_SAVE"
-    printf '%s\n' "$_cur" | grep -vE "$CRON_PAT" | grep -v '^$' | crontab - 2>/dev/null
+    printf '%s\n' "$_cur" | awk -v p="$CRON_PAT" '$0 !~ p || /detour-server/' | grep -v '^$' | crontab - 2>/dev/null
     [ -x /etc/init.d/cron ] && /etc/init.d/cron restart >/dev/null 2>&1
     return 0
 }
@@ -167,7 +168,7 @@ cron_restore() {
     [ "$KEENETIC" = 1 ] && return 0
     [ -s "$CRON_SAVE" ] || return 0
     have crontab || return 0
-    { crontab -l 2>/dev/null | grep -vE "$CRON_PAT"; cat "$CRON_SAVE"; } | grep -v '^$' | crontab - 2>/dev/null
+    { crontab -l 2>/dev/null | awk -v p="$CRON_PAT" '$0 !~ p || /detour-server/'; cat "$CRON_SAVE"; } | grep -v '^$' | crontab - 2>/dev/null
     rm -f "$CRON_SAVE"
     [ -x /etc/init.d/cron ] && /etc/init.d/cron restart >/dev/null 2>&1
     return 0
@@ -521,7 +522,13 @@ cmd_uninstall() {
         for _k in /etc/opkg/keys/*; do
             [ -f "$_k" ] && grep -qs 'detour' "$_k" && rm -f "$_k"
         done
+        # VPN-сервер при «полной остановке» не гасится (иначе выключение через
+        # этот же VPN отрезало бы доступ к дому) — снимаем его только здесь.
+        ip link del dsrv0 2>/dev/null
         if have uci; then
+            for _s in detour_srv detour_srv_wan detour_srv_lan detour_srv_in; do
+                uci -q delete "firewall.$_s"
+            done
             # Правила проброса (detour-pm-*) уже сняты `detour-portmap apply` в teardown.
             if ! fallback_needed; then
                 uci -q delete firewall.lan_mark_fallback

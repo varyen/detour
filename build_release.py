@@ -182,6 +182,9 @@ PANEL_FILES = [
     (("router_files", "detour-power"), "usr/sbin/detour-power", 0o755),
     # Консоль роутера в панели (ttyd по запросу, одноразово, только LAN).
     (("router_files", "detour-console"), "usr/sbin/detour-console", 0o755),
+    # Свой VPN-сервер (AmneziaWG на kmod из фида прошивки) с маршрутами роутера.
+    (("router_files", "detour-server"), "usr/sbin/detour-server", 0o755),
+    (("router_files", "detour-server.initd"), "etc/init.d/detour-server", 0o755),
     # Набор singbox_vpnservers: серверы всех профилей мимо перехвата.
     (("router_files", "detour-vpnservers"), "usr/sbin/detour-vpnservers", 0o755),
     # Syslog log-bridge: tails Detour's log files → `logger` so a remote-log
@@ -490,6 +493,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass /usr/sbin/detour-power \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
     /usr/sbin/detour-awg /etc/init.d/detour-awg \\
+    /usr/sbin/detour-server /etc/init.d/detour-server \\
     /www/cgi-bin/detour-api 2>/dev/null
 
 # 2b) Seed the health-check target list on first install (preserved on upgrade
@@ -597,6 +601,10 @@ fi
 # AmneziaWG-сайдкар: no-op без mihomo и без AWG-профилей.
 /etc/init.d/detour-awg enable >/dev/null 2>&1
 /etc/init.d/detour-awg restart >/dev/null 2>&1
+# VPN-сервер: no-op, пока не включён. start, а не restart — apply через
+# syncconf не рвёт сессии клиентов, которые, возможно, и ставят это обновление.
+/etc/init.d/detour-server enable >/dev/null 2>&1
+/etc/init.d/detour-server start >/dev/null 2>&1
 
 # 3f) Seed the HW-offload watchdog config on first install only (keeplist-preserved, so
 # a user's later choice survives upgrades). Default: auto-recover a wedged QCA accelerator.
@@ -621,7 +629,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent' | grep -v 'detour-server'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -647,6 +655,8 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   # и, если они выросли, пишем событие для панели + шлём один Web Push на эпизод.
   # Правил нет → tick выходит сразу, так что на «разрешающем» профиле это бесплатно.
   echo "* * * * * /usr/sbin/detour-torrent tick >/dev/null 2>&1"
+  # Статистика клиентов VPN-сервера: трафик, сессии. Сервер выключен → выход сразу.
+  echo "* * * * * /usr/sbin/detour-server tick >/dev/null 2>&1"
   # HW-offload watchdog — QCA/ipq53xx only; a safe no-op on non-QCA hardware. Detects a
   # wedged NSS/PPE accelerator (LAN<->WAN forwarding fell to the CPU → ~100 Mbit until a
   # reboot) and recovers it in place. Mode lives in /etc/detour/offload.conf (default auto).
@@ -712,6 +722,10 @@ esac
 # Stop the syslog log-bridge (tail|logger followers) so they don't linger.
 [ -x /etc/init.d/detour-logbridge ] && /etc/init.d/detour-logbridge stop >/dev/null 2>&1
 [ -x /etc/init.d/detour-awg ] && /etc/init.d/detour-awg stop >/dev/null 2>&1
+# VPN-сервер на обновлении не гасим: панель могут обновлять через него же.
+case "$1" in
+    remove|purge) ip link del dsrv0 2>/dev/null ;;
+esac
 # Stop the bypass engine (nfqws2/tpws + its firewall) WITHOUT changing the
 # persisted mode — postinst re-applies it. Falls back to a direct tpws stop.
 [ -x /usr/sbin/detour-bypass ] && /usr/sbin/detour-bypass stop >/dev/null 2>&1
@@ -739,6 +753,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-geo' \\
                       | grep -v 'detour-trafficlog' \\
                       | grep -v 'detour-torrent' \\
+                      | grep -v 'detour-server' \\
                       | crontab - 2>/dev/null
 echo "=== detour prerm end pid=$$ args:$* ==="
 exit 0

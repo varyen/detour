@@ -48,6 +48,7 @@
 #   mihomo-check           — check the feed for a newer mihomo
 #   mihomo-remove          — stop the AWG sidecar and remove mihomo
 #   ttyd-apply             — поставить ttyd (консоль роутера в панели) из штатного фида
+#   server-apply           — поставить AmneziaWG (kmod + tools) для VPN-сервера из штатного фида
 #   nfqueue-ensure         — поставить NFQUEUE (iptables-mod-nfqueue) для zapret2
 #   mihomo-ensure          — поставить mihomo, если есть AWG-профили и движок не «singbox»
 #   netfilter-ensure       — поставить iptables-nft (+tproxy), если iptables нет вовсе
@@ -1115,6 +1116,30 @@ cmd_ttyd_apply() {
     log "ttyd now at $(pkg_installed_version ttyd)"
 }
 
+# ---- AmneziaWG для VPN-сервера (detour-server) ----
+# kmod-amneziawg + amneziawg-tools — из штатного фида прошивки (у GL.iNet они
+# собраны под её ядро). Модуль ядра из чужого фида не загрузится, поэтому
+# своего пакета нет: нет в фиде прошивки — сервер недоступен.
+cmd_server_apply() {
+    [ "$KEENETIC" = 1 ] && die "на Keenetic VPN-сервер пока не поддерживается"
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    log "$PKGM update + install kmod-amneziawg amneziawg-tools..."
+    opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
+    local p
+    for p in kmod-amneziawg amneziawg-tools; do
+        if pkg_is_installed "$p"; then
+            log "$p уже установлен ($(pkg_installed_version "$p"))"
+        else
+            pkg_install "$p" 2>&1 || die "install of $p failed"
+        fi
+    done
+    modprobe amneziawg 2>&1 || die "модуль amneziawg не загрузился (ядро не совпало?)"
+    log "AmneziaWG готов"
+    [ -x /usr/sbin/detour-server ] && /usr/sbin/detour-server start >/dev/null 2>&1
+}
+
 # ---- mihomo (сайдкар AmneziaWG) ----
 # Ставится/обновляется одной командой: тот же фидовый путь, что у tpws. После
 # установки сайдкар пересобирается — AWG-профили, добавленные до mihomo, сразу
@@ -1668,6 +1693,7 @@ case "$ACTION" in
     mihomo-check)      cmd_mihomo_check ;;
     mihomo-remove)     cmd_mihomo_remove ;;
     ttyd-apply)        cmd_ttyd_apply ;;
+    server-apply)      cmd_server_apply ;;
     netfilter-ensure)  cmd_netfilter_ensure ;;
     mihomo-ensure)     cmd_mihomo_ensure ;;
     nfqueue-ensure)    cmd_nfqueue_ensure ;;

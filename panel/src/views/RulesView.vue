@@ -8,6 +8,7 @@ import RuleSection from "@/components/rules/RuleSection.vue";
 import ListDrawer from "@/components/rules/ListDrawer.vue";
 import RouteMapEditor from "@/components/rules/RouteMapEditor.vue";
 import DeviceRulesEditor from "@/components/rules/DeviceRulesEditor.vue";
+import TorrentPolicy from "@/components/rules/TorrentPolicy.vue";
 import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
@@ -967,6 +968,9 @@ onBeforeUnmount(() => unregister?.());
         <UiButton :busy="devicesLoading" @click="loadDevices(true)">Перечитать</UiButton>
       </div>
     </RuleSection>
+
+    <!-- 5б. Торренты на профилях, где они запрещены -->
+    <TorrentPolicy v-if="!status.isClient" :open="!!opened.torrents" @toggle="toggle('torrents')" />
 
     <!-- 6. Перехват прокси -->
     <RuleSection

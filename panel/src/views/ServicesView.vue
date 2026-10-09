@@ -10,6 +10,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import ServicePanel from "@/components/services/ServicePanel.vue";
 import PortmapSheet from "@/components/services/PortmapSheet.vue";
+import ServerPanel from "@/components/services/ServerPanel.vue";
 import CertSheet from "@/components/services/CertSheet.vue";
 import KeenHttpsSheet from "@/components/services/KeenHttpsSheet.vue";
 import PasswordSheet from "@/components/services/PasswordSheet.vue";
@@ -140,6 +141,7 @@ interface PortmapExternal {
 const open = reactive<Record<string, boolean>>({
   engine: false,
   portmap: false,
+  server: false,
   cert: false,
   push: false,
   offload: false,
@@ -1071,6 +1073,9 @@ onBeforeUnmount(() => unregister?.());
         </UiButton>
       </div>
     </ServicePanel>
+
+    <!-- ===== свой VPN-сервер ===== -->
+    <ServerPanel v-if="!status.isClient" v-model:open="open.server" />
 
     <!-- ===== сертификат ===== -->
     <ServicePanel

@@ -11,3 +11,4 @@ keenetic/**     text=auto eol=lf
 tools/**        text=auto eol=lf
 *.py            text=auto eol=lf
 *.sh            text=auto eol=lf
+linux/**       text=auto eol=lf
