@@ -2720,7 +2720,14 @@ status)
     MPTCP=$(sysctl -n net.mptcp.enabled 2>/dev/null || echo "unknown")
     UPTIME=$(cat /proc/uptime | awk '{printf "%dd %dh %dm", $1/86400, ($1%86400)/3600, ($1%3600)/60}')
     MEM_FREE=$(free | awk '/Mem:/{printf "%dMB/%dMB", ($3)/1024, ($2)/1024}')
-    DISK_FREE=$(df /overlay 2>/dev/null | awk 'NR==2{printf "%d", $4/1024}')
+    # OpenWrt — overlay, Keenetic — флешка Entware в /opt (overlay там нет).
+    # -P: длинное имя устройства иначе переносит строку, и NR==2 промахивается.
+    DISK_FREE=""
+    for _m in /overlay /opt /; do
+        [ -d "$_m" ] || continue
+        DISK_FREE=$(df -P "$_m" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {printf "%d", $4/1024}')
+        [ -n "$DISK_FREE" ] && break
+    done
 
     # CPU utilisation % over the interval since the previous status poll.
     # /proc/stat aggregate-line deltas are cached in /tmp, so this never blocks
@@ -2883,7 +2890,7 @@ status)
     "mptcp": "$MPTCP",
     "uptime": "$UPTIME",
     "memory": "$MEM_FREE",
-    "disk_free": "${DISK_FREE}MB",
+    "disk_free": "${DISK_FREE:+${DISK_FREE}MB}",
     "cpu": "$CPU_PCT",
     "cpu_cores": $CPU_CORES
     },
