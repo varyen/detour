@@ -789,8 +789,12 @@ verify_and_install() {
 
 # Back-compat wrapper for the single-package (panel) callers.
 verify_and_install_ipk() {
+    # Файл той же версии opkg молча пропускает («up to date», код 0) — а это и
+    # есть «перезалить пакет»: панель писала «установлено», не поставив ничего.
+    local vflags=""
+    [ "$PKGM" = apk ] || vflags="--force-reinstall"
     verify_and_install "$1" "$2" "${PACKAGE_NAME}_$(current_version).${PKG_EXT}" \
-        "$STASH_IPK" ""
+        "$STASH_IPK" "$vflags"
 }
 
 # ---- sing-box (opkg feed) helpers ----
