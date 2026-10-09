@@ -59,6 +59,7 @@ LOG=/var/log/detour-health.log
 HEALTH_DB=/tmp/detour-health.db
 SCHED=/tmp/detour-health.sched   # per-profile next-due schedule (TSV: id\tnext_due_epoch)
 SWITCH_MARK=/tmp/detour-health.switch
+HEALTH_HINT=/tmp/detour-health.hint         # socks/http, провалившие проверку, но отвечающие по другому протоколу (TSV: id\tproto)
 UNSUPP_MARK=/tmp/detour-health.unsupported   # set when sing-box has no working clash_api
 ASTATE=/tmp/detour-health.active-state       # `active` mode: "<id>\t<ok>" of last functional result (drives push transitions)
 ALOCK=/tmp/detour-health.active.lock         # `active` mode's OWN lock (independent of the sweep/tick LOCK so a long sweep can't starve the sub-minute active check)
@@ -697,6 +698,59 @@ probe_summary() { # $1 = profile id -> "ok=.. rtt=.. delays=.."
     }' "$WORK/$1" 2>/dev/null
 }
 
+# ---- Подсказка «не тот протокол» для socks/http-профилей ----------------------
+# Провайдеры прокси нередко отдают на порту только HTTP, а профиль заведён как
+# SOCKS (или наоборот): проверка честно «не проходит», а почему — не видно.
+# Если такой профиль провалил проверку, пробуем второй протокол curl'ом прямо с
+# роутера (свой трафик роутера идёт мимо sing-box — как и у временного
+# инстанса) и запоминаем, какой ответил. Файл: id \t протокол (http|socks5).
+hint_drop() { # $1 = id
+    [ -f "$HEALTH_HINT" ] || return 0
+    awk -F'\t' -v id="$1" '$1!=id' "$HEALTH_HINT" > "$HEALTH_HINT.$$" 2>/dev/null \
+        && mv "$HEALTH_HINT.$$" "$HEALTH_HINT" 2>/dev/null || rm -f "$HEALTH_HINT.$$"
+}
+
+proto_hint() { # $1 = id, $2 = ok (1|0)
+    hint_drop "$1"
+    [ "$2" = "1" ] && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+    _ph=$(lua - "$PROFILES/$1.json" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local h = io.open(arg[1], "r"); if not h then return end
+local obj = cjson.decode(h:read("*a") or ""); h:close()
+local ob = type(obj) == "table" and obj.outbound
+if type(ob) ~= "table" or type(ob.server) ~= "string" or not tonumber(ob.server_port) then return end
+-- HTTPS-прокси (tls) curl'ом по второму протоколу не сравнить — не трогаем.
+if type(ob.tls) == "table" and ob.tls.enabled then return end
+local alt
+if ob.type == "socks" then alt = "http" elseif ob.type == "http" then alt = "socks5h" else return end
+local function clean(s) return (tostring(s or ""):gsub("[%c]", "")) end
+local host = ob.server:find(":", 1, true) and ("[" .. ob.server .. "]") or ob.server
+io.write(alt, "\t", host, ":", tonumber(ob.server_port), "\t", clean(ob.username), "\t", clean(ob.password), "\n")
+LUA
+)
+    [ -n "$_ph" ] || return 0
+    _palt=$(printf '%s' "$_ph" | cut -f1)
+    _paddr=$(printf '%s' "$_ph" | cut -f2)
+    _puser=$(printf '%s' "$_ph" | cut -f3)
+    _ppass=$(printf '%s' "$_ph" | cut -f4)
+    _purl=$(head -1 "$URLS_RESOLVED" 2>/dev/null | cut -f3)
+    [ -n "$_purl" ] || _purl="https://www.gstatic.com/generate_204"
+    # Любой HTTP-ответ цели (даже 403/404) значит, что прокси по этому протоколу
+    # работает; 000 — не ответил. 407 — это ответ самого прокси, а не цели.
+    if [ -n "$_puser" ]; then
+        _pcode=$(curl -s -o /dev/null -m 8 --connect-timeout 5 -w '%{http_code}' \
+            -x "$_palt://$_paddr" -U "$_puser:$_ppass" "$_purl" 2>/dev/null)
+    else
+        _pcode=$(curl -s -o /dev/null -m 8 --connect-timeout 5 -w '%{http_code}' \
+            -x "$_palt://$_paddr" "$_purl" 2>/dev/null)
+    fi
+    case "$_pcode" in ''|000|407) return 0 ;; esac
+    [ "$_palt" = "socks5h" ] && _palt=socks5
+    printf '%s\t%s\n' "$1" "$_palt" >> "$HEALTH_HINT"
+    log "profile $1: fails as $( [ "$_palt" = http ] && echo socks || echo http ), answers as $_palt"
+}
+
 sb_log_tail() {
     tail -5 "$SB_LOG" 2>/dev/null | tr '\n' '|' | sed 's/|$//; s/[[:space:]][[:space:]]*/ /g'
 }
@@ -980,6 +1034,7 @@ if [ "$MODE" = "one" ]; then
     # On-demand download speed for THIS profile (the panel's per-row button — this is
     # how a NON-active profile gets a speed number). Only when it passed the check.
     _ONEOK=$(printf '%s' "$LINE" | awk -F'\t' '{print $2}')
+    proto_hint "$ONEID" "$_ONEOK"
     _ONEDL=-1
     if [ "$_ONEOK" = "1" ]; then
         _ONEDL=$(measure_speed "$ONEID"); [ -z "$_ONEDL" ] && _ONEDL=-1
@@ -1117,6 +1172,12 @@ ACTIVE=$(jstr active_profile "$SETTINGS")
 
 PROBED="$WORK/.probed"
 ls -1 "$WORK" 2>/dev/null | grep -v '^\.' > "$PROBED"
+while read -r _hid; do
+    proto_hint "$_hid" "$(cut -f2 "$WORK/$_hid" 2>/dev/null)"
+done < "$PROBED"
+[ "$FORCE_ALL" = "1" ] && [ -f "$HEALTH_HINT" ] && \
+    awk -F'\t' -v allf="$ALL_IDS" 'FILENAME==allf{p[$1]=1;next} ($1 in p)' "$ALL_IDS" "$HEALTH_HINT" \
+        > "$HEALTH_HINT.$$" 2>/dev/null && mv "$HEALTH_HINT.$$" "$HEALTH_HINT"
 
 TMPDB="$HEALTH_DB.tmp.$$"
 : > "$TMPDB"

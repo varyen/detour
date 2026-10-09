@@ -34,7 +34,7 @@ import {
 } from "@/components/profiles/uri";
 import { copyText } from "@/lib/clipboard";
 import type { ProfileDraft } from "@/components/profiles/uri";
-import { ccFromName, countryName, fmtAgo, fmtSpeedKbps } from "@/lib/format";
+import { altProtoLabel, ccFromName, countryName, fmtAgo, fmtSpeedKbps } from "@/lib/format";
 
 type Tab = "profiles" | "chains" | "subs" | "warp";
 
@@ -112,6 +112,10 @@ const rowState = computed(() => {
         r.health.ts ? ` · ${fmtAgo(r.health.ts)}` : ""
       }`,
     );
+    const alt = !r.health.ok ? altProtoLabel(r.health.alt) : "";
+    if (alt) {
+      out.push(`Сервер отвечает по ${alt}, а профиль заведён другим протоколом — смените протокол`);
+    }
     /* По каждой цели отдельно: «не проходит» само по себе не говорит, что
        именно отвалилось — YouTube или весь выход в сеть. */
     const delays = r.health.delays ?? [];
@@ -240,23 +244,58 @@ async function healthOne(r: ProfileRow) {
     /* Вердикт лежит в result.ok: внешнее ok — это «запрос обработан», оно true
        и для профиля, который проверку не прошёл. */
     const res = (await diag.healthCheckOne(r.id)) as unknown as {
-      result?: { ok?: boolean; dl?: number };
+      result?: { ok?: boolean; dl?: number; alt?: string };
     };
     await store.loadProbes();
     const passed = res.result?.ok ?? store.health[r.id]?.ok === true;
     /* Заодно замеряется скорость — если она есть, показываем сразу: ради неё
        эту проверку чаще всего и запускают вручную. */
     const speed = fmtSpeedKbps(res.result?.dl ?? store.health[r.id]?.dl);
+    const alt = passed ? "" : altProtoLabel(res.result?.alt ?? store.health[r.id]?.alt);
     toast[passed ? "ok" : "error"](
       passed
         ? `${r.name}: проверка пройдена${speed ? ` · ↓ ${speed}` : ""}`
-        : `${r.name}: проверка не пройдена`,
+        : alt
+          ? `${r.name}: не пройдена, но сервер отвечает по ${alt} — смените протокол`
+          : `${r.name}: проверка не пройдена`,
     );
+    if (rowItem.value?.id === r.id) rowItem.value = store.rows.find((x) => x.id === r.id) ?? rowItem.value;
   } catch (e) {
     toast.fromError(e, "Проверка не удалась");
   } finally {
     probing.value = "";
   }
+}
+
+/**
+ * Перевести socks/http-профиль на протокол, по которому сервер ответил при
+ * проверке, и сразу проверить заново. profile_save перезаписывает файл
+ * целиком, поэтому правим полный профиль из profile_get, а не строку списка.
+ */
+async function switchProto(r: ProfileRow) {
+  const alt = r.health?.alt;
+  if (!alt || busy.value) return;
+  busy.value = "proto";
+  try {
+    const raw = await profilesApi.get(r.id);
+    const ob = { ...((raw.outbound as Record<string, unknown>) ?? {}) };
+    if (alt === "http") {
+      ob.type = "http";
+      delete ob.version;
+    } else {
+      ob.type = "socks";
+      ob.version = "5";
+    }
+    await profilesApi.save({ ...raw, id: r.id, type: alt === "http" ? "http-proxy" : "socks5", outbound: ob });
+    toast.ok(`${r.name}: протокол — ${altProtoLabel(alt)}`);
+    await reload(true);
+  } catch (e) {
+    toast.fromError(e, "Не удалось сменить протокол");
+    return;
+  } finally {
+    busy.value = "";
+  }
+  await healthOne(store.rows.find((x) => x.id === r.id) ?? r);
 }
 
 /** Флаг одного профиля: то же, что массовая операция, но на один id. */
@@ -860,6 +899,15 @@ onBeforeUnmount(() => unregister?.());
       <UiButton :busy="probing === rowItem.id" @click="pingOne(rowItem)">Проверить пинг</UiButton>
       <UiButton :busy="probing === rowItem.id" @click="healthOne(rowItem)">
         Проверить работу и скорость
+      </UiButton>
+      <UiButton
+        v-if="rowItem.health && !rowItem.health.ok && altProtoLabel(rowItem.health.alt)"
+        variant="primary"
+        :busy="busy === 'proto'"
+        :disabled="!!probing"
+        @click="switchProto(rowItem)"
+      >
+        Переключить на {{ altProtoLabel(rowItem.health.alt) }}
       </UiButton>
       <UiButton :busy="busy === 'open'" @click="editRow(rowItem)">Править</UiButton>
       <UiButton :busy="busy === 'copy'" @click="copyRowLink(rowItem)">

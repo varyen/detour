@@ -262,6 +262,9 @@ export interface HealthResult {
   rtt?: number;
   dl?: number;
   delays?: number[];
+  /** socks/http-профиль проверку не прошёл, но тот же адрес отвечает по этому
+      протоколу — почти наверняка в профиле выбран не тот протокол. */
+  alt?: "http" | "socks5";
 }
 
 export interface HealthStatusResponse {

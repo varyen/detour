@@ -82,7 +82,8 @@ TPWS_STATE="/var/state/detour-tpws.json"   # tpws-zapret update state (written b
 MIHOMO_STATE="/var/state/detour-mihomo.json" # mihomo update state (written by detour-update mihomo-check)
 NFQWS2_STATE="/var/state/detour-nfqws2.json" # nfqws2 (zapret2) update state (written by detour-update nfqws2-check)
 PING_DB="/tmp/detour-ping.db"               # per-profile latency cache (TSV in tmpfs; cleared on reboot)
-HEALTH_DB="/tmp/detour-health.db"           # per-profile FUNCTIONAL check cache (TSV; written by detour-health)
+HEALTH_HINT="/tmp/detour-health.hint"       # socks/http «отвечает по другому протоколу» (пишет detour-health)
+HEALTH_DB="/tmp/detour-health.db"          # per-profile FUNCTIONAL check cache (TSV; written by detour-health)
 HEALTH_SWITCH="/tmp/detour-health.switch"   # last auto-switch event marker (JSON; written by detour-health)
 HEALTH_UNSUPP="/tmp/detour-health.unsupported" # set by detour-health when sing-box lacks clash_api
 HEALTH_URLS="/etc/sing-box/health-urls.list" # health-check targets: "label|url" per line (panel-editable)
@@ -3142,14 +3143,19 @@ health_status)
         # TSV: id \t ok \t ts \t rtt \t delays(csv ms|-1) \t dl_kbits(optional). $5
         # has no tabs, so wrapping it in [] yields a JSON array; rebuild it to
         # normalise blanks. Field 6 (download kbit/s) is optional → default -1.
-        awk -F'\t' 'BEGIN{first=1}
+        # Подсказка detour-health: socks/http-профиль не прошёл, но отвечает по
+        # другому протоколу → "alt":"http"|"socks5".
+        awk -F'\t' -v hintf="$HEALTH_HINT" 'BEGIN{first=1
+                while ((getline hl < hintf) > 0) { split(hl, hp, "\t"); if (hp[2] ~ /^(http|socks5)$/) alt[hp[1]]=hp[2] }
+            }
             NF>=5 {
                 if(!first)printf ","; first=0;
                 n=split($5,a,","); d="";
                 for(i=1;i<=n;i++){ if(i>1)d=d","; v=a[i]; if(v=="")v="-1"; d=d v }
                 dl=(NF>=6)?$6:"-1"; if(dl=="" || dl !~ /^-?[0-9]+$/) dl="-1";
-                printf "\"%s\":{\"ok\":%s,\"ts\":%s,\"rtt\":%s,\"dl\":%s,\"delays\":[%s]}",
-                    $1, ($2=="1"?"true":"false"), ($3==""?0:$3), ($4==""?-1:$4), dl, d;
+                a=($1 in alt)?(",\"alt\":\"" alt[$1] "\""):"";
+                printf "\"%s\":{\"ok\":%s,\"ts\":%s,\"rtt\":%s,\"dl\":%s,\"delays\":[%s]%s}",
+                    $1, ($2=="1"?"true":"false"), ($3==""?0:$3), ($4==""?-1:$4), dl, d, a;
             }' "$HEALTH_DB"
     fi
     printf '}}'
@@ -3177,8 +3183,11 @@ health_check)
         [ -z "$DLS" ] && DLS=-1
         case "$DLK" in ''|*[!0-9-]*) DLK=-1 ;; esac
         OKJ=false; [ "$OKV" = "1" ] && OKJ=true
-        printf '{"ok":true,"id":"%s","result":{"ok":%s,"ts":%s,"rtt":%s,"dl":%s,"delays":[%s]}}' \
-            "$HID" "$OKJ" "$TSV" "$RTTV" "$DLK" "$DLS"
+        ALTJ=""
+        ALTV=$(awk -F'\t' -v id="$HID" '$1==id{print $2; exit}' "$HEALTH_HINT" 2>/dev/null)
+        case "$ALTV" in http|socks5) ALTJ=",\"alt\":\"$ALTV\"" ;; esac
+        printf '{"ok":true,"id":"%s","result":{"ok":%s,"ts":%s,"rtt":%s,"dl":%s,"delays":[%s]%s}}' \
+            "$HID" "$OKJ" "$TSV" "$RTTV" "$DLK" "$DLS" "$ALTJ"
     else
         # Detach the full sweep so the request returns at once AND the sweep keeps
         # running after uhttpd reaps the CGI. A bare `&` is NOT enough: the child

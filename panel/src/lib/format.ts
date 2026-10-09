@@ -52,6 +52,11 @@ export function fmtSpeedKbps(kbps?: number | null): string {
   return `${mbps >= 10 ? Math.round(mbps) : mbps.toFixed(1)} Мбит/с`;
 }
 
+/** Подпись протокола из подсказки проверки (`HealthResult.alt`). */
+export function altProtoLabel(alt?: string): string {
+  return alt === "http" ? "HTTP" : alt === "socks5" ? "SOCKS5" : "";
+}
+
 /** «5 минут назад» — для отметок времени в секундах (unix). */
 export function fmtAgo(tsSeconds?: number): string {
   if (!tsSeconds) return "";

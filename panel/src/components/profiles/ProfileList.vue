@@ -15,7 +15,7 @@
 import { computed, ref, watch } from "vue";
 import SectionIcon from "@/components/SectionIcon.vue";
 import type { ProfileRow } from "@/stores/profiles";
-import { ccFromName, countryName, flagOf, fmtAgo, fmtSpeedKbps } from "@/lib/format";
+import { altProtoLabel, ccFromName, countryName, flagOf, fmtAgo, fmtSpeedKbps } from "@/lib/format";
 
 type SortKey = "name" | "type" | "group" | "ping" | "speed" | "state";
 
@@ -269,6 +269,8 @@ function serverText(r: ProfileRow): string {
 function healthText(r: ProfileRow): string {
   const h = r.health;
   if (!h || h.ok === undefined) return "—";
+  const alt = !h.ok ? altProtoLabel(h.alt) : "";
+  if (alt) return `не проходит · отвечает по ${alt}`;
   const when = fmtAgo(h.ts);
   return `${h.ok ? "проходит" : "не проходит"}${when ? ` · ${when}` : ""}`;
 }
@@ -309,7 +311,9 @@ function healthTitle(r: ProfileRow): string {
   });
   const speed = fmtSpeedKbps(speedKbps(r));
   const when = fmtAgo(h.ts);
-  return [parts.join(" · ") || "нет данных", speed ? `↓ ${speed}` : "", when].filter(Boolean).join(" · ");
+  const alt = !h.ok ? altProtoLabel(h.alt) : "";
+  const hint = alt ? `сервер отвечает по ${alt}, а не по протоколу профиля — смените протокол` : "";
+  return [hint, parts.join(" · ") || "нет данных", speed ? `↓ ${speed}` : "", when].filter(Boolean).join(" · ");
 }
 
 function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck" | "torrents"): boolean {
@@ -342,8 +346,10 @@ function stateTile(r: ProfileRow): string {
       return "✓ проверка";
     case "slow":
       return "медленно";
-    case "dead":
-      return "✕ не отвечает";
+    case "dead": {
+      const alt = r.health && !r.health.ok ? altProtoLabel(r.health.alt) : "";
+      return alt ? `✕ отвечает по ${alt}` : "✕ не отвечает";
+    }
     default:
       return "не проверялся";
   }
