@@ -56,6 +56,7 @@ Function ${un}StopDetour
   nsExec::ExecToLog 'taskkill /f /im winws2.exe'
   Pop $0
   nsExec::ExecToLog 'taskkill /f /im mihomo.exe'
+  nsExec::ExecToLog 'taskkill /f /im detour-awgsrv.exe'
   Pop $0
   Sleep 800
 FunctionEnd
@@ -83,6 +84,7 @@ Section "Detour" SecMain
   File "${STAGE}\sing-box.exe"
   ; Сайдкар AmneziaWG: sing-box этот протокол не умеет.
   File "${STAGE}\mihomo.exe"
+  File "${STAGE}\detour-awgsrv.exe"
   ; Движок обхода DPI кладётся, только если он был при сборке: Defender метит
   ; WinDivert, поэтому сборка без него — норма, а поставить его можно из
   ; приложения («Журнал» → «Обновления» → winws2).
@@ -149,12 +151,14 @@ Section "Uninstall"
   ; Правило kill-switch живёт в брандмауэре отдельно от службы: снимаем, иначе
   ; после удаления машина осталась бы без интернета.
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Detour kill-switch"'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Detour VPN server"'
   Pop $0
 
   Delete "$INSTDIR\detour-svc.exe"
   Delete "$INSTDIR\detour-app.exe"
   Delete "$INSTDIR\sing-box.exe"
   Delete "$INSTDIR\mihomo.exe"
+  Delete "$INSTDIR\detour-awgsrv.exe"
   Delete "$INSTDIR\winws2.exe"
   Delete "$INSTDIR\cygwin1.dll"
   Delete "$INSTDIR\WinDivert.dll"

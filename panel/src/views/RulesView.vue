@@ -970,7 +970,7 @@ onBeforeUnmount(() => unregister?.());
     </RuleSection>
 
     <!-- 5б. Торренты на профилях, где они запрещены -->
-    <TorrentPolicy v-if="!status.isClient" :open="!!opened.torrents" @toggle="toggle('torrents')" />
+    <TorrentPolicy :open="!!opened.torrents" @toggle="toggle('torrents')" />
 
     <!-- 6. Перехват прокси -->
     <RuleSection

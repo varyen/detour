@@ -396,6 +396,8 @@ export interface ServerStatus {
   configured: boolean;
   enabled: boolean;
   running: boolean;
+  /** Приложение: работает ли движок — без него сервер не поднимается. */
+  engine_running?: boolean;
   /** Интерфейс сервера в vpn_redirect_ifaces — клиенты получают маршруты роутера. */
   routed: boolean;
   iface: string;

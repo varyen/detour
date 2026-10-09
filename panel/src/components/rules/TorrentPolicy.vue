@@ -10,12 +10,14 @@ import UiButton from "@/components/UiButton.vue";
 import { profiles as profilesApi } from "@/api";
 import type { TorrentAction, TorrentActionMode, TorrentStatus } from "@/api";
 import { useProfilesStore } from "@/stores/profiles";
+import { useStatusStore } from "@/stores/status";
 import { useToastStore } from "@/stores/toast";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ toggle: [] }>();
 
 const store = useProfilesStore();
+const status = useStatusStore();
 const toast = useToastStore();
 
 const action = ref<TorrentAction | null>(null);
@@ -98,10 +100,18 @@ async function save() {
     <p class="hint">
       Большинство VPN-провайдеров запрещают торренты и банят за них аккаунт,
       поэтому на профиле без явного разрешения торренты по умолчанию
-      блокируются. Вместо блока их можно увести: роутер узнаёт торрент-клиента по
-      DHT, трекерам и uTP и следующие 30 минут пускает его соединения на
-      нестандартные порты отдельно. Браузер того же компьютера (веб, почта,
-      мессенджеры) остаётся на обычном маршруте.
+      блокируются.
+      <template v-if="status.isClient">
+        Вместо блока их можно увести: весь трафик торрент-программ (qBittorrent,
+        Transmission, µTorrent, Deluge и другие) идёт напрямую или через выбранный
+        профиль, остальные программы — обычным маршрутом.
+      </template>
+      <template v-else>
+        Вместо блока их можно увести: роутер узнаёт торрент-клиента по DHT,
+        трекерам и uTP и следующие 30 минут пускает его соединения на
+        нестандартные порты отдельно. Браузер того же компьютера (веб, почта,
+        мессенджеры) остаётся на обычном маршруте.
+      </template>
     </p>
 
     <div class="scroll-x">
@@ -127,7 +137,7 @@ async function save() {
       «Всё через VPN» роутер всё равно блокирует — этот режим обещает, что
       напрямую не уходит ничего.
     </p>
-    <p v-if="mode !== 'block'" class="hint">
+    <p v-if="mode !== 'block' && !status.isClient" class="hint">
       Зашифрованный обмен с пирами роутер не распознаёт по содержимому — его
       уводит именно признак «это торрент-клиент». Компьютер, где торрент только
       что качал, полчаса ходит на нестандартные порты тем же путём.

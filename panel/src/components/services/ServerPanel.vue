@@ -14,10 +14,12 @@ import SegmentedControl from "@/components/SegmentedControl.vue";
 import { diag, poll, services } from "@/api";
 import type { ApplyLogResponse, ServerClient, ServerClientMode, ServerStatus } from "@/api";
 import { fmtAgo, fmtBitrate, fmtBytes } from "@/lib/format";
+import { useStatusStore } from "@/stores/status";
 import { useToastStore } from "@/stores/toast";
 
 const open = defineModel<boolean>("open", { required: true });
 const toast = useToastStore();
+const status = useStatusStore();
 
 const st = ref<ServerStatus | null>(null);
 const loadError = ref("");
@@ -328,7 +330,13 @@ function hint(c: ServerClient): string {
     :chip="chip"
     :tone="tone"
   >
-    <p class="lead">
+    <p v-if="status.isClient" class="lead">
+      Подключайте телефон или другой компьютер к этому устройству по AmneziaWG —
+      протоколу, который маскируется от блокировок. Их трафик идёт по тем же
+      правилам Detour, что и трафик этого компьютера. Сервер работает, пока
+      Detour здесь подключён.
+    </p>
+    <p v-else class="lead">
       Подключайтесь к дому из любой сети по AmneziaWG — протоколу, который
       маскируется от блокировок. Клиенты получают маршруты роутера: заблокированное
       идёт через ваш VPN, остальное — напрямую, домашние устройства доступны.
@@ -361,11 +369,20 @@ function hint(c: ServerClient): string {
           @update:model-value="toggleServer"
         />
 
-        <p v-if="st.enabled && !st.running" class="note bad">
-          Сервер включён, но интерфейс не поднялся. Подробности — в журнале
-          /var/log/detour-server.log.
+        <p v-if="st.enabled && !st.running && status.isClient && !st.engine_running" class="note warn">
+          Detour не подключён — сервер поднимется вместе с подключением.
         </p>
-        <p v-if="st.wan_private && !st.endpoint" class="note warn">
+        <p v-else-if="st.enabled && !st.running" class="note bad">
+          Сервер включён, но не поднялся. Подробности — в журнале<template v-if="status.isClient">
+          службы (awgsrv.log)</template><template v-else> /var/log/detour-server.log</template>.
+        </p>
+        <p v-if="status.isClient && st.wan_private && !st.endpoint" class="note warn">
+          Компьютер в локальной сети ({{ st.wan_ip }}). Из этой же сети к нему
+          подключатся сразу; из интернета — только если на роутере проброшен
+          UDP-порт {{ st.port }} на {{ st.wan_ip }}, а в настройках сервера указан
+          внешний адрес или домен роутера.
+        </p>
+        <p v-else-if="st.wan_private && !st.endpoint" class="note warn">
           Внешний адрес роутера {{ st.wan_ip }} — серый (провайдерский NAT): из
           интернета до сервера не достучаться. Нужен белый IP или проброс порта
           {{ st.port }}/UDP на стороне провайдера.
@@ -373,7 +390,7 @@ function hint(c: ServerClient): string {
         <p v-if="st.enabled" class="note faint">
           Клиенты подключаются к {{ st.endpoint_effective || "—" }}:{{ st.port }}<template
             v-if="!st.endpoint"
-          > (внешний адрес роутера; если он меняется — укажите домен в настройках)</template>.
+          > ({{ status.isClient ? "адрес компьютера в локальной сети" : "внешний адрес роутера; если он меняется — укажите домен в настройках" }})</template>.
         </p>
 
         <template v-if="st.configured">

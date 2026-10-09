@@ -23,6 +23,9 @@ pub const EGRESS_BLOCK: &str = "lists/blocked-egress-ips.list";
 pub const AUTOSWITCH_EXCLUDE: &str = "flags/autoswitch-exclude.list";
 pub const SPEEDCHECK_EXCLUDE: &str = "flags/speedcheck-exclude.list";
 pub const TORRENT_ALLOW: &str = "flags/torrent-allow.list";
+/// «block» | «direct» | «via <id>» — что делать с торрентами на профиле, где
+/// они запрещены (тот же формат, что `/etc/sing-box/torrent-action` роутера).
+pub const TORRENT_ACTION: &str = "flags/torrent-action";
 pub const AUTOSTART_SINGBOX: &str = "flags/autostart.singbox";
 pub const AUTOSTART_DPI: &str = "flags/autostart.dpi";
 /// Стратегия winws2 одной строкой — как `nfqws2.strategy` на роутере.

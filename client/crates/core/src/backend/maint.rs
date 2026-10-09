@@ -322,6 +322,9 @@ impl Backend {
         // идёт, поэтому интервал маленький.
         every(&self, 2, 2, |b| async move { b.guard_tick().await });
         every(&self, 45, 300, |b| async move { b.keepalive_tick().await });
+        // Свой VPN-сервер: процесс за движком (поднялся/упал/сменился адрес) и учёт.
+        every(&self, 5, 5, |b| async move { b.server_sync().await });
+        every(&self, 60, 60, |b| async move { b.server_tick().await });
         every(&self, 900, 86400, |b| async move { b.geo_daily().await });
         let b = self.clone();
         tokio::spawn(async move {

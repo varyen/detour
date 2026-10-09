@@ -46,6 +46,14 @@ Copy-Item (Join-Path $client 'target\release\detour-svc.exe') $stage
 Copy-Item (Join-Path $client 'target\release\detour-app.exe') $stage
 Copy-Item $SingBox (Join-Path $stage 'sing-box.exe')
 
+Write-Host "== detour-awgsrv (свой VPN-сервер AmneziaWG)"
+Push-Location (Join-Path $client 'awgsrv')
+$env:CGO_ENABLED = '0'; $env:GOOS = 'windows'; $env:GOARCH = 'amd64'
+go build -trimpath -ldflags '-s -w' -o (Join-Path $stage 'detour-awgsrv.exe') .
+if ($LASTEXITCODE) { throw "detour-awgsrv не собрался (нужен Go)" }
+Remove-Item Env:GOOS, Env:GOARCH
+Pop-Location
+
 Write-Host "== mihomo (сайдкар AmneziaWG)"
 if (-not $Mihomo) {
   $zip = Join-Path $stage '_mihomo.zip'

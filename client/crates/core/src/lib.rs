@@ -15,11 +15,13 @@ pub mod probe;
 pub mod profiles;
 pub mod render;
 pub mod rulist;
+pub mod server;
 pub mod settings;
 pub mod sharelink;
 pub mod store;
 pub mod subscription;
 pub mod sysinfo;
+pub mod torrent;
 pub mod traffic;
 pub mod updater;
 

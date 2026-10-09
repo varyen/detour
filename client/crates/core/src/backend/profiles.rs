@@ -9,6 +9,7 @@ use crate::lists;
 use crate::profiles;
 use crate::settings::Settings;
 use crate::store;
+use crate::torrent;
 
 impl Backend {
     pub(super) fn profiles_list(&self) -> Response {
@@ -184,12 +185,57 @@ impl Backend {
 
     pub(super) async fn torrent_status(&self) -> Response {
         let allow = lists::parse_id_list(&self.store.read_text(store::TORRENT_ALLOW));
-        let chain = Settings::load(&self.store).active_chain();
+        let settings = Settings::load(&self.store);
+        let chain = settings.active_chain();
         let blocked = chain.iter().find(|h| !allow.contains(h));
         let running = self.engine.pid().await.is_some();
+        // То, что реально стоит в конфиге (с откатами в запрет), как на роутере.
+        let action = match torrent::load(&self.store) {
+            torrent::Action::Direct if !settings.allvpn() => torrent::Action::Direct,
+            torrent::Action::Via(id) if torrent::target_allowed(&self.store, &id) => torrent::Action::Via(id),
+            _ => torrent::Action::Block,
+        };
+        let via_name = profiles::load(&self.store, action.via())
+            .and_then(|p| p.get("name").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_default();
         Response::json(&json!({
             "enforcing": running && blocked.is_some(),
             "profile": blocked.cloned().unwrap_or_default(),
+            "action": action.mode(),
+            "via": action.via(),
+            "via_name": via_name,
+            "clients": [],
         }))
+    }
+
+    /// GET → {mode, via, via_ok}; POST {"mode":"block|direct|via","via":"<id>"}.
+    pub(super) async fn torrent_action(&self, body: String) -> Result<Response> {
+        if !body.trim().is_empty() {
+            let v: Value = serde_json::from_str(&body).map_err(|_| anyhow!("ожидался JSON"))?;
+            let via = v.get("via").and_then(Value::as_str).unwrap_or("");
+            let action = match v.get("mode").and_then(Value::as_str).unwrap_or("") {
+                "block" => torrent::Action::Block,
+                "direct" => torrent::Action::Direct,
+                "via" => {
+                    let a = torrent::parse(&format!("via {via}"));
+                    match &a {
+                        torrent::Action::Via(id) if torrent::target_allowed(&self.store, id) => a,
+                        torrent::Action::Via(_) => bail!("на выбранном профиле торренты не разрешены"),
+                        _ => bail!("не выбран профиль для торрентов"),
+                    }
+                }
+                _ => bail!("режим: block, direct или via"),
+            };
+            self.store.write_text(store::TORRENT_ACTION, &action.to_line())?;
+            let allow = lists::parse_id_list(&self.store.read_text(store::TORRENT_ALLOW));
+            if Settings::load(&self.store).active_chain().iter().any(|h| !allow.contains(h)) {
+                self.apply(None, Start::IfRunning)
+                    .await
+                    .map_err(|e| anyhow!("режим сохранён, но конфиг не собрался: {e:#}"))?;
+            }
+        }
+        let a = torrent::load(&self.store);
+        let ok = matches!(&a, torrent::Action::Via(id) if torrent::target_allowed(&self.store, id));
+        Ok(Response::json(&json!({ "ok": true, "mode": a.mode(), "via": a.via(), "via_ok": ok })))
     }
 }

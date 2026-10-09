@@ -1075,7 +1075,7 @@ onBeforeUnmount(() => unregister?.());
     </ServicePanel>
 
     <!-- ===== свой VPN-сервер ===== -->
-    <ServerPanel v-if="!status.isClient" v-model:open="open.server" />
+    <ServerPanel v-model:open="open.server" />
 
     <!-- ===== сертификат ===== -->
     <ServicePanel

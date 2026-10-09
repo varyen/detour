@@ -38,6 +38,17 @@ curl -sfL --max-time 600 \
     "https://github.com/MetaCubeX/mihomo/releases/download/v$MIHOMO_VERSION/mihomo-darwin-$MARCH-v$MIHOMO_VERSION.gz" \
     | gunzip > "$APP/Contents/MacOS/mihomo"
 chmod 0755 "$APP/Contents/MacOS/mihomo"
+# detour-awgsrv — свой VPN-сервер AmneziaWG. Чистый Go: можно собрать здесь
+# или подложить кросс-сборку (AWGSRV=<путь>), если Go на машине нет.
+if [ -n "${AWGSRV:-}" ]; then
+    cp "$AWGSRV" "$APP/Contents/MacOS/detour-awgsrv"
+elif command -v go >/dev/null 2>&1; then
+    ( cd "$ROOT/client/awgsrv" && CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o "$APP/Contents/MacOS/detour-awgsrv" . )
+else
+    echo "нет Go и не задан AWGSRV — detour-awgsrv не собрать" >&2
+    exit 1
+fi
+chmod 0755 "$APP/Contents/MacOS/detour-awgsrv"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

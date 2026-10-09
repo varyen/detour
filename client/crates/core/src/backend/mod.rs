@@ -7,6 +7,7 @@ mod hosts;
 mod maint;
 mod profiles;
 mod rules;
+mod server;
 mod service;
 mod stats;
 mod subs;
@@ -69,6 +70,8 @@ pub struct Backend {
     dpi: Dpi,
     /// Сайдкар mihomo для AmneziaWG-профилей (sing-box их не умеет).
     awg: Sidecar,
+    /// Помощник detour-awgsrv своего VPN-сервера.
+    server: server::Proc,
     apply_lock: Mutex<()>,
     /// Одно обновление подписок за раз: плановое и ручное не должны
     /// одновременно переписывать одни и те же профили.
@@ -123,6 +126,7 @@ impl Backend {
             engine,
             dpi,
             awg,
+            server: server::Proc::default(),
             apply_lock: Mutex::new(()),
             subs_lock: Mutex::new(()),
             health_lock: Mutex::new(()),
@@ -184,6 +188,7 @@ impl Backend {
     pub async fn shutdown(&self) {
         self.engine.stop().await;
         self.awg.stop().await;
+        self.server_shutdown().await;
         self.dpi.stop().await;
         self.killswitch(false);
     }
@@ -242,6 +247,11 @@ impl Backend {
             "speedcheck_set" => self.id_flag(req, store::SPEEDCHECK_EXCLUDE, "eligible", false, "excluded", body()?)?,
             "torrent_set" => self.torrent_set(req, body()?).await?,
             "torrent_status" => self.torrent_status().await,
+            "torrent_action" => self.torrent_action(body()?).await?,
+            "server_status" => self.server_status().await,
+            "server_sessions" => self.server_sessions(req),
+            "server_set" | "server_client_add" | "server_client_set" | "server_client_del" | "server_client_conf"
+            | "server_regen" | "server_install" => self.server_action(req, body()?).await?,
 
             "route_map" => self.text_file(req, store::ROUTE_MAP, "routemap", body()?, true).await?,
             "domains" => self.text_file(req, store::PROXY_DOMAINS, "domains", body()?, false).await?,
@@ -445,6 +455,7 @@ impl Backend {
             } else {
                 self.engine.start(&self.store.path(store::CONFIG)).await?;
             }
+            self.server_sync().await;
         }
         Ok(())
     }

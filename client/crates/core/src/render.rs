@@ -224,8 +224,7 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
 
     let allow = lists::parse_id_list(&store.read_text(store::TORRENT_ALLOW));
     if p.chain.iter().any(|h| !allow.contains(h)) {
-        // UDP-детектор uTP ложно срабатывает на handshake WireGuard.
-        rules.push(json!({ "protocol": ["bittorrent"], "network": ["tcp"], "action": "reject" }));
+        torrent_rules(store, settings, &mut b, &mut rules, p.awg_inline)?;
     }
 
     // Приоритетный hosts: имена из списка резолвятся в заданные адреса и идут
@@ -418,6 +417,19 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
     if !b.endpoints.is_empty() {
         config["endpoints"] = json!(b.endpoints);
     }
+    // Свой VPN-сервер: его соединения приходят сюда и идут по тем же правилам.
+    let srv = crate::server::load(store);
+    if crate::server::SUPPORTED && srv.enabled && !srv.socks_pass.is_empty() {
+        if let Some(ins) = config["inbounds"].as_array_mut() {
+            ins.push(json!({
+                "type": "mixed",
+                "tag": "server-in",
+                "listen": "127.0.0.1",
+                "listen_port": crate::server::SOCKS_PORT,
+                "users": [{ "username": crate::server::SOCKS_USER, "password": srv.socks_pass }],
+            }));
+        }
+    }
     Ok(Rendered { config, rulesets: files, awg: b.awg })
 }
 
@@ -436,6 +448,46 @@ fn local_dns(settings: &Settings) -> Result<Vec<Value>> {
     }
     srv["domain_resolver"] = json!("system");
     Ok(vec![srv, json!({ "type": "local", "tag": "system" })])
+}
+
+/// Активный профиль торренты запрещает. Торрент-клиенты (по процессу или
+/// пакету) и распознанный снифером BitTorrent уходят в reject, напрямую или в
+/// выход профиля, где торренты разрешены. «Напрямую» при «Всё через VPN» и
+/// «через профиль», потерявший разрешение, откатываются в запрет.
+fn torrent_rules(store: &Store, settings: &Settings, b: &mut Builder, rules: &mut Vec<Value>, inline: bool) -> Result<()> {
+    let verdict = match crate::torrent::load(store) {
+        crate::torrent::Action::Direct if !settings.allvpn() => json!({ "outbound": "direct" }),
+        crate::torrent::Action::Via(id) if crate::torrent::target_allowed(store, &id) => {
+            let hops = crate::torrent::target_hops(store, &id);
+            let last = hops.len();
+            for (i, h) in hops.iter().enumerate() {
+                let tag = if i + 1 == last { "torrent".to_owned() } else { format!("torrent_{}", i + 1) };
+                let detour = (i > 0).then(|| format!("torrent_{i}"));
+                let hop = hop(store, h, &tag, detour.as_deref(), &mut b.awg, inline)?;
+                b.push(hop);
+            }
+            json!({ "outbound": "torrent" })
+        }
+        _ => json!({ "action": "reject" }),
+    };
+    let mut by_app = if cfg!(target_os = "android") {
+        json!({ "package_name": crate::torrent::PACKAGES })
+    } else if cfg!(target_os = "ios") {
+        Value::Null
+    } else {
+        json!({ "process_name": crate::torrent::APPS })
+    };
+    if let (Some(m), Some(v)) = (by_app.as_object_mut(), verdict.as_object()) {
+        m.extend(v.clone());
+        rules.push(by_app);
+    }
+    // UDP-детектор uTP ложно срабатывает на handshake WireGuard — только TCP.
+    let mut sniffed = json!({ "protocol": ["bittorrent"], "network": ["tcp"] });
+    if let (Some(m), Some(v)) = (sniffed.as_object_mut(), verdict.as_object()) {
+        m.extend(v.clone());
+    }
+    rules.push(sniffed);
+    Ok(())
 }
 
 /// Карта маршрутов. Цель — профиль или цепочка; пропавшая цель не уходит в
@@ -620,6 +672,57 @@ mod tests {
             dns.iter().any(|x| x["rule_set"] == json!(["dpi-dns"]) && x["server"] == "local"),
             "домены обхода резолвятся мимо туннеля и при «всё, кроме исключений»"
         );
+    }
+
+    #[test]
+    fn torrents_block_direct_or_via_allowed_profile() {
+        let s = tmp_store("torrent");
+        put_profile(&s, "main", json!({ "type": "trojan", "server": "vpn.example.com", "server_port": 443 }));
+        put_profile(&s, "p2p", json!({ "type": "trojan", "server": "p2p.example.com", "server_port": 443 }));
+        s.write_text(store::TORRENT_ALLOW, "p2p\n").unwrap();
+        let chain = vec!["main".to_owned()];
+        let verdict = |settings: &Settings| -> (Value, Value, bool) {
+            let r = render(&s, settings, &params(&chain, s.root())).unwrap();
+            let rules = r.config["route"]["rules"].as_array().unwrap().clone();
+            let sniff = rules.iter().find(|x| x["protocol"] == json!(["bittorrent"])).cloned().unwrap();
+            let app = rules
+                .iter()
+                .find(|x| x.get("process_name").is_some_and(|v| v != &json!([awg::EXE]) && v != &json!([crate::dpi::EXE])) || x.get("package_name").is_some())
+                .cloned()
+                .unwrap_or(Value::Null);
+            let has_out = r.config["outbounds"].as_array().unwrap().iter().any(|o| o["tag"] == "torrent");
+            (sniff, app, has_out)
+        };
+        let plain = Settings::default();
+
+        let (sniff, app, out) = verdict(&plain);
+        assert_eq!(sniff["action"], "reject", "по умолчанию запрет");
+        assert!(!out);
+        if !cfg!(target_os = "ios") {
+            assert_eq!(app["action"], "reject", "торрент-клиент по процессу тоже под запретом");
+        }
+
+        s.write_text(store::TORRENT_ACTION, "direct\n").unwrap();
+        let (sniff, app, _) = verdict(&plain);
+        assert_eq!(sniff["outbound"], "direct");
+        if !cfg!(target_os = "ios") {
+            assert_eq!(app["outbound"], "direct");
+        }
+        let mut allvpn = Settings::default();
+        allvpn.set("allvpn", "1");
+        if allvpn.allvpn() {
+            assert_eq!(verdict(&allvpn).0["action"], "reject", "«Всё через VPN» обещает, что напрямую не уходит ничего");
+        }
+
+        s.write_text(store::TORRENT_ACTION, "via p2p\n").unwrap();
+        let (sniff, _, out) = verdict(&plain);
+        assert_eq!(sniff["outbound"], "torrent");
+        assert!(out, "выход профиля для торрентов в конфиге");
+
+        s.write_text(store::TORRENT_ALLOW, "").unwrap();
+        let (sniff, _, out) = verdict(&plain);
+        assert_eq!(sniff["action"], "reject", "профиль потерял разрешение — снова запрет");
+        assert!(!out);
     }
 
     #[test]
