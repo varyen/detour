@@ -649,7 +649,11 @@ awg_up() {
 # Интерфейс AWG: встроенный WireGuard KeeneticOS зовёт WireguardN в ядре nwgN.
 set_iface() {
     IFACE=dsrv0
-    [ "$KEENETIC" = 1 ] && [ -n "$NDMIF" ] && ndm_wg && IFACE="nwg${NDMIF#Wireguard}"
+    [ "$KEENETIC" = 1 ] || return 0
+    # Здесь, в основной оболочке, заполняется кэш NDM_COMP: дальше backend()
+    # зовётся из $(…), и без него каждый вызов шёл бы в RCI заново.
+    ndm_wg && [ -n "$NDMIF" ] && IFACE="nwg${NDMIF#Wireguard}"
+    return 0
 }
 
 rci() {  # $1 — тело запроса (JSON)

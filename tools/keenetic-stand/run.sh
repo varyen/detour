@@ -13,6 +13,7 @@ curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v$SB/sing-box
 cp /tmp/sing-box-$SB-linux-amd64-musl/sing-box /usr/bin/sing-box
 cp /repo/router_files/detour-server /opt/sbin/detour-server; chmod +x /opt/sbin/detour-server
 python3 /repo/tools/keenetic-stand/rcimock.py & sleep 1
+: > /tmp/rci.log; /opt/sbin/detour-server status >/dev/null; echo "== RCI-запросов на status до настройки: $(grep -c . /tmp/rci.log)"
 S=/opt/sbin/detour-server
 j() { python3 -c 'import json,sys; d=json.load(sys.stdin); print({k: d.get(k) for k in sys.argv[1:]})' "$@"; }
 echo "== status (до настройки)"; $S status | j supported installed backend reason note
