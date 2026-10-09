@@ -5,7 +5,11 @@
 # этом ядре и сколько вытягивает процессор.
 #
 #   wget -qO- https://raw.githubusercontent.com/varyen/detour/main/keenetic/test-awg-userspace.sh \
-#     | sh -s -- <конфиг клиента в base64> <адрес тестового сервера>
+#     | sh -s -- <адрес тестового сервера>
+#
+# Конфиг клиента скрипт берёт с того же сервера (http://<адрес>:18080/kn.conf.b64):
+# длинный аргумент обрезается при вставке в терминал. Можно передать и сам —
+# base64 первым аргументом, адрес вторым.
 #
 # Всё временное: интерфейс dtst0, файлы в /tmp/dtst-*. По завершении (и при
 # Ctrl+C) всё снимается. Конфиг KeeneticOS и файрвол не меняются.
@@ -17,8 +21,10 @@ info() { printf '  [info] %s\n' "$*"; }
 hdr()  { printf '\n=== %s ===\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-CONF_B64="$1"; HOST="$2"
-[ -n "$CONF_B64" ] && [ -n "$HOST" ] || { echo "usage: sh -s -- <conf-base64> <host>"; exit 1; }
+if [ -n "$2" ]; then CONF_B64="$1"; HOST="$2"; else HOST="$1"; CONF_B64=""; fi
+[ -n "$HOST" ] || { echo "usage: sh -s -- <host>"; exit 1; }
+[ -n "$CONF_B64" ] || CONF_B64=$(wget -q -T 20 -O - "http://$HOST:18080/kn.conf.b64") || true
+[ -n "$CONF_B64" ] || { echo "конфиг с http://$HOST:18080/kn.conf.b64 не скачался"; exit 1; }
 
 BIN=/tmp/dtst-awg; CONF=/tmp/dtst-conf; IFN=dtst0; TUNIP=10.66.0.9; SRVIP=10.66.0.1
 PID=""
