@@ -139,6 +139,8 @@ PANEL_FILES = [
     (("router-backup", "etc", "sysctl.d", "99-mptcp.conf"), "etc/sysctl.d/99-mptcp.conf", 0o644),
     (("router_files", "base64-shim.sh"), "usr/bin/base64", 0o755),
     (("router_files", "detour-bootstrap-install"), "usr/sbin/detour-bootstrap-install", 0o755),
+    # Переустановка после прошивки: postinst копирует в /etc/uci-defaults.
+    (("router_files", "detour-restore"), "usr/share/detour/detour-restore", 0o755),
     (("router_files", "detour-update"), "usr/sbin/detour-update", 0o755),
     (("router_files", "subscription-refresh"), "usr/sbin/subscription-refresh", 0o755),
     (("router_files", "vpn-keepalive"), "usr/sbin/vpn-keepalive", 0o755),
@@ -409,46 +411,16 @@ $BEGIN
 /etc/sing-box/ru-subnets-exclude.list
 /etc/zapret-tpws.conf
 /etc/zapret-tpws/domains.list
+/etc/uci-defaults/99-detour-restore
 $END
 KEEP
 mv "$SYSUP.new" "$SYSUP"
 
-# 1c) uci-defaults restore script. Runs at first boot after a sysupgrade
-# (OpenWrt processes /etc/uci-defaults/* once on boot then deletes them).
-# If sysupgrade preserved the stashed package but the package database
-# doesn't list us (new firmware == fresh package db), re-install it in place.
-# Package-manager-agnostic: OpenWrt 25.12+ ships apk-tools instead of opkg,
-# and the stash there is an .apk.
+# 1c) Переустановка после прошивки (см. шапку detour-restore). Сам скрипт живёт
+# в keeplist (строка выше) и не удаляется после загрузки — иначе к моменту
+# прошивки его уже не было бы.
 mkdir -p /etc/uci-defaults
-cat > /etc/uci-defaults/99-detour-restore <<'UCID'
-#!/bin/sh
-# Auto-re-install detour after a router firmware sysupgrade. A fresh firmware
-# wipes the package db (and, on opkg, /etc/opkg/customfeeds.conf), so we re-add
-# the sing-box feed where one is needed, refresh the index, then install the
-# stashed panel package.
-STASH=/etc/detour/installed.pkg
-[ -f "$STASH" ] || STASH=/etc/detour/installed.apk
-[ -f "$STASH" ] || STASH=/etc/detour/installed.ipk
-[ -f "$STASH" ] || exit 0
-LOG=/var/log/detour-restore.log
-if [ -d /etc/apk ] && command -v apk >/dev/null 2>&1; then
-    # apk-based OpenWrt (25.12+). sing-box lives in the DISTRO feed here, so
-    # there is no custom feed line to restore — the panel's Depends pulls it.
-    apk info -e detour >/dev/null 2>&1 && exit 0
-    logger -t detour "post-sysupgrade restore: apk add stashed panel"
-    apk update >"$LOG" 2>&1
-    apk add --allow-untrusted "$STASH" >>"$LOG" 2>&1
-    exit 0
-fi
-if opkg list-installed detour 2>/dev/null | grep -q '^detour '; then
-    exit 0   # already installed (regular boot, not a sysupgrade restore)
-fi
-logger -t detour "post-sysupgrade restore: re-add feed + opkg install panel"
-grep -qs '^src/gz {FEED_NAME} ' /etc/opkg/customfeeds.conf 2>/dev/null \\
-    || echo "{FEED_LINE}" >> /etc/opkg/customfeeds.conf
-opkg update >"$LOG" 2>&1
-opkg install "$STASH" >>"$LOG" 2>&1
-UCID
+cp -f /usr/share/detour/detour-restore /etc/uci-defaults/99-detour-restore
 chmod 0755 /etc/uci-defaults/99-detour-restore
 
 # 1d) update.conf placeholder (deploy_router.py overwrites with real token).
@@ -770,6 +742,8 @@ case "$1" in
         # User state stays: /etc/detour.auth, /etc/sing-box/profiles/,
         # /etc/detour/subscription.json — operator can wipe manually.
         rm -f /etc/detour/version
+        # Иначе он поставил бы удалённую панель обратно после прошивки.
+        rm -f /etc/uci-defaults/99-detour-restore
         ;;
 esac
 exit 0

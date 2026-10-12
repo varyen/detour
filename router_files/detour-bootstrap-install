@@ -132,7 +132,40 @@ if grep -qs '"type"[[:space:]]*:[[:space:]]*"amneziawg"' "$PROFILES_DIR"/*.json 
     need_mihomo=1
 fi
 
+# Движки, стоявшие до прошивки: «пакет команда» на строку, ведёт detour-update
+# (restore-record). Прошивка стирает пакеты, а /etc/detour переживает её.
+DETOUR_ETC=/etc/detour
+SB_ETC=/etc/sing-box
+API_BIN=/www/cgi-bin/detour-api
+BYPASS_BIN=/usr/sbin/detour-bypass
+if [ "$PLATFORM" = keenetic ]; then
+    DETOUR_ETC=/opt/etc/detour
+    SB_ETC=/opt/etc/sing-box
+    API_BIN=/opt/share/www/cgi-bin/detour-api
+    BYPASS_BIN=/opt/sbin/detour-bypass
+fi
+missing_extras=""
+if [ -f "$DETOUR_ETC/restore.list" ]; then
+    while read -r _pkg _cmd; do
+        [ -n "$_cmd" ] || continue
+        pkg_installed "$_pkg" && continue
+        case " $missing_extras " in *" $_cmd "*) ;; *) missing_extras="$missing_extras $_cmd" ;; esac
+    done < "$DETOUR_ETC/restore.list"
+fi
+# Конфиг движка собирает только detour-api, а он не в keeplist: после прошивки
+# sing-box поднимался без конфига, и маршруты не работали до ручной активации.
+need_config=0
+if [ ! -s "$SB_ETC/config.json" ] && [ ! -s "$SB_ETC/mihomo.json" ] && [ -s "$SB_ETC/settings.json" ]    && [ "$(cat "$DETOUR_ETC/autostart.singbox" 2>/dev/null)" != 0 ] && [ ! -f "$DETOUR_ETC/power.off" ]; then
+    need_config=1
+fi
+
+# Свежий пакет в сташе — до решения «делать нечего»: панель могли поставить мимо
+# апдейтера, и тогда восстанавливать после прошивки было бы старую версию.
+[ -x "$UPDATE_BIN" ] && "$UPDATE_BIN" stash-refresh >> "$LOG" 2>&1
+
 need_bootstrap=0
+[ -n "$missing_extras" ] && need_bootstrap=1
+[ "$need_config" = 1 ] && need_bootstrap=1
 feed_present || need_bootstrap=1
 pkg_installed sing-box || need_bootstrap=1
 pkg_installed tpws-zapret || need_bootstrap=1
@@ -176,6 +209,16 @@ need_restart=0
 if [ "$need_mihomo" = 1 ]; then
     run_cmd "$UPDATE_BIN" mihomo-ensure || log "WARNING: mihomo-ensure failed — AmneziaWG-профили не поднимутся, пока не встанет mihomo"
     pkg_installed mihomo && need_restart=1
+fi
+for _cmd in $missing_extras; do
+    run_cmd "$UPDATE_BIN" "$_cmd" || log "WARNING: $_cmd failed — движок не вернулся, поставьте его в «Журнал → Обновления»"
+    # Режим zapret2 при установке панели не поднялся: nfqws2 ещё не было.
+    [ "$_cmd" = nfqws2-apply ] && [ -x "$BYPASS_BIN" ] && run_cmd "$BYPASS_BIN" boot
+    [ "$_cmd" = mihomo-apply ] && need_restart=1
+done
+if [ "$need_config" = 1 ] && [ -x "$API_BIN" ] && pkg_installed sing-box; then
+    run_cmd "$API_BIN" activate || log "WARNING: конфиг не собрался — активируйте профиль в панели"
+    need_restart=0
 fi
 # sing-box мог стартовать до появления iptables — тогда правила перехвата не
 # встали; перезапуск их ставит. После mihomo — чтобы AWG-хоп цепочки ожил.

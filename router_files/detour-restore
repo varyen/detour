@@ -1,0 +1,128 @@
+#!/bin/sh
+# Detour: переустановка панели после прошивки роутера.
+#
+# Прошивка (в том числе штатным обновлением GL.iNet с сохранением настроек)
+# стирает все пакеты, оставляя только /etc из keeplist. Postinst копирует этот
+# файл в /etc/uci-defaults/99-detour-restore и вписывает его в /etc/sysupgrade.conf,
+# поэтому после прошивки он оказывается на месте и запускается на первой загрузке.
+#
+# Скрипт намеренно завершается кодом 1: OpenWrt удаляет из /etc/uci-defaults
+# каждый скрипт, вернувший 0, а этот должен дожить до СЛЕДУЮЩЕЙ прошивки. Иначе
+# он исчезал на первой же обычной перезагрузке и к моменту прошивки его уже не было.
+#
+# uci-defaults идёт в самом начале загрузки, до WAN, поэтому здесь только решение,
+# а установка — в фоне, после появления сети. Дальше postinst панели запускает
+# detour-bootstrap-install: тот ставит sing-box/tpws, движки из
+# /etc/detour/restore.list и пересобирает конфиг.
+
+SELF=/etc/uci-defaults/99-detour-restore
+LOG=/var/log/detour-restore.log
+OWNER=varyen
+REPO=detour
+FEED_LINE="src/gz detour https://raw.githubusercontent.com/varyen/detour/feed/aarch64"
+PUBKEY=/etc/detour/release.usign.pub
+
+PKGM=opkg
+if [ -f /etc/apk/world ] && command -v apk >/dev/null 2>&1; then PKGM=apk; fi
+
+panel_installed() {
+    if [ "$PKGM" = apk ]; then apk info -e detour >/dev/null 2>&1
+    else opkg list-installed detour 2>/dev/null | grep -q '^detour '; fi
+}
+
+restore_worker() {
+    mkdir -p /var/log
+    exec >>"$LOG" 2>&1
+    log() { echo "$(date '+%F %T') [detour-restore] $*"; logger -t detour-restore -- "$*" 2>/dev/null; }
+    mkdir /tmp/detour-restore.lock 2>/dev/null || { log "уже идёт — выхожу"; return 0; }
+    trap 'rm -rf /tmp/detour-restore.lock' EXIT INT TERM
+
+    ver=$(cat /etc/detour/version 2>/dev/null)
+    if [ "$PKGM" = apk ]; then name="detour_${ver}_noarch.apk"; stash=/etc/detour/installed.apk
+    else name="detour_${ver}_all.ipk"; stash=/etc/detour/installed.ipk; fi
+    log "==== панель $ver не установлена — восстанавливаю ($PKGM) ===="
+
+    if [ "$PKGM" = opkg ]; then
+        grep -qs '^src/gz detour ' /etc/opkg/customfeeds.conf \
+            || echo "$FEED_LINE" >> /etc/opkg/customfeeds.conf
+    fi
+
+    # Ждём сеть до 30 минут: пока индекс фида не скачался, зависимости
+    # (sing-box, tpws-zapret) не разрешатся.
+    i=0
+    while :; do
+        if [ "$PKGM" = apk ]; then apk update >/dev/null 2>&1 && break
+        else opkg update >/dev/null 2>&1 && break; fi
+        i=$((i + 1))
+        [ "$i" -ge 90 ] && { log "сети нет 30 минут — сдаюсь; повтор на следующей загрузке"; return 1; }
+        sleep 20
+    done
+    log "индекс пакетов обновлён (попыток: $((i + 1)))"
+
+    # Ту же версию, что стояла, — с GitHub; сохранённый пакет может отставать.
+    pkg=""
+    if [ -n "$ver" ]; then
+        tmp=/tmp/detour-restore.$$
+        mkdir -p "$tmp"
+        url="https://github.com/$OWNER/$REPO/releases/download/v$ver/$name"
+        if fetch "$url" "$tmp/$name" && fetch "$url.sig" "$tmp/$name.sig"; then
+            if ! command -v usign >/dev/null 2>&1 || [ ! -f "$PUBKEY" ]; then
+                log "usign или ключ недоступны — беру сохранённый пакет вместо непроверенного"
+            elif usign -V -m "$tmp/$name" -p "$PUBKEY" -x "$tmp/$name.sig" >/dev/null 2>&1; then
+                pkg="$tmp/$name"
+                log "скачан $name, подпись сошлась"
+            else
+                log "подпись $name не сошлась — не ставлю"
+            fi
+        else
+            log "не скачать $url"
+        fi
+    fi
+    if [ -z "$pkg" ]; then
+        [ -f "$stash" ] || { log "нет ни скачанного, ни сохранённого пакета — восстанавливать нечем"; return 1; }
+        pkg="$stash"
+        log "ставлю сохранённый пакет $stash"
+    fi
+
+    # На загрузке менеджер пакетов может держать кто-то ещё (штатное
+    # восстановление плагинов GL) — несколько попыток.
+    n=0
+    while [ "$n" -lt 5 ]; do
+        n=$((n + 1))
+        if [ "$PKGM" = apk ]; then apk add --allow-untrusted "$pkg"
+        else opkg install --force-overwrite "$pkg"; fi
+        panel_installed && break
+        log "установка не прошла (попытка $n/5)"
+        sleep 30
+    done
+    if panel_installed; then
+        [ "$pkg" = "$stash" ] || { cp -f "$pkg" "$stash"; cp -f "$pkg.sig" "$stash.sig" 2>/dev/null; }
+        log "панель восстановлена; движки и конфиг доставит detour-bootstrap-install"
+    else
+        log "панель не встала — смотрите вывод выше"
+    fi
+    rm -rf "${tmp:-/tmp/detour-restore.none}"
+}
+
+fetch() {   # <url> <файл>
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 15 --max-time 180 --retry 3 -o "$2" "$1"
+    else
+        wget -q -T 30 -O "$2" "$1"
+    fi
+}
+
+if [ "${DETOUR_RESTORE_RUN:-}" = 1 ]; then
+    restore_worker
+    exit $?
+fi
+
+# Панель удалили сознательно (postrm стирает version) — не воскрешать.
+if [ ! -f /etc/detour/version ]; then
+    rm -f "$SELF"
+    exit 0
+fi
+panel_installed && exit 1
+cp -f "$SELF" /tmp/detour-restore.sh 2>/dev/null || exit 1
+( DETOUR_RESTORE_RUN=1 sh /tmp/detour-restore.sh ) </dev/null >/dev/null 2>&1 &
+exit 1

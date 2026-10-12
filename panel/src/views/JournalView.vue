@@ -1417,6 +1417,7 @@ onBeforeUnmount(() => {
         :title="status.isClient ? `${dpiEngine} (обход DPI)` : 'nfqws2 (zapret2)'"
         :state="upd?.nfqws2 ?? null"
         :installed="status.data?.binaries?.nfqws2_version"
+        :missing="!status.isClient && status.data?.binaries?.nfqws2_present === false"
         :busy-check="updBusy === 'check:nfqws2'"
         :busy-apply="updBusy === 'apply:nfqws2'"
         @check="checkChannel('nfqws2')"

@@ -43,7 +43,7 @@ pub fn asset_name(version: &str) -> Result<String> {
 }
 
 async fn get(url: &str, proxy: Option<&str>, timeout: Duration) -> Result<reqwest::Response> {
-    let mut b = reqwest::Client::builder().timeout(timeout).user_agent("detour-client");
+    let mut b = crate::http::client_builder().timeout(timeout).user_agent("detour-client");
     b = match proxy {
         Some(p) => b.proxy(reqwest::Proxy::all(p)?),
         None => b.no_proxy(),

@@ -200,7 +200,7 @@ impl Meter {
 }
 
 pub async fn snapshot(port: u16, secret: &str) -> Option<Value> {
-    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().ok()?;
+    let client = crate::http::client_builder().no_proxy().timeout(Duration::from_secs(3)).build().ok()?;
     let r = client.get(format!("http://127.0.0.1:{port}/connections")).bearer_auth(secret).send().await.ok()?;
     r.json().await.ok()
 }

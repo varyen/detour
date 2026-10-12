@@ -2439,7 +2439,9 @@ login_record_success() {
 # uses (build_config → write_settings → reconfigure), avoiding a second copy of
 # that logic. All referenced functions are defined above.
 if [ "$1" = "activate" ]; then
-    CHAIN=$(normalize_profile_list "$2")
+    # Без аргумента — пересобрать активную (detour-bootstrap-install после прошивки:
+    # config.json не в keeplist).
+    CHAIN=$(normalize_profile_list "${2:-$(get_active_chain)}")
     [ -z "$CHAIN" ] && { echo "activate: chain/profile required" >&2; exit 2; }
     SBMODE=$(get_singbox_mode)
     if ! BUILD_ERR=$(build_config "$SBMODE" "$CHAIN" 2>&1); then
@@ -3689,7 +3691,8 @@ updates_overview)
     [ -f "$UPDATE_STATE" ] && P_LOG=$(json_val changelog_b64 "$UPDATE_STATE")
     SB_UPD=$(feed_upd "$BINS_STATE")
     TPWS_UPD=$(feed_upd "$TPWS_STATE")
-    NFQWS2_UPD=$(feed_upd "$NFQWS2_STATE")
+    # nfqws2 не стоит — это установка, а не обновление (как у mihomo ниже).
+    NFQWS2_UPD=false; [ -n "$(feed_cur "$NFQWS2_STATE")" ] && NFQWS2_UPD=$(feed_upd "$NFQWS2_STATE")
     SB_UPV=$(up_ver "$BINS_STATE");   SB_UPN=$(up_new "$BINS_STATE");   SB_LOG=$(up_log "$BINS_STATE")
     TPWS_UPV=$(up_ver "$TPWS_STATE"); TPWS_UPN=$(up_new "$TPWS_STATE"); TPWS_LOG=$(up_log "$TPWS_STATE")
     NFQWS2_UPV=$(up_ver "$NFQWS2_STATE"); NFQWS2_UPN=$(up_new "$NFQWS2_STATE"); NFQWS2_LOG=$(up_log "$NFQWS2_STATE")

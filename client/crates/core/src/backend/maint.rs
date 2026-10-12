@@ -381,7 +381,7 @@ impl Backend {
 fn every<F, Fut>(b: &Arc<Backend>, first: u64, period: u64, f: F)
 where
     F: Fn(Arc<Backend>) -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + Send,
+    Fut: Future<Output = ()> + Send + 'static,
 {
     let b = b.clone();
     tokio::spawn(async move {
@@ -390,7 +390,10 @@ where
         t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             t.tick().await;
-            f(b.clone()).await;
+            // Паника одного тика не должна останавливать цикл навсегда.
+            if let Err(e) = tokio::spawn(f(b.clone())).await {
+                tracing::error!("фоновая задача упала: {e}");
+            }
         }
     });
 }
@@ -402,7 +405,10 @@ impl Backend {
             let b = self.clone();
             tokio::spawn(async move {
                 while let Some(job) = rx.recv().await {
-                    b.run_job(job).await;
+                    let b = b.clone();
+                    if let Err(e) = tokio::spawn(async move { b.run_job(job).await }).await {
+                        tracing::error!("задача из очереди упала: {e}");
+                    }
                 }
             });
         }

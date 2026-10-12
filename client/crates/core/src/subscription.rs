@@ -533,7 +533,7 @@ const PREVIEW_HEADERS: [&str; 5] =
 
 /// Один запрос. Ошибки сформулированы, как у роутера, — панель их показывает.
 pub async fn fetch(url: &str, ua: &str, proxy: Option<&str>, timeout: Duration) -> Result<Fetched, String> {
-    let mut b = reqwest::Client::builder()
+    let mut b = crate::http::client_builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::limited(10));
     b = match proxy {

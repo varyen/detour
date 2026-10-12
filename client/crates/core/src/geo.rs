@@ -127,7 +127,7 @@ async fn lookup(targets: &[u32], proxy: Option<&str>) -> Result<(Vec<String>, St
     }
     {
         for (url, p) in attempts {
-            let mut b = reqwest::Client::builder().timeout(Duration::from_secs(180));
+            let mut b = crate::http::client_builder().timeout(Duration::from_secs(180));
             b = match p {
                 Some(p) => b.proxy(reqwest::Proxy::all(p)?),
                 None => b.no_proxy(),

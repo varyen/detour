@@ -173,7 +173,7 @@ fn speed_budget(bytes: u64) -> Duration {
 async fn measure(port: u16, url: &str, bytes: u64) -> i64 {
     let Ok(proxy) = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}")) else { return -1 };
     let budget = speed_budget(bytes);
-    let Ok(client) = reqwest::Client::builder().proxy(proxy).timeout(budget + Duration::from_secs(2)).build() else {
+    let Ok(client) = crate::http::client_builder().proxy(proxy).timeout(budget + Duration::from_secs(2)).build() else {
         return -1;
     };
     let start = Instant::now();
@@ -359,7 +359,7 @@ async fn drive(
 ) -> BTreeMap<usize, Verdict> {
     let secret = secret.to_owned();
     let base = format!("http://127.0.0.1:{clash_port}");
-    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(6)).build().expect("reqwest");
+    let client = crate::http::client_builder().no_proxy().timeout(Duration::from_secs(6)).build().expect("reqwest");
     let deadline = Instant::now() + READY_WAIT;
     let mut ready = false;
     while Instant::now() < deadline {

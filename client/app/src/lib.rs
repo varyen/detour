@@ -31,10 +31,16 @@ mod inproc {
     }
 
     pub async fn call(req: &Request) -> Result<Response, String> {
-        let Some(b) = BACKEND.get() else {
+        let Some(b) = BACKEND.get().cloned() else {
             return Err("ядро ещё не готово".to_owned());
         };
-        Ok(b.handle(req.clone()).await)
+        // Отдельной задачей: паника внутри обработчика иначе не возвращала
+        // ответа вовсе, и панель висела на спиннере до своего таймаута.
+        let req = req.clone();
+        let action = req.action.clone();
+        tauri::async_runtime::spawn(async move { b.handle(req).await })
+            .await
+            .map_err(|e| format!("ядро упало на «{action}»: {e}"))
     }
 }
 
