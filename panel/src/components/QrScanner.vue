@@ -150,7 +150,8 @@ onBeforeUnmount(() => {
 }
 .bar {
   position: relative;
-  padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+  /* --sa-bottom — навбар Android от оболочки приложения (env() там нулевой). */
+  padding: 14px 16px calc(14px + var(--sa-bottom));
   background: rgb(0 0 0 / 80%);
   color: #fff;
   display: grid;
