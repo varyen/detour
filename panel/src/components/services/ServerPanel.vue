@@ -263,6 +263,58 @@ async function regen() {
   }
 }
 
+/* ---------------- канал выхода (несколько WAN) ---------------- */
+
+/* Принимает клиентов только канал с белым адресом, а выходить в интернет их
+   трафик может любым: прямой — по метке соединения, туннель VPN — через свой
+   вход sing-box с routing_mark канала. */
+/* Те же подписи, что у detour-wan-link (uplink_label). */
+const UPLINK_NAMES: Record<string, string> = {
+  wan: "Основной",
+  secondwan: "Второй",
+  wwan: "Wi-Fi репитер",
+  tethering: "USB-модем",
+};
+function uplinkName(id: string): string {
+  return UPLINK_NAMES[id] ?? (id.startsWith("modem") ? "Мобильный" : id);
+}
+const uplinks = computed(() => st.value?.uplinks ?? []);
+const showUplink = computed(() => !status.isClient && uplinks.value.length >= 2);
+const uplinkOptions = computed(() => [
+  { value: "auto", label: "Как роутер", hint: "Канал выбирает мультиWAN роутера" },
+  ...uplinks.value.map((u) => ({
+    value: u.id,
+    label: `Только ${uplinkName(u.id)}`,
+    hint: `${u.iface}${u.ip ? ` · ${u.ip}` : ""}${u.usable ? "" : " · сейчас не работает"}`,
+  })),
+  { value: "all", label: "По очереди", hint: "Новые соединения клиентов чередуются между каналами" },
+]);
+const uplinkHint = computed(() => {
+  const u = st.value?.uplink ?? "auto";
+  if (u === "auto") return "Трафик клиентов идёт тем же каналом, что и у домашней сети.";
+  const dead = uplinks.value.filter((x) => !x.usable && (u === "all" || x.id === u));
+  const tail = dead.length
+    ? ` Сейчас не работает: ${dead.map((x) => uplinkName(x.id)).join(", ")} — его соединения идут каналом роутера.`
+    : "";
+  if (u === "all") return `Новые соединения клиентов чередуются между каналами — и прямые, и через VPN.${tail}`;
+  return `И прямой трафик клиентов, и их туннели VPN выходят через «${uplinkName(u)}»; если канал упадёт — каналом роутера.${tail}`;
+});
+const inboundOnly = computed(() => uplinks.value.filter((u) => u.private).map((u) => uplinkName(u.id)));
+
+async function setUplink(v: string) {
+  if (v === (st.value?.uplink ?? "auto")) return;
+  busy.value = "uplink";
+  try {
+    await services.serverSet({ uplink: v });
+    toast.ok(v === "auto" ? "Канал выхода — как у роутера" : v === "all" ? "Каналы по очереди" : `Выход через «${uplinkName(v)}»`);
+  } catch (e) {
+    toast.fromError(e, "Не удалось сменить канал");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
 /* ---------------- клиенты ---------------- */
 
 const newName = ref("");
@@ -516,6 +568,25 @@ function hint(c: ServerClient): string {
           > ({{ status.isClient ? "адрес компьютера в локальной сети" : "внешний адрес роутера; если он меняется — укажите домен в настройках" }})</template>.
         </p>
 
+        <div v-if="showUplink && st.enabled" class="uplink">
+          <h3 class="sub">Канал выхода клиентов</h3>
+          <SegmentedControl
+            :model-value="st.uplink ?? 'auto'"
+            label="Через какой канал выходят клиенты сервера"
+            :options="uplinkOptions"
+            :busy="busy === 'uplink'"
+            @update:model-value="setUplink"
+          />
+          <p class="note faint">
+            {{ uplinkHint }}<template v-if="inboundOnly.length">
+            Подключаются клиенты только через канал с белым адресом: у «{{ inboundOnly.join("», «") }}» адрес серый.</template>
+          </p>
+          <p v-if="(st.uplink ?? 'auto') !== 'auto' && st.uplink_pinned === false" class="note warn">
+            Правила каналов на роутере сейчас не стоят (второй канал не обнаружен или
+            «Отвечать тем же каналом» выключено) — выбор вступит в силу, когда они появятся.
+          </p>
+        </div>
+
         <template v-if="st.configured">
           <h3 class="sub">Клиенты</h3>
           <p v-if="!clients.length" class="note">
@@ -736,6 +807,11 @@ function hint(c: ServerClient): string {
   border-left: 2px solid var(--line);
   padding-left: 12px;
   margin-left: 4px;
+}
+.uplink {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
 }
 .sub {
   font-size: 13px;

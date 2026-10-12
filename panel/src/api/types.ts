@@ -430,8 +430,23 @@ export interface ServerStatus {
   dns: string;
   mtu: number;
   pubkey: string;
+  /** Канал выхода клиентов: auto — как роутер, all — по очереди, иначе id канала (роутер, с 2.9.0). */
+  uplink?: string;
+  /** Правила меток каналов (detour-wanpin) стоят — без них выбор канала ничего не меняет. */
+  uplink_pinned?: boolean;
+  uplinks?: ServerUplink[];
   clients: ServerClient[];
   now: number;
+}
+
+export interface ServerUplink {
+  id: string;
+  iface: string;
+  /** Канал поднят и есть шлюз. */
+  usable: boolean;
+  ip: string;
+  /** Серый адрес на интерфейсе — принимать клиентов этот канал не может. */
+  private: boolean;
 }
 
 export interface ServerVless {
@@ -469,6 +484,7 @@ export interface ServerSettingsPatch {
   endpoint?: string;
   dns?: string;
   mtu?: number;
+  uplink?: string;
 }
 
 export interface ApplyLogResponse {

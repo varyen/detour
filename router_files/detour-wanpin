@@ -55,7 +55,11 @@ CHAIN_IN=DETOUR_WANPIN
 CHAIN_OUT=DETOUR_WANPIN_OUT
 TBL_BASE=1210     # 1211..1225; clear of 106 (our TPROXY) and 16800 (GL)
 PRIO_BASE=12200   # after our TPROXY rule at 12106, before main at 32766
-PINMAP="$STATEDIR/pinmap"
+# On flash: the uplink choice of the VPN server bakes these marks into the
+# sing-box config. Re-deriving them after a reboot in the order uplinks happen
+# to come up would quietly swap the channels.
+PINMAP="$DETOUR_DIR/wan.pinmap"
+[ -f "$PINMAP" ] || { [ -f "$STATEDIR/pinmap" ] && mkdir -p "$DETOUR_DIR" 2>/dev/null && cp "$STATEDIR/pinmap" "$PINMAP" 2>/dev/null; }
 SIGFILE="$STATEDIR/wanpin.sig"
 MAX_UPLINKS=15    # one nibble
 
@@ -100,7 +104,7 @@ pin_index() {
         _got=$(awk -v id="$_id" '$1 == id { print $2; exit }' "$PINMAP" 2>/dev/null)
         [ -n "$_got" ] && { printf '%s' "$_got"; return 0; }
     fi
-    mkdir -p "$STATEDIR" 2>/dev/null
+    mkdir -p "$(dirname "$PINMAP")" 2>/dev/null
     [ -f "$PINMAP" ] || : > "$PINMAP"
     _n=1
     while [ "$_n" -le "$MAX_UPLINKS" ]; do
@@ -161,7 +165,8 @@ wanted() {
 # window — small, but once a minute, forever — where an established inbound
 # connection routes out of the wrong uplink.
 desired_sig() {
-    printf '%s|' "$WANPIN_MODE"
+    # r2 — the OUTPUT restore became conditional; older installs must rebuild.
+    printf 'r2|%s|' "$WANPIN_MODE"
     usable_uplinks | while IFS="$(printf '\t')" read -r _id _if _ip _gw; do
         printf '%s:%s:%s;' "$_id" "$_if" "$_gw"
     done
@@ -216,8 +221,11 @@ apply() {
         --restore-mark --nfmask "$MASK" --ctmask "$MASK" 2>/dev/null
     # Locally generated replies (panel, wgserver, ACME) never pass PREROUTING;
     # mangle OUTPUT is followed by a reroute check, so a mark set here still
-    # changes which uplink the packet leaves by.
-    iptables -t mangle -A "$CHAIN_OUT" -j CONNMARK \
+    # changes which uplink the packet leaves by. Only when the connection has a
+    # mark: an unconditional restore zeroes the nibble of a socket that set its
+    # own (sing-box routing_mark, detour-health probes), and the reroute then
+    # sends it out the default uplink with the other uplink's source address.
+    iptables -t mangle -A "$CHAIN_OUT" -m connmark ! --mark 0/"$MASK" -j CONNMARK \
         --restore-mark --nfmask "$MASK" --ctmask "$MASK" 2>/dev/null
 
     # Appended, not inserted: detour-meter owns PREROUTING positions 1-2 and
@@ -297,6 +305,19 @@ case "${1:-status}" in
     apply)  apply ;;
     clear)  clear_rules; rm -f "$SIGFILE" 2>/dev/null; log "cleared" ;;
     status) status_json ;;
+    # "id iface mark table usable ip" for every known uplink, down ones included:
+    # a mark baked into a config must not depend on which uplinks were up at the
+    # time. A mark routes only while its rule is installed; without it the
+    # packet simply follows the main table.
+    marks)
+        uplinks | while IFS="$(printf '\t')" read -r _id _if _ip _gw _up _m; do
+            [ -n "$_id" ] && [ -n "$_if" ] || continue
+            _n=$(pin_index "$_id") || continue
+            _ok=0
+            [ "$_up" = true ] && [ -n "$_gw" ] && _ok=1
+            printf '%s %s %s %s %s %s\n' "$_id" "$_if" "$(mark_for "$_n")" "$((TBL_BASE + _n))" "$_ok" "${_ip:--}"
+        done ;;
+    installed) installed ;;
     public) public_id ;;
     public-ip) public_ip ;;
     set-public)
@@ -321,7 +342,7 @@ case "${1:-status}" in
         status_json
         ;;
     *)
-        echo "usage: detour-wanpin {apply|clear|status|public|public-ip|set-public <id>|set-mode auto|on|off}" >&2
+        echo "usage: detour-wanpin {apply|clear|status|marks|installed|public|public-ip|set-public <id>|set-mode auto|on|off}" >&2
         exit 2
         ;;
 esac

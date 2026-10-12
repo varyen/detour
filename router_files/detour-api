@@ -1226,8 +1226,8 @@ LUA
 # Собрать outbound'ы/endpoint'ы многохоповой цепочки в RX_OB/RX_EP: последний хоп
 # получает $2, предыдущие — "<$3>_<n>" и связываются через detour. Это тот же
 # порядок, что и в render_chain_config, но для ЦЕЛИ МАРШРУТА внутри общего конфига.
-emit_route_chain() { # $1=hops CSV, $2=final tag, $3=tag prefix
-    local hops="$1" final="$2" prefix="$3"
+emit_route_chain() { # $1=hops CSV, $2=final tag, $3=tag prefix, $4=routing_mark первого хопа
+    local hops="$1" final="$2" prefix="$3" mark="$4"
     local old_ifs total i pname pfile payload ptype tag detour
     old_ifs="$IFS"; IFS=','; set -- $hops; IFS="$old_ifs"
     total=$#; i=0; detour=""
@@ -1243,9 +1243,11 @@ emit_route_chain() { # $1=hops CSV, $2=final tag, $3=tag prefix
         payload=$(set_outbound_chain_fields "$payload" "$tag" "$detour")
         if [ "$ptype" = "wireguard" ]; then
             payload=$(translate_wireguard_profile "$payload")
+            [ "$i" -eq 1 ] && payload=$(with_routing_mark "$payload" "$mark")
             RX_EP="$RX_EP,
     $payload"
         else
+            [ "$i" -eq 1 ] && payload=$(with_routing_mark "$payload" "$mark")
             RX_OB="$RX_OB,
     $payload"
         fi
@@ -1418,19 +1420,47 @@ devices_conf_lines() {
 # Клиенты своего VPN-сервера с маршрутом (поле route в clients.list detour-server):
 # MAC у туннеля нет, поэтому ключ — адрес клиента в подсети AWG и VLESS. Init
 # матчит такие ключи по источнику (-s) на интерфейсах сервера.
+#
+# Выбран канал выхода (detour-server uplink) — в карту идут ВСЕ включённые
+# клиенты: туннель для них открывает свой вход sing-box, исходящие которого
+# несут routing_mark канала. Четвёртое поле — метки через запятую; цель
+# «@active» — активная цепочка роутера (у клиента нет своего маршрута).
 server_device_lines() {
-    local srv="$DETOUR_DIR/server" sn vn
+    local srv="$DETOUR_DIR/server" sn vn marks
     [ -s "$srv/clients.list" ] && [ -f "$srv/server.conf" ] || return 0
     sn=$(sed -n 's/^NET=//p' "$srv/server.conf" | head -1)
     vn=$(sed -n 's/^VNET=//p' "$srv/server.conf" | head -1)
-    awk -F'|' -v n="$sn" -v v="$vn" '
-        $2 == 1 && $11 != "" && $4 ~ /^[0-9]+$/ {
-            if ($11 == "direct") { m = "direct"; t = "" }
+    marks=$(server_uplink_marks)
+    # С какими каналами собран конфиг: появился/пропал канал — tick detour-server
+    # сверит и пересоберёт (иначе новый канал туннели не увидели бы до ручной
+    # пересборки).
+    printf '%s\n' "$marks" > "$OPT/var/run/detour-server.rmarks" 2>/dev/null
+    awk -F'|' -v n="$sn" -v v="$vn" -v mk="$marks" '
+        $2 == 1 && ($11 != "" || mk != "") && $4 ~ /^[0-9]+$/ {
+            if ($11 == "") { m = "vpn"; t = "@active" }
+            else if ($11 == "direct") { m = "direct"; t = "" }
             else if ($11 ~ /^vpn:[A-Za-z0-9_.-]+$/) { m = "vpn"; t = substr($11, 5) }
             else next
-            if (n ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print n "." $4 "|" m "|" t
-            if (v ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print v "." $4 "|" m "|" t
+            s = (m == "vpn" && mk != "") ? "|" mk : ""
+            if (n ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print n "." $4 "|" m "|" t s
+            if (v ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print v "." $4 "|" m "|" t s
         }' "$srv/clients.list"
+}
+
+server_uplink_marks() {
+    local b="$OPT/usr/sbin/detour-server"
+    [ "$PLATFORM" = keenetic ] && b="$OPT/sbin/detour-server"
+    [ -x "$b" ] || return 0
+    "$b" uplink-marks 2>/dev/null | grep -E '^0x[0-9a-fA-F]+$' | tr '\n' ',' | sed 's/,$//'
+}
+
+# routing_mark в первый (внешний) хоп — он и набирает соединение в интернет.
+with_routing_mark() { # $1 JSON одной строкой, $2 метка (десятичная, 0 — без)
+    if [ -n "$2" ] && [ "$2" != 0 ]; then
+        printf '%s' "$1" | sed '1 s/^[[:space:]]*{/{"routing_mark":'"$2"',/'
+    else
+        printf '%s' "$1"
+    fi
 }
 
 # Цели устройств «через VPN X»: вход in_dev_K (+ in_dev_udp_K) и правило «вход →
@@ -1439,77 +1469,121 @@ server_device_lines() {
 # устройства. Цель, которой больше нет, пропускается: устройство тогда идёт
 # общим путём (через основной VPN), а не напрямую. Дописывает RX_OB/RX_EP/
 # RX_INBOUNDS, заполняет DX_RULES и DX_MAP (текст devices.map).
+#
+# Метки канала (клиенты VPN-сервера): по входу на каждую метку, у исходящих —
+# routing_mark. Несколько меток = каналы по очереди: какой вход взять, init
+# решает по connmark соединения (его ставит detour-server), поэтому прямой и
+# туннельный трафик клиента делят каналы одинаково. Пятое поле карты —
+# «метка=порт,…»; третье — порт по умолчанию (первый канал).
 compute_device_extras() {
-    local udp_mode mac mode target k k_old tag thops payload ptype port uport seen inb
+    local chain_csv="$1" udp_mode mac mode target marks k tag thops port uport seen inb key hit m mk alt
+    local first_port first_uport first_tag nl tab
     DX_RULES=""; DX_MAP=""; TORRENT_PORT=""; TORRENT_UPORT=""
     udp_mode=$(udp_vpn_mode_val)
-    k=0; seen=" "
+    k=0; seen=""
+    nl='
+'
+    tab=$(printf '\t')
     devices_conf_lines > "/tmp/detour-devices.$$"
     # Профиль для торрентов — та же цель «через X», что у устройства, только трафик
     # на её вход заворачивает detour-torrent по метке, а не правило по MAC.
     [ -n "$TORRENT_VIA" ] && echo "torrent|vpn|$TORRENT_VIA" >> "/tmp/detour-devices.$$"
-    while IFS='|' read -r mac mode target; do
+    while IFS='|' read -r mac mode target marks; do
         if [ "$mode" = direct ]; then
-            DX_MAP="$DX_MAP$mac direct 0 0
-"
+            DX_MAP="$DX_MAP$mac direct 0 0$nl"
             continue
         fi
-        # та же цель у нескольких устройств — один вход на всех
-        case "$seen" in
-            *" $target="*)
-                k_old=${seen#*" $target="}; k_old=${k_old%% *}
-                if [ "$mac" = torrent ]; then
-                    TORRENT_OUT="dv_$k_old"; TORRENT_PORT=$((DEV_PORT_BASE + k_old))
-                    TORRENT_UPORT=$(dev_udp_port "$udp_mode" "$k_old")
-                    continue
-                fi
-                DX_MAP="$DX_MAP$mac vpn $((DEV_PORT_BASE + k_old)) $(dev_udp_port "$udp_mode" "$k_old")
-"
-                continue ;;
-        esac
+        # та же цель (и те же метки) у нескольких устройств — одни входы на всех
+        key="$target#$marks"
+        hit=$(printf '%s' "$seen" | awk -F"$tab" -v k="$key" '$1 == k { print $2; exit }')
+        if [ -n "$hit" ]; then
+            set -- $hit
+            if [ "$mac" = torrent ]; then
+                TORRENT_OUT=$4; TORRENT_PORT=$1; TORRENT_UPORT=$2
+                continue
+            fi
+            [ "$3" = - ] && alt="" || alt=" $3"
+            DX_MAP="$DX_MAP$mac vpn $1 $2$alt$nl"
+            continue
+        fi
         thops=""
-        if [ ! -f "$SINGBOX_PROFILES_DIR/$target.json" ]; then
+        if [ "$target" = "@active" ]; then
+            thops=$chain_csv
+            [ -n "$thops" ] || continue
+        elif [ ! -f "$SINGBOX_PROFILES_DIR/$target.json" ]; then
             thops=$(chain_hops_csv "$target")
             [ -n "$thops" ] || continue
         fi
-        k=$((k + 1))
-        tag="dv_$k"
-        if [ -n "$thops" ]; then
-            emit_route_chain "$thops" "$tag" "dc$k" || { k=$((k - 1)); continue; }
-        else
-            payload=$(extract_profile_outbound "$SINGBOX_PROFILES_DIR/$target.json")
-            [ -n "$payload" ] || { k=$((k - 1)); continue; }
-            ptype=$(profile_type "$SINGBOX_PROFILES_DIR/$target.json")
-            payload=$(set_outbound_chain_fields "$payload" "$tag" "")
-            if [ "$ptype" = "wireguard" ]; then
-                payload=$(translate_wireguard_profile "$payload")
-                RX_EP="$RX_EP,
-    $payload"
-            else
-                RX_OB="$RX_OB,
-    $payload"
-            fi
+        # WireGuard/AmneziaWG на первом хопе: копия с тем же ключом — второй пир
+        # для сервера, и два набора рукопожатий сбивают друг друга. Копию
+        # активной цепочки не делаем вовсе (клиент идёт общим путём, канал
+        # выбирается только для прямого трафика), своей цели — одну.
+        if [ -n "$marks" ] && device_first_hop_wg "$target" "$thops"; then
+            [ "$target" = "@active" ] && continue
+            marks=${marks%%,*}
         fi
-        seen="$seen$target=$k "
-        port=$((DEV_PORT_BASE + k))
-        uport=$(dev_udp_port "$udp_mode" "$k")
-        RX_INBOUNDS="$RX_INBOUNDS,
-    {\"type\":\"redirect\",\"tag\":\"in_dev_$k\",\"listen\":\"::\",\"listen_port\":$port}"
-        inb="\"in_dev_$k\""
-        if [ "$uport" != 0 ]; then
+        alt=""; first_port=""; first_uport=""; first_tag=""
+        for m in $(printf '%s' "${marks:-0}" | tr ',' ' '); do
+            mk=$((m))
+            k=$((k + 1))
+            tag="dv_$k"
+            device_target_emit "$target" "$thops" "$tag" "$k" "$mk" || { k=$((k - 1)); continue; }
+            port=$((DEV_PORT_BASE + k))
+            uport=$(dev_udp_port "$udp_mode" "$k")
             RX_INBOUNDS="$RX_INBOUNDS,
+    {\"type\":\"redirect\",\"tag\":\"in_dev_$k\",\"listen\":\"::\",\"listen_port\":$port}"
+            inb="\"in_dev_$k\""
+            if [ "$uport" != 0 ]; then
+                RX_INBOUNDS="$RX_INBOUNDS,
     {\"type\":\"tproxy\",\"tag\":\"in_dev_udp_$k\",\"listen\":\"::\",\"listen_port\":$uport,\"network\":\"udp\"}"
-            inb="$inb,\"in_dev_udp_$k\""
-        fi
-        DX_RULES="$DX_RULES${DX_RULES:+,}{\"action\":\"route\",\"inbound\":[$inb],\"outbound\":\"$tag\"}"
+                inb="$inb,\"in_dev_udp_$k\""
+            fi
+            DX_RULES="$DX_RULES${DX_RULES:+,}{\"action\":\"route\",\"inbound\":[$inb],\"outbound\":\"$tag\"}"
+            [ -n "$first_port" ] || { first_port=$port; first_uport=$uport; first_tag=$tag; }
+            [ "$mk" != 0 ] && alt="$alt${alt:+,}$m=$port"
+        done
+        [ -n "$first_port" ] || continue
+        # Один вход — выбирать нечего.
+        case "$alt" in *,*) ;; *) alt="" ;; esac
+        seen="$seen$key$tab$first_port $first_uport ${alt:--} $first_tag$nl"
         if [ "$mac" = torrent ]; then
-            TORRENT_OUT="$tag"; TORRENT_PORT=$port; TORRENT_UPORT=$uport
+            TORRENT_OUT="$first_tag"; TORRENT_PORT=$first_port; TORRENT_UPORT=$first_uport
             continue
         fi
-        DX_MAP="$DX_MAP$mac vpn $port $uport
-"
+        DX_MAP="$DX_MAP$mac vpn $first_port $first_uport${alt:+ $alt}$nl"
     done < "/tmp/detour-devices.$$"
     rm -f "/tmp/detour-devices.$$"
+}
+
+device_first_hop_wg() { # $1 цель, $2 хопы CSV (пусто — цель сама профиль)
+    local f
+    if [ -n "$2" ]; then f="$SINGBOX_PROFILES_DIR/${2%%,*}.json"; else f="$SINGBOX_PROFILES_DIR/$1.json"; fi
+    [ -f "$f" ] || return 1
+    [ "$(profile_type "$f")" = wireguard ] || is_awg_profile "$f"
+}
+
+# Исходящие одной цели устройства под тегом $3 (цепочка — с префиксом dc$4);
+# $5 — routing_mark первого хопа (0 — без).
+device_target_emit() {
+    local target="$1" thops="$2" tag="$3" k="$4" mk="$5" payload ptype
+    if [ -n "$thops" ]; then
+        emit_route_chain "$thops" "$tag" "dc$k" "$mk"
+        return $?
+    fi
+    payload=$(extract_profile_outbound "$SINGBOX_PROFILES_DIR/$target.json")
+    [ -n "$payload" ] || return 1
+    ptype=$(profile_type "$SINGBOX_PROFILES_DIR/$target.json")
+    payload=$(set_outbound_chain_fields "$payload" "$tag" "")
+    if [ "$ptype" = "wireguard" ]; then
+        payload=$(with_routing_mark "$(translate_wireguard_profile "$payload")" "$mk")
+        RX_EP="$RX_EP,
+    $payload"
+    else
+        payload=$(with_routing_mark "$payload" "$mk")
+        RX_OB="$RX_OB,
+    $payload"
+    fi
+    return 0
 }
 
 # UDP-вход цели устройства есть, только когда «UDP через VPN» включён (иначе UDP
@@ -5454,7 +5528,9 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
     }
     # Маршрут клиента исполняет механизм устройств — после его смены нужна
     # пересборка конфига, как в действии devices.
+    # С выбранным каналом выхода в карте устройств все клиенты, не только с маршрутом.
     srv_has_route() {
+        [ -n "$(server_uplink_marks)" ] && return 0
         awk -F'|' -v id="$1" '$1 == id && $11 != "" { f = 1 } END { exit !f }' "$DETOUR_DIR/server/clients.list" 2>/dev/null
     }
     srv_rebuild() {
@@ -5483,10 +5559,17 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             v=$(srv_str net);      [ -n "$v" ] && set -- "$@" "net=$v"
             printf '%s' "$POST_DATA" | grep -q '"endpoint"' && set -- "$@" "endpoint=$(srv_str endpoint)"
             printf '%s' "$POST_DATA" | grep -q '"dns"' && set -- "$@" "dns=$(srv_str dns)"
+            v=$(srv_str uplink);   [ -n "$v" ] && set -- "$@" "uplink=$v"
             [ $# -gt 0 ] || { json_err "нечего менять"; exit 0; }
-            "$SERVER_BIN" set "$@" ;;
+            # Канал выхода и вкл/выкл сервера меняют входы sing-box клиентов.
+            SRV_MK0=$(server_uplink_marks)
+            SRV_OUT=$("$SERVER_BIN" set "$@")
+            case "$SRV_OUT" in *'"ok":true'*) [ "$(server_uplink_marks)" != "$SRV_MK0" ] && srv_rebuild ;; esac
+            printf '%s\n' "$SRV_OUT" ;;
         server_client_add)
-            "$SERVER_BIN" client-add "$(srv_str name)" "$(srv_str mode)" ;;
+            SRV_OUT=$("$SERVER_BIN" client-add "$(srv_str name)" "$(srv_str mode)")
+            case "$SRV_OUT" in *'"ok":true'*) [ -n "$(server_uplink_marks)" ] && srv_rebuild ;; esac
+            printf '%s\n' "$SRV_OUT" ;;
         server_client_set)
             set --
             v=$(srv_str name);     [ -n "$v" ] && set -- "$@" "name=$v"

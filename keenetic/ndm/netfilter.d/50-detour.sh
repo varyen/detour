@@ -375,6 +375,16 @@ fi
 # «Все через VPN»), поэтому цепочка устройства сама повторяет то, что главнее
 # правила устройства: «Отдельные маршруты» роутера, затем zapret.
 DEV_MAP="/opt/etc/sing-box/devices.map"
+# Каналы по очереди (клиенты VPN-сервера): «метка=порт,…» — вход sing-box с
+# routing_mark канала, который соединению выбрал detour-server (connmark).
+device_alt_redirects() {
+    _c="$1"; _alt="$2"; shift 2
+    [ -n "$_alt" ] || return 0
+    for _pair in $(echo "$_alt" | tr ',' ' '); do
+        [ -n "${_pair%%=*}" ] && [ -n "${_pair#*=}" ] || continue
+        iptables -t nat -A "$_c" -p tcp "$@" -m connmark --mark "${_pair%%=*}/0x000f0000" -j REDIRECT --to-ports "${_pair#*=}"
+    done
+}
 for IF in $IFACES; do
     [ -n "$IF" ] || continue
     while iptables -t nat -C PREROUTING -i "$IF" -j SINGBOX_DEVICES 2>/dev/null; do
@@ -389,7 +399,7 @@ iptables -t nat -X SINGBOX_DEVICES 2>/dev/null
 if [ -f /opt/etc/detour/singbox.enabled ] && [ -s "$DEV_MAP" ]; then
     iptables -t nat -N SINGBOX_DEVICES
     i=0
-    while read -r mac mode port uport; do
+    while read -r mac mode port uport alt; do
         [ -n "$mac" ] || continue
         i=$((i + 1)); c="SINGBOX_DEV_$i"
         iptables -t nat -N "$c"
@@ -413,8 +423,10 @@ if [ -f /opt/etc/detour/singbox.enabled ] && [ -s "$DEV_MAP" ]; then
             iptables -t nat -A "$c" -m set --match-set "$VS_IPSET" dst,dst -j ACCEPT 2>/dev/null
             if [ "$ROUTING_MODE" = "all-except" ]; then
                 iptables -t nat -A "$c" -p tcp -m set --match-set "$WL_IPSET" dst -j ACCEPT 2>/dev/null
+                device_alt_redirects "$c" "$alt"
                 iptables -t nat -A "$c" -p tcp -j REDIRECT --to-ports "$port"
             else
+                device_alt_redirects "$c" "$alt" -m set --match-set "$SINGBOX_IPSET" dst
                 iptables -t nat -A "$c" -p tcp -m set --match-set "$SINGBOX_IPSET" dst -j REDIRECT --to-ports "$port"
             fi
         fi
@@ -537,7 +549,7 @@ if [ -n "$TP_STATUS" ]; then
 
     ipset create "$UDP_VPN_IPSET" hash:net -exist 2>/dev/null
     if [ -n "$UDP_DEVS" ]; then
-        while read -r mac dmode port uport; do
+        while read -r mac dmode port uport alt; do
             [ -n "$mac" ] || continue
             if [ "$dmode" = direct ]; then
                 iptables -t mangle -A "$UDP_VPN_CHAIN" $(device_match "$mac") -j RETURN

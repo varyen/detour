@@ -3,7 +3,7 @@
 #
 #   detour-server status                 — JSON: поддержка, состояние, клиенты
 #   detour-server start | stop | apply   — поднять / погасить / пересобрать
-#   detour-server set КЛЮЧ=ЗНАЧ…         — enabled port net endpoint dns mtu
+#   detour-server set КЛЮЧ=ЗНАЧ…         — enabled port net endpoint dns mtu uplink
 #   detour-server client-add <имя> [full|lan]
 #   detour-server client-set <id> КЛЮЧ=ЗНАЧ…   — name mode enabled route
 #   detour-server client-del <id>
@@ -398,6 +398,7 @@ VPRIV=$VPRIV
 VPUB=$VPUB
 VSID=$VSID
 NDMIF=$NDMIF
+UPLINK=$UPLINK
 EOF
     mv "$CONF.tmp" "$CONF"
 }
@@ -416,7 +417,7 @@ pick_net() {  # $1 — подсеть, которую тоже обходить
 load_conf() {
     ENABLED=0; PORT=""; NET=""; ENDPOINT=""; DNS=""; MTU=""
     PRIVKEY=""; PUBKEY=""
-    AWG=1; VLESS=0; VPORT=""; VNET=""; VSNI=""; VPRIV=""; VPUB=""; VSID=""; NDMIF=""
+    AWG=1; VLESS=0; VPORT=""; VNET=""; VSNI=""; VPRIV=""; VPUB=""; VSID=""; NDMIF=""; UPLINK=""
     [ -f "$CONF" ] && . "$CONF"
     set_iface
 }
@@ -1198,7 +1199,127 @@ vless_down() {
     ip netns del "$NS" 2>/dev/null
 }
 
+# ---------- канал выхода клиентов (несколько WAN) ----------
+#
+# UPLINK: пусто/auto — как весь роутер; <id канала> — только он; all — каналы
+# по очереди, по соединениям. Вход не выбирается: принимать клиентов может
+# только канал с белым адресом.
+#
+# Метки и таблицы — detour-wanpin (ниббл 0x000f0000, ip rule fwmark → таблица
+# канала). Прямой трафик клиента метится здесь: connmark на первом пакете
+# соединения в mangle PREROUTING, метка пакета — restore. Перехваченный
+# (REDIRECT в sing-box) получает ту же метку, но уходит локально (таблица local
+# раньше правил по меткам), а наружу его ведёт исходящий sing-box с
+# routing_mark — эти входы собирает detour-api по `uplink-marks`.
+# Метка без своего ip rule (канал упал, wanpin снял правило) — не ошибка:
+# пакет идёт по main, то есть так, как пошёл бы без выбора канала.
+UPL_CHAIN=DSRV_UPLINK
+UPL_NEW=DSRV_UPLINK_NEW
+UPL_MASK=0x000f0000
+UPL_SIG="$RUN/detour-server.uplink"
+
+ipr() { if [ "$KEENETIC" = 1 ]; then $KIP "$@"; else ip "$@"; fi; }
+
+# «id iface mark table usable ip» — по строке на канал.
+uplink_table() { [ -x "$WANPIN_BIN" ] && "$WANPIN_BIN" marks 2>/dev/null; }
+
+# Метки выбранного режима. $1 = any — и упавших каналов (для конфига sing-box:
+# он собирается редко и должен пережить падение канала), иначе только рабочих.
+uplink_marks() {
+    [ "$ENABLED" = 1 ] || return 0
+    case "$UPLINK" in ''|auto) return 0 ;; esac
+    uplink_table | awk -v u="$UPLINK" -v any="$1" \
+        '(u == "all" || $1 == u) && (any == "any" || $5 == 1) { print $3 }'
+}
+
+# Набор каналов изменился с последней сборки конфига (подключили USB-модем,
+# убрали канал) — пересобрать, чтобы у туннелей были входы на все каналы.
+# Только при работающем движке: activate при остановленном VPN поднял бы его.
+uplink_rebuild_check() {
+    f="$RUN/detour-server.rmarks"
+    [ -f "$f" ] || return 0
+    cur=$(uplink_marks any | tr '\n' ',' | sed 's/,$//')
+    [ "$cur" = "$(head -1 "$f")" ] && return 0
+    if [ "$KEENETIC" = 1 ]; then api=/opt/share/www/cgi-bin/detour-api; else api=/www/cgi-bin/detour-api; fi
+    [ -x "$api" ] || return 0
+    [ -n "$("$api" engine-pid 2>/dev/null)" ] || return 0
+    ch=$(sed -n 's/.*"active_chain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" | head -1)
+    [ -n "$ch" ] || ch=$(sed -n 's/.*"active_profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" | head -1)
+    [ -n "$ch" ] || return 0
+    log "каналы изменились (${cur:-нет} вместо $(head -1 "$f")) — пересобираю конфиг"
+    "$api" activate "$ch" >/dev/null 2>&1 || log "пересборка не удалась"
+}
+
+uplink_down() {
+    for i in "$IFACE" "$VIF"; do
+        while iptables -t mangle -D PREROUTING -i "$i" -j "$UPL_CHAIN" 2>/dev/null; do :; done
+    done
+    for c in "$UPL_CHAIN" "$UPL_NEW"; do
+        iptables -t mangle -F "$c" 2>/dev/null
+        iptables -t mangle -X "$c" 2>/dev/null
+    done
+    [ -n "$NET" ] && ipr -4 rule del to "$NET.0/24" lookup main pref "$RULE_PREF" 2>/dev/null
+    rm -f "$UPL_SIG"
+}
+
+uplink_apply() {
+    marks=$(uplink_marks | tr '\n' ' ' | sed 's/ $//')
+    set --
+    awg_on && set -- "$@" "$IFACE"
+    vless_on && set -- "$@" "$VIF"
+    ifs="$*"
+    if [ -z "$marks" ] || [ -z "$ifs" ]; then
+        if [ -f "$UPL_SIG" ]; then
+            uplink_down
+            log "канал выхода: как у роутера"
+        fi
+        return 0
+    fi
+    sig="$marks|$ifs|$NET"
+    if [ "$(cat "$UPL_SIG" 2>/dev/null)" = "$sig" ]; then
+        ok=1
+        for i in $ifs; do iptables -t mangle -C PREROUTING -i "$i" -j "$UPL_CHAIN" 2>/dev/null || ok=0; done
+        [ "$ok" = 1 ] && return 0
+    fi
+    uplink_down
+    iptables -t mangle -N "$UPL_NEW" 2>/dev/null
+    iptables -t mangle -N "$UPL_CHAIN" 2>/dev/null
+    for d in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16 224.0.0.0/4; do
+        iptables -t mangle -A "$UPL_NEW" -d "$d" -j RETURN
+    done
+    # CONNMARK не завершает цепочку, поэтому счётчик nth каждого правила видит
+    # все новые соединения: правило k ловит k-е из каждых n.
+    set -- $marks
+    n=$#; k=0
+    for m in "$@"; do
+        if [ "$n" -gt 1 ]; then
+            iptables -t mangle -A "$UPL_NEW" -m statistic --mode nth --every "$n" --packet "$k" \
+                -j CONNMARK --set-xmark "$m/$UPL_MASK"
+        else
+            iptables -t mangle -A "$UPL_NEW" -j CONNMARK --set-xmark "$m/$UPL_MASK"
+        fi
+        k=$((k + 1))
+    done
+    iptables -t mangle -A "$UPL_CHAIN" -m conntrack --ctstate NEW -j "$UPL_NEW"
+    iptables -t mangle -A "$UPL_CHAIN" -m connmark ! --mark "0/$UPL_MASK" \
+        -j CONNMARK --restore-mark --nfmask "$UPL_MASK" --ctmask "$UPL_MASK"
+    for i in $ifs; do
+        iptables -t mangle -A PREROUTING -i "$i" -j "$UPL_CHAIN"
+    done
+    # Ответы клиенту несут метку соединения, а в таблице канала есть только
+    # default через WAN — без этого правила они уходили бы в интернет. Для
+    # VLESS такое же ставит vless_net_up.
+    if awg_on && [ -n "$NET" ]; then
+        ipr -4 rule del to "$NET.0/24" lookup main pref "$RULE_PREF" 2>/dev/null
+        ipr -4 rule add to "$NET.0/24" lookup main pref "$RULE_PREF"
+    fi
+    mkdir -p "$RUN"
+    echo "$sig" > "$UPL_SIG"
+    log "канал выхода: $UPLINK — метки $marks на $ifs"
+}
+
 do_stop() {
+    uplink_down
     awg_down
     vless_down
     [ -f "$CONF" ] && { load_conf; ENABLED=0; fw_apply; }
@@ -1214,6 +1335,7 @@ do_apply() {
     if awg_on; then awg_up || rc=1; else awg_down; fi
     if vless_on; then vless_up || rc=1; else vless_down; fi
     fw_apply
+    uplink_apply
     set --
     awg_on && set -- "$@" "$IFACE"
     vless_on && set -- "$@" "$VIF"
@@ -1483,8 +1605,17 @@ status_json() {
         "$(json_esc "$VSNI")" "$VPUB" "$VSID" "${VNET:+$VNET.0/24}"
     printf '"iface":"%s","port":%s,"net":"%s","server_ip":"%s","endpoint":"%s","endpoint_effective":"%s",' \
         "$IFACE" "${PORT:-0}" "${NET:+$NET.0/24}" "${NET:+$(server_ip)}" "$(json_esc "$ENDPOINT")" "$(json_esc "$(endpoint_host)")"
-    printf '"wan_ip":"%s","wan_private":%s,"panel_domain":"%s","dns":"%s","mtu":%s,"pubkey":"%s","clients":[' \
+    printf '"wan_ip":"%s","wan_private":%s,"panel_domain":"%s","dns":"%s","mtu":%s,"pubkey":"%s",' \
         "$wip" "$wpriv" "$(json_esc "$dom")" "$(json_esc "$DNS")" "${MTU:-1376}" "$PUBKEY"
+    # Каналы для выбора выхода; pinned — правила меток стоят (без них выбор
+    # ничего не меняет: детект второго канала ещё не прошёл или он один).
+    upl_pinned=false
+    [ -x "$WANPIN_BIN" ] && "$WANPIN_BIN" installed 2>/dev/null && upl_pinned=true
+    printf '"uplink":"%s","uplink_pinned":%s,"uplinks":[%s],"clients":[' \
+        "$(json_esc "${UPLINK:-auto}")" "$upl_pinned" \
+        "$(uplink_table | awk '{ printf "%s{\"id\":\"%s\",\"iface\":\"%s\",\"usable\":%s,\"ip\":\"%s\",\"private\":%s}", \
+            (n++ ? "," : ""), $1, $2, ($5 == 1 ? "true" : "false"), ($6 == "-" ? "" : $6), \
+            ($6 ~ /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)/ ? "true" : "false") }')"
     dump=$(server_dump)
     now=$(date +%s)
     # rx/tx — живые счётчики (AWG + VLESS; скорость панель считает по их
@@ -1594,6 +1725,14 @@ cmd_set() {
                 case "$v" in ''|*[!0-9]*) err "MTU — число" ;; esac
                 [ "$v" -ge 1200 ] && [ "$v" -le 1500 ] || err "MTU 1200–1500"
                 MTU=$v ;;
+            uplink)
+                case "$v" in
+                    ''|auto) v="" ;;
+                    all) ;;
+                    *[!A-Za-z0-9_.-]*) err "канал: auto, all или id канала" ;;
+                    *) uplink_table | awk -v u="$v" '$1 == u { f = 1 } END { exit !f }' || err "канал $v не найден" ;;
+                esac
+                UPLINK=$v ;;
             *) err "неизвестный параметр: $k" ;;
         esac
     done
@@ -1682,6 +1821,9 @@ attach_all() {
 case "$1" in
     status) status_json ;;
     sessions) sessions_json "$2" ;;
+    # Для detour-api: метки входов sing-box клиентов сервера, по одной в строке
+    # (пусто — выбор канала выключен).
+    uplink-marks) load_conf; uplink_marks any ;;
     tick)
         # Сервер ни разу не настраивался — cron стоит на всех роутерах, выходим сразу.
         [ -f "$CLIENTS" ] || exit 0
@@ -1701,6 +1843,10 @@ case "$1" in
         # переписали без нашего интерфейса — без этого клиенты шли бы мимо
         # маршрутов роутера.
         [ "$ENABLED" = 1 ] && attach_all
+        # Канал упал/поднялся — прямой трафик клиентов перестаёт/начинает в него
+        # уходить; снесённые перестройкой файрвола правила встают заново.
+        uplink_apply
+        uplink_rebuild_check
         # Keenetic: NDM при переподключениях WAN может снести наши ip rule/neigh.
         [ "$KEENETIC" = 1 ] && vless_on && vless_running && vless_net_up >/dev/null 2>&1
         stats_tick ;;
@@ -1714,7 +1860,7 @@ case "$1" in
     down)
         # Удаление пакета: снять всё, файрвол чистит вызывающий (на Keenetic
         # своих правил у NDM нет — снимаем сами).
-        load_conf; stats_tick; stats_flush; awg_down; vless_down
+        load_conf; stats_tick; stats_flush; uplink_down; awg_down; vless_down
         if [ "$KEENETIC" = 1 ]; then
             fw_remove
             [ -n "$NDMIF" ] && ndm_wg && ndm_cli "system configuration save" >/dev/null 2>&1
@@ -1725,7 +1871,7 @@ case "$1" in
         [ "$KEENETIC" = 1 ] || exit 0
         [ -f "$CONF" ] || exit 0
         kill_stuck_ipt
-        load_conf; keen_fw ;;
+        load_conf; keen_fw; uplink_apply ;;
     set) shift; lock; cmd_set "$@" ;;
     client-add) shift; lock; cmd_client_add "$@" ;;
     client-set) shift; lock; cmd_client_set "$@" ;;
@@ -1744,6 +1890,6 @@ case "$1" in
         log "regen-obf"
         echo '{"ok":true}' ;;
     *)
-        echo "usage: $0 {status|start|stop|down|apply|set k=v…|client-add <name> [full|lan]|client-set <id> k=v…|client-del <id>|client-conf <id>|client-link <id>|regen-obf}" >&2
+        echo "usage: $0 {status|start|stop|down|apply|uplink-marks|set k=v…|client-add <name> [full|lan]|client-set <id> k=v…|client-del <id>|client-conf <id>|client-link <id>|regen-obf}" >&2
         exit 2 ;;
 esac
