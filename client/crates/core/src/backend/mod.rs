@@ -62,6 +62,7 @@ enum Job {
     HealthSweep,
     BinsApply,
     DpiApply,
+    AppDownload,
 }
 
 pub struct Backend {
@@ -342,6 +343,11 @@ impl Backend {
             "nfqws2_update_check" | "tpws_update_check" => self.dpi_bins_check().await,
             "nfqws2_update_status" | "tpws_update_status" => self.dpi_bins_status(),
             "nfqws2_update_apply" | "tpws_update_apply" => self.dpi_bins_apply(),
+            // Канал «panel» у приложения — само приложение (см. appupdate).
+            "panel_update_check" => self.app_check().await,
+            "panel_update_status" => self.app_status(),
+            "panel_update_apply" => self.app_apply(),
+            "app_update_install" => self.app_install().await?,
             "updates_overview" => self.updates_overview().await,
             "autocheck_status" => self.autocheck_status(),
             "autocheck_set" => self.autocheck_set(body()?)?,

@@ -50,6 +50,24 @@ pub extern "system" fn Java_io_github_varyen_detour_DetourBridge_nativeInit(
     detour_core::engine::tunnel::set(Box::new(AndroidTunnel));
 }
 
+/// Системный установщик APK. Пустой ответ java-стороны — диалог показан.
+pub fn install_apk(path: &Path) -> Result<(), String> {
+    let p = path.to_string_lossy().into_owned();
+    let error = with_java(|env, class| {
+        let arg = env.new_string(&p)?;
+        let value = env.call_static_method(class, "installApk", "(Ljava/lang/String;)Ljava/lang/String;", &[JValue::Object(&arg)])?;
+        let text: JString = value.l()?.into();
+        let out = String::from(env.get_string(&text)?);
+        Ok(out)
+    })
+    .map_err(|e| format!("{e:#}"))?;
+    match error.as_str() {
+        "" => Ok(()),
+        "need_permission" => Err("Разрешите Detour устанавливать приложения (откроется настройка) и нажмите «Установить» ещё раз".into()),
+        _ => Err(error),
+    }
+}
+
 fn with_java<T>(f: impl FnOnce(&mut JNIEnv, &JClass) -> Result<T>) -> Result<T> {
     let bridge = BRIDGE.get().context("мост в приложение ещё не поднят")?;
     let mut env = bridge.vm.attach_current_thread()?;

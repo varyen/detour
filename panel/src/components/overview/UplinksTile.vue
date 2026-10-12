@@ -134,7 +134,7 @@ function facts(u: WanUplink): string[] {
 </script>
 
 <template>
-  <TileCard v-if="show" title="Каналы в интернет">
+  <TileCard v-if="show" icon="uplinks" title="Каналы в интернет">
     <p v-if="allDown" class="state">
       <i class="dot bad" aria-hidden="true"></i>
       <span>Ни один канал не поднят</span>

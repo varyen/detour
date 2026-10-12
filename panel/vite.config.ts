@@ -121,6 +121,8 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks(id) {
+            /* Декодер QR нужен только сканеру — свой чанк по требованию. */
+            if (id.includes("node_modules/jsqr")) return "jsqr";
             if (id.includes("node_modules")) return "vendor";
           },
         },

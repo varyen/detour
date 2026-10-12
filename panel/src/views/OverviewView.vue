@@ -724,13 +724,13 @@ onBeforeUnmount(() => {
     </DashSlot>
 
     <DashSlot id="traffic">
-      <TileCard title="Трафик">
+      <TileCard icon="chart" title="Трафик">
         <TrafficChart :rx-speed="rxSpeed" :tx-speed="txSpeed" />
       </TileCard>
     </DashSlot>
 
     <DashSlot id="connection">
-    <TileCard title="Активное подключение">
+    <TileCard icon="link" title="Активное подключение">
       <p class="big">
         {{ profileLabel }}
         <small v-if="sb?.active_type">{{ sb.active_type }}</small>
@@ -789,7 +789,7 @@ onBeforeUnmount(() => {
     </DashSlot>
 
     <DashSlot id="scope">
-    <TileCard title="Область действия">
+    <TileCard icon="target" title="Область действия">
       <SwitchToggle
         v-model="allvpn"
         label="Все через VPN"
@@ -874,7 +874,7 @@ onBeforeUnmount(() => {
     </DashSlot>
 
     <DashSlot id="health">
-    <TileCard title="Здоровье профилей">
+    <TileCard icon="heart" title="Здоровье профилей">
       <p class="big num">
         {{ healthCounts.ok }}<small>из {{ healthCounts.total }} проходят проверку</small>
       </p>
@@ -915,7 +915,7 @@ onBeforeUnmount(() => {
     </DashSlot>
 
     <DashSlot id="system">
-    <TileCard title="Система">
+    <TileCard icon="cpu" title="Система">
       <p class="meta col">
         <span>
           Процессор {{ cpuText
@@ -941,7 +941,7 @@ onBeforeUnmount(() => {
     </DashSlot>
 
     <DashSlot id="versions">
-    <TileCard title="Версии">
+    <TileCard icon="tag" title="Версии">
       <!-- Чип с доступной версией прямо в строке: «панель 1.43.2» само по себе
            не отвечает на вопрос, старая она или свежая. -->
       <template #badge>

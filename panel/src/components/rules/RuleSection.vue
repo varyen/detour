@@ -2,8 +2,12 @@
 /* Одна область правил: строка «что сейчас настроено» и раскрытие. Семь вкладок
    старой панели превратились в вертикальный список именно так — чтобы с
    телефона было видно всё состояние сразу, без переключения. */
+import AreaIcon from "@/components/AreaIcon.vue";
+
 defineProps<{
   title: string;
+  /** Иконка области (SectionIcon) — чтобы пункты списка различались. */
+  icon?: string;
   summary: string;
   open: boolean;
   /* Короткая пометка справа от заголовка: «выключено», «недоступно». */
@@ -17,6 +21,7 @@ const emit = defineEmits<{ toggle: [] }>();
 <template>
   <section class="area" :class="{ expanded: open }">
     <button class="head" type="button" :aria-expanded="open" @click="emit('toggle')">
+      <AreaIcon v-if="icon" :name="icon" />
       <span class="txt">
         <span class="t">
           {{ title }}

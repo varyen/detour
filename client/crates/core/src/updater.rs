@@ -18,7 +18,7 @@ pub const STATE: &str = "run/bins.json";
 const RELEASES: &str = "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=40";
 const MAX_ASSET: usize = 96 << 20;
 
-fn semver(v: &str) -> Option<(u64, u64, u64)> {
+pub(crate) fn semver(v: &str) -> Option<(u64, u64, u64)> {
     let v = v.trim().trim_start_matches('v');
     let core = v.split(['-', '+']).next()?;
     let mut it = core.split('.').map(|x| x.parse::<u64>().ok());
@@ -56,7 +56,7 @@ async fn get(url: &str, proxy: Option<&str>, timeout: Duration) -> Result<reqwes
 }
 
 /// Сначала через VPN (GitHub из РФ бывает медленным), потом напрямую.
-async fn get_any(url: &str, proxy: Option<&str>, timeout: Duration) -> Result<reqwest::Response> {
+pub(crate) async fn get_any(url: &str, proxy: Option<&str>, timeout: Duration) -> Result<reqwest::Response> {
     if let Some(p) = proxy {
         if let Ok(r) = get(url, Some(p), timeout).await {
             return Ok(r);

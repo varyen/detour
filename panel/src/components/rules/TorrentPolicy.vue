@@ -92,6 +92,7 @@ async function save() {
 <template>
   <RuleSection
     id="rule-torrents"
+    icon="torrent"
     title="Торренты на запрещающих профилях"
     :summary="summary"
     :open="open"

@@ -3,14 +3,17 @@
    содержимое раскрывается по нажатию. Так страница читается сверху вниз
    одним списком, а тяжёлое (логи, дампы, редакторы) не загружается, пока
    его не попросили. */
+import AreaIcon from "@/components/AreaIcon.vue";
+
 const open = defineModel<boolean>("open", { default: false });
 
-defineProps<{ title: string; summary?: string }>();
+defineProps<{ title: string; summary?: string; icon?: string }>();
 </script>
 
 <template>
   <section class="area" :class="{ expanded: open }">
     <button class="head" type="button" :aria-expanded="open" @click="open = !open">
+      <AreaIcon v-if="icon" :name="icon" />
       <span class="txt">
         <span class="eyebrow">{{ title }}</span>
         <span v-if="summary" class="sum">{{ summary }}</span>

@@ -10,6 +10,8 @@ base64.workspace = true
 getrandom = "0.3"
 humantime = "2"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# Проверка подписи сборок при самообновлении; уже в дереве через rustls.
+ring = "0.17"
 reqwest ={ version = "0.13", default-features = false, features = ["rustls", "socks", "gzip", "http2", "json"] }
 serde.workspace = true
 serde_json.workspace = true

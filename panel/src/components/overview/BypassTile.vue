@@ -196,7 +196,7 @@ async function saveStrategy() {
 </script>
 
 <template>
-  <TileCard title="Обход DPI">
+  <TileCard icon="dpi" title="Обход DPI">
     <SegmentedControl
       v-model="mode"
       label="Движок обхода DPI"

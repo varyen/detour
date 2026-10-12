@@ -141,7 +141,7 @@ onMounted(load);
 </script>
 
 <template>
-  <TileCard v-if="supported" title="Cloudflare WARP">
+  <TileCard v-if="supported" icon="cloud" title="Cloudflare WARP">
     <p class="lead">
       WARP ставится последним хопом: клиент → ваш VPN → WARP → сайт. Выходной
       адрес перестаёт выглядеть адресом дата-центра — именно это обычно нужно

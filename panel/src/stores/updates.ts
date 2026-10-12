@@ -10,7 +10,8 @@ import type { UpdateChannelState, UpdatesOverview } from "@/api";
 export type UpdateChannel = "panel" | "singbox" | "tpws" | "nfqws2" | "mihomo";
 
 export const CHANNEL_TITLE: Record<UpdateChannel, string> = {
-  panel: "Панель",
+  /* В приложении этот канал — само приложение (скачивание из релиза GitHub). */
+  panel: __CLIENT__ ? "Приложение" : "Панель",
   singbox: "sing-box",
   tpws: "tpws (обход DPI)",
   nfqws2: __CLIENT__ ? "winws2 (обход DPI)" : "nfqws2 (zapret2)",

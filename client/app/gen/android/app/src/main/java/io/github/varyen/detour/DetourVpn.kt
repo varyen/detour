@@ -31,6 +31,8 @@ object DetourVpn {
         appContext = context.applicationContext
     }
 
+    fun context(): Context? = appContext
+
     fun running(): Boolean = service?.tunnelUp == true
 
     fun start(configPath: String): String {

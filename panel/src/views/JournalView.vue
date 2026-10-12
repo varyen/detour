@@ -585,6 +585,31 @@ async function followPanelStatus(preVersion: string, title: string) {
   }
 }
 
+/* Приложение: ядро скачало сборку и проверило подпись — ставит окно (или
+   демон на macOS). Отказ в UAC или в разрешении Android — не конец: кнопка
+   «Установить» в шторке повторяет шаг без нового скачивания. */
+const appInstallRetry = ref(false);
+async function installApp() {
+  appInstallRetry.value = false;
+  applyNote.value = "Сборка скачана и проверена по подписи — запускаю установку…";
+  try {
+    const r = await diag.appUpdateInstall();
+    if (!r.ok) throw new Error(r.error || "установка не запустилась");
+    const p = status.data?.platform;
+    applyNote.value =
+      p === "windows"
+        ? "Подтвердите запрос прав Windows. Установщик закроет Detour, обновит его и откроет заново — VPN при этом ненадолго прервётся."
+        : p === "android"
+          ? "Откроется системный установщик — нажмите «Обновить». Настройки и профили сохранятся."
+          : "Приложение обновлено, Detour перезапускается.";
+    toast.ok("Обновление приложения запущено");
+  } catch (e) {
+    appInstallRetry.value = true;
+    applyNote.value = e instanceof Error ? e.message : "Установка не запустилась";
+    toast.fromError(e, "Установка не запустилась");
+  }
+}
+
 /** Живой хвост отсоединённой установки: единственный способ узнать её исход. */
 async function followApply(title: string, panelish: boolean, okText = "обновление установлено") {
   /* Версия ДО установки — по её смене фолбэк отличает свежий «applied» в
@@ -605,7 +630,9 @@ async function followApply(title: string, panelish: boolean, okText = "обно�
     });
     const raw = String(r?.rc ?? "").trim();
     const rc = raw === "" ? null : Number(raw);
-    if (r?.done === true && rc === 0) {
+    if (r?.done === true && rc === 0 && panelish && status.isClient) {
+      await installApp();
+    } else if (r?.done === true && rc === 0) {
       applyNote.value = panelish
         ? "Готово. Обновите страницу, чтобы открылась новая версия панели."
         : "Готово.";
@@ -1134,6 +1161,7 @@ onBeforeUnmount(() => {
     <JournalArea
       id="area-logs"
       v-model:open="areas.logs"
+      icon="logs"
       title="Журналы"
       :summary="logSummary"
     >
@@ -1189,6 +1217,7 @@ onBeforeUnmount(() => {
     <JournalArea
       id="area-config"
       v-model:open="areas.config"
+      icon="code"
       title="Конфигурация sing-box"
       :summary="
         status.isClient
@@ -1216,6 +1245,7 @@ onBeforeUnmount(() => {
     <JournalArea
       id="area-services"
       v-model:open="areas.services"
+      icon="sliders"
       title="Управление сервисами"
       :summary="servicesSummary"
     >
@@ -1318,6 +1348,7 @@ onBeforeUnmount(() => {
       v-if="!status.isClient"
       id="area-firewall"
       v-model:open="areas.firewall"
+      icon="firewall"
       title="Файрвол"
       summary="дампы nat, nft и живые соединения — куда на самом деле уходит трафик"
     >
@@ -1337,12 +1368,15 @@ onBeforeUnmount(() => {
     <JournalArea
       id="area-updates"
       v-model:open="areas.updates"
+      icon="download"
       title="Обновления"
       :summary="updatesSummary"
     >
+      <!-- В приложении эта строка — само приложение: ядро отдаёт канал panel,
+           только где умеет обновлять себя (Windows, macOS, Android). -->
       <UpdateRow
-        v-if="!status.isClient"
-        title="Панель"
+        v-if="!status.isClient || !!upd?.panel"
+        :title="CH_TITLE.panel"
         :state="upd?.panel ?? null"
         :installed="status.data?.version"
         :busy-check="updBusy === 'check:panel'"
@@ -1452,6 +1486,7 @@ onBeforeUnmount(() => {
       v-if="!status.isClient"
       id="area-console"
       v-model:open="areas.console"
+      icon="terminal"
       title="Консоль роутера"
       :summary="!consoleSt ? '' : !consoleSt.installed ? 'нужен ttyd' : consoleSt.running ? 'открыта' : 'готова'"
     >
@@ -1491,6 +1526,7 @@ onBeforeUnmount(() => {
     <JournalArea
       id="area-health"
       v-model:open="areas.health"
+      icon="pulse"
       title="Проверка и пинги"
       :summary="healthSummary"
     >
@@ -1702,7 +1738,8 @@ onBeforeUnmount(() => {
     </div>
     <template #footer>
       <div class="sheetc acts">
-        <UiButton v-if="!applyRunning" variant="primary" @click="reloadPage">
+        <UiButton v-if="appInstallRetry" variant="primary" @click="installApp">Установить</UiButton>
+        <UiButton v-else-if="!applyRunning && !status.isClient" variant="primary" @click="reloadPage">
           Обновить страницу
         </UiButton>
         <UiButton @click="applyOpen = false">Закрыть</UiButton>

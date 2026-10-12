@@ -798,6 +798,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- 1. Режимы -->
     <RuleSection
       id="rule-mode"
+      icon="tunnel"
       title="Что уходит в туннель"
       :summary="modeSummary"
       :open="!!opened.mode"
@@ -851,6 +852,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- 2. Домены через VPN -->
     <RuleSection
       id="rule-domains"
+      icon="shield"
       title="Сайты через VPN"
       :summary="domainsSummary"
       :open="!!opened.domains"
@@ -879,6 +881,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- 3. Белый список -->
     <RuleSection
       id="rule-whitelist"
+      icon="direct"
       title="Всегда напрямую"
       :summary="whitelistSummary"
       :open="!!opened.whitelist"
@@ -904,6 +907,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- 4. Домены обхода DPI -->
     <RuleSection
       id="rule-zapret"
+      icon="dpi"
       title="Сайты через обход DPI"
       :summary="zapretSummary"
       :open="!!opened.zapret"
@@ -929,6 +933,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- 5. Маршруты -->
     <RuleSection
       id="rule-routes"
+      icon="route"
       title="Отдельные маршруты"
       :summary="routeSummary"
       :open="!!opened.routes"
@@ -953,6 +958,7 @@ onBeforeUnmount(() => unregister?.());
     <RuleSection
       v-if="!status.isClient"
       id="rule-devices"
+      icon="devices"
       title="Устройства"
       :summary="devicesSummary"
       :open="!!opened.devices"
@@ -976,6 +982,7 @@ onBeforeUnmount(() => unregister?.());
     <RuleSection
       v-if="!status.isClient"
       id="rule-si"
+      icon="intercept"
       title="Перехват трафика к прокси"
       :summary="siSummary"
       :open="!!opened.si"
@@ -1030,6 +1037,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- 7. UDP через VPN -->
     <RuleSection
       id="rule-udp"
+      icon="waves"
       title="UDP через VPN — список"
       :summary="udpSummary"
       :open="!!opened.udp"
@@ -1061,6 +1069,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- 8. Блок-лист исходящих -->
     <RuleSection
       id="rule-egress"
+      icon="block"
       title="Запрещённые адреса"
       :summary="egressSummary"
       :open="!!opened.egress"
@@ -1083,6 +1092,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- 9. Российские подсети -->
     <RuleSection
       id="rule-rulist"
+      icon="flag"
       title="Российские адреса — напрямую"
       :summary="rulistSummary"
       :open="!!opened.rulist"
@@ -1150,6 +1160,7 @@ onBeforeUnmount(() => unregister?.());
     <!-- 10. Приоритетный hosts + Secure DNS -->
     <RuleSection
       id="rule-hosts"
+      icon="dns"
       title="Свой DNS-список и шифрование DNS"
       :summary="hostsSummary"
       :open="!!opened.hosts"

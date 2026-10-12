@@ -6,6 +6,7 @@
    разметке и не крутит JS-таймеры), в узкой карточке — те же три направления
    столбиком с полосами долей: тянуть 900 px схемы на 375 px бессмысленно. */
 import { computed, ref } from "vue";
+import AreaIcon from "@/components/AreaIcon.vue";
 import { useElementWidth } from "../composables/useElementWidth";
 
 const props = defineProps<{
@@ -112,7 +113,7 @@ const lanes = computed(() => [
 <template>
   <section ref="board" class="board">
     <div class="head">
-      <h2 class="title">Поток трафика</h2>
+      <h2 class="title"><AreaIcon name="waves" small />Поток трафика</h2>
       <span class="live">
         <i class="dot" :class="{ pulse: vpnUp }"></i>
         <template v-if="speed">{{ speed }}</template>
@@ -247,6 +248,9 @@ const lanes = computed(() => [
   flex-wrap: wrap;
 }
 .title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   font-size: 15px;
   font-weight: 650;

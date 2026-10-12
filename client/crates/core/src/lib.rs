@@ -24,5 +24,6 @@ pub mod sysinfo;
 pub mod torrent;
 pub mod traffic;
 pub mod updater;
+pub mod appupdate;
 
 pub const VERSION: &str = env!("DETOUR_VERSION");

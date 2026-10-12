@@ -12,6 +12,7 @@ use crate::rulist;
 use crate::settings::Settings;
 use crate::store::{self, now_epoch};
 use crate::updater;
+use crate::appupdate;
 
 const APPLY_LOG: &str = "run/apply.log";
 const SENTINEL: &str = "===DETOUR_APPLY_DONE rc=";
@@ -208,13 +209,96 @@ impl Backend {
         Response::json(&json!({ "ok": true, "done": !rc.is_empty(), "rc": rc, "log": log }))
     }
 
+    // ---------- само приложение ----------
+
+    pub(super) async fn app_check(&self) -> Response {
+        let proxy = self.fetch_proxy().await;
+        match appupdate::check(&self.store, proxy.as_deref()).await {
+            Ok(v) => Response::json(&v),
+            Err(e) => {
+                let mut st = appupdate::state(&self.store);
+                st["status"] = json!("error");
+                st["message"] = json!(format!("{e:#}"));
+                st["error"] = st["message"].clone();
+                Response::json(&st)
+            }
+        }
+    }
+
+    pub(super) fn app_status(&self) -> Response {
+        Response::json(&appupdate::state(&self.store))
+    }
+
+    /// Скачивание и проверка подписи — в фоне, ход в apply.log. Ставит уже
+    /// `app_update_install` (на Windows и Android его перехватывает окно).
+    pub(super) fn app_apply(&self) -> Response {
+        if !appupdate::supported() {
+            return Response::json(&json!({ "ok": false, "error": "на этой платформе приложение обновляется не из панели" }));
+        }
+        let _ = self.store.write_text(APPLY_LOG, "обновление приложения: начинаю\n");
+        let _ = self.jobs.send(Job::AppDownload);
+        Response::json(&json!({ "ok": true, "status": "started" }))
+    }
+
+    async fn app_download_job(&self) {
+        let proxy = self.fetch_proxy().await;
+        let mut lines = Vec::new();
+        let res = appupdate::download(&self.store, proxy.as_deref(), &mut |l| lines.push(l)).await;
+        for l in &lines {
+            self.log_line(l);
+        }
+        let rc = match res {
+            Ok(_) => {
+                self.log_line("сборка скачана и проверена — запускаю установку");
+                0
+            }
+            Err(e) => {
+                self.log_line(&format!("ошибка: {e:#}"));
+                1
+            }
+        };
+        self.log_line(&format!("{SENTINEL}{rc}"));
+    }
+
+    /// macOS: демон подменяет Detour.app и выходит — launchd поднимет новый.
+    pub(super) async fn app_install(&self) -> Result<Response> {
+        #[cfg(target_os = "macos")]
+        {
+            let dmg = appupdate::ready(&self.store)?;
+            let mut lines = Vec::new();
+            let app = appupdate::install_macos(&dmg, &mut |l| lines.push(l))?;
+            tracing::info!("приложение обновлено в {}: {}", app.display(), lines.join("; "));
+            let _ = std::fs::remove_dir_all(self.store.path("update"));
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                std::process::exit(0);
+            });
+            return Ok(Response::json(&json!({ "ok": true, "restart": true })));
+        }
+        #[allow(unreachable_code)]
+        Ok(Response::error("not_supported"))
+    }
+
     pub(super) async fn updates_overview(&self) -> Response {
+        let app = appupdate::state(&self.store);
         let st = updater::state(&self.store);
         let s = |k: &str| st.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
         let current = self.engine.version().await.unwrap_or_else(|| s("current"));
         let available = s("available");
         let has_update = !available.is_empty() && available != current;
+        let a = |k: &str| app.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+        let panel = appupdate::supported().then(|| {
+            json!({
+                "update_available": app["update_available"].as_bool().unwrap_or(false),
+                "available_version": a("available"),
+                "current_version": crate::VERSION,
+                "last_check": a("last_check"),
+                "changelog_b64": a("changelog_b64"),
+                "error": if a("status") == "error" { a("message") } else { String::new() },
+            })
+        });
         Response::json(&json!({
+            "panel": panel,
             "singbox": {
                 "update_available": has_update,
                 "available_version": available,
@@ -255,6 +339,19 @@ impl Backend {
             }
         }
         self.hosts_maintenance().await;
+        if self.autocheck_on() && appupdate::supported() {
+            let last = appupdate::state(&self.store)
+                .get("last_check")
+                .and_then(Value::as_str)
+                .and_then(|t| humantime::parse_rfc3339(t).ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if now_epoch() - last >= AUTOCHECK_EVERY {
+                let proxy = self.fetch_proxy().await;
+                let _ = appupdate::check(&self.store, proxy.as_deref()).await;
+            }
+        }
         if self.autocheck_on() && crate::dpi::UPDATABLE && self.engine.present() {
             let st = updater::state(&self.store);
             let last = st
@@ -276,6 +373,7 @@ impl Backend {
             Job::HealthSweep => self.health_tick(true).await,
             Job::BinsApply => self.bins_apply_job().await,
             Job::DpiApply => self.dpi_apply_job().await,
+            Job::AppDownload => self.app_download_job().await,
         }
     }
 }

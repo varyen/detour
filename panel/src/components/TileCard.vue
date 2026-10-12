@@ -1,10 +1,13 @@
 <script setup lang="ts">
-defineProps<{ title: string; span?: boolean }>();
+import AreaIcon from "@/components/AreaIcon.vue";
+
+defineProps<{ title: string; span?: boolean; icon?: string }>();
 </script>
 
 <template>
   <section class="tile" :class="{ span }">
     <h2 class="eyebrow">
+      <AreaIcon v-if="icon" :name="icon" small />
       {{ title }}
       <slot name="badge" />
     </h2>

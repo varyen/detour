@@ -675,10 +675,17 @@ async function goChains() {
   chainsRef.value?.openNew();
 }
 
-async function goSubs() {
+async function goSubs(url?: string, name?: string) {
   tab.value = "subs";
   await nextTick();
-  subsRef.value?.openNew();
+  subsRef.value?.openNew(url, name);
+}
+
+/* В форму профиля вставили или отсканировали ссылку подписки. */
+function profileSheetSubscription(sub: { url: string; name: string }) {
+  sheetOpen.value = false;
+  toast.info("Это ссылка подписки — добавляю её в «Подписки»");
+  void goSubs(sub.url, sub.name);
 }
 
 let unregister: (() => void) | undefined;
@@ -760,7 +767,7 @@ onBeforeUnmount(() => unregister?.());
   </div>
 
   <div v-show="tab === 'profiles'" class="pane">
-    <TileCard title="Профили">
+    <TileCard icon="list" title="Профили">
       <p v-if="store.loading && !store.rows.length" class="lead">Читаю список профилей…</p>
       <ProfileList
         v-else
@@ -850,8 +857,11 @@ onBeforeUnmount(() => unregister?.());
     :draft="sheetDraft"
     :busy="busy === 'save'"
     :groups="groups"
+    :existing-ids="store.rows.map((r) => r.id)"
+    :first-profile="!store.rows.length"
     @close="sheetOpen = false"
     @save="saveProfile"
+    @subscription="profileSheetSubscription"
   />
 
   <DrawerSheet

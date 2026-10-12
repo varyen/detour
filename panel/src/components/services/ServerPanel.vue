@@ -466,6 +466,7 @@ function hint(c: ServerClient): string {
   <ServicePanel
     id="svc-server"
     v-model:open="open"
+    icon="server"
     title="Свой VPN-сервер"
     :summary="summary"
     :chip="chip"

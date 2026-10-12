@@ -11,12 +11,19 @@
 
    WireGuard и AmneziaWG заводятся из .conf (вставить текст или выбрать файл)
    и из ключа Amnezia vpn://. AmneziaWG на роутере работает через сайдкар
-   mihomo — если его нет, форма предлагает поставить. */
+   mihomo — если его нет, форма предлагает поставить.
+
+   Новый профиль — путь в пару нажатий: QR с камеры или картинки (или ссылка)
+   → имя и идентификатор подставляются сами → «Сохранить и подключиться».
+   Поля протокола при этом свёрнуты: после разбора там всё уже заполнено. */
 import { computed, nextTick, ref, watch } from "vue";
 import { awg as awgApi, poll, services } from "@/api";
 import type { AwgStatus, EngineConfig } from "@/api";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import UiButton from "@/components/UiButton.vue";
+import QrScanner from "@/components/QrScanner.vue";
+import { cameraSupported, decodeFile } from "@/lib/qr";
+import { parseSubscriptionLink } from "@/lib/sublink";
 import PField from "@/components/profiles/PField.vue";
 import {
   NO_UTLS,
@@ -40,11 +47,17 @@ const props = defineProps<{
   draft: ProfileDraft | null;
   busy?: boolean;
   groups: string[];
+  /** Занятые идентификаторы — новый профиль получит свободный. */
+  existingIds?: string[];
+  /** Профилей ещё нет: «подключиться сразу» включено заранее. */
+  firstProfile?: boolean;
 }>();
 
 const emit = defineEmits<{
   close: [];
   save: [payload: { draft: ProfileDraft; activate: boolean }];
+  /** Это ссылка подписки, а не сервера — её место в «Подписках». */
+  subscription: [payload: { url: string; name: string }];
 }>();
 
 const d = ref<ProfileDraft>(emptyDraft());
@@ -67,10 +80,26 @@ watch(
     link.value = "";
     linkNote.value = "";
     shareShown.value = false;
-    activateNow.value = false;
+    activateNow.value = !props.draft && !!props.firstProfile;
     idTouched.value = false;
+    showFields.value = !!props.draft;
+    parsedSummary.value = "";
   },
 );
+
+/* Поля протокола у нового профиля свёрнуты до разбора ссылки/QR или до
+   «Заполнить вручную». */
+const showFields = ref(true);
+const parsedSummary = ref("");
+
+function uniqueId(base: string): string {
+  const taken = new Set(props.existingIds ?? []);
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) {
+    const id = `${base.slice(0, 60)}_${n}`;
+    if (!taken.has(id)) return id;
+  }
+}
 
 /* Пока идентификатор не правили руками, он идёт следом за именем — так профиль
    получает понятное имя файла. У существующего профиля id не трогаем вовсе:
@@ -78,7 +107,7 @@ watch(
 watch(
   () => d.value.name,
   (name) => {
-    if (isNew.value && !idTouched.value) d.value.id = name.trim() ? slugify(name) : "";
+    if (isNew.value && !idTouched.value) d.value.id = name.trim() ? uniqueId(slugify(name)) : "";
   },
 );
 
@@ -161,6 +190,18 @@ async function parseInput(text: string): Promise<ProfileDraft | null> {
 }
 
 async function applyLink() {
+  /* https://…/sub/token или обёртка sing-box://, happ://, clash://… — это
+     подписка, а не сервер (см. lib/sublink). */
+  const sub = isNew.value ? parseSubscriptionLink(link.value) : null;
+  if (sub && "error" in sub) {
+    linkNote.value = sub.error;
+    return;
+  }
+  if (sub) {
+    link.value = "";
+    emit("subscription", sub);
+    return;
+  }
   const parsed = await parseInput(link.value);
   if (!parsed) {
     linkNote.value = VPN_KEY.test(link.value.trim())
@@ -178,9 +219,41 @@ async function applyLink() {
   if (keepName) d.value.name = keepName;
   if (keepGroup) d.value.group = keepGroup;
   if (!d.value.name) d.value.name = parsed.server;
-  if (isNew.value && !idTouched.value) d.value.id = slugify(d.value.name);
-  linkNote.value = `Разобрано: ${parsed.type}, ${parsed.server}:${parsed.port}`;
+  if (isNew.value && !idTouched.value) d.value.id = uniqueId(slugify(d.value.name));
+  parsedSummary.value = `${PROTO_TYPES.find((t) => t.value === parsed.type)?.label ?? parsed.type} · ${parsed.server}:${parsed.port}`;
+  linkNote.value = isNew.value ? "" : `Разобрано: ${parsed.type}, ${parsed.server}:${parsed.port}`;
   link.value = "";
+}
+
+/* ---------- QR ---------- */
+const canCamera = cameraSupported();
+const scanOpen = ref(false);
+const qrBusy = ref(false);
+const imgEl = ref<HTMLInputElement | null>(null);
+
+async function takeQr(text: string) {
+  scanOpen.value = false;
+  link.value = text;
+  await applyLink();
+}
+
+async function qrFromBlob(f: Blob) {
+  qrBusy.value = true;
+  try {
+    const text = await decodeFile(f);
+    if (text) await takeQr(text);
+    else linkNote.value = "На картинке не нашёлся QR-код. Снимите ближе и ровнее, без бликов";
+  } finally {
+    qrBusy.value = false;
+  }
+}
+
+async function pickImage(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const f = input.files?.[0];
+  input.value = "";
+  scanOpen.value = false;
+  if (f) await qrFromBlob(f);
 }
 
 const fileEl = ref<HTMLInputElement | null>(null);
@@ -199,6 +272,13 @@ const linkRows = computed(() => Math.min(10, Math.max(1, link.value.split("\n").
 function linkPaste(e: ClipboardEvent) {
   const el = e.target as HTMLTextAreaElement;
   const whole = el.selectionStart === 0 && el.selectionEnd === el.value.length;
+  /* Вставили картинку (скриншот QR) — читаем код с неё. */
+  const img = Array.from(e.clipboardData?.files ?? []).find((f) => f.type.startsWith("image/"));
+  if (img) {
+    e.preventDefault();
+    void qrFromBlob(img);
+    return;
+  }
   const text = e.clipboardData?.getData("text") ?? "";
   if (!whole || !text.trim()) return;
   e.preventDefault();
@@ -264,14 +344,21 @@ async function copyShare() {
 <template>
   <DrawerSheet :open="open" :title="title" wide @close="emit('close')">
     <template #sticky>
-      <label class="linklbl" for="profile-link">Ссылка или конфиг VPN — вставьте сюда (Ctrl+V)</label>
+      <div class="qrrow">
+        <UiButton v-if="canCamera" variant="primary" @click="scanOpen = true">Сканировать QR-код</UiButton>
+        <UiButton :busy="qrBusy" :variant="canCamera ? undefined : 'primary'" @click="imgEl?.click()">
+          {{ canCamera ? "QR с картинки" : "QR-код: фото или картинка" }}
+        </UiButton>
+        <input ref="imgEl" type="file" accept="image/*" hidden @change="pickImage" />
+      </div>
+      <label class="linklbl" for="profile-link">Или ссылка, конфиг VPN или ссылка подписки — вставьте сюда (Ctrl+V)</label>
       <div class="linkrow">
         <textarea
           id="profile-link"
           v-model="link"
           :rows="linkRows"
           spellcheck="false"
-          placeholder="Ссылка vless://…, .conf WireGuard/AmneziaWG или vpn://"
+          placeholder="vless://…, .conf WireGuard/AmneziaWG, vpn:// или https://… подписки"
           aria-label="Ссылка или конфиг"
           @keydown.enter="linkEnter"
           @paste="linkPaste"
@@ -279,7 +366,12 @@ async function copyShare() {
         <UiButton :disabled="!link.trim()" @click="applyLink">Разобрать</UiButton>
         <UiButton title="Загрузить .conf WireGuard/AmneziaWG" @click="fileEl?.click()">Файл…</UiButton>
         <input ref="fileEl" type="file" accept=".conf,.txt,text/plain" hidden @change="pickFile" />
-        <UiButton :disabled="!shareText" :title="`${shareLabel} для стороннего клиента`" @click="copyShare">
+        <UiButton
+          v-if="showFields"
+          :disabled="!shareText"
+          :title="`${shareLabel} для стороннего клиента`"
+          @click="copyShare"
+        >
           {{ shareLabel }}
         </UiButton>
       </div>
@@ -297,7 +389,23 @@ async function copyShare() {
       ></textarea>
     </template>
 
-    <div class="grid">
+    <div v-if="!showFields" class="quick">
+      <PField label="Имя профиля">
+        <input v-model="d.name" type="text" placeholder="Например, Example VPN" />
+      </PField>
+      <p v-if="parsedSummary" class="parsed">{{ parsedSummary }}</p>
+      <p v-else class="lead">
+        Отсканируйте QR-код от VPN-сервиса или вставьте ссылку — остальное заполнится само.
+      </p>
+      <template v-if="awgBlocked">
+        <p class="warn">AmneziaWG на роутере работает через mihomo, а он не установлен.</p>
+        <UiButton :busy="awgInstalling" @click="installMihomo">Установить mihomo</UiButton>
+      </template>
+      <p v-if="awgNote" class="lead">{{ awgNote }}</p>
+      <UiButton @click="showFields = true">{{ parsedSummary ? "Все поля" : "Заполнить вручную" }}</UiButton>
+    </div>
+
+    <div v-else class="grid">
       <PField label="Имя профиля">
         <input v-model="d.name" type="text" placeholder="Например, Example VPN" />
       </PField>
@@ -564,16 +672,45 @@ async function copyShare() {
 
     <template #footer>
       <UiButton variant="primary" :busy="busy" :disabled="!canSave" @click="submit">
-        Сохранить
+        {{ activateNow ? "Сохранить и подключиться" : "Сохранить" }}
       </UiButton>
       <UiButton @click="emit('close')">Отмена</UiButton>
       <span v-if="awgBlocked" class="hint">Сначала установите mihomo</span>
-      <span v-else-if="!canSave" class="hint">Заполните имя и адрес сервера</span>
+      <span v-else-if="!canSave" class="hint">
+        {{ showFields ? "Заполните имя и адрес сервера" : "Сначала QR-код или ссылка" }}
+      </span>
     </template>
   </DrawerSheet>
+  <QrScanner :open="scanOpen" @result="takeQr" @close="scanOpen = false" @image="imgEl?.click()" />
 </template>
 
 <style scoped>
+.qrrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.quick {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
+.quick > :first-child {
+  justify-self: stretch;
+}
+.parsed {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ok);
+  overflow-wrap: anywhere;
+}
+.lead {
+  margin: 0;
+  font-size: 13px;
+  color: var(--dim);
+}
 .linklbl {
   display: block;
   margin-bottom: 6px;

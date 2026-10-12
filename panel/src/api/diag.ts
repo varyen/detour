@@ -137,6 +137,13 @@ export const diag = {
       body: ipk as unknown as string,
       timeoutMs: 300_000,
     }),
+  /** Приложение: поставить скачанную и проверенную сборку (UAC на Windows,
+      системный установщик на Android, подмена .app на macOS). */
+  appUpdateInstall: () =>
+    requestJson<{ ok: boolean; error?: string; restart?: boolean }>("app_update_install", {
+      method: "POST",
+      timeoutMs: 180_000,
+    }),
   autocheckStatus: () => requestJson<{ enabled: boolean }>("autocheck_status"),
   autocheckSet: (enabled: boolean) =>
     requestJson<{ ok: boolean }>("autocheck_set", { body: { enabled } }),

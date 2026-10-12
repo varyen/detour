@@ -53,6 +53,7 @@ targets:
       path: detour-app_iOS/Info.plist
       properties:
         LSRequiresIPhoneOS: true
+        NSCameraUsageDescription: Камера нужна, чтобы отсканировать QR-код профиля VPN.
         UILaunchStoryboardName: LaunchScreen
         UIRequiredDeviceCapabilities: [arm64, metal]
         UISupportedInterfaceOrientations:

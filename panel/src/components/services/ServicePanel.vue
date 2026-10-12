@@ -3,8 +3,11 @@
    развёрнутую попадает управление. Экран получается длинным списком коротких
    строк — на телефоне это читается лучше, чем семь одновременно раскрытых
    карточек. */
+import AreaIcon from "@/components/AreaIcon.vue";
+
 defineProps<{
   title: string;
+  icon?: string;
   /** Короткая фраза о текущем состоянии — видна и в свёрнутом виде. */
   summary?: string;
   /** Метка справа: «включено», «нет сертификата», … */
@@ -24,6 +27,7 @@ defineEmits<{ "update:open": [boolean] }>();
       :aria-expanded="open"
       @click="$emit('update:open', !open)"
     >
+      <AreaIcon v-if="icon" :name="icon" />
       <span class="txt">
         <span class="ttl">{{ title }}</span>
         <small v-if="summary">{{ summary }}</small>

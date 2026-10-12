@@ -10,6 +10,10 @@ import SwitchToggle from "@/components/SwitchToggle.vue";
 import TileCard from "@/components/TileCard.vue";
 import UiButton from "@/components/UiButton.vue";
 import PField from "@/components/profiles/PField.vue";
+import QrScanner from "@/components/QrScanner.vue";
+import { slugify } from "@/components/profiles/uri";
+import { cameraSupported, decodeFile } from "@/lib/qr";
+import { parseSubscriptionLink } from "@/lib/sublink";
 import { subscriptions } from "@/api";
 import type { Subscription } from "@/api";
 import { useProfilesStore } from "@/stores/profiles";
@@ -122,13 +126,96 @@ async function load() {
   }
 }
 
-function openNew() {
+/** `url` — ссылка уже есть (QR из формы профиля): сразу пробуем её загрузить. */
+function openNew(url?: string, name?: string) {
   draft.value = blank();
   uaPreset.value = presetForUa(draft.value.user_agent);
   isNew.value = true;
   probe.value = "";
   probeLines.value = [];
   sheetOpen.value = true;
+  if (url) {
+    draft.value.url = url;
+    if (name) draft.value.title = name;
+    void tryFetch();
+  }
+}
+
+/* В поле ссылки вставили обёртку (sing-box://…, happ://add/…) — заменяем её
+   вложенным адресом, название из обёртки — в «Название». */
+watch(
+  () => draft.value.url,
+  (v) => {
+    if (!isNew.value || /^https?:\/\//i.test(v.trim())) return;
+    const sub = parseSubscriptionLink(v);
+    if (!sub) return;
+    if ("error" in sub) {
+      probe.value = sub.error;
+      return;
+    }
+    draft.value.url = sub.url;
+    if (sub.name && !draft.value.title) draft.value.title = sub.name;
+    void tryFetch();
+  },
+);
+
+/* ---------- QR со ссылкой подписки ---------- */
+const canCamera = cameraSupported();
+const scanOpen = ref(false);
+const qrBusy = ref(false);
+const imgEl = ref<HTMLInputElement | null>(null);
+
+function takeQr(text: string) {
+  scanOpen.value = false;
+  const sub = parseSubscriptionLink(text) ?? (/^https?:\/\//i.test(text.trim()) ? { url: text.trim(), name: "" } : null);
+  if (!sub) {
+    probe.value = "В QR-коде не ссылка подписки. Если это ссылка на один сервер — добавьте её как профиль";
+    return;
+  }
+  if ("error" in sub) {
+    probe.value = sub.error;
+    return;
+  }
+  draft.value.url = sub.url;
+  if (sub.name && !draft.value.title) draft.value.title = sub.name;
+  void tryFetch();
+}
+
+async function pickImage(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const f = input.files?.[0];
+  input.value = "";
+  scanOpen.value = false;
+  if (!f) return;
+  qrBusy.value = true;
+  try {
+    const text = await decodeFile(f);
+    if (text) takeQr(text);
+    else probe.value = "На картинке не нашёлся QR-код";
+  } finally {
+    qrBusy.value = false;
+  }
+}
+
+/* Новой подписке идентификатор и группу можно не придумывать: берутся из
+   названия (поставщик присылает его в заголовке) или из адреса. */
+function autoFill() {
+  if (!isNew.value) return;
+  let host = "";
+  try {
+    host = new URL(draft.value.url.trim()).hostname;
+  } catch {
+    host = "";
+  }
+  if (!draft.value.title?.trim() && host) draft.value.title = host;
+  const base = draft.value.title?.trim() || host;
+  if (!draft.value.id.trim() && base) {
+    const taken = new Set(items.value.map((x) => x.id));
+    let id = slugify(base).replace(/[^a-zA-Z0-9._-]/g, "_");
+    for (let n = 2; taken.has(id); n++) id = `${slugify(base)}_${n}`;
+    draft.value.id = id;
+  }
+  if (!draft.value.group?.trim() && base) draft.value.group = base;
 }
 
 function openEdit(s: SubRecord) {
@@ -181,8 +268,10 @@ async function tryFetch() {
     probe.value = `Ответ получен, ${fmtInt(bytes)} символов.`;
     probeLines.value = lines;
     if (!draft.value.title && h["profile-title"]) draft.value.title = h["profile-title"];
+    autoFill();
   } catch (e) {
     probe.value = e instanceof Error ? e.message : "Не удалось загрузить";
+    autoFill();
   } finally {
     busy.value = "";
   }
@@ -195,6 +284,7 @@ async function tryFetch() {
  * неудача обновления сообщается отдельно — запись уже сохранена.
  */
 async function save(refreshAfter = false) {
+  autoFill();
   const id = draft.value.id.trim();
   const url = draft.value.url.trim();
   if (!/^[a-zA-Z0-9._-]+$/.test(id)) {
@@ -304,7 +394,7 @@ defineExpose({ openNew, refreshAll, reload: load });
 </script>
 
 <template>
-  <TileCard title="Подписки">
+  <TileCard icon="rss" title="Подписки">
     <p class="lead">
       Подписка — ссылка поставщика, из которой
       {{ status.isClient ? "приложение само" : "роутер сам" }} достаёт список серверов и
@@ -369,6 +459,11 @@ defineExpose({ openNew, refreshAll, reload: load });
     wide
     @close="sheetOpen = false"
   >
+    <div v-if="isNew" class="qrrow">
+      <UiButton v-if="canCamera" @click="scanOpen = true">Сканировать QR-код</UiButton>
+      <UiButton :busy="qrBusy" @click="imgEl?.click()">{{ canCamera ? "QR с картинки" : "QR-код: фото или картинка" }}</UiButton>
+      <input ref="imgEl" type="file" accept="image/*" hidden @change="pickImage" />
+    </div>
     <div class="grid">
       <PField label="Ссылка подписки" wide>
         <input
@@ -383,15 +478,15 @@ defineExpose({ openNew, refreshAll, reload: load });
         label="Идентификатор"
         :hint="`Имя файла на ${status.isClient ? 'устройстве' : 'роутере'}: латиница, цифры, . _ -`"
       >
-        <input v-model="draft.id" type="text" :disabled="!isNew" spellcheck="false" />
+        <input v-model="draft.id" type="text" :disabled="!isNew" spellcheck="false" :placeholder="isNew ? 'авто' : ''" />
       </PField>
 
       <PField label="Название" hint="Как подписку показывать в панели">
         <input v-model="draft.title" type="text" placeholder="Например, Example VPN" />
       </PField>
 
-      <PField label="Группа профилей" hint="Обязательна: в неё попадут скачанные профили">
-        <input v-model="draft.group" type="text" placeholder="Например, Example VPN" />
+      <PField label="Группа профилей" hint="В неё попадут скачанные профили. Пусто — по названию подписки">
+        <input v-model="draft.group" type="text" :placeholder="isNew ? 'авто' : 'Например, Example VPN'" />
       </PField>
 
       <PField label="Интервал обновления, часов">
@@ -451,16 +546,24 @@ defineExpose({ openNew, refreshAll, reload: load });
     </div>
 
     <template #footer>
-      <UiButton variant="primary" :busy="busy === 'save'" @click="save()">Сохранить</UiButton>
-      <UiButton :busy="busy === 'save-refresh'" @click="save(true)">
+      <!-- Новой подписке нужнее сразу забрать серверы — эта кнопка главная. -->
+      <UiButton :variant="isNew ? undefined : 'primary'" :busy="busy === 'save'" @click="save()">Сохранить</UiButton>
+      <UiButton :variant="isNew ? 'primary' : undefined" :busy="busy === 'save-refresh'" @click="save(true)">
         Сохранить и обновить
       </UiButton>
       <UiButton @click="sheetOpen = false">Отмена</UiButton>
     </template>
   </DrawerSheet>
+  <QrScanner :open="scanOpen" @result="takeQr" @close="scanOpen = false" @image="imgEl?.click()" />
 </template>
 
 <style scoped>
+.qrrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
 .lead,
 .empty {
   font-size: 13px;

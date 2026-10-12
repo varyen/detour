@@ -138,7 +138,14 @@ Section "Detour" SecMain
   nsExec::ExecToLog '"$INSTDIR\detour-svc.exe" install'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONEXCLAMATION "Служба не зарегистрировалась (код $0). Запустите «$INSTDIR\detour-svc.exe install» от администратора."
+    MessageBox MB_ICONEXCLAMATION "Служба не зарегистрировалась (код $0). Запустите «$INSTDIR\detour-svc.exe install» от администратора." /SD IDOK
+  ${EndIf}
+
+  ; Тихая установка — это обновление из самого приложения: окно установщик
+  ; закрыл, открываем заново. Через explorer — чтобы окно шло от пользователя,
+  ; а не с правами администратора, полученными для установки.
+  ${If} ${Silent}
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\detour-app.exe"'
   ${EndIf}
 SectionEnd
 

@@ -67,6 +67,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSCameraUsageDescription</key><string>Камера нужна, чтобы отсканировать QR-код профиля VPN.</string>
 </dict>
 </plist>
 PLIST

@@ -29,7 +29,7 @@ const targets = computed(() => sb.value?.route_targets ?? 0);
 </script>
 
 <template>
-  <TileCard title="Маршрутизация">
+  <TileCard icon="route" title="Маршрутизация">
     <p class="meta col">
       <span>{{ modeText }}</span>
       <span v-if="allExcept" class="faint">

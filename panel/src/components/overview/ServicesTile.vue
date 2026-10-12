@@ -61,7 +61,7 @@ const pushText = computed(() => {
 </script>
 
 <template>
-  <TileCard title="Сервисы и доступ">
+  <TileCard icon="server" title="Сервисы и доступ">
     <p class="meta col">
       <span :class="certOk ? 'ok' : 'faint'">{{ certText }}</span>
       <!-- Открытый наружу порт — это то, о чём стоит помнить, поэтому он
