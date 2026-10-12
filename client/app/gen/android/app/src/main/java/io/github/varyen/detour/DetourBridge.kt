@@ -54,8 +54,12 @@ object DetourBridge {
      * приложений», после неё человек жмёт «Установить» ещё раз.
      */
     @JvmStatic
-    fun installApk(path: String): String = try {
+    fun installApk(path: String): String {
         val ctx = DetourVpn.context() ?: return "приложение ещё не запущено"
+        return try { installApkWith(ctx, path) } catch (t: Throwable) { t.message ?: t.toString() }
+    }
+
+    private fun installApkWith(ctx: android.content.Context, path: String): String =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !ctx.packageManager.canRequestPackageInstalls()) {
             ctx.startActivity(
                 Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + ctx.packageName))
@@ -74,7 +78,4 @@ object DetourBridge {
             )
             ""
         }
-    } catch (t: Throwable) {
-        t.message ?: t.toString()
-    }
 }
