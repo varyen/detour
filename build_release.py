@@ -378,6 +378,31 @@ chmod 0700 /etc/detour/subscriptions
 # "set username + password" form instead of the login screen.
 # We intentionally do NOT seed credentials here — the operator picks them.
 
+# 1a') Переезд с proxy-admin (имя пакета до 1.2). Сам пакет opkg уже удалил по
+# Conflicts/Replaces, а его состояние осталось. Формат учётки тот же (crypt $6$).
+if [ -d /etc/proxy-admin ] || [ -f /etc/proxy-admin.auth ]; then
+    for f in /etc/proxy-admin/subscriptions/*.json; do
+        [ -f "$f" ] || continue
+        [ -e "/etc/detour/subscriptions/${{f##*/}}" ] || cp -p "$f" /etc/detour/subscriptions/
+    done
+    chmod 0600 /etc/detour/subscriptions/*.json 2>/dev/null
+    if [ -s /etc/proxy-admin.auth ] && [ ! -s /etc/detour.auth ]; then
+        cp -p /etc/proxy-admin.auth /etc/detour.auth
+        chmod 0600 /etc/detour.auth
+    fi
+    # Старый config.json (sniff в inbound) sing-box 1.13 не принимает: демон
+    # живёт, но не слушает. Без файла detour-bootstrap-install соберёт новый.
+    [ -f /etc/sing-box/config.json ] && mv -f /etc/sing-box/config.json /etc/sing-box/config.json.proxy-admin
+    rm -rf /etc/proxy-admin /etc/proxy-admin.auth /www/proxy-admin /var/log/proxy-admin-update.log \\
+        /etc/uci-defaults/99-proxy-admin-restore /var/proxy-admin-backup
+    [ -f /etc/sysupgrade.conf ] && grep -v 'proxy-admin' /etc/sysupgrade.conf > /etc/sysupgrade.conf.new \\
+        && mv /etc/sysupgrade.conf.new /etc/sysupgrade.conf
+    # Старый proxy-admin-update после `opkg install` кладёт пакет в
+    # /etc/proxy-admin/installed.ipk и тем самым создаёт каталог заново.
+    ( sleep 20; rm -rf /etc/proxy-admin ) </dev/null >/dev/null 2>&1 &
+    logger -t detour "postinst: перенесено состояние proxy-admin"
+fi
+
 # 1b) Register our state files with sysupgrade so they survive a flash of
 # the router firmware. /lib/upgrade/keep.d/ is wiped by the new firmware,
 # so we manage a marker-delimited block inside /etc/sysupgrade.conf (which
@@ -601,7 +626,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent' | grep -v 'detour-server'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'proxy-admin-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent' | grep -v 'detour-server'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -758,6 +783,10 @@ def build_control_tar_gz(version, installed_size):
         f"Package: {PACKAGE_NAME}\n"
         f"Version: {version}\n"
         f"Depends: {DEPENDS}\n"
+        # Пакет до переименования. opkg с этой парой сам удаляет proxy-admin
+        # (его prerm/postrm + файлы) и забирает общие файлы без file clash.
+        f"Conflicts: proxy-admin\n"
+        f"Replaces: proxy-admin\n"
         f"Source: https://github.com/varyen/detour\n"
         f"License: MIT\n"
         f"Section: net\n"

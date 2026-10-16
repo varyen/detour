@@ -5,6 +5,17 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [2.10.3] — 2026-10-16
+
+### Исправлено
+- **Установка поверх старого `proxy-admin` (имя пакета до 1.2).** Раньше
+  `opkg install detour` упирался в общие файлы старого пакета. Теперь `detour`
+  объявляет `Conflicts`/`Replaces: proxy-admin`: opkg сам удаляет старый пакет,
+  а postinst переносит подписки и учётку панели, убирает старую cron-строку
+  `proxy-admin-update` и откладывает в сторону `config.json` старого формата,
+  чтобы конфиг пересобрался. Только OpenWrt (opkg): на Keenetic и apk-прошивках
+  `proxy-admin` не было.
+
 ## [2.10.2] — 2026-10-12
 
 ### Исправлено
