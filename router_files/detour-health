@@ -118,6 +118,8 @@ ACTIVE_LOOP_BUDGET="${ACTIVE_LOOP_BUDGET:-55}"   # env-overridable: =0 → singl
 # cadence a run of cache-healthy-but-dead candidates could otherwise switch+push
 # every iteration; the cooldown caps switch alerts. SWITCH_MARK carries the last ts.
 SWITCH_COOLDOWN=120
+SWITCH_LOCK=/tmp/detour-switch.lock   # замок переключения detour-api (держит панель, пока переключает)
+OFFLINE_MARK=/tmp/detour-health.offline  # «интернета нет» уже записано в лог — не повторять каждые 30 с
 
 # Keenetic/Entware platform shim (mirrors detour-api / detour-ping / vpn-keepalive).
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
@@ -769,6 +771,83 @@ push_alert() {
     "$PUSH_BIN" send "$1" "$2" >/dev/null 2>&1
 }
 
+# Есть ли интернет МИМО VPN. Без него падают все профили разом, и «профиль не
+# работает» — ложный вывод: без этой проверки при выдернутых кабелях автопереключение
+# уводило на профиль с наименьшим rtt из устаревшего кэша (свой, российский), а
+# tick метил мёртвыми все профили. Проверка — HTTPS к трём адресам без DNS (он
+# без WAN тоже мёртв), напрямую: собственный трафик роутера через sing-box не
+# идёт. Маршрута нет — curl падает сразу, по таблицам маршрутов не гадаем (на
+# Keenetic и при политиках мульти-WAN они устроены по-разному). Жив хотя бы один
+# ответ, даже с ошибкой TLS/HTTP, — связь есть. Нечем проверить — считаем, что есть.
+internet_up() {
+    command -v curl >/dev/null 2>&1 || return 0
+    _iu_dir="/tmp/detour-health.inet.$$"
+    mkdir -p "$_iu_dir" 2>/dev/null || return 0
+    _iu_pids=""
+    for _iu_t in 77.88.8.8 1.1.1.1 8.8.8.8; do
+        ( curl -sk -o /dev/null --connect-timeout 3 -m 5 "https://$_iu_t/" 2>/dev/null
+          echo $? > "$_iu_dir/$_iu_t" ) &
+        _iu_pids="$_iu_pids $!"
+    done
+    wait $_iu_pids 2>/dev/null
+    _iu_ok=1
+    for _iu_f in "$_iu_dir"/*; do
+        case "$(cat "$_iu_f" 2>/dev/null)" in
+            ''|6|7|28) ;;
+            *) _iu_ok=0; break ;;
+        esac
+    done
+    rm -rf "$_iu_dir"
+    return $_iu_ok
+}
+
+# Обёртка для мест, где падение профиля решает судьбу: пишет в лог переходы
+# «пропал / вернулся», а не каждую итерацию. 0 — интернет есть.
+internet_gate() { # $1 = кто спрашивает (для лога)
+    if internet_up; then
+        if [ -f "$OFFLINE_MARK" ]; then
+            rm -f "$OFFLINE_MARK"
+            log "$1: интернет вернулся — проверки снова в силе"
+        fi
+        return 0
+    fi
+    if [ ! -f "$OFFLINE_MARK" ]; then
+        : > "$OFFLINE_MARK"
+        log "$1: нет интернета мимо VPN (WAN не отвечает) — профили не трогаем, автопереключение на паузе"
+    fi
+    return 1
+}
+
+# Можно ли автопереключаться прямо сейчас. Код 1 + ASW_REASON — нельзя.
+#  - Панель держит замок detour-api: человек как раз переключает сам. Перебить
+#    его выбор посреди переключения — именно то, что ломало панель.
+#  - active_profile уже не тот, что мы проверяли: переключили, пока шла проба.
+#  - Пауза после недавнего автопереключения (общая для active и tick).
+switch_guard() { # $1 = профиль, который проверяли
+    _owner=$(cat "$SWITCH_LOCK/pid" 2>/dev/null)
+    if [ -n "$_owner" ] && kill -0 "$_owner" 2>/dev/null; then
+        log "auto-switch: $1 down, но идёт переключение из панели — не вмешиваемся"
+        ASW_REASON="идёт ручное переключение"
+        return 1
+    fi
+    _cur=$(jstr active_profile "$SETTINGS")
+    if [ "$_cur" != "$1" ]; then
+        log "auto-switch: проверяли $1, а активен уже $_cur — пропускаем"
+        ASW_REASON="профиль уже сменили"
+        return 1
+    fi
+    if [ -f "$SWITCH_MARK" ]; then
+        _lastsw=$(sed -n 's/.*"ts"[^0-9]*\([0-9][0-9]*\).*/\1/p' "$SWITCH_MARK" 2>/dev/null)
+        case "$_lastsw" in ''|*[!0-9]*) _lastsw=0 ;; esac
+        if [ "$((NOW - _lastsw))" -lt "$SWITCH_COOLDOWN" ]; then
+            log "auto-switch: $1 down, на паузе ($((NOW - _lastsw))s<${SWITCH_COOLDOWN}s) — остаёмся"
+            ASW_REASON="автопереключение на паузе после недавнего переключения"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # Healthiest OTHER profile eligible for auto-switch: ok=1, NOT in the user's exclude
 # list (AUTOSWITCH_EXCLUDE — absent/empty = all eligible), lowest positive rtt wins.
 # Prints the id (empty if none). Shared by `active` and the tail-block auto-switch so
@@ -793,7 +872,8 @@ pick_switch_candidate() {
 # Sets OUT to the activator output (or a diagnostic) for the caller's log.
 api_activate() {
     _tgt="$1"
-    OUT=$("$API_BIN" activate "$_tgt" 2>&1); _rc=$?
+    # Замок занят — не ждём: значит, переключает человек, и он главнее.
+    OUT=$(SWITCH_LOCK_WAIT=0 "$API_BIN" activate "$_tgt" 2>&1); _rc=$?
     _now=$(jstr active_profile "$SETTINGS")
     [ "$_now" = "$_tgt" ] && return 0
     OUT="activate did not take effect (rc=$_rc, active_profile='$_now'): $OUT"
@@ -819,15 +899,7 @@ autoswitch_active() {
     [ -x "$API_BIN" ] || { ASW_REASON="активатор профилей недоступен"; return 1; }
     # Cooldown: at most one auto-switch per SWITCH_COOLDOWN. A run of cache-healthy-
     # but-actually-dead candidates would otherwise switch+push every iteration.
-    if [ -f "$SWITCH_MARK" ]; then
-        _lastsw=$(sed -n 's/.*"ts"[^0-9]*\([0-9][0-9]*\).*/\1/p' "$SWITCH_MARK" 2>/dev/null)
-        case "$_lastsw" in ''|*[!0-9]*) _lastsw=0 ;; esac
-        if [ "$((NOW - _lastsw))" -lt "$SWITCH_COOLDOWN" ]; then
-            log "active-check: $_a down, auto-switch on cooldown ($((NOW - _lastsw))s<${SWITCH_COOLDOWN}s) — staying put"
-            ASW_REASON="автопереключение на паузе после недавнего переключения"
-            return 1
-        fi
-    fi
+    switch_guard "$_a" || return 1
     _cand=$(pick_switch_candidate "$_a")
     if [ -z "$_cand" ]; then
         log "active-check: $_a down, no healthy ELIGIBLE candidate — staying put"
@@ -919,6 +991,14 @@ active_check_once() {
     # Confirm a failure with one re-probe (kill transient flaps).
     if [ "$_NEWOK" = "0" ] && probe_idfile "$WORK/.active-ids"; then
         _NEWOK=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$_A" 2>/dev/null)
+    fi
+    # Без интернета виноват не профиль: в кэш не пишем, не переключаем, не шлём.
+    if [ "$_NEWOK" = "0" ] && ! internet_gate active-check; then
+        return 0
+    fi
+    if [ "$_NEWOK" = "1" ] && [ -f "$OFFLINE_MARK" ]; then
+        rm -f "$OFFLINE_MARK"
+        log "active-check: интернет вернулся — проверки снова в силе"
     fi
     upsert_db "$_A"
 
@@ -1162,6 +1242,13 @@ fi
 probe_range "$PROBE_IDS"
 DONE=$(ls "$WORK" 2>/dev/null | grep -vc '^\.')
 log "$MODE probed $DONE profiles"
+# Связь пропала до или во время прогона — его «мёртвые» ничего не значат: кэш и
+# расписание не трогаем, иначе после возврата WAN все профили висели бы красными,
+# а хвостовое автопереключение увело бы на случайный.
+if cat "$WORK"/* 2>/dev/null | awk -F'\t' '$2 == "0" { f = 1 } END { exit !f }' \
+   && ! internet_gate "$MODE"; then
+    exit 0
+fi
 
 # ---- Assemble the cache: active profile first (panel's active card reads it).
 # FORCE_ALL probed everything → rebuild from the scratch dir (deleted profiles
@@ -1284,6 +1371,8 @@ if probe_idfile "$WORK/.active-ids"; then
     AOK2=$(awk -F'\t' 'NR==1{print $2}' "$WORK/$ACTIVE" 2>/dev/null)
     [ "$AOK2" = "0" ] || { log "active $ACTIVE recovered on re-probe — no switch"; exit 0; }
 fi
+internet_gate "$MODE" || exit 0
+switch_guard "$ACTIVE" || exit 0
 
 # Pick the healthiest OTHER ELIGIBLE profile (ok=1, not excluded, lowest positive rtt).
 CAND=$(pick_switch_candidate "$ACTIVE")

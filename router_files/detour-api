@@ -728,28 +728,37 @@ set_outbound_chain_fields() {
     printf '%s' "$line"
 }
 
+# Пауза опроса: 100 мс через usleep, где он есть, иначе секунда. Целая секунда
+# на каждый хост и была причиной «переключение ~30 с»: nslookup отвечает за
+# 20 мс, а цикл ждал `sleep 1` до первой проверки.
+poll_nap() {
+    if command -v usleep >/dev/null 2>&1; then usleep 100000; else sleep 1; fi
+}
+poll_ticks() { # $1 = секунды → сколько раз звать poll_nap
+    if command -v usleep >/dev/null 2>&1; then echo $(($1 * 10)); else echo "$1"; fi
+}
+
 # Resolve a hostname with a hard ~3s ceiling so a broken/old tunnel can't wedge
 # the CGI (hung nslookup → zombie procs → router meltdown). BusyBox/Entware have
 # no dependable `timeout` applet, so run nslookup detached and poll: once the
-# budget is spent send TERM, then KILL, then reap (wait) to avoid zombies, and
-# finally emit whatever it managed to write. Output matches a bare nslookup so
-# the caller's awk parser is unchanged.
+# budget is spent send KILL and reap (wait) to avoid zombies, and finally emit
+# whatever it managed to write. Output matches a bare nslookup so the caller's
+# awk parser is unchanged.
 nslookup_with_timeout() {
     local host="$1"
     local server="$2"
-    local tmpf="/tmp/detour-nslookup.$$"
-    local pid count
+    local tmpf="/tmp/detour-nslookup.$$.$RANDOM"
+    local pid count max
     nslookup "$host" "$server" > "$tmpf" 2>/dev/null &
     pid=$!
     count=0
+    max=$(poll_ticks 3)
     while kill -0 "$pid" 2>/dev/null; do
-        if [ "$count" -ge 2 ]; then
-            kill "$pid" 2>/dev/null
-            sleep 1
+        if [ "$count" -ge "$max" ]; then
             kill -9 "$pid" 2>/dev/null
             break
         fi
-        sleep 1
+        poll_nap
         count=$((count + 1))
     done
     wait "$pid" 2>/dev/null
@@ -757,25 +766,70 @@ nslookup_with_timeout() {
     rm -f "$tmpf"
 }
 
+# IPv4-адреса из вывода nslookup: только после строки Name:, чтобы не схватить
+# адрес самого DNS-сервера. Понимает оба формата busybox («Address: ip» и
+# «Address 1: ip имя»).
+nslookup_ipv4() {
+    awk '/^Name:/ { f = 1; next }
+         f && /^Address/ { for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print $i }' "$@"
+}
+
+# Разрезолвить все имена разом, а не по одному: хостов у гибрида — по одному на
+# каждый профиль сайдкара (на home 34), и последовательный резолв без WAN стоил
+# 34 × 3 с — дольше, чем uhttpd даёт CGI (script_timeout 60). Тогда CGI убивали
+# между сборкой конфига и записью settings: config.json уже новый, settings и
+# работающий sing-box — старые. Общий потолок — 3 с на все имена.
+# Печатает адреса; код 1 — хотя бы одно имя не разрезолвилось.
+resolve_hosts_parallel() {
+    local dir="/tmp/detour-resolve.$$.$RANDOM" host i=0 pids="" pid count max alive rc=0 f
+    [ $# -gt 0 ] || return 0
+    mkdir -p "$dir" || return 1
+    for host in "$@"; do
+        i=$((i + 1))
+        nslookup "$host" 127.0.0.1 > "$dir/$i" 2>/dev/null &
+        pids="$pids $!"
+    done
+    count=0
+    max=$(poll_ticks 3)
+    while [ "$count" -lt "$max" ]; do
+        alive=0
+        for pid in $pids; do
+            kill -0 "$pid" 2>/dev/null && { alive=1; break; }
+        done
+        [ "$alive" = 0 ] && break
+        poll_nap
+        count=$((count + 1))
+    done
+    for pid in $pids; do kill -9 "$pid" 2>/dev/null; done
+    wait $pids 2>/dev/null
+    for f in "$dir"/*; do
+        [ -f "$f" ] || continue
+        nslookup_ipv4 "$f" | grep . || rc=1
+    done
+    rm -rf "$dir"
+    return $rc
+}
+
 collect_upstream_ips() {
-    {
+    local servers ips names resolved old=""
+    servers=$({
         sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SINGBOX_CONFIG" 2>/dev/null
         for cf in "$SINGBOX_CONFIG_DIR"/config-*.json; do
             [ -f "$cf" ] && sed -n 's/.*"server"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cf" 2>/dev/null
         done
         # AWG-узлы в конфиге sing-box видны как 127.0.0.1 — настоящие адреса у сайдкара
         [ -f "$AWG_CONF" ] && tr ',' '\n' < "$AWG_CONF" | sed -n 's/^"server":"\([^"]*\)".*/\1/p'
-    } | grep -vx '127\.0\.0\.1' | \
-    while IFS= read -r host; do
-        [ -n "$host" ] || continue
-        if echo "$host" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-            printf '%s\n' "$host"
-        else
-            nslookup_with_timeout "$host" 127.0.0.1 | \
-                awk '/^Address [0-9]+: /{print $3} /^Address: /{print $2}' | \
-                grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true
-        fi
-    done | awk '!seen[$0]++ { if (out) out = out "," $0; else out = $0 } END { print out }'
+    } | grep -vx '127\.0\.0\.1' | awk 'NF && !seen[$0]++')
+    ips=$(printf '%s\n' "$servers" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+    names=$(printf '%s\n' "$servers" | grep -vE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -E '^[A-Za-z0-9._-]+$')
+    if ! resolved=$(resolve_hosts_parallel $names); then
+        # Без интернета имена не резолвятся — оставляем прежние адреса, иначе
+        # пропадут RETURN-правила к серверам VPN.
+        old=$(get_upstream_ips | tr ',' '\n')
+    fi
+    printf '%s\n%s\n%s\n' "$ips" "$resolved" "$old" | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v '^127\.' | \
+        awk '!seen[$0]++ { if (out) out = out "," $0; else out = $0 } END { print out }'
 }
 
 write_settings() {
@@ -2084,6 +2138,54 @@ build_config_mihomo() {
     return 0
 }
 
+# Одно переключение за раз. Панель, автопереключение detour-health и правки
+# маршрутов собирали конфиг и писали settings параллельно: побеждал последний,
+# а config.json, settings.json и работающий sing-box расходились между собой.
+# Замок берёт build_config, а держит его ПРОЦЕСС до выхода (trap EXIT ниже):
+# write_settings и перезапуск идут после сборки и тоже должны быть под ним.
+# build_config зовут через $(...) — в подоболочке $$ тот же, поэтому владелец
+# записывается родительский, а trap подоболочки не наследует и замок не снимет.
+# Владелец умер (CGI убит по script_timeout) — замок снимается сразу.
+SWITCH_LOCK=/tmp/detour-switch.lock
+switch_lock_take() {
+    local waited=0 owner limit="${SWITCH_LOCK_WAIT:-45}"
+    while :; do
+        if mkdir "$SWITCH_LOCK" 2>/dev/null; then
+            echo "$$" > "$SWITCH_LOCK/pid"
+            return 0
+        fi
+        owner=$(cat "$SWITCH_LOCK/pid" 2>/dev/null)
+        [ "$owner" = "$$" ] && return 0
+        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -rf "$SWITCH_LOCK"; continue
+        fi
+        # без pid дольше 5 с — владелец умер между mkdir и записью pid
+        if [ -z "$owner" ] && [ "$waited" -ge 5 ]; then
+            rm -rf "$SWITCH_LOCK"; continue
+        fi
+        [ "$waited" -ge "$limit" ] && return 1
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+switch_lock_release() {
+    [ "$(cat "$SWITCH_LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$SWITCH_LOCK"
+    return 0
+}
+
+# Движок принял соединения на :12345 — ждать дольше незачем. Раньше после
+# перезапуска стоял слепой `sleep 3`.
+wait_engine_listen() { # $1 = потолок, с
+    local i=0 max
+    max=$(poll_ticks "${1:-3}")
+    while [ "$i" -lt "$max" ]; do
+        grep -qs ':3039 [0-9A-F:]* 0A ' /proc/net/tcp /proc/net/tcp6 && return 0
+        poll_nap
+        i=$((i + 1))
+    done
+    return 1
+}
+
 # Build all sing-box config(s) for the given mode + chain. Writes to temp files,
 # validates EVERY config with `sing-box check`, then commits atomically. On any
 # failure prints a reason to stdout, returns 1, and leaves live configs intact.
@@ -2096,6 +2198,14 @@ build_config() {
 
     commit_list=""
     keep_targets=""
+
+    if ! switch_lock_take; then
+        echo "уже идёт другое переключение VPN — повторите через минуту"
+        return 1
+    fi
+    # Под замком чужих сборок нет: всё, что лежит, — от убитых процессов.
+    rm -f "$SINGBOX_CONFIG".tmp.* "$SINGBOX_CONFIG_DIR"/config-*.json.tmp.* \
+        "$MIHOMO_CONF".tmp.* "$MIHOMO_CONF".sb.* 2>/dev/null
 
     # Какой движок соберёт этот конфиг. Считается до сайдкара: в движке mihomo
     # сайдкар не нужен, AWG-профили идут в основной конфиг.
@@ -2438,6 +2548,8 @@ login_record_success() {
 # opt-in auto-switch to activate a profile through the SAME pipeline the panel
 # uses (build_config → write_settings → reconfigure), avoiding a second copy of
 # that logic. All referenced functions are defined above.
+trap switch_lock_release EXIT
+trap 'exit 143' TERM HUP INT
 if [ "$1" = "activate" ]; then
     # Без аргумента — пересобрать активную (detour-bootstrap-install после прошивки:
     # config.json не в keeplist).
@@ -4445,7 +4557,7 @@ profile_save)
             "$(collect_upstream_ips)" "$SBMODE"
         # Сменился только апстрим — хватает быстрого reconfigure (fail-closed).
         $SINGBOX_INITD reconfigure >/dev/null 2>&1
-        sleep 3
+        wait_engine_listen 3
     fi
     json_ok
     ;;
@@ -4489,7 +4601,7 @@ chain_activate)
         # Profile/chain switch only changes the upstream server — use the fast
         # reconfigure (skips the per-IP conntrack flush + DNS warm-up); fail-closed.
         $SINGBOX_INITD reconfigure >/dev/null 2>&1
-        sleep 3
+        wait_engine_listen 3
         json_ok
         ;;
 
@@ -4544,7 +4656,7 @@ chain_save)
             "$(collect_upstream_ips)" "$SBMODE"
         # Домены/ipset не менялись — хватает быстрого reconfigure (fail-closed).
         $SINGBOX_INITD reconfigure >/dev/null 2>&1
-        sleep 3
+        wait_engine_listen 3
     fi
     json_ok
     ;;
@@ -4584,7 +4696,7 @@ profile_activate)
         # Profile/chain switch only changes the upstream server — use the fast
         # reconfigure (skips the per-IP conntrack flush + DNS warm-up); fail-closed.
         $SINGBOX_INITD reconfigure >/dev/null 2>&1
-        sleep 3
+        wait_engine_listen 3
         json_ok
     ;;
 
