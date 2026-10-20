@@ -4,7 +4,7 @@
 # интернет через профили и цепочки Detour, с его маршрутами.
 #
 #   sh install.sh [--port 51820] [--vless-port 443] [--endpoint <IP или домен>]
-#                 [--panel-port 8080]
+#                 [--panel-port 8080] [--sub-port 2096] [--sub-local]
 #                 [--panel-public] [--name detour] [--uninstall]
 #
 # Что делает:
@@ -19,6 +19,11 @@
 # Панель по умолчанию открыта только на 127.0.0.1 хоста: снаружи к ней ходят
 # через SSH-туннель (ssh -L 8080:127.0.0.1:8080 root@сервер). --panel-public
 # публикует её на все адреса — тогда сразу смените пароль и выпустите сертификат.
+#
+# Подписки клиентов (все протоколы клиента одной ссылкой) отдаёт отдельный
+# веб-сервер на --sub-port, панели там нет. --sub-local публикует его только на
+# 127.0.0.1 — под свой реверс-прокси с TLS (его адрес задаётся в панели);
+# --sub-port 0 — без подписок.
 
 set -eu
 
@@ -28,6 +33,8 @@ VPORT=""
 PANEL_PORT=8080
 ENDPOINT=""
 PANEL_PUBLIC=0
+SUB_PORT=2096
+SUB_LOCAL=0
 UNINSTALL=0
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -38,9 +45,11 @@ while [ $# -gt 0 ]; do
         --endpoint) ENDPOINT=$2; shift 2 ;;
         --panel-port) PANEL_PORT=$2; shift 2 ;;
         --panel-public) PANEL_PUBLIC=1; shift ;;
+        --sub-port) SUB_PORT=$2; shift 2 ;;
+        --sub-local) SUB_LOCAL=1; shift ;;
         --name) NAME=$2; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
-        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
         *) echo "неизвестный параметр: $1" >&2; exit 2 ;;
     esac
 done
@@ -60,6 +69,7 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 case "$PORT" in ''|*[!0-9]*) die "--port — число" ;; esac
+case "$SUB_PORT" in ''|*[!0-9]*) die "--sub-port — число" ;; esac
 case "$(uname -m)" in
     x86_64|amd64) OWRT=x86-64-25.12.0 ;;
     aarch64|arm64) OWRT=armsr-armv8-25.12.0 ;;
@@ -90,7 +100,10 @@ tcp_busy() {
 }
 if [ -z "$VPORT" ]; then
     VPORT=443
-    tcp_busy 443 && VPORT=8443
+    # Переустановка: 443 держит наш же прежний контейнер — он сейчас уйдёт.
+    if tcp_busy 443 && ! docker port "$NAME" 2>/dev/null | grep -q '^443/tcp'; then
+        VPORT=8443
+    fi
 fi
 say "Внешний адрес для клиентов: $ENDPOINT — AmneziaWG $PORT/udp, VLESS $VPORT/tcp"
 
@@ -102,6 +115,11 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 PANEL_BIND=127.0.0.1:
 [ "$PANEL_PUBLIC" = 1 ] && PANEL_BIND=""
+set --
+if [ "$SUB_PORT" != 0 ]; then
+    SUB_BIND=""; [ "$SUB_LOCAL" = 1 ] && SUB_BIND=127.0.0.1:
+    set -- -p "${SUB_BIND}${SUB_PORT}:${SUB_PORT}/tcp" -e DETOUR_SUB_PORT="$SUB_PORT"
+fi
 
 say "Запуск контейнера $NAME"
 # --privileged: OpenWrt внутри управляет своим файрволом и интерфейсами (tun,
@@ -110,6 +128,7 @@ docker run -d --name "$NAME" --hostname "$NAME" --restart unless-stopped \
     --privileged --network "$NAME-net" \
     -p "${PANEL_BIND}${PANEL_PORT}:80/tcp" -p "$PORT:$PORT/udp" -p "$VPORT:$VPORT/tcp" \
     -e DETOUR_SERVER_PORT="$PORT" -e DETOUR_VLESS_PORT="$VPORT" -e DETOUR_ENDPOINT="$ENDPOINT" -e DETOUR_PANEL_WAN="$PANEL_PUBLIC" \
+    "$@" \
     -v "$NAME-detour:/etc/detour" -v "$NAME-singbox:/etc/sing-box" -v "$NAME-config:/etc/config" \
     -v "$NAME-zapret:/etc/zapret-tpws" \
     "$NAME-box" >/dev/null
@@ -135,5 +154,6 @@ cat <<EOF
   Дальше:   задайте пароль панели, добавьте профиль или подписку, затем
             «Сервисы → Свой VPN-сервер» — включить и завести клиентов.
             Порты сервера уже совпадают с опубликованными ($PORT/udp, $VPORT/tcp).
+  Подписки: порт $SUB_PORT/tcp (0 — выключены); ссылка — в карточке клиента.
   Удалить:  sh $0 --uninstall
 EOF

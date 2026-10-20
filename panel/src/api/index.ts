@@ -2,6 +2,7 @@ export * from "./client";
 export * from "./types";
 
 export { auth } from "./auth";
+export type { PanelRole, PanelUser } from "./auth";
 export { overview } from "./overview";
 export { profiles, chains, subscriptions, warp, awg } from "./profiles";
 export { rules } from "./rules";

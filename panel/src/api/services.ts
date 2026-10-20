@@ -56,14 +56,15 @@ export const services = {
   serverInstall: () => requestJson<{ ok: boolean }>("server_install", { method: "POST" }),
   serverSet: (patch: ServerSettingsPatch) =>
     requestJson<{ ok: boolean }>("server_set", { body: patch, timeoutMs: 120_000 }),
-  serverClientAdd: (name: string, mode: ServerClientMode) =>
+  /** owner — логин админа, за которым закрепить клиента (только главный админ). */
+  serverClientAdd: (name: string, mode: ServerClientMode, owner?: string) =>
     requestJson<{ ok: boolean; id: string }>("server_client_add", {
-      body: { name, mode },
+      body: { name, mode, ...(owner ? { owner } : {}) },
       timeoutMs: 120_000,
     }),
   serverClientSet: (
     id: string,
-    patch: { name?: string; mode?: ServerClientMode; enabled?: boolean; route?: string },
+    patch: { name?: string; mode?: ServerClientMode; enabled?: boolean; route?: string; owner?: string },
   ) => requestJson<{ ok: boolean }>("server_client_set", { body: { id, ...patch }, timeoutMs: 120_000 }),
   serverClientDel: (id: string) =>
     requestJson<{ ok: boolean }>("server_client_del", { body: { id } }),
@@ -72,6 +73,11 @@ export const services = {
     requestJson<{ ok: boolean; conf: string }>("server_client_conf", { body: { id } }),
   serverClientLink: (id: string) =>
     requestJson<{ ok: boolean; link: string }>("server_client_link", { body: { id } }),
+  /** URL подписки — в нём секрет клиента, поэтому тоже POST. */
+  serverClientSub: (id: string) =>
+    requestJson<{ ok: boolean; url: string }>("server_client_sub", { body: { id } }),
+  serverClientSubReset: (id: string) =>
+    requestJson<{ ok: boolean }>("server_client_sub_reset", { body: { id } }),
   serverRegen: () =>
     requestJson<{ ok: boolean }>("server_regen", { method: "POST", timeoutMs: 120_000 }),
   serverSessions: (id?: string) =>

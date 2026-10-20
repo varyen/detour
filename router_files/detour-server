@@ -38,11 +38,12 @@
 # свои правила (`fw`), их же переставляет netfilter-хук после перестроек NDM.
 #
 # Хранение: $DIR/server.conf (shell KEY=VAL) и $DIR/clients.list:
-#   id|enabled|name|octet|pubkey|privkey|psk|mode|created|uuid|route
+#   id|enabled|name|octet|pubkey|privkey|psk|mode|created|uuid|route|token|owner
 # (pubkey пуст, пока на платформе нет AWG; uuid — пользователь VLESS; route —
 # пусто = правила роутера, direct = мимо VPN, vpn:<профиль|цепочка>. Маршрут
 # исполняет механизм «Правила → Устройства»: detour-api добавляет клиента в
-# devices.map по его адресам $NET.N и $VNET.N.)
+# devices.map по его адресам $NET.N и $VNET.N; token — секрет URL подписки;
+# owner — логин админа панели, который завёл клиента (пусто — главный админ).)
 # Приватный ключ клиента хранится, чтобы конфиг/QR можно было показать повторно
 # (так же делает GL). Каталог 0700, под /etc/detour → keeplist sysupgrade.
 
@@ -70,6 +71,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     LAN_IF=br0
     WANPIN_BIN=/opt/sbin/detour-wanpin
     CERT_CONF=/opt/etc/detour/cert.conf
+    SUB_HOME=/opt/share/detour/sub-www
     RCI=http://localhost:79/rci/
     KIP=/opt/sbin/ip
     HOOK=/opt/etc/ndm/netfilter.d/50-detour.sh
@@ -83,6 +85,7 @@ else
     LAN_IF=br-lan
     WANPIN_BIN=/usr/sbin/detour-wanpin
     CERT_CONF=/etc/detour/cert.conf
+    SUB_HOME=/usr/share/detour/sub-www
 fi
 # Нет утилиты awg (чистая OpenWrt с userspace-пакетом detour-awg-go) — её
 # подмножество встроено в наш amneziawg-go.
@@ -109,6 +112,9 @@ VPID="$RUN/detour-vless.pid"
 VLOG="$RUN/detour-vless.log"
 VACT="$RUN/detour-server.vact"
 VACCT_SIG="$RUN/detour-server.vacct"
+SUBPID="$RUN/detour-sub.pid"
+SUBSIG="$RUN/detour-sub.sig"
+SUBLCONF="$RUN/detour-sub.lighttpd.conf"
 ONLINE_SEC=180
 FLUSH_MIN=30
 SESS_KEEP=500
@@ -399,6 +405,9 @@ VPUB=$VPUB
 VSID=$VSID
 NDMIF=$NDMIF
 UPLINK=$UPLINK
+SUB=$SUB
+SPORT=$SPORT
+SUBURL=$SUBURL
 EOF
     mv "$CONF.tmp" "$CONF"
 }
@@ -418,6 +427,7 @@ load_conf() {
     ENABLED=0; PORT=""; NET=""; ENDPOINT=""; DNS=""; MTU=""
     PRIVKEY=""; PUBKEY=""
     AWG=1; VLESS=0; VPORT=""; VNET=""; VSNI=""; VPRIV=""; VPUB=""; VSID=""; NDMIF=""; UPLINK=""
+    SUB=0; SPORT=""; SUBURL=""
     [ -f "$CONF" ] && . "$CONF"
     set_iface
 }
@@ -425,10 +435,11 @@ load_conf() {
 load_defaults() {
     # Detour в контейнере (linux/): порты обязаны совпасть с опубликованными, а
     # адрес — быть внешним адресом хоста. Их кладёт стартовый скрипт контейнера.
-    DEF_PORT=""; DEF_VPORT=""; DEF_ENDPOINT=""
+    DEF_PORT=""; DEF_VPORT=""; DEF_ENDPOINT=""; DEF_SPORT=""
     [ -f "$DIR/defaults" ] && . "$DIR/defaults"
     case "$DEF_PORT" in ''|*[!0-9]*) DEF_PORT="" ;; esac
     case "$DEF_VPORT" in ''|*[!0-9]*) DEF_VPORT="" ;; esac
+    case "$DEF_SPORT" in ''|*[!0-9]*) DEF_SPORT="" ;; esac
 }
 
 # Первичная инициализация: порт, подсеть, обфускация, затем ключи того входа,
@@ -491,6 +502,16 @@ ensure_conf() {
         changed=1
         log "init vless: port=$VPORT net=$VNET.0/24"
     fi
+    if [ -z "$SPORT" ]; then
+        if [ -n "$DEF_SPORT" ]; then
+            # Контейнер: порт подписок уже опубликован на хосте — включаем сразу.
+            SPORT=$DEF_SPORT; SUB=1
+        else
+            SPORT=2096
+            while tcp_port_busy "$SPORT" || [ "$SPORT" = "$VPORT" ]; do SPORT=$(rand_range 20000 60000); done
+        fi
+        changed=1
+    fi
     [ "$changed" = 1 ] && save_conf
     fill_clients
 }
@@ -500,21 +521,27 @@ ensure_conf() {
 fill_clients() {
     [ -s "$CLIENTS" ] || return 0
     need_awg=0; awg_ok && need_awg=1
-    awk -F'|' -v a="$need_awg" '(a == 1 && $5 == "") || $10 == "" { f = 1 } END { exit !f }' "$CLIENTS" || return 0
+    awk -F'|' -v a="$need_awg" '(a == 1 && $5 == "") || $10 == "" || $12 == "" { f = 1 } END { exit !f }' "$CLIENTS" || return 0
     umask 077
     : > "$CLIENTS.tmp"
-    while IFS='|' read -r id en name octet pub priv psk mode created uuid route; do
+    while IFS='|' read -r id en name octet pub priv psk mode created uuid route token owner; do
         [ -n "$id" ] || continue
         if [ "$need_awg" = 1 ] && [ -z "$pub" ] && wg_keypair; then
             priv=$KP_PRIV; pub=$KP_PUB; psk=$(wg_psk)
         fi
         [ -n "$uuid" ] || uuid=$(new_uuid)
-        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$en" "$name" "$octet" "$pub" "$priv" "$psk" "$mode" "$created" "$uuid" "$route" >> "$CLIENTS.tmp"
+        [ -n "$token" ] || token=$(new_token)
+        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$en" "$name" "$octet" "$pub" "$priv" "$psk" "$mode" "$created" "$uuid" "$route" "$token" "$owner" >> "$CLIENTS.tmp"
     done < "$CLIENTS"
     mv "$CLIENTS.tmp" "$CLIENTS"
 }
 
 new_uuid() { cat /proc/sys/kernel/random/uuid; }
+
+new_token() {
+    hexdump -n 16 -v -e '/1 "%02x"' /dev/urandom 2>/dev/null || \
+        od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
 
 server_ip() { echo "$NET.1"; }
 
@@ -595,6 +622,12 @@ free_octet() {
 }
 
 client_line() { awk -F'|' -v id="$1" '$1 == id' "$CLIENTS" 2>/dev/null | head -1; }
+
+# Логин панели (те же правила, что у detour-api) или пусто.
+valid_owner() {
+    case "$1" in '') return 0 ;; *[!A-Za-z0-9._-]*) return 1 ;; esac
+    [ "${#1}" -le 32 ]
+}
 
 # ---------- применение ----------
 
@@ -702,6 +735,15 @@ fw_apply() {
         want "${ZONE}_vin.target" DNAT
         want "${ZONE}_vin.enabled" "$(vless_on && echo 1 || echo 0)"
     fi
+    if [ -n "$SPORT" ]; then
+        want "${ZONE}_sub" rule
+        want "${ZONE}_sub.name" detour-server-sub
+        want "${ZONE}_sub.src" wan
+        want "${ZONE}_sub.proto" tcp
+        want "${ZONE}_sub.dest_port" "$SPORT"
+        want "${ZONE}_sub.target" ACCEPT
+        want "${ZONE}_sub.enabled" "$(sub_on && echo 1 || echo 0)"
+    fi
     if [ "$changed" = 1 ]; then
         uci commit firewall
         /etc/init.d/firewall reload >/dev/null 2>&1
@@ -712,7 +754,7 @@ fw_apply() {
 fw_remove() {
     [ "$KEENETIC" = 1 ] && { ENABLED=0; keen_fw; return 0; }
     uci -q get "firewall.$ZONE" >/dev/null || return 0
-    for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_in" "${ZONE}_vin"; do
+    for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_in" "${ZONE}_vin" "${ZONE}_sub"; do
         uci -q delete "firewall.$s"
     done
     uci commit firewall
@@ -926,6 +968,7 @@ keen_fw() {
         keen_fw_add nat POSTROUTING -s "$VNET.0/24" ! -o "$VIF" -j MASQUERADE
         vless_acct_up
     fi
+    if sub_on; then keen_fw_add filter INPUT -p tcp --dport "$SPORT" -j ACCEPT; fi
 }
 
 # ---------- VLESS-Reality ----------
@@ -1322,6 +1365,7 @@ do_stop() {
     uplink_down
     awg_down
     vless_down
+    sub_down
     [ -f "$CONF" ] && { load_conf; ENABLED=0; fw_apply; }
 }
 
@@ -1334,6 +1378,7 @@ do_apply() {
     rc=0
     if awg_on; then awg_up || rc=1; else awg_down; fi
     if vless_on; then vless_up || rc=1; else vless_down; fi
+    if sub_on; then sub_up || rc=1; else sub_down; fi
     fw_apply
     uplink_apply
     set --
@@ -1603,6 +1648,11 @@ status_json() {
     printf '"vless":{"supported":%s,"reason":"%s","can_install":%s,"enabled":%s,"running":%s,"port":%s,"sni":"%s","pubkey":"%s","short_id":"%s","net":"%s"},' \
         "$vsup" "$(json_esc "$vr")" "$vinst" "$([ "$VLESS" = 1 ] && echo true || echo false)" "$vrun" "${VPORT:-0}" \
         "$(json_esc "$VSNI")" "$VPUB" "$VSID" "${VNET:+$VNET.0/24}"
+    srun=false; [ -n "$(sub_pid)" ] && srun=true
+    shttps=false; sub_https && shttps=true
+    printf '"sub":{"enabled":%s,"running":%s,"port":%s,"https":%s,"url":"%s","base":"%s"},' \
+        "$([ "$SUB" = 1 ] && echo true || echo false)" "$srun" "${SPORT:-0}" "$shttps" \
+        "$(json_esc "$SUBURL")" "$(json_esc "$([ -n "$SPORT" ] && sub_base)")"
     printf '"iface":"%s","port":%s,"net":"%s","server_ip":"%s","endpoint":"%s","endpoint_effective":"%s",' \
         "$IFACE" "${PORT:-0}" "${NET:+$NET.0/24}" "${NET:+$(server_ip)}" "$(json_esc "$ENDPOINT")" "$(json_esc "$(endpoint_host)")"
     printf '"wan_ip":"%s","wan_private":%s,"panel_domain":"%s","dns":"%s","mtu":%s,"pubkey":"%s",' \
@@ -1621,7 +1671,9 @@ status_json() {
     # rx/tx — живые счётчики (AWG + VLESS; скорость панель считает по их
     # разнице между опросами); total/month/day/session — накопленное tick'ом
     # (+ ещё не учтённая дельта, чтобы цифры не отставали на минуту).
+    # DETOUR_SRV_OWNER — админ с доступом только к серверу: видны лишь его клиенты.
     [ -f "$CLIENTS" ] && printf '%s\n' "$dump" | awk -F'|' -v net="$NET" -v now="$now" -v on_sec="$ONLINE_SEC" \
+        -v own="${DETOUR_SRV_OWNER:-}" \
         -v mon="$(date +%Y%m)" -v day="$(date +%Y%m%d)" '
         function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
         FILENAME == "-" {
@@ -1630,6 +1682,7 @@ status_json() {
             next
         }
         FILENAME == ARGV[2] { S[$1] = $0; next }
+        own != "" && $13 != own { next }
         {
             k = $5; vk = "v:" $1
             for (j = 1; j <= 19; j++) a[j] = 0
@@ -1659,6 +1712,7 @@ status_json() {
             printf "%s{\"id\":\"%s\",\"enabled\":%s,\"name\":\"%s\",\"ip\":\"%s.%s\",\"mode\":\"%s\",\"created\":%d,\"awg\":%s,\"vless\":%s,\"route\":\"%s\",",
                 (n++ ? "," : ""), $1, ($2 == 1 ? "true" : "false"), esc($3), net, $4, ($8 == "" ? "full" : $8), $9 + 0,
                 ($5 != "" ? "true" : "false"), ($10 != "" ? "true" : "false"), esc($11)
+            printf "\"owner\":\"%s\",", esc($13)
             printf "\"online\":%s,\"handshake\":%d,\"handshake_ago\":%d,\"last_seen\":%d,\"rx\":%.0f,\"tx\":%.0f,\"remote\":\"%s\",",
                 (online ? "true" : "false"), h, (h > 0 ? now - h : -1), seen, crx + vrx, ctx + vtx, rem
             printf "\"session_start\":%d,\"session_rx\":%.0f,\"session_tx\":%.0f,", sst, srx, stx
@@ -1666,6 +1720,245 @@ status_json() {
                 dyrx, dytx, mrx, mtx, a[4] + drx, a[5] + dtx
         }' - "$(stats_src)" "$CLIENTS"
     printf '],"now":%s}\n' "$now"
+}
+
+# ---------- подписка ----------
+#
+# URL <база>/cgi-bin/sub?t=<токен клиента> отдаёт все протоколы клиента одним
+# профилем. Отдаёт его отдельный веб-сервер на $SPORT (uhttpd, на Keenetic —
+# lighttpd), в корне которого один CGI: панель с WAN по-прежнему не видна.
+# Формат выбирает CGI по User-Agent, ?f= перекрывает:
+#   uri     — base64 списка ссылок (v2rayN, v2rayNG, Hiddify, Streisand, Happ):
+#             только VLESS — общепринятой ссылки у AmneziaWG нет;
+#   clash   — YAML mihomo (Clash Verge, FlClash, Stash): VLESS и AmneziaWG;
+#   singbox — конфиг sing-box (SFA, SFI): только VLESS, AmneziaWG sing-box не умеет;
+#   detour  — outbounds для подписок Detour (Accept: application/vnd.detour+json —
+#             произвольные заголовки uhttpd в CGI не передаёт): оба протокола;
+#   awg     — .conf AmneziaWG.
+
+sub_on() { [ "$ENABLED" = 1 ] && [ "$SUB" = 1 ] && [ -n "$SPORT" ]; }
+
+sub_cert() {
+    SUB_CRT=""; SUB_KEY=""
+    [ -f "$CERT_CONF" ] || return 1
+    _cd=$( . "$CERT_CONF" 2>/dev/null; printf '%s' "$CERT_DIR" )
+    [ -n "$_cd" ] && [ -s "$_cd/fullchain.pem" ] && [ -s "$_cd/privkey.pem" ] || return 1
+    SUB_CRT=$_cd/fullchain.pem; SUB_KEY=$_cd/privkey.pem
+}
+
+sub_tls_ok() {
+    if [ "$KEENETIC" = 1 ]; then
+        [ -f /opt/lib/lighttpd/mod_openssl.so ]
+    else
+        ls /lib/libustream-ssl*.so* >/dev/null 2>&1 || ls /usr/lib/libustream-ssl*.so* >/dev/null 2>&1
+    fi
+}
+
+# HTTPS — на сертификате панели, если он выпущен и домен известен: иначе
+# браузерный клиент упрётся в чужое имя. Без него — HTTP.
+sub_https() { sub_cert && sub_tls_ok && [ -n "$(panel_domain)" ]; }
+
+sub_base() {
+    if [ -n "$SUBURL" ]; then printf '%s' "${SUBURL%/}"; return; fi
+    if sub_https; then
+        printf 'https://%s:%s' "$(panel_domain)" "$SPORT"
+    else
+        printf 'http://%s:%s' "$(endpoint_host)" "$SPORT"
+    fi
+}
+
+sub_pid() {
+    [ -f "$SUBPID" ] || return 1
+    p=$(cat "$SUBPID" 2>/dev/null)
+    [ -n "$p" ] && [ -d "/proc/$p" ] && grep -q -e sub-www -e detour-sub "/proc/$p/cmdline" 2>/dev/null && echo "$p"
+}
+
+sub_down() {
+    p=$(sub_pid)
+    if [ -n "$p" ]; then
+        kill "$p" 2>/dev/null
+        i=0; while [ -d "/proc/$p" ] && [ "$i" -lt 10 ]; do sleep 0.2 2>/dev/null || sleep 1; i=$((i + 1)); done
+        kill -9 "$p" 2>/dev/null
+    fi
+    rm -f "$SUBPID" "$SUBSIG" "$SUBLCONF"
+}
+
+sub_up() {
+    [ -x "$SUB_HOME/cgi-bin/sub" ] || { log "sub: нет $SUB_HOME/cgi-bin/sub"; return 1; }
+    tls=0; sub_https && tls=1
+    # Продлённый сертификат веб-сервер сам не перечитывает — mtime в подписи.
+    sig="$SPORT|$tls|$SUB_CRT|$([ "$tls" = 1 ] && date -r "$SUB_CRT" +%s 2>/dev/null)"
+    [ -n "$(sub_pid)" ] && [ "$(cat "$SUBSIG" 2>/dev/null)" = "$sig" ] && return 0
+    sub_down
+    if [ "$KEENETIC" = 1 ]; then
+        lbin=$(command -v lighttpd)
+        [ -n "$lbin" ] || { log "sub: нет lighttpd"; return 1; }
+        {
+            printf 'server.document-root = "%s"\n' "$SUB_HOME"
+            printf 'server.port = %s\nserver.bind = "0.0.0.0"\n' "$SPORT"
+            printf 'server.pid-file = "%s"\nserver.errorlog = "%s"\n' "$SUBPID" "$LOG"
+            printf 'server.max-connections = 32\nserver.dir-listing = "disable"\n'
+            if [ "$tls" = 1 ]; then
+                printf 'server.modules = ("mod_cgi", "mod_openssl")\n'
+                printf 'ssl.engine = "enable"\nssl.pemfile = "%s"\nssl.privkey = "%s"\n' "$SUB_CRT" "$SUB_KEY"
+            else
+                printf 'server.modules = ("mod_cgi")\n'
+            fi
+            printf 'cgi.assign = ("/sub" => "")\n'
+        } > "$SUBLCONF"
+        "$lbin" -f "$SUBLCONF" >>"$LOG" 2>&1 </dev/null || { log "sub: lighttpd не запустился"; return 1; }
+    else
+        command -v uhttpd >/dev/null 2>&1 || { log "sub: нет uhttpd"; return 1; }
+        # Без -R: фильтр RFC1918 рубит запросы с белых адресов на серый адрес
+        # роутера (контейнер, роутер за NAT провайдера с пробросом).
+        set -- -f -D -h "$SUB_HOME" -x /cgi-bin -t 20 -T 10 -k 5 -n 8 -N 32
+        if [ "$tls" = 1 ]; then
+            set -- "$@" -s "$SPORT" -C "$SUB_CRT" -K "$SUB_KEY"
+        else
+            set -- "$@" -p "$SPORT"
+        fi
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "$(command -v uhttpd)" "$@" >>"$LOG" 2>&1 </dev/null &
+        else
+            uhttpd "$@" >>"$LOG" 2>&1 </dev/null &
+        fi
+        echo $! > "$SUBPID"
+    fi
+    sleep 1
+    [ -n "$(sub_pid)" ] || { log "sub: веб-сервер подписок не запустился (порт $SPORT)"; rm -f "$SUBPID"; return 1; }
+    echo "$sig" > "$SUBSIG"
+    log "sub: подписки на порту $SPORT ($([ "$tls" = 1 ] && echo https || echo http))"
+}
+
+client_by_token() {
+    case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#1}" = 32 ] || return 1
+    awk -F'|' -v t="$1" '$12 == t' "$CLIENTS" 2>/dev/null | head -1
+}
+
+sub_allowed() {  # «Только сеть дома»: подсеть сервера и LAN
+    printf '%s.0/24' "$NET"
+    lc=$(lan_cidr); [ -n "$lc" ] && printf ' %s' "$lc"
+}
+
+sub_vless_json() {  # $1 tag
+    printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s","flow":"xtls-rprx-vision",' \
+        "$(json_esc "$1")" "$(json_esc "$host")" "$VPORT" "$uuid"
+    printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"chrome"},' "$VSNI"
+    printf '"reality":{"enabled":true,"public_key":"%s","short_id":"%s"}}}' "$VPUB" "$VSID"
+}
+
+# Профиль AmneziaWG в форме профилей Detour (detour-awg): ключи amnezia — mihomo.
+sub_awg_json() {  # $1 tag
+    printf '{"type":"amneziawg","tag":"%s","server":"%s","server_port":%s,"local_address":["%s.%s/32"],' \
+        "$(json_esc "$1")" "$(json_esc "$host")" "$PORT" "$NET" "$octet"
+    printf '"private_key":"%s","peer_public_key":"%s","pre_shared_key":"%s","mtu":%s,"persistent_keepalive_interval":25,' \
+        "$priv" "$PUBKEY" "$psk" "${MTU:-1376}"
+    printf '"amnezia":{"jc":%s,"jmin":%s,"jmax":%s,"s1":%s,"s2":%s,"h1":"%s","h2":"%s","h3":"%s","h4":"%s"}}' \
+        "$JC" "$JMIN" "$JMAX" "$S1" "$S2" "$H1" "$H2" "$H3" "$H4"
+}
+
+sub_clash() {
+    vn="$name · VLESS"; an="$name · AmneziaWG"
+    echo "proxies:"
+    if [ "$has_v" = 1 ]; then
+        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$vn" "$host" "$VPORT" "$uuid"
+        printf '    network: tcp\n    udp: true\n    tls: true\n    flow: xtls-rprx-vision\n'
+        printf '    servername: %s\n    client-fingerprint: chrome\n' "$VSNI"
+        printf '    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$VPUB" "$VSID"
+    fi
+    if [ "$has_a" = 1 ]; then
+        printf '  - name: "%s"\n    type: wireguard\n    server: %s\n    port: %s\n    ip: %s.%s\n' "$an" "$host" "$PORT" "$NET" "$octet"
+        printf '    private-key: "%s"\n    public-key: "%s"\n    pre-shared-key: "%s"\n' "$priv" "$PUBKEY" "$psk"
+        printf '    mtu: %s\n    udp: true\n    persistent-keepalive: 25\n' "${MTU:-1376}"
+        printf '    remote-dns-resolve: true\n    dns: [%s]\n' "${DNS:-$(server_ip)}"
+        if [ "$mode" = lan ]; then
+            printf '    allowed-ips: [%s]\n' "$(sub_allowed | sed 's/ /, /g')"
+        else
+            printf '    allowed-ips: [0.0.0.0/0, "::/0"]\n'
+        fi
+        printf '    amnezia-wg-option:\n      jc: %s\n      jmin: %s\n      jmax: %s\n      s1: %s\n      s2: %s\n' \
+            "$JC" "$JMIN" "$JMAX" "$S1" "$S2"
+        printf '      h1: "%s"\n      h2: "%s"\n      h3: "%s"\n      h4: "%s"\n' "$H1" "$H2" "$H3" "$H4"
+    fi
+    printf 'proxy-groups:\n  - name: "%s"\n    type: select\n    proxies:\n' "$name"
+    [ "$has_v" = 1 ] && printf '      - "%s"\n' "$vn"
+    [ "$has_a" = 1 ] && printf '      - "%s"\n' "$an"
+    echo "rules:"
+    if [ "$mode" = lan ]; then
+        for c in $(sub_allowed); do printf '  - IP-CIDR,%s,%s,no-resolve\n' "$c" "$name"; done
+        echo "  - MATCH,DIRECT"
+    else
+        printf '  - MATCH,%s\n' "$name"
+    fi
+}
+
+sub_singbox() {
+    tag="$name · VLESS"
+    printf '{"log":{"level":"warn"},'
+    printf '"dns":{"servers":[{"type":"local","tag":"local"},{"type":"tls","tag":"remote","server":"1.1.1.1","detour":"%s"}],"final":"%s"},' \
+        "$(json_esc "$tag")" "$([ "$mode" = lan ] && echo local || echo remote)"
+    printf '"inbounds":[{"type":"tun","tag":"tun-in","address":["172.19.0.1/30"],"auto_route":true,"strict_route":true}],'
+    printf '"outbounds":['; sub_vless_json "$tag"; printf ',{"type":"direct","tag":"direct"}],'
+    printf '"route":{"auto_detect_interface":true,"default_domain_resolver":"local","rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"}'
+    if [ "$mode" = lan ]; then
+        printf ',{"ip_cidr":["%s"],"outbound":"%s"}],"final":"direct"}}\n' "$(sub_allowed | sed 's/ /","/g')" "$(json_esc "$tag")"
+    else
+        printf '],"final":"%s"}}\n' "$(json_esc "$tag")"
+    fi
+}
+
+sub_b64() {
+    if command -v base64 >/dev/null 2>&1; then base64 | tr -d '\n'
+    elif command -v openssl >/dev/null 2>&1; then openssl base64 -A
+    else cat; fi
+}
+
+# Ответ CGI целиком (заголовки + тело). $1 токен, $2 формат.
+cmd_sub() {
+    load_conf
+    line=$(client_by_token "$1")
+    if [ -z "$line" ] || [ "$(echo "$line" | cut -d'|' -f2)" != 1 ] || ! sub_on; then
+        printf 'Status: 404 Not Found\r\nContent-Type: text/plain\r\n\r\nnot found\n'
+        return 0
+    fi
+    id=$(echo "$line" | cut -d'|' -f1); name=$(echo "$line" | cut -d'|' -f3)
+    octet=$(echo "$line" | cut -d'|' -f4); priv=$(echo "$line" | cut -d'|' -f6)
+    psk=$(echo "$line" | cut -d'|' -f7); mode=$(echo "$line" | cut -d'|' -f8)
+    uuid=$(echo "$line" | cut -d'|' -f10)
+    host=$(endpoint_host)
+    has_v=0; vless_on && [ -n "$uuid" ] && [ -n "$VPUB" ] && has_v=1
+    has_a=0; awg_on && [ -n "$priv" ] && [ -n "$PUBKEY" ] && has_a=1
+    f=$2
+    [ "$f" = awg ] && [ "$has_a" != 1 ] && f=uri
+    case "$f" in uri|singbox) [ "$has_v" = 1 ] || f=clash ;; esac
+    log "sub: $id ($name) формат $f${REMOTE_ADDR:+ с $REMOTE_ADDR}"
+    printf 'Cache-Control: no-store\r\nprofile-update-interval: 12\r\n'
+    printf 'profile-title: base64:%s\r\n' "$(printf '%s' "$name" | sub_b64)"
+    case "$f" in
+        clash)   printf 'Content-Type: text/yaml; charset=utf-8\r\n\r\n'; sub_clash ;;
+        singbox) printf 'Content-Type: application/json\r\n\r\n'; sub_singbox ;;
+        detour)
+            printf 'Content-Type: application/json\r\n\r\n{"outbounds":['
+            [ "$has_v" = 1 ] && sub_vless_json "$name · VLESS"
+            [ "$has_v" = 1 ] && [ "$has_a" = 1 ] && printf ','
+            [ "$has_a" = 1 ] && sub_awg_json "$name · AmneziaWG"
+            printf ']}\n' ;;
+        awg)
+            printf 'Content-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename="detour-%s.conf"\r\n\r\n' "$id"
+            client_conf "$id" ;;
+        *)
+            printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+            client_link "$id" | sub_b64; echo ;;
+    esac
+}
+
+client_sub_url() {
+    line=$(client_line "$1")
+    [ -n "$line" ] || return 1
+    t=$(echo "$line" | cut -d'|' -f12)
+    [ -n "$t" ] || return 1
+    printf '%s/cgi-bin/sub?t=%s\n' "$(sub_base)" "$t"
 }
 
 # ---------- команды ----------
@@ -1733,6 +2026,18 @@ cmd_set() {
                     *) uplink_table | awk -v u="$v" '$1 == u { f = 1 } END { exit !f }' || err "канал $v не найден" ;;
                 esac
                 UPLINK=$v ;;
+            sub) case "$v" in 0|1) SUB=$v ;; *) err "sub: 0 или 1" ;; esac ;;
+            sport)
+                case "$v" in ''|*[!0-9]*) err "порт — число" ;; esac
+                [ "$v" -ge 1024 ] && [ "$v" -le 65535 ] || err "порт 1024–65535"
+                [ "$v" = "$VPORT" ] && err "TCP-порт $v занят входом VLESS"
+                if [ "$v" != "$SPORT" ] && tcp_port_busy "$v"; then err "TCP-порт $v уже занят на роутере"; fi
+                SPORT=$v ;;
+            suburl)
+                v=${v%/}
+                [ -z "$v" ] || printf '%s' "$v" | grep -qE '^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$' || \
+                    err "адрес подписок: http(s)://домен[:порт][/путь]"
+                SUBURL=$v ;;
             *) err "неизвестный параметр: $k" ;;
         esac
     done
@@ -1749,6 +2054,7 @@ cmd_client_add() {
     ensure_conf
     name=$(clean_name "$1"); [ -n "$name" ] || err "нужно имя клиента"
     mode=${2:-full}; case "$mode" in full|lan) ;; *) err "режим: full или lan" ;; esac
+    owner=${3:-}; valid_owner "$owner" || err "владелец: логин панели"
     octet=$(free_octet); [ -n "$octet" ] || err "в подсети нет свободных адресов"
     id=$(new_id)
     priv=""; pub=""; psk=""
@@ -1758,8 +2064,9 @@ cmd_client_add() {
         [ -n "$psk" ] || err "не удалось сгенерировать ключи"
     fi
     uuid=$(new_uuid); [ -n "$uuid" ] || err "не удалось получить uuid"
+    token=$(new_token); [ -n "$token" ] || err "не удалось получить токен подписки"
     umask 077
-    printf '%s|1|%s|%s|%s|%s|%s|%s|%s|%s|\n' "$id" "$name" "$octet" "$pub" "$priv" "$psk" "$mode" "$(date +%s)" "$uuid" >> "$CLIENTS"
+    printf '%s|1|%s|%s|%s|%s|%s|%s|%s|%s||%s|%s\n' "$id" "$name" "$octet" "$pub" "$priv" "$psk" "$mode" "$(date +%s)" "$uuid" "$token" "$owner" >> "$CLIENTS"
     do_apply
     log "client-add $id ($name) $NET.$octet $mode"
     printf '{"ok":true,"id":"%s"}\n' "$id"
@@ -1794,6 +2101,9 @@ cmd_client_set() {
                     *) err "маршрут: пусто, direct или vpn:<id>" ;;
                 esac
                 rewrite_client "$id" '$1 == id { $11 = v } { print }' -v v="$v" ;;
+            owner)
+                valid_owner "$v" || err "владелец: логин панели"
+                rewrite_client "$id" '$1 == id { $13 = v } { print }' -v v="$v" ;;
             *) err "неизвестный параметр: $k" ;;
         esac
     done
@@ -1839,6 +2149,8 @@ case "$1" in
             log "tick: sing-box VLESS не запущен при включённом сервере — поднимаю"
             do_apply
         fi
+        # Упал веб-сервер подписок или продлён сертификат — sub_up сверит подпись.
+        sub_on && sub_up
         # settings.json появился позже сервера (свежая установка) или его
         # переписали без нашего интерфейса — без этого клиенты шли бы мимо
         # маршрутов роутера.
@@ -1860,7 +2172,7 @@ case "$1" in
     down)
         # Удаление пакета: снять всё, файрвол чистит вызывающий (на Keenetic
         # своих правил у NDM нет — снимаем сами).
-        load_conf; stats_tick; stats_flush; uplink_down; awg_down; vless_down
+        load_conf; stats_tick; stats_flush; uplink_down; awg_down; vless_down; sub_down
         if [ "$KEENETIC" = 1 ]; then
             fw_remove
             [ -n "$NDMIF" ] && ndm_wg && ndm_cli "system configuration save" >/dev/null 2>&1
@@ -1882,6 +2194,32 @@ case "$1" in
     client-link)
         load_conf
         client_link "$2" || { echo "клиент не найден или VLESS не настроен" >&2; exit 1; } ;;
+    # Ответ CGI подписки (cgi-bin/sub): $2 токен, $3 формат.
+    sub) cmd_sub "$2" "$3" ;;
+    client-sub-url)
+        # Клиенты до версии с подписками получают токен здесь.
+        lock; ensure_conf >/dev/null
+        client_sub_url "$2" || { echo "клиент не найден" >&2; exit 1; } ;;
+    client-sub-reset)
+        # Старая ссылка утекла — новый токен, прежний URL перестаёт отвечать.
+        lock; load_conf
+        [ -n "$(client_line "$2")" ] || err "клиент не найден"
+        rewrite_client "$2" '$1 == id { $12 = t } { print }' -v t="$(new_token)"
+        log "client-sub-reset $2"
+        echo '{"ok":true}' ;;
+    # Админы панели (detour-api): владелец клиента, переименование и удаление логина.
+    client-owner)
+        line=$(client_line "$2"); [ -n "$line" ] || exit 1
+        echo "$line" | cut -d'|' -f13 ;;
+    owner-rename|owner-clear)
+        valid_owner "$2" && [ -n "$2" ] || { echo "нужен логин" >&2; exit 1; }
+        new=""; [ "$1" = owner-rename ] && new=$3
+        valid_owner "$new" || { echo "плохой логин" >&2; exit 1; }
+        [ -s "$CLIENTS" ] || exit 0
+        lock; umask 077
+        awk -F'|' -v OFS='|' -v o="$2" -v n="$new" '$13 == o { $13 = n } { print }' "$CLIENTS" > "$CLIENTS.tmp" && \
+            mv "$CLIENTS.tmp" "$CLIENTS"
+        log "$1 $2${new:+ → $new}" ;;
     regen-obf)
         lock; ensure_conf; gen_obf; save_conf
         # Параметры интерфейса syncconf не меняет надёжно — пересоздаём.
@@ -1890,6 +2228,6 @@ case "$1" in
         log "regen-obf"
         echo '{"ok":true}' ;;
     *)
-        echo "usage: $0 {status|start|stop|down|apply|uplink-marks|set k=v…|client-add <name> [full|lan]|client-set <id> k=v…|client-del <id>|client-conf <id>|client-link <id>|regen-obf}" >&2
+        echo "usage: $0 {status|start|stop|down|apply|uplink-marks|set k=v…|client-add <name> [full|lan]|client-set <id> k=v…|client-del <id>|client-conf <id>|client-link <id>|client-sub-url <id>|client-sub-reset <id>|sub <token> <format>|regen-obf}" >&2
         exit 2 ;;
 esac

@@ -12,7 +12,9 @@ import FormField from "@/components/services/FormField.vue";
 import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
-import { diag, poll, services } from "@/api";
+import { auth, diag, poll, services } from "@/api";
+import type { PanelUser } from "@/api";
+import { useSessionStore } from "@/stores/session";
 import type { ApplyLogResponse, ServerClient, ServerClientMode, ServerStatus } from "@/api";
 import { fmtAgo, fmtBitrate, fmtBytes } from "@/lib/format";
 import { useProfilesStore } from "@/stores/profiles";
@@ -22,6 +24,36 @@ import { useToastStore } from "@/stores/toast";
 const open = defineModel<boolean>("open", { required: true });
 const toast = useToastStore();
 const status = useStatusStore();
+const session = useSessionStore();
+/* Админ «только VPN-сервер»: свои клиенты, без настроек сервера и маршрутов. */
+const limited = computed(() => session.vpnOnly);
+
+/* Главный админ может закрепить клиента за другим логином панели. */
+const users = ref<PanelUser[]>([]);
+const owners = computed(() => users.value.filter((u) => u.user !== session.user));
+async function loadUsers() {
+  if (limited.value || status.isClient) return;
+  try {
+    users.value = (await auth.users()).users;
+  } catch {
+    users.value = [];
+  }
+}
+const newOwner = ref("");
+
+async function setOwner(c: ServerClient, owner: string) {
+  if (owner === (c.owner ?? "")) return;
+  busy.value = `c:${c.id}`;
+  try {
+    await services.serverClientSet(c.id, { owner });
+    toast.ok(owner ? `«${c.name}» теперь у ${owner}` : `«${c.name}» теперь ваш`);
+  } catch (e) {
+    toast.fromError(e, "Не удалось сменить владельца");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
 const profilesStore = useProfilesStore();
 
 const st = ref<ServerStatus | null>(null);
@@ -87,6 +119,7 @@ watch(
   (o) => {
     if (o) {
       void load();
+      void loadUsers();
       startPolling();
     } else {
       stopPolling();
@@ -111,6 +144,10 @@ const anyReady = computed(() => awgReady.value || vlessReady.value);
 const canInstall = computed(() => !!st.value?.can_install || !!vl.value?.can_install);
 const awgOn = computed(() => awgReady.value && (st.value?.awg_enabled ?? true));
 const vlessOn = computed(() => vlessReady.value && !!vl.value?.enabled);
+/* Подписки — только роутер (в приложении поля sub нет). */
+const sb = computed(() => st.value?.sub);
+const subOn = computed(() => !!sb.value?.enabled && !!sb.value?.running);
+const subPlain = computed(() => !!sb.value && !sb.value.https && !/^https:/.test(sb.value.url));
 
 const summary = computed(() => {
   const s = st.value;
@@ -178,6 +215,19 @@ async function toggleServer(on: boolean) {
   }
 }
 
+async function toggleSub(on: boolean) {
+  busy.value = "sub";
+  try {
+    await services.serverSet({ sub: on });
+    toast.ok(on ? "Подписки включены" : "Подписки выключены");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить подписки");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
 async function toggleEntry(kind: "awg" | "vless", on: boolean) {
   busy.value = kind;
   try {
@@ -203,7 +253,7 @@ const entriesHint = computed(() => {
   return `${parts.join(" · ")} · сеть ${s.net}`;
 });
 
-const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "" });
+const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "", sport: "", suburl: "" });
 const showSettings = ref(false);
 watch(showSettings, (v) => {
   if (!v || !st.value) return;
@@ -214,6 +264,8 @@ watch(showSettings, (v) => {
   form.net = st.value.net;
   form.dns = st.value.dns;
   form.mtu = String(st.value.mtu || "");
+  form.sport = String(sb.value?.port || "");
+  form.suburl = sb.value?.url ?? "";
 });
 
 async function saveSettings() {
@@ -229,6 +281,10 @@ async function saveSettings() {
     if (Number(form.vport) && Number(form.vport) !== vl.value.port) patch.vport = Number(form.vport);
     if (form.sni.trim() && form.sni.trim() !== vl.value.sni) patch.sni = form.sni.trim();
   }
+  if (sb.value) {
+    if (Number(form.sport) && Number(form.sport) !== sb.value.port) patch.sport = Number(form.sport);
+    if (form.suburl.trim() !== sb.value.url) patch.suburl = form.suburl.trim();
+  }
   if (!Object.keys(patch).length) {
     showSettings.value = false;
     return;
@@ -239,7 +295,17 @@ async function saveSettings() {
     toast.ok("Настройки сервера сохранены");
     showSettings.value = false;
     if (patch.port || patch.net || patch.endpoint || patch.dns || patch.mtu || patch.vport || patch.sni) {
-      toast.push("Конфиги клиентов изменились — импортируйте их заново", "info", 8000);
+      /* Без HTTPS и своего адреса ссылка подписки собрана из адреса для клиентов. */
+      const subMoved = patch.endpoint !== undefined && !sb.value?.https && !sb.value?.url;
+      toast.push(
+        subOn.value && !subMoved
+          ?"Конфиги клиентов изменились — приложения с подпиской подхватят их сами, остальным импортируйте заново"
+          : "Конфиги клиентов изменились — импортируйте их заново",
+        "info",
+        8000,
+      );
+    } else if (patch.sport !== undefined || patch.suburl !== undefined) {
+      toast.push("Ссылки подписок изменились — отдайте клиентам новые", "info", 8000);
     }
   } catch (e) {
     toast.fromError(e, "Не удалось сохранить настройки");
@@ -320,13 +386,14 @@ async function setUplink(v: string) {
 const newName = ref("");
 const newMode = ref<ServerClientMode>("full");
 
-const sheet = reactive<{ open: boolean; id: string; tab: "conf" | "vless" | "history" }>({
+type SheetTab = "sub" | "conf" | "vless" | "history";
+const sheet = reactive<{ open: boolean; id: string; tab: SheetTab }>({
   open: false,
   id: "",
   tab: "conf",
 });
 const sheetClient = computed(() => clients.value.find((c) => c.id === sheet.id) ?? null);
-function openSheet(c: ServerClient, tab: "conf" | "vless" | "history") {
+function openSheet(c: ServerClient, tab: SheetTab) {
   sheet.id = c.id;
   sheet.tab = tab;
   sheet.open = true;
@@ -340,11 +407,11 @@ async function addClient() {
   }
   busy.value = "add";
   try {
-    const r = await services.serverClientAdd(name, newMode.value);
+    const r = await services.serverClientAdd(name, newMode.value, limited.value ? undefined : newOwner.value);
     newName.value = "";
     await load();
     const c = clients.value.find((x) => x.id === r.id);
-    if (c) openSheet(c, awgOn.value ? "conf" : "vless");
+    if (c) openSheet(c, subOn.value ? "sub" : awgOn.value ? "conf" : "vless");
   } catch (e) {
     toast.fromError(e, "Не удалось добавить клиента");
   } finally {
@@ -383,7 +450,7 @@ async function setMode(c: ServerClient, mode: ServerClientMode) {
 /* На роутере маршрут исполняет механизм «Правила → Устройства» по адресам
    клиента, в приложении — правила движка по логину клиента во входе сервера.
    В обоих «Отдельные маршруты» и обход DPI главнее. */
-const canRoute = computed(() => true);
+const canRoute = computed(() => !limited.value);
 watch(
   () => open.value && canRoute.value,
   (v) => {
@@ -458,7 +525,8 @@ function presence(c: ServerClient): string {
 function hint(c: ServerClient): string {
   const mode = c.mode === "lan" ? "только дом" : "весь трафик";
   const route = c.route ? ` ${routeLabel(c.route)}` : "";
-  return `${c.ip} · ${mode}${route} · ${presence(c)}`;
+  const owner = !limited.value && c.owner ? ` · админ ${c.owner}` : "";
+  return `${c.ip} · ${mode}${route}${owner} · ${presence(c)}`;
 }
 </script>
 
@@ -472,7 +540,11 @@ function hint(c: ServerClient): string {
     :chip="chip"
     :tone="tone"
   >
-    <p v-if="status.isClient" class="lead">
+    <p v-if="limited" class="lead">
+      Заводите клиентов — телефоны, ноутбуки — и отдавайте каждому его ссылку
+      подписки или QR-код. Здесь видны только клиенты, которых завели вы.
+    </p>
+    <p v-else-if="status.isClient" class="lead">
       Подключайте телефон или другой компьютер к этому устройству по AmneziaWG
       или VLESS-Reality — протоколам, которые маскируются от блокировок. Их трафик идёт по тем же
       правилам Detour, что и трафик этого компьютера. Сервер работает, пока
@@ -489,11 +561,15 @@ function hint(c: ServerClient): string {
 
     <template v-if="st">
       <p v-if="st.note" class="note">{{ st.note }}</p>
-      <p v-if="!anyReady && !canInstall" class="note warn">
+      <p v-if="limited && !(st.enabled && st.running)" class="note warn">
+        Сервер сейчас не работает — клиенты не подключатся. Обратитесь к главному
+        администратору.
+      </p>
+      <p v-if="!anyReady && !canInstall && !limited" class="note warn">
         {{ st.reason || vl?.reason || "На этом роутере сервер недоступен." }}
       </p>
 
-      <template v-else-if="!anyReady">
+      <template v-else-if="!anyReady && !limited">
         <p class="note">
           Для сервера нужны пакеты из фида прошивки:
           <template v-if="st.can_install">AmneziaWG (модуль ядра, а если его нет — userspace-сборка из фида Detour)</template><template
@@ -511,6 +587,7 @@ function hint(c: ServerClient): string {
 
       <template v-else>
         <SwitchToggle
+          v-if="!limited"
           :model-value="st.enabled"
           label="Сервер включён"
           :hint="entriesHint"
@@ -518,7 +595,7 @@ function hint(c: ServerClient): string {
           @update:model-value="toggleServer"
         />
 
-        <div v-if="vl && st.configured" class="entries">
+        <div v-if="vl && st.configured && !limited" class="entries">
           <SwitchToggle
             :model-value="awgOn"
             label="AmneziaWG"
@@ -535,18 +612,37 @@ function hint(c: ServerClient): string {
             :busy="busy === 'vless'"
             @update:model-value="toggleEntry('vless', $event)"
           />
+          <SwitchToggle
+            v-if="sb"
+            :model-value="sb.enabled"
+            label="Подписки"
+            :hint="`${sb.url ? `через ${sb.url}` : `TCP ${sb.port} · ${sb.https ? 'HTTPS' : 'HTTP'}`} · все протоколы клиента одной ссылкой`"
+            :busy="busy === 'sub'"
+            @update:model-value="toggleSub"
+          />
           <div v-if="(!awgReady && st.can_install) || (!vlessReady && vl.can_install)" class="actions">
             <UiButton :busy="busy === 'install'" @click="install">Установить недостающее</UiButton>
           </div>
           <pre v-if="installLog" class="log">{{ installLog }}</pre>
         </div>
 
+        <template v-if="!limited">
         <p v-if="st.enabled && !st.running && status.isClient && !st.engine_running" class="note warn">
           Detour не подключён — сервер поднимется вместе с подключением.
         </p>
         <p v-else-if="st.enabled && !st.running" class="note bad">
           Сервер включён, но не поднялся. Подробности — в журнале<template v-if="status.isClient">
           службы (awgsrv.log)</template><template v-else-if="st.platform === 'keenetic'"> /opt/var/log/detour-server.log</template><template v-else> /var/log/detour-server.log</template>.
+        </p>
+        <p v-if="st.enabled && sb?.enabled && !sb.running" class="note bad">
+          Веб-сервер подписок не запустился на порту {{ sb.port }} — подробности в журнале<template
+            v-if="st.platform === 'keenetic'"
+          > /opt/var/log/detour-server.log</template><template v-else> /var/log/detour-server.log</template>.
+        </p>
+        <p v-else-if="st.enabled && subOn && subPlain" class="note warn">
+          Подписки отдаются по HTTP: ключи клиентов видны по пути. Выпустите
+          сертификат панели («Сервисы → Сертификат») — подписки перейдут на HTTPS
+          на том же порту.
         </p>
         <p v-if="status.isClient && st.wan_private && !st.endpoint" class="note warn">
           Компьютер в локальной сети ({{ st.wan_ip }}). Из этой же сети к нему
@@ -568,8 +664,9 @@ function hint(c: ServerClient): string {
             v-if="!st.endpoint"
           > ({{ status.isClient ? "адрес компьютера в локальной сети" : "внешний адрес роутера; если он меняется — укажите домен в настройках" }})</template>.
         </p>
+        </template>
 
-        <div v-if="showUplink && st.enabled" class="uplink">
+        <div v-if="showUplink && st.enabled && !limited" class="uplink">
           <h3 class="sub">Канал выхода клиентов</h3>
           <SegmentedControl
             :model-value="st.uplink ?? 'auto'"
@@ -654,8 +751,20 @@ function hint(c: ServerClient): string {
                 </option>
               </select>
             </label>
+            <label v-if="!limited && owners.length" class="route">
+              <span>Админ</span>
+              <select
+                :value="c.owner ?? ''"
+                :disabled="busy === `c:${c.id}`"
+                aria-label="Чей это клиент"
+                @change="setOwner(c, ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">Вы ({{ session.user }})</option>
+                <option v-for="u in owners" :key="u.user" :value="u.user">{{ u.user }}</option>
+              </select>
+            </label>
             <div class="row-actions">
-              <UiButton @click="openSheet(c, vlessOn && !awgOn ? 'vless' : 'conf')">Подключение и QR</UiButton>
+              <UiButton @click="openSheet(c, subOn ? 'sub' : vlessOn && !awgOn ? 'vless' : 'conf')">Подключение и QR</UiButton>
               <UiButton @click="openSheet(c, 'history')">История</UiButton>
               <UiButton
                 :busy="busy === `c:${c.id}`"
@@ -684,6 +793,12 @@ function hint(c: ServerClient): string {
               />
             </FormField>
             <SegmentedControl v-model="newMode" label="Что пускать через сервер" :options="MODE_OPTIONS" />
+            <FormField v-if="!limited && owners.length" label="Чей клиент" hint="Админ с доступом только к серверу видит лишь своих клиентов">
+              <select v-model="newOwner">
+                <option value="">Ваш ({{ session.user }})</option>
+                <option v-for="u in owners" :key="u.user" :value="u.user">{{ u.user }}</option>
+              </select>
+            </FormField>
             <div class="actions">
               <UiButton variant="primary" :busy="busy === 'add'" @click="addClient">
                 Добавить клиента
@@ -691,7 +806,7 @@ function hint(c: ServerClient): string {
             </div>
           </div>
 
-          <details class="settings" :open="showSettings" @toggle="showSettings = ($event.target as HTMLDetailsElement).open">
+          <details v-if="!limited" class="settings" :open="showSettings" @toggle="showSettings = ($event.target as HTMLDetailsElement).open">
             <summary>Настройки сервера</summary>
             <div class="settings-body">
               <FormField
@@ -712,6 +827,17 @@ function hint(c: ServerClient): string {
                   hint="Зарубежный сайт с TLS 1.3, доступный из вашей сети; сервер выдаёт себя за него"
                 >
                   <input v-model="form.sni" type="text" placeholder="www.microsoft.com" />
+                </FormField>
+              </template>
+              <template v-if="sb">
+                <FormField label="TCP-порт подписок" hint="Открывается с WAN, пока подписки включены">
+                  <input v-model="form.sport" type="number" min="1024" max="65535" />
+                </FormField>
+                <FormField
+                  label="Адрес подписок"
+                  :hint="`Пусто — ${sb.base}. Свой реверс-прокси с HTTPS — например https://vpn.example.com:8443`"
+                >
+                  <input v-model="form.suburl" type="text" placeholder="авто" />
                 </FormField>
               </template>
               <FormField label="Подсеть клиентов" hint="Частная /24, не пересекающаяся с домашней сетью">
@@ -754,6 +880,8 @@ function hint(c: ServerClient): string {
     :tab="sheet.tab"
     :awg="awgOn"
     :vless="vlessOn"
+    :sub="subOn"
+    :sub-plain="subPlain"
     :traffic="st?.awg_traffic"
     @close="sheet.open = false"
   />

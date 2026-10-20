@@ -14,6 +14,7 @@ import ServerPanel from "@/components/services/ServerPanel.vue";
 import CertSheet from "@/components/services/CertSheet.vue";
 import KeenHttpsSheet from "@/components/services/KeenHttpsSheet.vue";
 import PasswordSheet from "@/components/services/PasswordSheet.vue";
+import PanelUsers from "@/components/services/PanelUsers.vue";
 import UninstallSheet from "@/components/services/UninstallSheet.vue";
 import LogPane from "@/components/journal/LogPane.vue";
 import FormField from "@/components/services/FormField.vue";
@@ -1458,7 +1459,7 @@ onBeforeUnmount(() => unregister?.());
       id="svc-account"
       v-model:open="open.account"
       icon="key"
-      title="Вход в панель"
+      title="Вход в панель и админы"
       :summary="session.user ? `Вы вошли как ${session.user}` : 'Учётная запись панели'"
     >
       <p class="lead">
@@ -1471,6 +1472,8 @@ onBeforeUnmount(() => unregister?.());
           Сменить логин или пароль
         </UiButton>
       </div>
+
+      <PanelUsers v-if="open.account" />
     </ServicePanel>
 
     <!-- ===== остановка и удаление ===== -->

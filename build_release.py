@@ -186,6 +186,7 @@ PANEL_FILES = [
     (("router_files", "detour-console"), "usr/sbin/detour-console", 0o755),
     # Свой VPN-сервер (AmneziaWG на kmod из фида прошивки) с маршрутами роутера.
     (("router_files", "detour-server"), "usr/sbin/detour-server", 0o755),
+    (("router_files", "detour-sub"), "usr/share/detour/sub-www/cgi-bin/sub", 0o755),
     (("router_files", "detour-server.initd"), "etc/init.d/detour-server", 0o755),
     # Набор singbox_vpnservers: серверы всех профилей мимо перехвата.
     (("router_files", "detour-vpnservers"), "usr/sbin/detour-vpnservers", 0o755),

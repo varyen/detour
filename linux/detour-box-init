@@ -13,6 +13,7 @@
 # Переменные окружения (их задаёт install.sh):
 #   DETOUR_SERVER_PORT   UDP-порт VPN-сервера — тот, что опубликован на хосте
 #   DETOUR_ENDPOINT      внешний адрес хоста (IP или домен) для конфигов клиентов
+#   DETOUR_SUB_PORT      TCP-порт подписок клиентов, опубликованный на хосте
 #   DETOUR_PANEL_WAN=1   пускать в панель всех; иначе — только сам хост
 
 ip4=$(ip -4 -o addr show dev eth0 2>/dev/null | awk '{ print $4; exit }')
@@ -72,6 +73,7 @@ mkdir -p /etc/detour/server
     [ -n "${DETOUR_SERVER_PORT:-}" ] && echo "DEF_PORT=$DETOUR_SERVER_PORT"
     [ -n "${DETOUR_VLESS_PORT:-}" ] && echo "DEF_VPORT=$DETOUR_VLESS_PORT"
     [ -n "${DETOUR_ENDPOINT:-}" ] && echo "DEF_ENDPOINT=$DETOUR_ENDPOINT"
+    [ -n "${DETOUR_SUB_PORT:-}" ] && echo "DEF_SPORT=$DETOUR_SUB_PORT"
 } > /etc/detour/server/defaults
 
 exec /sbin/init

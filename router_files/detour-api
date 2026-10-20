@@ -2439,23 +2439,63 @@ get_session_token() {
         grep '^detour_session=' | head -1 | cut -d'=' -f2
 }
 
+# Учётки панели: строка AUTH_FILE — `логин:хэш[:роль]`. Роль пустая или admin —
+# вся панель; vpn — только свой VPN-сервер и только свои клиенты (ROLE_GATE ниже).
+user_role() {
+    [ -n "$1" ] && [ -f "$AUTH_FILE" ] || return 0
+    awk -F: -v u="$1" '$1==u { print ($3 == "" ? "admin" : $3); exit }' "$AUTH_FILE"
+}
+
+SESSION_USER=""
+SESSION_ROLE=""
 check_auth() {
     local token=$(get_session_token)
     [ -z "$token" ] && return 1
     echo "$token" | grep -qE '^[a-f0-9]{64}$' || return 1
     [ -f "$SESSION_DIR/$token" ] || return 1
+    SESSION_USER=$(cat "$SESSION_DIR/$token" 2>/dev/null)
+    SESSION_ROLE=$(user_role "$SESSION_USER")
+    # Логин удалили или переименовали — его сессии больше не действуют.
+    if [ -z "$SESSION_ROLE" ]; then
+        rm -f "$SESSION_DIR/$token"
+        return 1
+    fi
     touch "$SESSION_DIR/$token"
     return 0
+}
+
+# Сессии одного логина (файл сессии хранит логин). $2 — токен, который оставить.
+drop_user_sessions() {
+    for _s in "$SESSION_DIR"/*; do
+        [ -f "$_s" ] || continue
+        [ -n "$2" ] && [ "$_s" = "$SESSION_DIR/$2" ] && continue
+        [ "$(cat "$_s" 2>/dev/null)" = "$1" ] && rm -f "$_s"
+    done
+}
+
+# Переписать AUTH_FILE awk-программой атомарно (права 0600).
+auth_rewrite() {
+    local tmp
+    tmp=$(mktemp) || return 1
+    awk -F: -v OFS=: "$@" "$AUTH_FILE" > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 0600 "$tmp"
+    mv "$tmp" "$AUTH_FILE"
+}
+
+admin_count() { awk -F: '$1 != "" && ($3 == "" || $3 == "admin")' "$AUTH_FILE" 2>/dev/null | wc -l; }
+
+valid_login() {
+    case "$1" in ''|*[!a-zA-Z0-9._-]*) return 1 ;; esac
+    [ "${#1}" -ge 2 ] && [ "${#1}" -le 32 ]
 }
 
 verify_password() {
     [ ! -f "$AUTH_FILE" ] && return 1
     # EXACT username match (awk field compare, not a grep regex) — the supplied
     # username is attacker-controlled and must never be interpreted as a pattern.
-    # Rejoin fields 2..NF in case a hash ever contains ':' (crypt $6$ doesn't, but
-    # be safe), matching the old `cut -f2-` semantics.
+    # Поле 2 — хэш crypt $6$ (двоеточий в нём нет), поле 3 — роль.
     local stored_hash
-    stored_hash=$(awk -F: -v u="$1" '$1==u{h=$2; for(i=3;i<=NF;i++) h=h":"$i; print h; exit}' "$AUTH_FILE")
+    stored_hash=$(awk -F: -v u="$1" '$1==u{print $2; exit}' "$AUTH_FILE")
     [ -z "$stored_hash" ] && return 1
     local salt=$(echo "$stored_hash" | cut -d'$' -f3)
     local computed=$(printf '%s' "$2" | openssl passwd -6 -salt "$salt" -stdin 2>/dev/null)
@@ -2818,6 +2858,22 @@ if ! check_auth; then
     exit 0
 fi
 
+# ==================== ROLE GATE ====================
+# Админ «только VPN-сервер» не видит ничего, кроме своих клиентов сервера:
+# остальные действия закрыты здесь, а не в интерфейсе.
+if [ "$SESSION_ROLE" = vpn ]; then
+    case "$ACTION" in
+        check_auth|panel_change_password|server_status|server_sessions|server_client_add|server_client_set|\
+        server_client_del|server_client_conf|server_client_link|server_client_sub|server_client_sub_reset) ;;
+        *)
+            echo "Status: 403 Forbidden"
+            reply_json
+            echo ""
+            printf '{"ok":false,"error":"Недоступно для этой учётной записи"}'
+            exit 0 ;;
+    esac
+fi
+
 # ==================== AUTHENTICATED HEADERS ====================
 reply_json
 echo ""
@@ -2860,9 +2916,66 @@ case "$ACTION" in
 
 check_auth)
     # Reply with the active username so the panel can prefill the change-account form.
-    TOKEN=$(get_session_token); SESSION_USER=""
-    [ -n "$TOKEN" ] && [ -f "$SESSION_DIR/$TOKEN" ] && SESSION_USER=$(cat "$SESSION_DIR/$TOKEN")
-    printf '{"ok":true,"user":"%s"}' "$SESSION_USER"
+    printf '{"ok":true,"user":"%s","role":"%s"}' "$SESSION_USER" "$SESSION_ROLE"
+    ;;
+
+# ==================== АДМИНЫ ПАНЕЛИ ====================
+# Только для роли admin (vpn сюда не пускает ROLE_GATE). Пароли — как при
+# первой настройке: crypt $6$, не короче 8 символов.
+panel_users|panel_user_add|panel_user_set|panel_user_del)
+    if [ "$ACTION" = panel_users ]; then
+        SRV_CL="$DETOUR_DIR/server/clients.list"
+        awk -F: -v cl="$SRV_CL" '
+            BEGIN { FS = "|"; while ((getline l < cl) > 0) { split(l, f, "|"); c[f[13]]++ }; FS = ":" }
+            $1 != "" { printf "%s{\"user\":\"%s\",\"role\":\"%s\",\"clients\":%d}", (n++ ? "," : ""), $1, ($3 == "" ? "admin" : $3), c[$1] + 0 }
+        ' "$AUTH_FILE" | { printf '{"ok":true,"me":"%s","users":[' "$SESSION_USER"; cat; printf ']}'; }
+        exit 0
+    fi
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    PU_USER=$(printf '%s' "$POST_DATA" | sed -n 's/.*"user"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PU_PASS=$(printf '%s' "$POST_DATA" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    PU_ROLE=$(printf '%s' "$POST_DATA" | sed -n 's/.*"role"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    valid_login "$PU_USER" || { json_err "логин: 2–32 символа a-z, A-Z, 0-9, ._-"; exit 0; }
+    case "$PU_ROLE" in ''|admin|vpn) ;; *) json_err "роль: admin или vpn"; exit 0 ;; esac
+    if [ -n "$PU_PASS" ] && [ "${#PU_PASS}" -lt 8 ]; then json_err "пароль не короче 8 символов"; exit 0; fi
+    PU_CUR=$(user_role "$PU_USER")
+    PU_SRV="${OPT}/usr/sbin/detour-server"
+    [ "$PLATFORM" = keenetic ] && PU_SRV="$OPT/sbin/detour-server"
+    case "$ACTION" in
+        panel_user_add)
+            [ -z "$PU_CUR" ] || { json_err "такой логин уже есть"; exit 0; }
+            [ -n "$PU_PASS" ] || { json_err "нужен пароль"; exit 0; }
+            PU_HASH=$(printf '%s' "$PU_PASS" | openssl passwd -6 -stdin 2>/dev/null)
+            [ -n "$PU_HASH" ] || { json_err "openssl hash failed"; exit 0; }
+            auth_rewrite -v u="$PU_USER" -v h="$PU_HASH" -v r="${PU_ROLE:-vpn}" '{ print } END { print u, h, r }' || \
+                { json_err "не удалось записать учётки"; exit 0; }
+            json_ok ;;
+        panel_user_set)
+            [ -n "$PU_CUR" ] || { json_err "логин не найден"; exit 0; }
+            if [ -n "$PU_ROLE" ] && [ "$PU_ROLE" != "$PU_CUR" ] && [ "$PU_CUR" = admin ] && [ "$(admin_count)" -le 1 ]; then
+                json_err "это последний админ с полным доступом"; exit 0
+            fi
+            [ "$PU_USER" = "$SESSION_USER" ] && [ "$PU_ROLE" = vpn ] && { json_err "свою роль понизить нельзя"; exit 0; }
+            PU_HASH=""
+            if [ -n "$PU_PASS" ]; then
+                PU_HASH=$(printf '%s' "$PU_PASS" | openssl passwd -6 -stdin 2>/dev/null)
+                [ -n "$PU_HASH" ] || { json_err "openssl hash failed"; exit 0; }
+            fi
+            auth_rewrite -v u="$PU_USER" -v h="$PU_HASH" -v r="$PU_ROLE" \
+                '$1 == u { if (h != "") $2 = h; if (r != "") $3 = r } { print }' || { json_err "не удалось записать учётки"; exit 0; }
+            # Новый пароль или роль — открытые сессии этого логина закрываются.
+            drop_user_sessions "$PU_USER" "$(get_session_token)"
+            json_ok ;;
+        panel_user_del)
+            [ -n "$PU_CUR" ] || { json_err "логин не найден"; exit 0; }
+            [ "$PU_USER" != "$SESSION_USER" ] || { json_err "себя удалить нельзя"; exit 0; }
+            if [ "$PU_CUR" = admin ] && [ "$(admin_count)" -le 1 ]; then json_err "это последний админ с полным доступом"; exit 0; fi
+            auth_rewrite -v u="$PU_USER" '$1 != u { print }' || { json_err "не удалось записать учётки"; exit 0; }
+            drop_user_sessions "$PU_USER"
+            # Клиенты удалённого админа остаются работать и переходят главному.
+            [ -x "$PU_SRV" ] && "$PU_SRV" owner-clear "$PU_USER" >/dev/null 2>&1
+            json_ok ;;
+    esac
     ;;
 
 status)
@@ -5107,7 +5220,7 @@ subscription_fetch)
     if ! curl -sS -L -D "$SUB_TMP/hdrs" -o "$SUB_TMP/body" \
             --max-time 20 \
             -A "$SUB_UA" \
-            -H "Accept: */*" \
+            -H "Accept: */*, application/vnd.detour+json" \
             "$SUB_URL" 2>"$SUB_TMP/err"; then
         SUB_ERR=$(head -3 "$SUB_TMP/err" 2>/dev/null | json_escape)
         rm -rf "$SUB_TMP"
@@ -5342,10 +5455,7 @@ panel_change_password)
     NEW_USER=$(printf '%s' "$POST_DATA" | sed -n 's/.*"new_user"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     if [ -z "$NEW_PW" ]; then json_err "new_password required"; exit 0; fi
     if [ "${#NEW_PW}" -lt 8 ]; then json_err "password must be at least 8 chars"; exit 0; fi
-    # Identify current user from the active session cookie.
-    SESSION_USER=""
     TOKEN=$(get_session_token)
-    [ -n "$TOKEN" ] && [ -f "$SESSION_DIR/$TOKEN" ] && SESSION_USER=$(cat "$SESSION_DIR/$TOKEN")
     if [ -z "$SESSION_USER" ]; then json_err "no active session"; exit 0; fi
     if ! verify_password "$SESSION_USER" "$OLD_PW"; then
         sleep 1
@@ -5361,25 +5471,25 @@ panel_change_password)
         if [ "${#NEW_USER}" -lt 2 ] || [ "${#NEW_USER}" -gt 32 ]; then
             json_err "username must be 2..32 chars"; exit 0
         fi
+        [ -z "$(user_role "$NEW_USER")" ] || { json_err "такой логин уже есть"; exit 0; }
         EFFECTIVE_USER="$NEW_USER"
     fi
     NEW_HASH=$(printf '%s' "$NEW_PW" | openssl passwd -6 -stdin 2>/dev/null)
     if [ -z "$NEW_HASH" ]; then json_err "openssl hash failed"; exit 0; fi
-    # Atomic replacement to avoid windowed half-write on the auth file.
-    TMP_AUTH=$(mktemp)
-    printf '%s:%s\n' "$EFFECTIVE_USER" "$NEW_HASH" > "$TMP_AUTH"
-    chmod 0600 "$TMP_AUTH"
-    mv "$TMP_AUTH" "$AUTH_FILE"
-    # If username changed, drop ALL sessions (including current) — operator
-    # must log in with the new credentials. Otherwise just invalidate peers.
+    # Меняется только своя строка: остальные админы и роль остаются как были.
+    auth_rewrite -v u="$SESSION_USER" -v n="$EFFECTIVE_USER" -v h="$NEW_HASH" \
+        '$1 == u { $1 = n; $2 = h } { print }' || { json_err "не удалось записать учётки"; exit 0; }
+    # Логин сменился — все его сессии, включая текущую, закрываются (войти
+    # заново), клиенты сервера переезжают на новый логин. Иначе — только чужие
+    # сессии этого же логина.
     if [ "$EFFECTIVE_USER" != "$SESSION_USER" ]; then
-        rm -f "$SESSION_DIR"/* 2>/dev/null
+        drop_user_sessions "$SESSION_USER"
+        PC_SRV="${OPT}/usr/sbin/detour-server"
+        [ "$PLATFORM" = keenetic ] && PC_SRV="$OPT/sbin/detour-server"
+        [ -x "$PC_SRV" ] && "$PC_SRV" owner-rename "$SESSION_USER" "$EFFECTIVE_USER" >/dev/null 2>&1
         printf '{"ok":true,"user_changed":true}'
     else
-        for sess in "$SESSION_DIR"/*; do
-            [ "$sess" = "$SESSION_DIR/$TOKEN" ] && continue
-            rm -f "$sess" 2>/dev/null
-        done
+        drop_user_sessions "$SESSION_USER" "$TOKEN"
         json_ok
     fi
     ;;
@@ -5624,14 +5734,20 @@ console_status|console_start|console_stop|console_install)
 # Обёртка над detour-server: вся валидация и запись конфига — в нём. Значения
 # уходят argv'ом, id проверяется по charset. Конфиг клиента несёт приватный
 # ключ — только POST, чтобы не осесть в логах веб-сервера и кэше.
-server_status|server_sessions|server_install|server_set|server_client_add|server_client_set|server_client_del|server_client_conf|server_client_link|server_regen)
+server_status|server_sessions|server_install|server_set|server_client_add|server_client_set|server_client_del|server_client_conf|server_client_link|server_client_sub|server_client_sub_reset|server_regen)
     SERVER_BIN="${OPT}/usr/sbin/detour-server"
     [ "$PLATFORM" = keenetic ] && SERVER_BIN="$OPT/sbin/detour-server"
     [ -x "$SERVER_BIN" ] || { json_err "detour-server не установлен"; exit 0; }
-    if [ "$ACTION" = server_status ]; then "$SERVER_BIN" status; exit 0; fi
+    # Роль vpn: только клиенты, которых этот логин завёл сам.
+    SRV_OWN=""; [ "$SESSION_ROLE" = vpn ] && SRV_OWN=$SESSION_USER
+    srv_mine() { [ -z "$SRV_OWN" ] || [ "$("$SERVER_BIN" client-owner "$1" 2>/dev/null)" = "$SRV_OWN" ]; }
+    if [ "$ACTION" = server_status ]; then DETOUR_SRV_OWNER="$SRV_OWN" "$SERVER_BIN" status; exit 0; fi
     if [ "$ACTION" = server_sessions ]; then
         SRV_ID=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]id=\([^&]*\).*/\1/p' | head -1)
         case "$SRV_ID" in *[!a-f0-9]*) json_err "bad id"; exit 0 ;; esac
+        if [ -n "$SRV_OWN" ]; then
+            [ -n "$SRV_ID" ] && srv_mine "$SRV_ID" || { json_err "клиент не найден"; exit 0; }
+        fi
         "$SERVER_BIN" sessions "$SRV_ID"; exit 0
     fi
     if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
@@ -5654,8 +5770,9 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
         [ -n "$(engine_pid)" ] && $SINGBOX_INITD restart >/dev/null 2>&1
     }
     SRV_ID=$(srv_str id)
-    case "$ACTION" in server_client_set|server_client_del|server_client_conf|server_client_link)
-        case "$SRV_ID" in ''|*[!a-f0-9]*) json_err "bad id"; exit 0 ;; esac ;;
+    case "$ACTION" in server_client_set|server_client_del|server_client_conf|server_client_link|server_client_sub|server_client_sub_reset)
+        case "$SRV_ID" in ''|*[!a-f0-9]*) json_err "bad id"; exit 0 ;; esac
+        srv_mine "$SRV_ID" || { json_err "клиент не найден"; exit 0; } ;;
     esac
     case "$ACTION" in
         server_install)
@@ -5675,6 +5792,9 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             printf '%s' "$POST_DATA" | grep -q '"endpoint"' && set -- "$@" "endpoint=$(srv_str endpoint)"
             printf '%s' "$POST_DATA" | grep -q '"dns"' && set -- "$@" "dns=$(srv_str dns)"
             v=$(srv_str uplink);   [ -n "$v" ] && set -- "$@" "uplink=$v"
+            v=$(srv_bool sub);     [ -n "$v" ] && set -- "$@" "sub=$v"
+            v=$(srv_num sport);    [ -n "$v" ] && set -- "$@" "sport=$v"
+            printf '%s' "$POST_DATA" | grep -q '"suburl"' && set -- "$@" "suburl=$(srv_str suburl)"
             [ $# -gt 0 ] || { json_err "нечего менять"; exit 0; }
             # Канал выхода и вкл/выкл сервера меняют входы sing-box клиентов.
             SRV_MK0=$(server_uplink_marks)
@@ -5682,7 +5802,13 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             case "$SRV_OUT" in *'"ok":true'*) [ "$(server_uplink_marks)" != "$SRV_MK0" ] && srv_rebuild ;; esac
             printf '%s\n' "$SRV_OUT" ;;
         server_client_add)
-            SRV_OUT=$("$SERVER_BIN" client-add "$(srv_str name)" "$(srv_str mode)")
+            # Главный админ может сразу отдать клиента другому логину.
+            SRV_OWNER=$SRV_OWN
+            if [ -z "$SRV_OWN" ]; then
+                SRV_OWNER=$(srv_str owner)
+                [ -z "$SRV_OWNER" ] || [ -n "$(user_role "$SRV_OWNER")" ] || { json_err "нет такого логина"; exit 0; }
+            fi
+            SRV_OUT=$("$SERVER_BIN" client-add "$(srv_str name)" "$(srv_str mode)" "$SRV_OWNER")
             case "$SRV_OUT" in *'"ok":true'*) [ -n "$(server_uplink_marks)" ] && srv_rebuild ;; esac
             printf '%s\n' "$SRV_OUT" ;;
         server_client_set)
@@ -5691,8 +5817,17 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             v=$(srv_str mode);     [ -n "$v" ] && set -- "$@" "mode=$v"
             v=$(srv_bool enabled); [ -n "$v" ] && set -- "$@" "enabled=$v"
             SRV_ROUTE=0
-            if printf '%s' "$POST_DATA" | grep -q '"route"'; then
-                set -- "$@" "route=$(srv_str route)"; SRV_ROUTE=1
+            # Маршрут ссылается на профили роутера, владелец — на логины: это
+            # решает только главный админ.
+            if [ -z "$SRV_OWN" ]; then
+                if printf '%s' "$POST_DATA" | grep -q '"route"'; then
+                    set -- "$@" "route=$(srv_str route)"; SRV_ROUTE=1
+                fi
+                if printf '%s' "$POST_DATA" | grep -q '"owner"'; then
+                    v=$(srv_str owner)
+                    [ -z "$v" ] || [ -n "$(user_role "$v")" ] || { json_err "нет такого логина"; exit 0; }
+                    set -- "$@" "owner=$v"
+                fi
             fi
             # Выключенный клиент выпадает из devices.map — тоже пересборка.
             [ -n "$(srv_bool enabled)" ] && srv_has_route "$SRV_ID" && SRV_ROUTE=1
@@ -5712,6 +5847,11 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             SRV_LINK=$("$SERVER_BIN" client-link "$SRV_ID" 2>/dev/null) || { json_err "у клиента нет VLESS или вход не настроен"; exit 0; }
             # Имя в ссылке percent-encoded — кавычек и обратных слэшей там нет.
             printf '{"ok":true,"link":"%s"}\n' "$(printf '%s' "$SRV_LINK" | tr -d '\n"\\')" ;;
+        server_client_sub)
+            SRV_URL=$("$SERVER_BIN" client-sub-url "$SRV_ID" 2>/dev/null) || { json_err "клиент не найден"; exit 0; }
+            printf '{"ok":true,"url":"%s"}\n' "$(printf '%s' "$SRV_URL" | tr -d '\n"\\')" ;;
+        server_client_sub_reset)
+            "$SERVER_BIN" client-sub-reset "$SRV_ID" ;;
         server_regen)
             "$SERVER_BIN" regen-obf ;;
     esac

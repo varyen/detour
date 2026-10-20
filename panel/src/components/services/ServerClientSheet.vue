@@ -1,6 +1,6 @@
 <script setup lang="ts">
-/* Клиент VPN-сервера: конфиг AmneziaWG (QR + файл), ссылка VLESS-Reality
-   (QR + текст) и история подключений. Конфиг и ссылка — ключи клиента, поэтому
+/* Клиент VPN-сервера: подписка со всеми его протоколами, конфиг AmneziaWG
+   (QR + файл), ссылка VLESS-Reality (QR + текст) и история подключений. Конфиг и ссылка — ключи клиента, поэтому
    запрашиваются только при открытии шторки и не задерживаются после закрытия. */
 import { computed, ref, watch } from "vue";
 import qrcode from "qrcode-generator";
@@ -12,7 +12,7 @@ import type { ServerClient, ServerSession } from "@/api";
 import { fmtBytes } from "@/lib/format";
 import { useToastStore } from "@/stores/toast";
 
-type Tab = "conf" | "vless" | "history";
+type Tab = "sub" | "conf" | "vless" | "history";
 
 const props = defineProps<{
   open: boolean;
@@ -21,6 +21,10 @@ const props = defineProps<{
   /** Какие входы сейчас включены на сервере — вкладки только для них. */
   awg: boolean;
   vless: boolean;
+  /** Подписки включены и их веб-сервер работает. */
+  sub?: boolean;
+  /** Подписка отдаётся по HTTP — ключи видны по пути. */
+  subPlain?: boolean;
   /** false — объём трафика клиента роутер не видит (встроенный WireGuard KeeneticOS). */
   traffic?: boolean;
 }>();
@@ -30,6 +34,8 @@ const toast = useToastStore();
 const view = ref<Tab>("conf");
 const conf = ref("");
 const link = ref("");
+const subUrl = ref("");
+const confirmReset = ref(false);
 const loading = ref(false);
 const error = ref("");
 const sessions = ref<ServerSession[]>([]);
@@ -43,9 +49,11 @@ function qrOf(text: string): string {
 }
 const qrSvg = computed(() => qrOf(conf.value));
 const linkQr = computed(() => qrOf(link.value));
+const subQr = computed(() => qrOf(subUrl.value));
 
 const tabs = computed(() => {
   const t: { value: Tab; label: string }[] = [];
+  if (props.sub) t.push({ value: "sub", label: "Подписка" });
   if (props.awg && props.client?.awg !== false) t.push({ value: "conf", label: "AmneziaWG" });
   if (props.vless && props.client?.vless) t.push({ value: "vless", label: "VLESS" });
   t.push({ value: "history", label: "История" });
@@ -89,6 +97,31 @@ async function loadLink() {
   }
 }
 
+async function loadSub() {
+  if (!props.client) return;
+  loading.value = true;
+  error.value = "";
+  try {
+    subUrl.value = (await services.serverClientSub(props.client.id)).url;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Не удалось получить ссылку подписки";
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function resetSub() {
+  if (!props.client) return;
+  confirmReset.value = false;
+  try {
+    await services.serverClientSubReset(props.client.id);
+    toast.ok("Старая ссылка больше не работает — отдайте клиенту новую");
+    await loadSub();
+  } catch (e) {
+    toast.fromError(e, "Не удалось сменить ссылку");
+  }
+}
+
 async function loadSessions() {
   if (!props.client) return;
   loading.value = true;
@@ -103,6 +136,7 @@ async function loadSessions() {
 }
 
 function load() {
+  if (view.value === "sub" && !subUrl.value) void loadSub();
   if (view.value === "conf" && !conf.value) void loadConf();
   if (view.value === "vless" && !link.value) void loadLink();
   if (view.value === "history") void loadSessions();
@@ -118,6 +152,8 @@ watch(
     } else {
       conf.value = "";
       link.value = "";
+      subUrl.value = "";
+      confirmReset.value = false;
       sessions.value = [];
       error.value = "";
     }
@@ -177,7 +213,47 @@ function host(remote: string): string {
 
       <p v-if="error" class="note bad">{{ error }}</p>
 
-      <template v-if="view === 'conf'">
+      <template v-if="view === 'sub'">
+        <p class="lead">
+          Одна ссылка со всеми протоколами клиента — добавьте её как подписку
+          в Clash Verge, FlClash, Hiddify, v2rayNG, v2rayN, Streisand или в
+          Detour. Приложение само заберёт настройки и обновит их, если на
+          сервере что-то поменяется. Ссылка даёт доступ в домашнюю сеть — не
+          пересылайте её чужим.
+        </p>
+        <p class="note faint">
+          AmneziaWG получат Clash-совместимые приложения (mihomo) и Detour;
+          v2rayNG, v2rayN, Hiddify и sing-box получат VLESS — AmneziaWG они не
+          умеют.
+        </p>
+        <p v-if="props.subPlain" class="note warn">
+          Подписка идёт по HTTP: ключи клиента видны по пути. Выпустите
+          сертификат панели («Сервисы → Сертификат») — подписки перейдут на HTTPS.
+        </p>
+        <p v-if="loading" class="note">Готовлю ссылку…</p>
+        <template v-else-if="subUrl">
+          <!-- SVG собирает qrcode-generator из наших же данных: только rect/path. -->
+          <div class="qr" v-html="subQr"></div>
+          <div class="actions">
+            <UiButton variant="primary" @click="copy(subUrl, 'Ссылка')">Скопировать ссылку</UiButton>
+            <template v-if="confirmReset">
+              <UiButton variant="danger" @click="resetSub">Да, сменить</UiButton>
+              <UiButton @click="confirmReset = false">Отмена</UiButton>
+            </template>
+            <UiButton v-else @click="confirmReset = true">Сменить ссылку</UiButton>
+          </div>
+          <p v-if="confirmReset" class="note">
+            Старая ссылка перестанет работать — приложения с ней перестанут
+            обновляться. Подключение по уже скачанным настройкам не прервётся.
+          </p>
+          <details class="raw">
+            <summary>Показать ссылку</summary>
+            <pre>{{ subUrl }}</pre>
+          </details>
+        </template>
+      </template>
+
+      <template v-else-if="view === 'conf'">
         <p class="lead">
           Отсканируйте код в приложении AmneziaVPN или AmneziaWG или импортируйте
           файл. Конфиг даёт доступ в домашнюю сеть — не пересылайте его чужим.
@@ -258,6 +334,15 @@ function host(remote: string): string {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: 9px 11px;
+}
+.note.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.note.faint {
+  color: var(--faint);
+  border-color: transparent;
+  padding: 0 2px;
 }
 .note.bad {
   color: var(--bad);

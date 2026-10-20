@@ -1,5 +1,14 @@
 import { requestJson, requestText, utf8ToBase64 } from "./client";
 
+export type PanelRole = "admin" | "vpn";
+
+export interface PanelUser {
+  user: string;
+  role: PanelRole;
+  /** Сколько клиентов VPN-сервера закреплено за логином. */
+  clients: number;
+}
+
 export interface SetupStatus {
   setup_required: boolean;
 }
@@ -7,7 +16,16 @@ export interface SetupStatus {
 export const auth = {
   setupStatus: () => requestJson<SetupStatus>("panel_setup_status"),
 
-  checkAuth: () => requestJson<{ ok: boolean; user?: string }>("check_auth"),
+  /** role: admin — вся панель, vpn — только свои клиенты VPN-сервера. Нет поля — старый роутер. */
+  checkAuth: () => requestJson<{ ok: boolean; user?: string; role?: PanelRole }>("check_auth"),
+
+  users: () =>
+    requestJson<{ ok: boolean; me: string; users: PanelUser[] }>("panel_users"),
+  userAdd: (user: string, password: string, role: PanelRole) =>
+    requestJson<{ ok: boolean }>("panel_user_add", { body: { user, password, role } }),
+  userSet: (user: string, patch: { password?: string; role?: PanelRole }) =>
+    requestJson<{ ok: boolean }>("panel_user_set", { body: { user, ...patch } }),
+  userDel: (user: string) => requestJson<{ ok: boolean }>("panel_user_del", { body: { user } }),
 
   /** CGI ждёт base64(login + "\n" + пароль) сырым телом. */
   login: (user: string, password: string) =>

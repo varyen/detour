@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import MatrixRain from "@/components/MatrixRain.vue";
 import SectionIcon from "@/components/SectionIcon.vue";
 import CommandPalette from "@/components/CommandPalette.vue";
 import ToastHost from "@/components/ToastHost.vue";
 import LoginView from "@/views/LoginView.vue";
+import ServerPanel from "@/components/services/ServerPanel.vue";
+import PasswordSheet from "@/components/services/PasswordSheet.vue";
 import { SECTIONS } from "@/router";
 import { useSessionStore } from "@/stores/session";
 import { useStatusStore } from "@/stores/status";
@@ -26,6 +28,9 @@ const router = useRouter();
 const { theme, toggle: toggleTheme } = useTheme();
 
 const isClientApp = __CLIENT__;
+/* Админ «только VPN-сервер»: вместо разделов — одна область сервера. */
+const soloOpen = ref(true);
+const soloPassword = ref(false);
 const title = computed(() => (route.meta.title as string) ?? "Обзор");
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -126,6 +131,8 @@ onBeforeUnmount(() => {
 
 /* Данные тянем только после входа — до него любой запрос вернёт 401. */
 async function start() {
+  /* Состояние роутера этой роли закрыто (403) — опрашивать нечего. */
+  if (session.vpnOnly) return;
   await status.refresh();
   void status.refreshExtras();
   /* Список профилей нужен палитре с любого экрана — иначе поиск по имени VPN
@@ -158,6 +165,31 @@ session.$subscribe((_m, s) => {
   </div>
 
   <LoginView v-else-if="!session.authorized" />
+
+  <main v-else-if="session.vpnOnly" class="main solo">
+    <header class="top">
+      <div class="head">
+        <h1>Свой VPN-сервер</h1>
+        <p class="sub">Вы вошли как {{ session.user }} · видны только ваши клиенты</p>
+      </div>
+      <button class="icon-btn" type="button" aria-label="Сменить пароль" @click="soloPassword = true">
+        <SectionIcon name="key" :size="17" />
+      </button>
+      <button
+        class="icon-btn"
+        type="button"
+        :aria-label="theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'"
+        @click="toggleTheme"
+      >
+        <SectionIcon :name="theme === 'dark' ? 'sun' : 'moon'" :size="17" />
+      </button>
+      <button class="icon-btn" type="button" aria-label="Выйти" @click="session.logout()">
+        <SectionIcon name="logout" :size="17" />
+      </button>
+    </header>
+    <ServerPanel v-model:open="soloOpen" />
+    <PasswordSheet :open="soloPassword" @close="soloPassword = false" />
+  </main>
 
   <div v-else class="app">
     <nav class="rail" aria-label="Разделы">
@@ -245,6 +277,18 @@ session.$subscribe((_m, s) => {
 </template>
 
 <style scoped>
+.solo {
+  max-width: 920px;
+  margin: 0 auto;
+}
+.solo .top {
+  flex-wrap: nowrap;
+}
+.solo .head {
+  flex: 1;
+  min-width: 0;
+}
+
 .boot {
   min-height: 100dvh;
   display: grid;

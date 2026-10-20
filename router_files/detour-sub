@@ -1,0 +1,37 @@
+#!/bin/sh
+# Подписка клиента своего VPN-сервера — единственное, что отдаёт веб-сервер на
+# порту подписок (его поднимает detour-server). Сессии нет: доступ даёт токен
+# клиента в URL. Тело и заголовки собирает `detour-server sub`.
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    BIN=/opt/sbin/detour-server
+else
+    BIN=/usr/sbin/detour-server
+fi
+
+qs_get() { printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | head -1; }
+
+t=$(qs_get t | tr -cd '0-9a-f' | cut -c1-32)
+f=$(qs_get f | tr -cd 'a-z' | cut -c1-16)
+if [ -z "$f" ]; then
+    ua=$(printf '%s' "$HTTP_USER_AGENT" | tr 'A-Z' 'a-z')
+    if printf '%s' "$HTTP_ACCEPT" | grep -q 'application/vnd\.detour'; then
+        f=detour
+    else
+        # Hiddify пишет в UA ещё «ClashMeta» и «sing-box» — ему ссылки, их он понимает точно.
+        case "$ua" in
+            *hiddify*|*v2ray*|*streisand*|*happ*|*shadowrocket*) f=uri ;;
+            *clash*|*mihomo*|*stash*|*flclash*|*koala*) f=clash ;;
+            sing-box*|sfa/*|sfi/*|sfm/*|sft/*|*sing-box*) f=singbox ;;
+            *) f=uri ;;
+        esac
+    fi
+fi
+case "$f" in uri|clash|singbox|detour|awg) ;; *) f=uri ;; esac
+
+if [ "$REQUEST_METHOD" != GET ] && [ "$REQUEST_METHOD" != HEAD ]; then
+    printf 'Status: 405 Method Not Allowed\r\nContent-Type: text/plain\r\n\r\n'
+    exit 0
+fi
+[ -x "$BIN" ] || { printf 'Status: 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\n'; exit 0; }
+exec "$BIN" sub "$t" "$f"

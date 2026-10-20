@@ -247,7 +247,7 @@ local function fetch_body(url, ua, proxy, timeout)
     -- the body); we split it off before parsing.
     local px = proxy and (" -x " .. shell_quote(proxy)) or ""
     local cmd = string.format(
-        "curl -sS -L --max-time %d%s -A %s -H 'Accept: */*' -w '\\nDETOUR_HTTP:%%{http_code}' %s 2>/dev/null",
+        "curl -sS -L --max-time %d%s -A %s -H 'Accept: */*, application/vnd.detour+json' -w '\\nDETOUR_HTTP:%%{http_code}' %s 2>/dev/null",
         timeout, px, shell_quote(ua), shell_quote(url))
     local h = io.popen(cmd, "r")
     if not h then return nil, "popen failed" end

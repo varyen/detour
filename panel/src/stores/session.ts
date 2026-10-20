@@ -1,18 +1,31 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { AuthError, LockedOutError, auth, onAuthRequired } from "@/api";
+import type { PanelRole } from "@/api";
 
 type Screen = "loading" | "login" | "setup" | "ready";
 
 export const useSessionStore = defineStore("session", () => {
   const screen = ref<Screen>("loading");
   const user = ref("");
+  const role = ref<PanelRole>("admin");
   const error = ref("");
   const busy = ref(false);
   /** До какого времени вход заблокирован после серии неудач (unix, мс). */
   const lockedUntil = ref(0);
 
   const authorized = computed(() => screen.value === "ready");
+  /** Админ «только VPN-сервер»: панель сводится к его клиентам. */
+  const vpnOnly = computed(() => role.value === "vpn");
+
+  async function loadRole() {
+    try {
+      const r = await auth.checkAuth();
+      role.value = r.role ?? "admin";
+    } catch {
+      role.value = "admin";
+    }
+  }
 
   /* Любой 401 из любого запроса роняет панель на экран входа: сессия живёт в
      tmpfs и исчезает при перезагрузке роутера, так что это штатный путь. */
@@ -28,6 +41,7 @@ export const useSessionStore = defineStore("session", () => {
     try {
       const r = await auth.checkAuth();
       user.value = r.user ?? "";
+      role.value = r.role ?? "admin";
       screen.value = "ready";
       return;
     } catch (e) {
@@ -50,6 +64,7 @@ export const useSessionStore = defineStore("session", () => {
     try {
       await auth.login(u, p);
       user.value = u;
+      await loadRole();
       lockedUntil.value = 0;
       screen.value = "ready";
       return true;
@@ -73,6 +88,7 @@ export const useSessionStore = defineStore("session", () => {
       /* CGI сам ставит cookie после создания учётки — второй вход не нужен. */
       await auth.firstSetup(u, p);
       user.value = u;
+      role.value = "admin";
       screen.value = "ready";
       return true;
     } catch (e) {
@@ -88,6 +104,7 @@ export const useSessionStore = defineStore("session", () => {
       await auth.logout();
     } finally {
       user.value = "";
+      role.value = "admin";
       screen.value = "login";
     }
   }
@@ -95,6 +112,8 @@ export const useSessionStore = defineStore("session", () => {
   return {
     screen,
     user,
+    role,
+    vpnOnly,
     error,
     busy,
     lockedUntil,

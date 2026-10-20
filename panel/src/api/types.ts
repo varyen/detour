@@ -375,6 +375,8 @@ export interface ServerClient {
   vless?: boolean;
   /** Маршрут клиента (роутер): "" — правила роутера, "direct", "vpn:<профиль|цепочка>". */
   route?: string;
+  /** Логин админа панели, который завёл клиента; пусто — главный админ. */
+  owner?: string;
   online: boolean;
   handshake: number;
   handshake_ago: number;
@@ -417,6 +419,8 @@ export interface ServerStatus {
   awg_running?: boolean;
   /** Вход VLESS-Reality (только роутер, с 2.7.0). */
   vless?: ServerVless;
+  /** Подписки клиентов (только роутер, с 2.11.0). */
+  sub?: ServerSub;
   iface: string;
   port: number;
   net: string;
@@ -464,6 +468,18 @@ export interface ServerVless {
   net: string;
 }
 
+export interface ServerSub {
+  enabled: boolean;
+  /** Отдельный веб-сервер подписок запущен. */
+  running: boolean;
+  port: number;
+  /** Отдаёт по HTTPS на сертификате панели. */
+  https: boolean;
+  /** Свой адрес подписок (реверс-прокси); пусто — base собирается сам. */
+  url: string;
+  base: string;
+}
+
 export interface ServerSession {
   id: string;
   start: number;
@@ -485,6 +501,9 @@ export interface ServerSettingsPatch {
   dns?: string;
   mtu?: number;
   uplink?: string;
+  sub?: boolean;
+  sport?: number;
+  suburl?: string;
 }
 
 export interface ApplyLogResponse {

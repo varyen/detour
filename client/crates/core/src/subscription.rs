@@ -544,7 +544,7 @@ pub async fn fetch(url: &str, ua: &str, proxy: Option<&str>, timeout: Duration) 
     let mut resp = client
         .get(url)
         .header(reqwest::header::USER_AGENT, ua)
-        .header(reqwest::header::ACCEPT, "*/*")
+        .header(reqwest::header::ACCEPT, "*/*, application/vnd.detour+json")
         .send()
         .await
         .map_err(describe)?;
