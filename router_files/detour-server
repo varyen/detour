@@ -1154,6 +1154,41 @@ vless_acct_up() {
     echo "$sig" > "$VACCT_SIG"
 }
 
+# QCA ECM (GL.iNet на ipq53xx и пр.) ускоряет через SFE и форвард между WAN и
+# veth входа VLESS — и ломает его: первые пакеты проходят, дальше поток встаёт
+# (Reality не дочитывает ClientHello, клиенты висят на «Соединение…»; проверено
+# на GL-BE9300, прошивка 4.10.1). Соединения с conntrack-helper ECM не ускоряет
+# («Connection has helper»), поэтому потокам входа назначаем helper, который в
+# их данных ничего не найдёт: irc (TCP, ищет только CTCP DCC) и snmp (UDP,
+# работает лишь с широковещательными адресами). Без ECM — no-op.
+NOACCEL=DSRV_NOACCEL
+noaccel_up() {
+    [ -d /sys/kernel/debug/ecm ] || return 0
+    modprobe nf_conntrack_irc 2>/dev/null
+    modprobe nf_conntrack_snmp 2>/dev/null
+    iptables -t raw -N "$NOACCEL" 2>/dev/null
+    iptables -t raw -C PREROUTING -j "$NOACCEL" 2>/dev/null || iptables -t raw -I PREROUTING 1 -j "$NOACCEL"
+    sig="$VPORT"
+    if [ "$sig" = "$(cat "$RUN/detour-server.noaccel" 2>/dev/null)" ] && \
+        iptables -t raw -C "$NOACCEL" -i "$VIF" -p tcp -j CT --helper irc 2>/dev/null; then
+        return 0
+    fi
+    iptables -t raw -F "$NOACCEL"
+    for i in "$VIF" "$VIF2"; do
+        iptables -t raw -A "$NOACCEL" -i "$i" -p tcp -j CT --helper irc || log "noaccel: CT --helper irc не встал"
+        iptables -t raw -A "$NOACCEL" -i "$i" -p udp -j CT --helper snmp 2>/dev/null
+    done
+    iptables -t raw -A "$NOACCEL" -p tcp --dport "$VPORT" -m addrtype --dst-type LOCAL -j CT --helper irc
+    echo "$sig" > "$RUN/detour-server.noaccel"
+}
+
+noaccel_down() {
+    iptables -t raw -D PREROUTING -j "$NOACCEL" 2>/dev/null
+    iptables -t raw -F "$NOACCEL" 2>/dev/null
+    iptables -t raw -X "$NOACCEL" 2>/dev/null
+    rm -f "$RUN/detour-server.noaccel"
+}
+
 vless_acct_down() {
     iptables -t mangle -D PREROUTING -i "$VIF" -j "$ACCT_IN" 2>/dev/null
     acct_out_set
@@ -1194,6 +1229,7 @@ vless_up() {
     vless_ok || { log "vless: $(vless_reason)"; return 1; }
     vless_net_up || return 1
     vless_acct_up
+    noaccel_up
     umask 077
     vless_render 1 > "$VRENDER.new"
     # clash API есть не в каждой сборке sing-box — без него теряется только
@@ -1229,6 +1265,7 @@ vless_down() {
     [ -n "$p" ] && kill "$p" 2>/dev/null
     rm -f "$VPID" "$VRENDER"
     vless_acct_down
+    noaccel_down
     if [ "$KEENETIC" = 1 ]; then
         [ -n "$VNET" ] && $KIP rule del from "$VNET.0/24" iif lo lookup "$NS_TABLE" 2>/dev/null
         $KIP route flush table "$NS_TABLE" 2>/dev/null
@@ -2149,6 +2186,8 @@ case "$1" in
             log "tick: sing-box VLESS не запущен при включённом сервере — поднимаю"
             do_apply
         fi
+        # Правила против аппаратного ускорения могла снести перестройка файрвола.
+        vless_on && noaccel_up
         # Упал веб-сервер подписок или продлён сертификат — sub_up сверит подпись.
         sub_on && sub_up
         # settings.json появился позже сервера (свежая установка) или его
