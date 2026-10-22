@@ -1177,6 +1177,8 @@ if [ "$MODE" = "active" ]; then
     A_DEADLINE=$((NOW + ACTIVE_LOOP_BUDGET))
     while :; do
         NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0   # fresh ts per iteration
+        # VPN выключили посреди цикла — ни проверок, ни пуша, ни переключения.
+        [ -n "$("$API_BIN" engine-pid 2>/dev/null)" ] || break
         active_check_once
         _t=$(date +%s 2>/dev/null); [ -z "$_t" ] && _t="$A_DEADLINE"
         [ "$_t" -ge "$A_DEADLINE" ] && break                  # budget spent
@@ -1357,6 +1359,9 @@ esac
 # healthiest OTHER profile through the panel's own activation pipeline.
 case "$AUTOSWITCH" in 1|on|true|yes) ;; *) exit 0 ;; esac
 [ -x "$API_BIN" ] || exit 0
+# VPN выключен руками — переключать не с чего: activate делает reconfigure, а это
+# stop+start, то есть VPN включился бы сам, на профиле, который никто не выбирал.
+[ -n "$("$API_BIN" engine-pid 2>/dev/null)" ] || exit 0
 ACHAIN=$(jstr active_chain "$SETTINGS")
 case "$ACHAIN" in *,*) exit 0 ;; esac          # multi-hop chain → never auto-switch
 [ -z "$ACTIVE" ] && exit 0
