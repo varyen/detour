@@ -200,7 +200,13 @@ local PRIVATE = {
   ["detour/push-subs.json"] = true,
 }
 
+-- Настройки плагинов: detour/plugins/<id>/settings.json. Сами плагины в копию
+-- не входят (это пакеты), а настройки ждут своего плагина и после восстановления
+-- подхватятся, когда его поставят.
+local PLUGIN_SETTINGS = "^detour/plugins/[a-z0-9-]+/settings%.json$"
+
 local function allowed(rel)
+  if rel:match(PLUGIN_SETTINGS) then return true end
   for _, r in ipairs(ROUTER_FILES) do
     if r == rel then return true end
   end
@@ -267,6 +273,10 @@ if mode == "export" then
       local body = read(dir .. "/" .. name)
       if body then files[#files + 1] = encode(d[1] .. "/" .. name) .. ":" .. encode(body) end
     end
+  end
+  for _, id in ipairs(ls(dd .. "/plugins", "^[a-z0-9-]+$")) do
+    local body = read(dd .. "/plugins/" .. id .. "/settings.json")
+    if body then files[#files + 1] = encode("detour/plugins/" .. id .. "/settings.json") .. ":" .. encode(body) end
   end
   add("router_files", "{" .. table.concat(files, ",") .. "}")
 
@@ -351,7 +361,7 @@ if mode == "import" then
     for rel, body in pairs(doc.router_files) do
       local path = type(rel) == "string" and allowed(rel) and abs(r, rel)
       if path and type(body) == "string" then
-        put(rel, path, body, PRIVATE[rel] and "0600" or "0644")
+        put(rel, path, body, (PRIVATE[rel] or rel:match(PLUGIN_SETTINGS)) and "0600" or "0644")
       else
         skipped[#skipped + 1] = tostring(rel) .. ": не входит в резервную копию"
       end

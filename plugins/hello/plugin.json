@@ -1,0 +1,60 @@
+{
+  "id": "hello",
+  "name": "Привет",
+  "version": "1.0.0",
+  "description": "Пример плагина: карточка на главной, секции настроек, действия, периодическая задача и свой UI-модуль.",
+  "author": "Detour",
+  "icon": "bolt",
+  "min_panel": "2.12.0",
+  "catalog": false,
+  "platforms": ["openwrt", "keenetic"],
+  "files": [
+    { "src": "router_files/detour-hello", "dst": "/usr/sbin/detour-hello", "mode": "0755" }
+  ],
+  "cron": [
+    { "op": "tick", "every": 300 }
+  ],
+  "ui": {
+    "module": "ui.js",
+    "card": {
+      "title": "Привет",
+      "hint": "пример плагина: счётчик тиков и аптайм",
+      "span": 2,
+      "op": "card",
+      "poll": 30
+    },
+    "sections": [
+      {
+        "id": "main",
+        "area": "services",
+        "title": "Привет — настройки",
+        "icon": "bolt",
+        "op": "card",
+        "fields": [
+          { "key": "greeting", "type": "text", "label": "Приветствие", "default": "Привет, мир", "maxlength": 64,
+            "hint": "показывается на карточке «Обзора»" },
+          { "key": "count_ticks", "type": "bool", "label": "Считать тики", "default": true,
+            "hint": "периодическая задача раз в 5 минут увеличивает счётчик" },
+          { "key": "tone", "type": "select", "label": "Цвет статуса", "default": "ok",
+            "options": [
+              { "value": "ok", "label": "зелёный" },
+              { "value": "warn", "label": "жёлтый" },
+              { "value": "bad", "label": "красный" }
+            ] },
+          { "key": "limit", "type": "number", "label": "Порог тиков", "default": 100, "min": 1, "max": 100000 },
+          { "key": "token", "type": "password", "label": "Секрет (пример)", "hint": "в панель не возвращается — только «задан»" }
+        ],
+        "actions": [
+          { "label": "Сбросить счётчик", "op": "reset", "confirm": "Сбросить счётчик тиков?", "variant": "danger" }
+        ]
+      },
+      {
+        "id": "about",
+        "area": "rules",
+        "title": "Привет — пример своего UI",
+        "icon": "bolt",
+        "component": "About"
+      }
+    ]
+  }
+}

@@ -9,3 +9,5 @@ export { rules } from "./rules";
 export { diag } from "./diag";
 export { services } from "./services";
 export type { LogName } from "./diag";
+export { plugins } from "./plugins";
+export type * from "./plugins";

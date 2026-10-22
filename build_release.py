@@ -184,6 +184,8 @@ PANEL_FILES = [
     (("router_files", "detour-power"), "usr/sbin/detour-power", 0o755),
     # Консоль роутера в панели (ttyd по запросу, одноразово, только LAN).
     (("router_files", "detour-console"), "usr/sbin/detour-console", 0o755),
+    # Реестр и рантайм плагинов (сами плагины — отдельные пакеты detour-plugin-*).
+    (("router_files", "detour-plugin"), "usr/sbin/detour-plugin", 0o755),
     # Свой VPN-сервер (AmneziaWG на kmod из фида прошивки) с маршрутами роутера.
     (("router_files", "detour-server"), "usr/sbin/detour-server", 0o755),
     (("router_files", "detour-sub"), "usr/share/detour/sub-www/cgi-bin/sub", 0o755),
@@ -627,7 +629,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'proxy-admin-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent' | grep -v 'detour-server'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'proxy-admin-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent' | grep -v 'detour-server' | grep -v 'detour-plugin'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -655,6 +657,8 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   echo "* * * * * /usr/sbin/detour-torrent tick >/dev/null 2>&1"
   # Статистика клиентов VPN-сервера: трафик, сессии. Сервер выключен → выход сразу.
   echo "* * * * * /usr/sbin/detour-server tick >/dev/null 2>&1"
+  # Периодические задачи плагинов: интервалы — в их манифестах, срок решает detour-plugin.
+  echo "* * * * * /usr/sbin/detour-plugin tick >/dev/null 2>&1"
   # HW-offload watchdog — QCA/ipq53xx only; a safe no-op on non-QCA hardware. Detects a
   # wedged NSS/PPE accelerator (LAN<->WAN forwarding fell to the CPU → ~100 Mbit until a
   # reboot) and recovers it in place. Mode lives in /etc/detour/offload.conf (default auto).
@@ -754,6 +758,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-trafficlog' \\
                       | grep -v 'detour-torrent' \\
                       | grep -v 'detour-server' \\
+                      | grep -v 'detour-plugin' \\
                       | crontab - 2>/dev/null
 echo "=== detour prerm end pid=$$ args:$* ==="
 exit 0

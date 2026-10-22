@@ -17,6 +17,9 @@ import PasswordSheet from "@/components/services/PasswordSheet.vue";
 import PanelUsers from "@/components/services/PanelUsers.vue";
 import UninstallSheet from "@/components/services/UninstallSheet.vue";
 import LogPane from "@/components/journal/LogPane.vue";
+import PluginManager from "@/components/plugins/PluginManager.vue";
+import PluginSections from "@/components/plugins/PluginSections.vue";
+import { usePluginsStore } from "@/stores/plugins";
 import FormField from "@/components/services/FormField.vue";
 import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
@@ -149,8 +152,10 @@ const open = reactive<Record<string, boolean>>({
   swap: false,
   backup: false,
   account: false,
+  plugins: false,
   power: false,
 });
+const pluginsStore = usePluginsStore();
 
 /* Ссылки из карточки «Сервисы и доступ» на «Обзоре»: `#/services?focus=cert`.
    Без этого ссылка приводила к списку из семи свёрнутых областей, где нужную
@@ -1451,6 +1456,24 @@ onBeforeUnmount(() => unregister?.());
           Восстановить из файла
         </UiButton>
       </div>
+    </ServicePanel>
+
+    <!-- ===== секции плагинов и сами плагины ===== -->
+    <PluginSections v-if="!status.isClient && !session.vpnOnly" area="services" />
+    <ServicePanel
+      v-if="!status.isClient && !session.vpnOnly"
+      id="svc-plugins"
+      v-model:open="open.plugins"
+      icon="plug"
+      title="Плагины"
+      :summary="
+        pluginsStore.list.length
+          ? `Установлено: ${pluginsStore.list.length}, включено: ${pluginsStore.list.filter((p) => p.enabled).length}`
+          : 'Дополнения к панели: свои карточки, настройки и службы на роутере'
+      "
+      :chip="pluginsStore.list.length ? String(pluginsStore.list.length) : undefined"
+    >
+      <PluginManager />
     </ServicePanel>
 
     <!-- ===== вход в панель ===== -->

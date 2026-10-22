@@ -35,6 +35,7 @@ import {
 import { copyText } from "@/lib/clipboard";
 import type { ProfileDraft } from "@/components/profiles/uri";
 import { altProtoLabel, ccFromName, countryName, fmtAgo, fmtSpeedKbps } from "@/lib/format";
+import PluginSections from "@/components/plugins/PluginSections.vue";
 
 type Tab = "profiles" | "chains" | "subs" | "warp";
 
@@ -837,6 +838,7 @@ onBeforeUnmount(() => unregister?.());
       </UiButton>
       <UiButton @click="selected = []">Снять выделение</UiButton>
     </div>
+    <PluginSections v-if="!status.isClient" area="profiles" />
   </div>
 
   <div v-show="tab === 'chains'" class="pane">

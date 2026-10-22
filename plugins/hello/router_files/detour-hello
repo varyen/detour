@@ -1,0 +1,18 @@
+#!/bin/sh
+# Пример своей утилиты плагина: попадает в /usr/sbin (на Keenetic — /opt/sbin)
+# по записи files в plugin.json.
+
+case "$1" in
+    uptime)
+        s=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+        [ -n "$s" ] || exit 1
+        d=$((s / 86400)); h=$((s % 86400 / 3600)); m=$((s % 3600 / 60))
+        if [ "$d" -gt 0 ]; then echo "${d} д ${h} ч"
+        elif [ "$h" -gt 0 ]; then echo "${h} ч ${m} мин"
+        else echo "${m} мин"; fi
+        ;;
+    *)
+        echo "usage: detour-hello uptime" >&2
+        exit 1
+        ;;
+esac

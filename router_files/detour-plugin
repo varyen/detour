@@ -1,0 +1,351 @@
+#!/bin/sh
+# Detour — реестр и рантайм подключаемых плагинов, обе платформы.
+#
+#   detour-plugin list                  — JSON со всеми установленными плагинами
+#   detour-plugin call <id> <op>        — вызвать обработчик плагина (тело — stdin)
+#   detour-plugin settings-set <id>     — сохранить настройки (JSON со stdin) по схеме манифеста
+#   detour-plugin enable|disable <id>   — включить / выключить плагин
+#   detour-plugin enabled <id>          — код возврата 0, если включён (для скриптов плагина)
+#   detour-plugin tick                  — запустить периодические задачи, у которых подошёл срок
+#   detour-plugin postinst <id>         — из postinst пакета плагина
+#   detour-plugin prerm <id> <remove|upgrade>
+#   detour-plugin purge <id>            — стереть настройки и данные плагина
+#
+# Плагин — отдельный пакет detour-plugin-<id>. Его манифест лежит в
+# $SHARE/<id>/plugin.json, обработчик действий — $SHARE/<id>/api (необязателен),
+# UI для панели — $WWW/<id>/. Состояние, которое должно пережить обновление и
+# прошивку, — в $ETC/<id>/ (под /etc/detour, то есть в keeplist).
+#
+# Обработчик зовётся как `api <op>` с телом запроса на stdin и окружением
+# PLUGIN_ID, PLUGIN_DIR, PLUGIN_DATA, PLUGIN_SETTINGS, PLUGIN_PLATFORM,
+# PLUGIN_METHOD; печатает JSON. Служебные op (вызывает только сам рантайм):
+# install, remove, enable, disable, settings — их нельзя дёрнуть из панели.
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    PLATFORM=keenetic
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    SHARE=/opt/share/detour/plugins
+    ETC=/opt/etc/detour/plugins
+    WWW=/opt/share/www/detour/plugins
+    STATE=/opt/var/state
+    VERSION_FILE=/opt/etc/detour/version
+    LUA_PRE='package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path'
+else
+    PLATFORM=openwrt
+    SHARE=/usr/share/detour/plugins
+    ETC=/etc/detour/plugins
+    WWW=/www/detour/plugins
+    STATE=/var/state
+    VERSION_FILE=/etc/detour/version
+    LUA_PRE=''
+fi
+TICK_STATE="$STATE/detour-plugins.tick"
+LOCK_DIR=/tmp/detour-plugin.lock
+# Op, которые зовёт только рантайм: панель не должна уметь «удалить» плагин
+# изнутри, минуя пакетный менеджер.
+RESERVED_OPS=" install remove enable disable settings "
+
+err() { printf '{"ok":false,"error":"%s"}\n' "$1"; exit 1; }
+
+valid_id() {
+    case "$1" in ''|-*|*[!a-z0-9-]*) return 1 ;; esac
+    [ "${#1}" -le 32 ]
+}
+valid_op() {
+    case "$1" in ''|-*|*[!a-z0-9_-]*) return 1 ;; esac
+    [ "${#1}" -le 48 ]
+}
+installed() { [ -f "$SHARE/$1/plugin.json" ]; }
+is_enabled() { [ ! -f "$ETC/$1/disabled" ]; }
+
+# run_api <id> <op> — обработчик плагина с его окружением; stdin проходит насквозь.
+run_api() {
+    _h="$SHARE/$1/api"
+    [ -x "$_h" ] || return 127
+    mkdir -p "$ETC/$1" 2>/dev/null
+    PLUGIN_ID="$1" PLUGIN_DIR="$SHARE/$1" PLUGIN_DATA="$ETC/$1" \
+    PLUGIN_SETTINGS="$ETC/$1/settings.json" PLUGIN_PLATFORM="$PLATFORM" \
+    PLUGIN_METHOD="${REQUEST_METHOD:-CLI}" \
+        "$_h" "$2"
+}
+
+# hook <id> <op> — служебный вызов; отсутствие обработчика не ошибка.
+hook() {
+    [ -x "$SHARE/$1/api" ] || return 0
+    run_api "$1" "$2" </dev/null >/dev/null 2>&1
+}
+
+plugin_lua() {
+    lua - "$@" <<LUA
+$LUA_PRE
+$(cat)
+LUA
+}
+
+cmd_list() {
+    _ver=$(cat "$VERSION_FILE" 2>/dev/null)
+    plugin_lua "$SHARE" "$ETC" "$WWW" "$PLATFORM" "${_ver:-0.0.0}" <<'EOF'
+local cjson = require("cjson.safe")
+local share, etc, www, platform, panel_ver = arg[1], arg[2], arg[3], arg[4], arg[5]
+
+local function read(p)
+    local f = io.open(p, "rb"); if not f then return nil end
+    local s = f:read("*a"); f:close(); return s
+end
+local function exists(p) local f = io.open(p, "rb"); if f then f:close() return true end return false end
+local function vcmp(a, b)
+    local x, y = {}, {}
+    for n in tostring(a):gmatch("%d+") do x[#x + 1] = tonumber(n) end
+    for n in tostring(b):gmatch("%d+") do y[#y + 1] = tonumber(n) end
+    for i = 1, 3 do
+        local p, q = x[i] or 0, y[i] or 0
+        if p ~= q then return p < q and -1 or 1 end
+    end
+    return 0
+end
+
+local ids = {}
+local ls = io.popen('ls -1 "' .. share .. '" 2>/dev/null')
+if ls then for l in ls:lines() do if l:match("^[a-z0-9-]+$") then ids[#ids + 1] = l end end ls:close() end
+table.sort(ids)
+
+local out = {}
+for _, id in ipairs(ids) do
+    local m = cjson.decode(read(share .. "/" .. id .. "/plugin.json") or "")
+    if type(m) == "table" then
+        local saved = cjson.decode(read(etc .. "/" .. id .. "/settings.json") or "") or {}
+        local values = {}
+        -- Схема настроек — поля всех секций. Значение берётся из сохранённого,
+        -- иначе из default. Пароли наружу не отдаются: только «задан ли».
+        local secrets = {}
+        local sections = (type(m.ui) == "table" and type(m.ui.sections) == "table") and m.ui.sections or {}
+        for _, s in ipairs(sections) do
+            for _, f in ipairs(type(s.fields) == "table" and s.fields or {}) do
+                if type(f.key) == "string" then
+                    local v = saved[f.key]
+                    if v == nil or v == cjson.null then v = f.default end
+                    if f.type == "password" then
+                        secrets[f.key] = (type(v) == "string" and v ~= "")
+                        v = ""
+                    end
+                    if v ~= nil then values[f.key] = v end
+                end
+            end
+        end
+        local plats = type(m.platforms) == "table" and m.platforms or { "openwrt", "keenetic" }
+        local onplat = false
+        for _, p in ipairs(plats) do if p == platform then onplat = true end end
+        local reason = ""
+        if not onplat then reason = "плагин не поддерживает эту платформу"
+        elseif m.min_panel and vcmp(panel_ver, m.min_panel) < 0 then
+            reason = "нужна панель " .. tostring(m.min_panel) .. " или новее"
+        end
+        local module = ""
+        if type(m.ui) == "table" and type(m.ui.module) == "string"
+           and m.ui.module:match("^[%w%._/-]+%.m?js$") and not m.ui.module:find("%.%.")
+           and exists(www .. "/" .. id .. "/" .. m.ui.module) then
+            module = "plugins/" .. id .. "/" .. m.ui.module
+        end
+        out[#out + 1] = {
+            id = id,
+            manifest = m,
+            enabled = not exists(etc .. "/" .. id .. "/disabled"),
+            compatible = reason == "",
+            reason = reason,
+            has_api = exists(share .. "/" .. id .. "/api"),
+            module = module,
+            settings = values,
+            secrets = secrets,
+            signed = exists(etc .. "/.pkg/" .. id .. ".signed"),
+        }
+    end
+end
+io.write(cjson.encode({ ok = true, platform = platform, panel = panel_ver, plugins = out }) or '{"ok":false}')
+EOF
+}
+
+cmd_call() {
+    _id="$1"; _op="$2"
+    valid_id "$_id" || err "bad plugin id"
+    valid_op "$_op" || err "bad op"
+    installed "$_id" || err "плагин не установлен"
+    case "$RESERVED_OPS" in *" $_op "*) err "служебное действие" ;; esac
+    is_enabled "$_id" || err "плагин выключен"
+    [ -x "$SHARE/$_id/api" ] || err "у плагина нет обработчика действий"
+    _out=$(run_api "$_id" "$_op")
+    _rc=$?
+    if [ -z "$_out" ]; then
+        [ "$_rc" = 0 ] && { echo '{"ok":true}'; return 0; }
+        err "обработчик плагина завершился с кодом $_rc"
+    fi
+    printf '%s\n' "$_out"
+}
+
+cmd_settings_set() {
+    _id="$1"
+    valid_id "$_id" || err "bad plugin id"
+    installed "$_id" || err "плагин не установлен"
+    mkdir -p "$ETC/$_id" || err "не создать $ETC/$_id"
+    # Тело — во временный файл: stdin у plugin_lua занят самим Lua-кодом.
+    _in="/tmp/detour-plugin-in.$$"
+    head -c 65536 > "$_in"
+    _res=$(plugin_lua "$SHARE/$_id/plugin.json" "$ETC/$_id/settings.json" "$_in" <<'EOF'
+local cjson = require("cjson.safe")
+local mpath, spath, ipath = arg[1], arg[2], arg[3]
+local function read(p)
+    local f = io.open(p, "rb"); if not f then return nil end
+    local s = f:read("*a"); f:close(); return s
+end
+local m = cjson.decode(read(mpath) or "")
+if type(m) ~= "table" then io.write("манифест плагина повреждён") os.exit(1) end
+local input = cjson.decode(read(ipath) or "")
+if type(input) ~= "table" then io.write("ожидался JSON-объект") os.exit(1) end
+local saved = cjson.decode(read(spath) or "") or {}
+if type(saved) ~= "table" then saved = {} end
+
+local sections = (type(m.ui) == "table" and type(m.ui.sections) == "table") and m.ui.sections or {}
+for _, s in ipairs(sections) do
+    for _, f in ipairs(type(s.fields) == "table" and s.fields or {}) do
+        local k, v = f.key, input[f.key]
+        if type(k) == "string" and v ~= nil and v ~= cjson.null then
+            local label = f.label or k
+            local t = f.type or "text"
+            if t == "bool" then
+                v = (v == true or v == 1 or v == "1" or v == "true")
+            elseif t == "number" then
+                v = tonumber(v)
+                if not v then io.write(label .. ": нужно число") os.exit(1) end
+                if f.min and v < f.min then io.write(label .. ": не меньше " .. f.min) os.exit(1) end
+                if f.max and v > f.max then io.write(label .. ": не больше " .. f.max) os.exit(1) end
+            elseif t == "select" then
+                v = tostring(v)
+                local ok = false
+                for _, o in ipairs(type(f.options) == "table" and f.options or {}) do
+                    local ov = type(o) == "table" and o.value or o
+                    if tostring(ov) == v then ok = true end
+                end
+                if not ok then io.write(label .. ": значение не из списка") os.exit(1) end
+            else
+                v = tostring(v)
+                if #v > (tonumber(f.maxlength) or 4096) then io.write(label .. ": слишком длинно") os.exit(1) end
+                if f.pattern and v ~= "" and not v:match("^" .. f.pattern .. "$") then
+                    io.write(label .. ": неверный формат") os.exit(1)
+                end
+                if t == "password" and v == "" then v = nil end   -- пустое = оставить как было
+            end
+            if v ~= nil then saved[k] = v end
+        end
+    end
+end
+local f = io.open(spath .. ".tmp", "wb")
+if not f then io.write("не записать настройки") os.exit(1) end
+f:write(cjson.encode(saved) or "{}"); f:close()
+os.rename(spath .. ".tmp", spath)
+EOF
+)
+    _rc=$?
+    rm -f "$_in"
+    [ "$_rc" = 0 ] || err "$(printf '%s' "$_res" | sed 's/["\\]/\\&/g')"
+    chmod 0600 "$ETC/$_id/settings.json" 2>/dev/null
+    # Хук получает новое состояние уже из файла; его ответ — ответ сохранения,
+    # чтобы плагин мог отказать («порт занят») или сообщить результат.
+    if [ -x "$SHARE/$_id/api" ] && is_enabled "$_id"; then
+        _out=$(run_api "$_id" settings </dev/null 2>/dev/null)
+        [ -n "$_out" ] && { printf '%s\n' "$_out"; return 0; }
+    fi
+    echo '{"ok":true}'
+}
+
+cmd_toggle() {
+    _id="$1"; _on="$2"
+    valid_id "$_id" || err "bad plugin id"
+    installed "$_id" || err "плагин не установлен"
+    mkdir -p "$ETC/$_id"
+    if [ "$_on" = 1 ]; then
+        rm -f "$ETC/$_id/disabled"
+        hook "$_id" enable
+    else
+        hook "$_id" disable
+        : > "$ETC/$_id/disabled"
+    fi
+    echo '{"ok":true}'
+}
+
+# Периодические задачи — интервалы, а не cron-выражения: на Keenetic нет crond,
+# там tick зовёт detour-cron раз в ~5 мин, на OpenWrt — cron раз в минуту.
+# Интервал короче шага тика на платформе просто выполняется каждый тик.
+cmd_tick() {
+    mkdir "$LOCK_DIR" 2>/dev/null || {
+        # Повисший прошлый tick (старше 30 мин) не должен держать расписание вечно.
+        [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +30 2>/dev/null)" ] || return 0
+        rm -rf "$LOCK_DIR"; mkdir "$LOCK_DIR" 2>/dev/null || return 0
+    }
+    trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+    mkdir -p "$STATE"
+    _now=$(date +%s)
+    _due=$(plugin_lua "$SHARE" "$ETC" "$TICK_STATE" "$_now" <<'EOF'
+local cjson = require("cjson.safe")
+local share, etc, statef, now = arg[1], arg[2], arg[3], tonumber(arg[4]) or 0
+local last = {}
+local f = io.open(statef, "r")
+if f then for l in f:lines() do local k, t = l:match("^(%S+)%s+(%d+)$") if k then last[k] = tonumber(t) end end f:close() end
+local ls = io.popen('ls -1 "' .. share .. '" 2>/dev/null')
+for id in ls:lines() do
+    if id:match("^[a-z0-9-]+$") then
+        local d = io.open(etc .. "/" .. id .. "/disabled", "r")
+        if d then d:close() else
+            local mf = io.open(share .. "/" .. id .. "/plugin.json", "rb")
+            local m = mf and cjson.decode(mf:read("*a")) or nil
+            if mf then mf:close() end
+            if type(m) == "table" and type(m.cron) == "table" then
+                for _, c in ipairs(m.cron) do
+                    local op, every = c.op, tonumber(c.every) or 0
+                    if type(op) == "string" and op:match("^[a-z0-9_-]+$") and every >= 60 then
+                        local key = id .. "/" .. op
+                        -- запас 20 с: тик cron плывёт на секунды, и строгое «>=»
+                        -- через раз пропускало бы ровно минутный интервал
+                        if now - (last[key] or 0) >= every - 20 then print(id .. " " .. op) end
+                    end
+                end
+            end
+        end
+    end
+end
+ls:close()
+EOF
+)
+    [ -n "$_due" ] || return 0
+    printf '%s\n' "$_due" | while read -r _id _op; do
+        [ -x "$SHARE/$_id/api" ] || continue
+        { grep -v "^$_id/$_op " "$TICK_STATE" 2>/dev/null; echo "$_id/$_op $_now"; } > "$TICK_STATE.tmp" \
+            && mv "$TICK_STATE.tmp" "$TICK_STATE"
+        run_api "$_id" "$_op" </dev/null >/dev/null 2>&1
+    done
+}
+
+case "$1" in
+    list)         cmd_list ;;
+    call)         cmd_call "$2" "$3" ;;
+    settings-set) cmd_settings_set "$2" ;;
+    enable)       cmd_toggle "$2" 1 ;;
+    disable)      cmd_toggle "$2" 0 ;;
+    enabled)      valid_id "$2" && installed "$2" && is_enabled "$2" ;;
+    tick)         cmd_tick ;;
+    postinst)
+        valid_id "$2" || exit 1
+        mkdir -p "$ETC/$2"
+        is_enabled "$2" && hook "$2" install
+        exit 0 ;;
+    prerm)
+        valid_id "$2" || exit 1
+        case "$3" in remove|purge) hook "$2" remove ;; esac
+        exit 0 ;;
+    purge)
+        valid_id "$2" || err "bad plugin id"
+        rm -rf "${ETC:?}/$2"
+        grep -v "^$2/" "$TICK_STATE" > "$TICK_STATE.tmp" 2>/dev/null && mv "$TICK_STATE.tmp" "$TICK_STATE"
+        echo '{"ok":true}' ;;
+    *)
+        sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+        exit 1 ;;
+esac

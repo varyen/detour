@@ -1,0 +1,59 @@
+#!/bin/sh
+# Обработчик действий плагина «Привет». Зовётся detour-plugin как `api <op>`,
+# тело запроса — stdin, ответ — JSON в stdout. Окружение: PLUGIN_ID, PLUGIN_DIR,
+# PLUGIN_DATA (сохраняется при обновлениях и прошивке), PLUGIN_SETTINGS,
+# PLUGIN_PLATFORM, PLUGIN_METHOD.
+
+TICKS="$PLUGIN_DATA/ticks"
+
+# Настройки — плоский JSON, который пишет detour-plugin по схеме из манифеста.
+setting() {
+    v=$(sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$PLUGIN_SETTINGS" 2>/dev/null | head -1)
+    printf '%s' "${v:-$2}"
+}
+
+json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+case "$1" in
+    card)
+        n=$(cat "$TICKS" 2>/dev/null); n=${n:-0}
+        limit=$(setting limit 100)
+        tone=$(setting tone ok)
+        [ "$n" -ge "$limit" ] 2>/dev/null && tone=warn
+        up=$(detour-hello uptime 2>/dev/null)
+        printf '{"ok":true,"status":{"text":"%s","tone":"%s"},"lead":"%s","metrics":[' \
+            "$( [ "$(setting count_ticks true)" = true ] && echo "считает" || echo "на паузе")" \
+            "$tone" "$(json_str "$(setting greeting 'Привет, мир')")"
+        printf '{"label":"Тиков","value":"%s"},{"label":"Аптайм","value":"%s"},{"label":"Платформа","value":"%s"}],' \
+            "$n" "$(json_str "${up:-?}")" "$PLUGIN_PLATFORM"
+        printf '"actions":[{"label":"Тик сейчас","op":"tick"}]}\n'
+        ;;
+    tick)
+        [ "$(setting count_ticks true)" = true ] || { echo '{"ok":true,"message":"Счёт на паузе"}'; exit 0; }
+        n=$(cat "$TICKS" 2>/dev/null); n=${n:-0}
+        echo $((n + 1)) > "$TICKS"
+        printf '{"ok":true,"message":"Тиков: %s"}\n' $((n + 1))
+        ;;
+    reset)
+        [ "$PLUGIN_METHOD" = POST ] || { echo '{"ok":false,"error":"POST required"}'; exit 0; }
+        echo 0 > "$TICKS"
+        echo '{"ok":true,"message":"Счётчик сброшен"}'
+        ;;
+    echo)
+        # Для ESM-модуля: вернуть то, что прислали.
+        body=$(head -c 4096)
+        printf '{"ok":true,"got":"%s","method":"%s"}\n' "$(json_str "$body")" "$PLUGIN_METHOD"
+        ;;
+    install)
+        [ -f "$TICKS" ] || echo 0 > "$TICKS"
+        ;;
+    settings)
+        # Ответ на сохранение настроек: можно отказать или пояснить.
+        echo '{"ok":true,"message":"Настройки «Привет» сохранены"}'
+        ;;
+    remove|enable|disable)
+        ;;
+    *)
+        printf '{"ok":false,"error":"неизвестное действие: %s"}\n' "$(json_str "$1")"
+        ;;
+esac

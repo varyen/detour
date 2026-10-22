@@ -119,6 +119,8 @@ SB2MIHOMO="/usr/share/detour/sb2mihomo.lua"
 BACKUP_LUA="/usr/share/detour/detour-backup.lua"   # полная резервная копия (backup_export / panel_import_config)
 METER_BIN="/usr/sbin/detour-meter"          # счётчики трафика по лентам — backs the traffic_counters action
 TRAFFICLOG_BIN="/usr/sbin/detour-trafficlog" # временной ряд трафика (cron) — backs the traffic_series action
+PLUGIN_BIN="/usr/sbin/detour-plugin"        # реестр и рантайм плагинов — backs the plugin_* actions
+PLUGIN_UPLOAD="/tmp/detour-plugin-upload"   # пакет плагина, загруженный в панель (+ .sig)
 WARP_STATE="/var/state/detour-warp.json"    # ход регистрации WARP (пишет detour-warp; CGI её детачит)
 # Swap file (Keenetic/Entware only — /opt on a USB flash needs swap or the stack
 # gets OOM-killed). Managed via the S05swap init script; backs the swap_* actions.
@@ -261,6 +263,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     WARP_STATE="$OPT/var/state/detour-warp.json"
     METER_BIN="$OPT/sbin/detour-meter"
     TRAFFICLOG_BIN="$OPT/sbin/detour-trafficlog"
+    PLUGIN_BIN="$OPT/sbin/detour-plugin"
     SWAPFILE="$OPT/swapfile"
     SWAP_INITD="$OPT/etc/init.d/S05swap"
     SWAP_STATE="$OPT/var/state/detour-swap.json"
@@ -2696,6 +2699,7 @@ if [ "$REQUEST_METHOD" = "POST" ] && [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LEN
     # whole package in a shell variable.
     case "$ACTION" in
         panel_update_local) head -c "$CONTENT_LENGTH" > /tmp/detour-upload.ipk ;;
+        plugin_upload) head -c "$CONTENT_LENGTH" > "$PLUGIN_UPLOAD.pkg" ;;
         hosts_upload) head -c "$CONTENT_LENGTH" > /tmp/detour-hosts-upload ;;
         hosts_custom_save) head -c "$CONTENT_LENGTH" > /tmp/detour-hosts-custom ;;
         *) POST_DATA=$(head -c "$CONTENT_LENGTH") ;;
@@ -6256,6 +6260,81 @@ lan_clients)
     done < "$LC_OUT"
     printf ']}'
     rm -f "$LC_RAW" "$LC_OUT"
+    ;;
+
+# ==================== ПЛАГИНЫ ====================
+# Реестр, вызовы и настройки — detour-plugin; установка и удаление пакетов —
+# detour-update (фоном, ход в apply_log). id и op идут в query, а тело POST
+# уходит обработчику плагина как есть.
+plugins_list|plugin_call|plugin_settings|plugin_toggle|plugin_purge)
+    [ -x "$PLUGIN_BIN" ] || { json_err "detour-plugin не установлен"; exit 0; }
+    PL_ID=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]id=\([a-z0-9-]*\).*/\1/p' | head -1)
+    case "$ACTION" in
+        plugins_list) "$PLUGIN_BIN" list ;;
+        plugin_call)
+            PL_OP=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]op=\([a-z0-9_-]*\).*/\1/p' | head -1)
+            printf '%s' "$POST_DATA" | "$PLUGIN_BIN" call "$PL_ID" "$PL_OP" ;;
+        *)
+            if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+            case "$ACTION" in
+                plugin_settings) printf '%s' "$POST_DATA" | "$PLUGIN_BIN" settings-set "$PL_ID" ;;
+                plugin_toggle)
+                    case "$POST_DATA" in
+                        *'"enabled":true'*|*'"enabled": true'*) "$PLUGIN_BIN" enable "$PL_ID" ;;
+                        *) "$PLUGIN_BIN" disable "$PL_ID" ;;
+                    esac ;;
+                plugin_purge) "$PLUGIN_BIN" purge "$PL_ID" ;;
+            esac ;;
+    esac
+    ;;
+
+plugins_catalog)
+    # GET — последний скачанный каталог; POST — скачать заново.
+    PL_CAT="/var/state/detour-plugins-catalog.json"
+    [ "$PLATFORM" = keenetic ] && PL_CAT="$OPT/var/state/detour-plugins-catalog.json"
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+        if ! PL_OUT=$("$UPDATE_BIN" plugins-catalog 2>&1); then
+            json_err "$(printf '%s' "$PL_OUT" | grep -v '^{' | tail -3)"; exit 0
+        fi
+    fi
+    if [ -s "$PL_CAT" ]; then cat "$PL_CAT"; else printf '{"plugins":[]}'; fi
+    ;;
+
+plugin_install|plugin_remove|plugin_upload_sig|plugin_upload|plugin_install_uploaded)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$UPDATE_BIN" ] || { json_err "updater not installed"; exit 0; }
+    PL_ID=$(printf '%s' "$POST_DATA" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([a-z0-9-]*\)".*/\1/p' | head -1)
+    case "$ACTION" in
+        plugin_install)
+            [ -n "$PL_ID" ] || { json_err "bad plugin id"; exit 0; }
+            start_apply "\"$UPDATE_BIN\" plugin-install \"$PL_ID\"" ;;
+        plugin_remove)
+            [ -n "$PL_ID" ] || { json_err "bad plugin id"; exit 0; }
+            PL_PURGE=""
+            case "$POST_DATA" in *'"purge":true'*|*'"purge": true'*) PL_PURGE=purge ;; esac
+            start_apply "\"$UPDATE_BIN\" plugin-remove \"$PL_ID\" $PL_PURGE" ;;
+        plugin_upload_sig)
+            rm -f "$PLUGIN_UPLOAD".*
+            printf '%s' "$POST_DATA" > "$PLUGIN_UPLOAD.sig"
+            json_ok ;;
+        plugin_upload)
+            # Тело уже на диске (см. чтение POST выше). Формат — по содержимому:
+            # имя файла до CGI не доходит, а detour-update выбирает разбор по расширению.
+            [ -s "$PLUGIN_UPLOAD.pkg" ] || { json_err "пакет не загружен"; exit 0; }
+            PL_EXT=ipk
+            tar -tzf "$PLUGIN_UPLOAD.pkg" 2>/dev/null | head -5 | grep -q '^\.PKGINFO$' && PL_EXT=apk
+            mv -f "$PLUGIN_UPLOAD.pkg" "$PLUGIN_UPLOAD.$PL_EXT"
+            [ -s "$PLUGIN_UPLOAD.sig" ] && mv -f "$PLUGIN_UPLOAD.sig" "$PLUGIN_UPLOAD.$PL_EXT.sig"
+            "$UPDATE_BIN" plugin-inspect "$PLUGIN_UPLOAD.$PL_EXT" "$PLUGIN_UPLOAD.$PL_EXT.sig" 2>/dev/null                 || rm -f "$PLUGIN_UPLOAD".* ;;
+        plugin_install_uploaded)
+            PL_PKG=""
+            for PL_F in "$PLUGIN_UPLOAD.ipk" "$PLUGIN_UPLOAD.apk"; do [ -s "$PL_F" ] && PL_PKG="$PL_F"; done
+            [ -n "$PL_PKG" ] || { json_err "сначала загрузите пакет"; exit 0; }
+            PL_ALLOW=0
+            case "$POST_DATA" in *'"allow_unsigned":true'*|*'"allow_unsigned": true'*) PL_ALLOW=1 ;; esac
+            start_apply "\"$UPDATE_BIN\" plugin-install-local \"$PL_PKG\" $PL_ALLOW; _prc=\$?; rm -f \"$PLUGIN_UPLOAD\".*; (exit \$_prc)" ;;
+    esac
     ;;
 
 *) json_err "unknown action: $ACTION" ;;

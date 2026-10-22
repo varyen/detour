@@ -211,6 +211,21 @@ fi
 [ -n "$GH_OWNER" ] || GH_OWNER=varyen
 [ -n "$GH_REPO" ] || GH_REPO=detour
 
+# Плагины: каталог в ветке feed (plugins/index.json + .sig), копии установленных
+# пакетов — в $PLUGINS_STASH под /etc/detour: каталог переживает прошивку, и по
+# этим копиям plugins-restore возвращает плагины, в том числе сторонние.
+PLUGIN_PKG_PREFIX=detour-plugin-
+[ -n "${PLUGINS_BASE:-}" ] || PLUGINS_BASE="https://raw.githubusercontent.com/$GH_OWNER/$GH_REPO/feed/plugins"
+PLUGINS_ETC=/etc/detour/plugins
+PLUGIN_BIN=/usr/sbin/detour-plugin
+PLUGINS_CATALOG_STATE=/var/state/detour-plugins-catalog.json
+if [ "$KEENETIC" = 1 ]; then
+    PLUGINS_ETC=/opt/etc/detour/plugins
+    PLUGIN_BIN=/opt/sbin/detour-plugin
+    PLUGINS_CATALOG_STATE=/opt/var/state/detour-plugins-catalog.json
+fi
+PLUGINS_STASH=$PLUGINS_ETC/.pkg
+
 # The 6h auto-check cron runs `check-all` (panel + sing-box + tpws + nfqws2) so
 # the panel can light up any stale version chip. The manual panel "Проверить"
 # buttons and `detour-update check` always work regardless of this cron — only the
@@ -859,6 +874,11 @@ restore_record() {
         for p in "$NFQWS2_PKG:nfqws2-apply" "$MIHOMO_PKG:mihomo-apply" "ttyd:ttyd-apply" \
                  "kmod-amneziawg:server-apply" "$AWGGO_PKG:server-apply"; do
             pkg_is_installed "${p%%:*}" && echo "${p%%:*} ${p#*:}"
+        done
+        for p in "$PLUGINS_STASH"/*."$PKG_EXT"; do
+            [ -f "$p" ] || continue
+            p=${p##*/}; p="$PLUGIN_PKG_PREFIX${p%.*}"
+            pkg_is_installed "$p" && echo "$p plugins-restore"
         done
     } | awk 'NF == 2 && !seen[$1]++' > "$tmp" && mv -f "$tmp" "$RESTORE_LIST"
 }
@@ -1681,6 +1701,235 @@ cmd_apply_local() {
     return 0   # never let the trailing refresh flip cmd_apply_local's success status
 }
 
+# ---- Плагины -------------------------------------------------------------------
+# Пакет плагина — detour-plugin-<id> того же формата, что панель на этой
+# платформе. Из каталога он приходит с подписью нашим ключом; загруженный
+# руками может быть и сторонним — тогда ставится только с allow_unsigned=1
+# (панель спрашивает подтверждение: код плагина выполняется от root).
+
+plugin_kind() {
+    if [ "$KEENETIC" = 1 ]; then echo keenetic
+    elif [ "$PKGM" = apk ]; then echo apk
+    else echo ipk; fi
+}
+
+plugin_lua() {
+    if [ "$KEENETIC" = 1 ]; then
+        lua -e 'package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path' - "$@"
+    else
+        lua - "$@"
+    fi
+}
+
+# plugin_sig <пакет> <.sig> → 0 подпись наша, 1 подписи нет или она чужая,
+# 2 проверить нечем (на Entware обычно нет usign).
+plugin_sig() {
+    command -v usign >/dev/null 2>&1 || return 2
+    [ -s "$2" ] && [ -f "$PUBLIC_KEY" ] || return 1
+    usign -V -q -m "$1" -p "$PUBLIC_KEY" -x "$2" >/dev/null 2>&1
+}
+
+# Пути файлов данных пакета: .ipk — tar с data.tar.gz внутри, .apk — сразу tar.
+plugin_pkg_files() {
+    case "$1" in
+        *.apk) tar -tzf "$1" 2>/dev/null ;;
+        *) tar -xzOf "$1" ./data.tar.gz 2>/dev/null | tar -tzf - 2>/dev/null ;;
+    esac | sed 's|^\./||'
+}
+
+# plugin_pkg_cat <пакет> <путь в пакете без ./> → содержимое файла.
+plugin_pkg_cat() {
+    case "$1" in
+        *.apk) tar -xzOf "$1" "$2" 2>/dev/null ;;
+        *) tar -xzOf "$1" ./data.tar.gz 2>/dev/null | tar -xzOf - "./$2" 2>/dev/null ;;
+    esac
+}
+
+# plugin_inspect <пакет> [<.sig>] → JSON {ok,id,version,name,signed,compatible,reason}.
+# Что это вообще пакет плагина, проверяем по содержимому: ровно один манифест
+# …/detour/plugins/<id>/plugin.json, и собран он под эту платформу.
+plugin_inspect() {
+    local f="$1" sig="${2:-}" mpath id ver signed tmp
+    [ -s "$f" ] || { echo '{"ok":false,"error":"пакет не загружен"}'; return 1; }
+    mpath=$(plugin_pkg_files "$f" | grep -E '^(opt/)?(usr/)?share/detour/plugins/[a-z0-9-]+/plugin\.json$')
+    if [ -z "$mpath" ] || [ "$(printf '%s\n' "$mpath" | wc -l)" -ne 1 ]; then
+        echo '{"ok":false,"error":"это не пакет плагина Detour: нет манифеста plugin.json"}'; return 1
+    fi
+    case "$mpath" in
+        opt/*) [ "$KEENETIC" = 1 ] || { echo '{"ok":false,"error":"пакет собран для Keenetic"}'; return 1; } ;;
+        *) [ "$KEENETIC" = 1 ] && { echo '{"ok":false,"error":"пакет собран для OpenWrt, а это Keenetic"}'; return 1; } ;;
+    esac
+    id=$(printf '%s' "$mpath" | sed 's|.*/plugins/\([a-z0-9-]*\)/plugin\.json$|\1|')
+    ver=$(pkg_file_version "$f")
+    plugin_sig "$f" "$sig"
+    case "$?" in 0) signed=true ;; 2) signed=null ;; *) signed=false ;; esac
+    tmp=$(mktemp) || return 1
+    plugin_pkg_cat "$f" "$mpath" > "$tmp"
+    plugin_lua "$tmp" "$id" "$ver" "$signed" "$(current_version)" "$(plugin_kind)" <<'EOF'
+local cjson = require("cjson.safe")
+local mpath, id, ver, signed, panel, kind = arg[1], arg[2], arg[3], arg[4], arg[5], arg[6]
+local f = io.open(mpath, "rb")
+local m = f and cjson.decode(f:read("*a")) or nil
+if f then f:close() end
+if type(m) ~= "table" then io.write('{"ok":false,"error":"манифест плагина не читается"}') os.exit(1) end
+if m.id ~= id then io.write('{"ok":false,"error":"id в манифесте не совпадает с каталогом плагина"}') os.exit(1) end
+local function vcmp(a, b)
+    local x, y = {}, {}
+    for n in tostring(a):gmatch("%d+") do x[#x + 1] = tonumber(n) end
+    for n in tostring(b):gmatch("%d+") do y[#y + 1] = tonumber(n) end
+    for i = 1, 3 do local p, q = x[i] or 0, y[i] or 0 if p ~= q then return p < q and -1 or 1 end end
+    return 0
+end
+local platform = kind == "keenetic" and "keenetic" or "openwrt"
+local plats = type(m.platforms) == "table" and m.platforms or { "openwrt", "keenetic" }
+local onplat = false
+for _, p in ipairs(plats) do if p == platform then onplat = true end end
+local reason = ""
+if not onplat then reason = "плагин не поддерживает эту платформу"
+elseif m.min_panel and vcmp(panel, m.min_panel) < 0 then reason = "нужна панель " .. tostring(m.min_panel) .. " или новее" end
+local out = { ok = true, id = id, version = ver ~= "" and ver or m.version, name = m.name or id,
+              description = m.description or "", author = m.author or "",
+              compatible = reason == "", reason = reason }
+local s = cjson.encode(out)
+-- signed бывает null («проверить нечем»): cjson.null у чистого Lua-cjson нет.
+io.write((s:gsub("}$", ',"signed":' .. signed .. "}")))
+EOF
+    local rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
+# plugin_install_file <пакет> <.sig> <allow_unsigned 0|1>
+plugin_install_file() {
+    local f="$1" sig="$2" allow="$3" info id want got signed
+    info=$(plugin_inspect "$f" "$sig") || die "$(printf '%s' "$info" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')"
+    id=$(printf '%s' "$info" | sed -n 's/.*"id":"\([a-z0-9-]*\)".*/\1/p')
+    [ -n "$id" ] || die "не удалось прочитать id плагина"
+    case "$info" in *'"compatible":false'*)
+        die "$(printf '%s' "$info" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')" ;;
+    esac
+    signed=$(printf '%s' "$info" | sed -n 's/.*"signed":\([a-z]*\).*/\1/p')
+    if [ "$signed" = false ] && [ "$allow" != 1 ]; then
+        die "пакет без подписи Detour — подтвердите установку стороннего плагина"
+    fi
+    log "плагин $id: установка $(basename "$f") (подпись: $signed)"
+    local flags=""
+    [ "$PKGM" = apk ] || flags="--force-reinstall"
+    # Зависимости плагина сверх detour (пакеты штатного фида) не разрешатся по
+    # устаревшему индексу — на неудаче обновляем индекс и пробуем ещё раз.
+    # shellcheck disable=SC2086
+    if ! pkg_install_file "$f" $flags 2>&1; then
+        log "установка не прошла — обновляю индекс пакетов и пробую снова"
+        opkg_update_retry >/dev/null 2>&1
+        pkg_install_file "$f" $flags 2>&1 || die "$PKGM: установка плагина $id не удалась"
+    fi
+    want=$(pkg_file_version "$f")
+    got=$(pkg_installed_version "$PLUGIN_PKG_PREFIX$id")
+    [ -n "$got" ] || die "$PKGM вернул успех, но $PLUGIN_PKG_PREFIX$id в базе нет"
+    [ -z "$want" ] || [ "$want" = "$got" ] || die "в базе $PKGM осталась версия $got (в пакете $want)"
+    mkdir -p "$PLUGINS_STASH"
+    cp -f "$f" "$PLUGINS_STASH/$id.$PKG_EXT"
+    if [ "$signed" = false ]; then rm -f "$PLUGINS_STASH/$id.signed"
+    else : > "$PLUGINS_STASH/$id.signed"; fi
+    restore_record
+    log "плагин $id $got установлен"
+}
+
+cmd_plugins_catalog() {
+    local tmp
+    tmp=$(mktemp -d) || die "mktemp failed"
+    if ! gh_curl_retry $(feed_curl_v4) -fsSL --max-time 30 -o "$tmp/index.json" "$PLUGINS_BASE/index.json"; then
+        rm -rf "$tmp"; die "каталог плагинов недоступен ($PLUGINS_BASE)"
+    fi
+    gh_curl_retry $(feed_curl_v4) -fsSL --max-time 30 -o "$tmp/index.json.sig" "$PLUGINS_BASE/index.json.sig" 2>/dev/null
+    plugin_sig "$tmp/index.json" "$tmp/index.json.sig"
+    [ "$?" = 1 ] && { rm -rf "$tmp"; die "подпись каталога плагинов не сошлась"; }
+    mkdir -p "$(dirname "$PLUGINS_CATALOG_STATE")"
+    mv -f "$tmp/index.json" "$PLUGINS_CATALOG_STATE"
+    rm -rf "$tmp"
+    cat "$PLUGINS_CATALOG_STATE"
+}
+
+# plugin-install <id> — поставить или обновить плагин из каталога.
+cmd_plugin_install() {
+    local id="$1" kind path sum tmp name got
+    case "$id" in ''|*[!a-z0-9-]*) die "usage: plugin-install <id>" ;; esac
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    log "каталог плагинов: $PLUGINS_BASE"
+    cmd_plugins_catalog >/dev/null
+    kind=$(plugin_kind)
+    set -- $(plugin_lua "$PLUGINS_CATALOG_STATE" "$id" "$kind" <<'EOF'
+local cjson = require("cjson.safe")
+local f = io.open(arg[1], "rb")
+local c = f and cjson.decode(f:read("*a")) or nil
+if f then f:close() end
+for _, p in ipairs(type(c) == "table" and type(c.plugins) == "table" and c.plugins or {}) do
+    if p.id == arg[2] and type(p.files) == "table" and type(p.files[arg[3]]) == "table" then
+        local e = p.files[arg[3]]
+        if type(e.path) == "string" and e.path:match("^[%w%._/-]+$") and not e.path:find("%.%.") then
+            print(e.path .. " " .. (e.sha256 or "-"))
+        end
+    end
+end
+EOF
+)
+    path="${1:-}"; sum="${2:--}"
+    [ -n "$path" ] || die "плагина $id нет в каталоге для этой платформы ($kind)"
+    tmp=$(mktemp -d) || die "mktemp failed"
+    name=${path##*/}
+    log "скачиваю $name"
+    gh_curl_retry $(feed_curl_v4) -fsSL --max-time 300 -o "$tmp/$name" "$PLUGINS_BASE/$path" \
+        || { rm -rf "$tmp"; die "не скачать $PLUGINS_BASE/$path"; }
+    gh_curl_retry $(feed_curl_v4) -fsSL --max-time 60 -o "$tmp/$name.sig" "$PLUGINS_BASE/$path.sig" 2>/dev/null
+    if [ "$sum" != "-" ] && command -v sha256sum >/dev/null 2>&1; then
+        got=$(sha256sum "$tmp/$name" | awk '{print $1}')
+        [ "$got" = "$sum" ] || { rm -rf "$tmp"; die "контрольная сумма $name не совпала с каталогом"; }
+    fi
+    # Из каталога — только подписанное: «проверить нечем» (Entware) терпим, его
+    # прикрывают HTTPS и сумма из подписанного индекса; «подпись чужая» — нет.
+    plugin_sig "$tmp/$name" "$tmp/$name.sig"
+    [ "$?" = 1 ] && { rm -rf "$tmp"; die "подпись $name не сошлась"; }
+    ( plugin_install_file "$tmp/$name" "$tmp/$name.sig" 0 ) || { rm -rf "$tmp"; exit 1; }
+    rm -rf "$tmp"
+}
+
+# plugin-install-local <файл> [allow_unsigned 0|1] — пакет, загруженный в панель.
+cmd_plugin_install_local() {
+    local f="$1" allow="${2:-0}"
+    [ -s "$f" ] || die "usage: plugin-install-local <пакет> [1]"
+    [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
+    : > "$LOCKFILE"
+    trap 'rm -f "$LOCKFILE"' EXIT INT TERM
+    plugin_install_file "$f" "$f.sig" "$allow"
+}
+
+# plugin-remove <id> [purge] — удалить пакет; purge стирает и настройки.
+cmd_plugin_remove() {
+    local id="$1"
+    case "$id" in ''|*[!a-z0-9-]*) die "usage: plugin-remove <id> [purge]" ;; esac
+    if pkg_is_installed "$PLUGIN_PKG_PREFIX$id"; then
+        pkg_remove "$PLUGIN_PKG_PREFIX$id" 2>&1 || die "$PKGM: удаление плагина $id не удалось"
+    fi
+    rm -f "$PLUGINS_STASH/$id.$PKG_EXT" "$PLUGINS_STASH/$id.signed"
+    restore_forget "$PLUGIN_PKG_PREFIX$id"
+    [ "${2:-}" = purge ] && [ -x "$PLUGIN_BIN" ] && "$PLUGIN_BIN" purge "$id" >/dev/null
+    log "плагин $id удалён"
+}
+
+# После прошивки: вернуть плагины из копий в $PLUGINS_STASH (без сети).
+cmd_plugins_restore() {
+    local p id
+    for p in "$PLUGINS_STASH"/*."$PKG_EXT"; do
+        [ -f "$p" ] || continue
+        id=${p##*/}; id=${id%.*}
+        pkg_is_installed "$PLUGIN_PKG_PREFIX$id" && continue
+        log "возвращаю плагин $id"
+        pkg_install_file "$p" 2>&1 || log "WARNING: плагин $id не вернулся"
+    done
+}
+
 cmd_rollback() {
     [ -d "$BACKUP_DIR" ] || die "no backups in $BACKUP_DIR"
     # Pick the most recent backup that is NOT the currently-installed version.
@@ -1834,6 +2083,12 @@ case "$ACTION" in
     nfqws2-check)      cmd_nfqws2_check ;;
     nfqws2-apply)      cmd_nfqws2_apply ;;
     nfqws2-status)     cat "$NFQWS2_STATE_FILE" 2>/dev/null || echo '{"status":"unknown"}' ;;
+    plugins-catalog)   cmd_plugins_catalog ;;
+    plugin-inspect)    plugin_inspect "${2:-}" "${3:-}" ;;
+    plugin-install)    cmd_plugin_install "${2:-}" ;;
+    plugin-install-local) cmd_plugin_install_local "${2:-}" "${3:-0}" ;;
+    plugin-remove)     cmd_plugin_remove "${2:-}" "${3:-}" ;;
+    plugins-restore)   cmd_plugins_restore ;;
     stash-refresh)     cmd_stash_refresh ;;
     restore-record)    restore_record ;;
     rollback)          cmd_rollback ;;

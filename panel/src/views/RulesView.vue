@@ -20,6 +20,7 @@ import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
 import { asNum, fmtAgo, fmtBytes, fmtInt } from "@/lib/format";
 import { useFocusTarget } from "@/lib/deeplink";
+import PluginSections from "@/components/plugins/PluginSections.vue";
 import {
   countEntries,
   domainsLabel,
@@ -1288,6 +1289,7 @@ onBeforeUnmount(() => unregister?.());
         </p>
       </template>
     </RuleSection>
+    <PluginSections v-if="!status.isClient" area="rules" />
   </div>
 
   <ListDrawer

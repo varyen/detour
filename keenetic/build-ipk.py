@@ -99,6 +99,7 @@ FILES = [
     # Полная остановка панели («полный bypass») и её бесследное удаление.
     (os.path.join(ROUTER_FILES, "detour-power"), "opt/sbin/detour-power", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-console"), "opt/sbin/detour-console", 0o755, True),
+    (os.path.join(ROUTER_FILES, "detour-plugin"), "opt/sbin/detour-plugin", 0o755, True),
     # VPN-сервер: на Keenetic пока только честное «не поддерживается» для панели.
     (os.path.join(ROUTER_FILES, "detour-server"), "opt/sbin/detour-server", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-sub"), "opt/share/detour/sub-www/cgi-bin/sub", 0o755, True),
@@ -312,7 +313,7 @@ fi
 # dist туда же напрямую — этих файлов opkg не знает и не тронет.
 rm -rf /opt/share/www/detour-next
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
-    /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-power /opt/sbin/detour-cron \
+    /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-power /opt/sbin/detour-cron /opt/sbin/detour-plugin \
     /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp /opt/sbin/detour-geo /opt/sbin/detour-trafficlog \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\

@@ -24,6 +24,8 @@ import { useToastStore } from "@/stores/toast";
 import { useCommandStore } from "@/stores/commands";
 import { normalizeChannel, useUpdatesStore } from "@/stores/updates";
 import { useDashboardStore } from "@/stores/dashboard";
+import { usePluginsStore } from "@/stores/plugins";
+import PluginCard from "@/components/plugins/PluginCard.vue";
 import { fmtAgo, fmtBitrate, fmtSpeedKbps, isSet } from "@/lib/format";
 
 const router = useRouter();
@@ -33,6 +35,7 @@ const toast = useToastStore();
 const commands = useCommandStore();
 const updates = useUpdatesStore();
 const dash = useDashboardStore();
+const pluginsStore = usePluginsStore();
 
 /* Раньше здесь была своя шторка со списком профилей: тот же список, но без
    фильтров, скорости и всего, что есть в разделе «Профили». Держать вторую
@@ -549,6 +552,7 @@ async function checkTorrentBlock(seed: boolean) {
 let unregister: (() => void) | undefined;
 
 onMounted(async () => {
+  void pluginsStore.load();
   unregister = commands.register([
     {
       id: "ov:switch",
@@ -983,6 +987,11 @@ onBeforeUnmount(() => {
         <UiButton :busy="busy === 'updcheck'" @click="checkUpdates">Проверить</UiButton>
       </template>
     </TileCard>
+    </DashSlot>
+
+    <!-- Карточки плагинов: состав и место настраиваются так же, как у встроенных. -->
+    <DashSlot v-for="t in pluginsStore.tiles" :id="t.id" :key="t.id">
+      <PluginCard :plugin="t.plugin" />
     </DashSlot>
 
     <p v-if="!dash.visibleCount" class="empty">

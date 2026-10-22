@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
+import { usePluginsStore } from "@/stores/plugins";
 
 /* Состав и порядок карточек «Обзора». Хранится в браузере, а не на роутере:
    набор нужного отличается у телефона и у большого экрана, и это личная
@@ -46,11 +47,6 @@ export const DASH_TILES: DashTile[] = [
 
 const KEY = "detour:dashboard";
 const CATALOG = __CLIENT__ ? DASH_TILES.filter((t) => !t.router) : DASH_TILES;
-const IDS = CATALOG.map((t) => t.id);
-
-const DEFAULT_SPANS: Record<string, number> = Object.fromEntries(
-  CATALOG.map((t) => [t.id, t.span]),
-);
 const ALLOWED: number[] = SPANS.map((s) => s.span);
 
 interface Saved {
@@ -60,34 +56,40 @@ interface Saved {
 }
 
 export const useDashboardStore = defineStore("dashboard", () => {
-  const order = ref<string[]>([...IDS]);
-  const hidden = ref<string[]>([]);
-  const spans = ref<Record<string, number>>({ ...DEFAULT_SPANS });
+  const plugins = usePluginsStore();
+
+  /* Каталог живой: к встроенным карточкам добавляются карточки установленных
+     плагинов (id plugin:<id>), и появляются они не сразу, а когда придёт список
+     плагинов. Поэтому сохранённое состояние хранится «сырым», с чужими id, и
+     фильтруется по каталогу при чтении — иначе место и ширина карточки плагина
+     терялись бы на каждой загрузке страницы, до прихода списка. */
+  const catalog = computed<DashTile[]>(() => [
+    ...CATALOG,
+    ...plugins.tiles.map((t) => ({ id: t.id, title: t.title, hint: t.hint, span: t.span })),
+  ]);
+  const ids = computed(() => catalog.value.map((t) => t.id));
+  const defaultSpans = computed<Record<string, number>>(() =>
+    Object.fromEntries(catalog.value.map((t) => [t.id, t.span])),
+  );
+
+  const savedOrder = ref<string[]>([]);
+  const savedHidden = ref<string[]>([]);
+  const savedSpans = ref<Record<string, number>>({});
 
   function read() {
     try {
       const raw = localStorage.getItem(KEY);
       if (!raw) return;
       const saved = JSON.parse(raw) as Saved;
-      /* Сохранённый порядок фильтруем по каталогу, а недостающие карточки
-         дописываем на их место по умолчанию: иначе плитка, появившаяся в новой
-         версии панели, не показалась бы никому, кто хоть раз менял состав. */
-      const next = (saved.order ?? []).filter((id) => IDS.includes(id));
-      IDS.forEach((id, i) => {
-        if (!next.includes(id)) next.splice(Math.min(i, next.length), 0, id);
-      });
-      order.value = next;
-      hidden.value = (saved.hidden ?? []).filter((id) => IDS.includes(id));
-      /* Ширины пришли позже порядка: у того, кто настраивал главную до этой
-         версии, их в записи нет — берём каталожные, а не нули. Чужие id и
-         размеры не из набора отбрасываем: запись правится руками из консоли
-         не реже, чем самой панелью. */
-      const savedSpans = saved.spans ?? {};
-      spans.value = { ...DEFAULT_SPANS };
-      for (const id of IDS) {
-        const n = Number(savedSpans[id]);
-        if (ALLOWED.includes(n)) spans.value[id] = n;
+      savedOrder.value = Array.isArray(saved.order) ? saved.order.filter((x) => typeof x === "string") : [];
+      savedHidden.value = Array.isArray(saved.hidden) ? saved.hidden.filter((x) => typeof x === "string") : [];
+      /* Размеры не из набора отбрасываем: запись правится руками из консоли не
+         реже, чем самой панелью. */
+      const sp: Record<string, number> = {};
+      for (const [id, n] of Object.entries(saved.spans ?? {})) {
+        if (ALLOWED.includes(Number(n))) sp[id] = Number(n);
       }
+      savedSpans.value = sp;
     } catch {
       /* Испорченная запись — не повод остаться без главной страницы. */
     }
@@ -96,15 +98,15 @@ export const useDashboardStore = defineStore("dashboard", () => {
   read();
 
   watch(
-    [order, hidden, spans],
+    [savedOrder, savedHidden, savedSpans],
     () => {
       try {
         localStorage.setItem(
           KEY,
           JSON.stringify({
-            order: order.value,
-            hidden: hidden.value,
-            spans: spans.value,
+            order: savedOrder.value,
+            hidden: savedHidden.value,
+            spans: savedSpans.value,
           } satisfies Saved),
         );
       } catch {
@@ -115,10 +117,23 @@ export const useDashboardStore = defineStore("dashboard", () => {
     { deep: true },
   );
 
+  /* Сохранённый порядок по каталогу, а недостающие карточки — на их место по
+     умолчанию: иначе плитка, появившаяся в новой версии панели (или новый
+     плагин), не показалась бы никому, кто хоть раз менял состав. */
+  const order = computed<string[]>(() => {
+    const known = ids.value;
+    const next = savedOrder.value.filter((id) => known.includes(id));
+    known.forEach((id, i) => {
+      if (!next.includes(id)) next.splice(Math.min(i, next.length), 0, id);
+    });
+    return next;
+  });
+  const hidden = computed(() => savedHidden.value.filter((id) => ids.value.includes(id)));
+
   /** Карточки в выбранном порядке — для редактора состава. */
   const tiles = computed<DashTile[]>(() =>
     order.value
-      .map((id) => CATALOG.find((t) => t.id === id))
+      .map((id) => catalog.value.find((t) => t.id === id))
       .filter((t): t is DashTile => !!t),
   );
 
@@ -128,21 +143,25 @@ export const useDashboardStore = defineStore("dashboard", () => {
   const customized = computed(
     () =>
       hidden.value.length > 0 ||
-      order.value.join() !== IDS.join() ||
-      IDS.some((id) => spans.value[id] !== DEFAULT_SPANS[id]),
+      order.value.join() !== ids.value.join() ||
+      ids.value.some((id) => spanOf(id) !== defaultSpans.value[id]),
   );
 
   function isVisible(id: string) {
-    return IDS.includes(id) && !hidden.value.includes(id);
+    return ids.value.includes(id) && !savedHidden.value.includes(id);
+  }
+
+  function titleOf(id: string) {
+    return catalog.value.find((t) => t.id === id)?.title ?? id;
   }
 
   function spanOf(id: string) {
-    return spans.value[id] ?? DEFAULT_SPANS[id] ?? 2;
+    return savedSpans.value[id] ?? defaultSpans.value[id] ?? 2;
   }
 
   function setSpan(id: string, span: number) {
     if (!ALLOWED.includes(span)) return;
-    spans.value = { ...spans.value, [id]: span };
+    savedSpans.value = { ...savedSpans.value, [id]: span };
   }
 
   /** CSS-порядок в гриде: сама сетка остаётся сеткой, меняется только место. */
@@ -152,9 +171,15 @@ export const useDashboardStore = defineStore("dashboard", () => {
   }
 
   function toggle(id: string) {
-    hidden.value = isVisible(id)
-      ? [...hidden.value, id]
-      : hidden.value.filter((x) => x !== id);
+    savedHidden.value = isVisible(id)
+      ? [...savedHidden.value, id]
+      : savedHidden.value.filter((x) => x !== id);
+  }
+
+  /* Записываем порядок известных карточек, а id, которых сейчас в каталоге нет
+     (плагин выключен), дописываем в хвост — они вернутся на своё место. */
+  function writeOrder(list: string[]) {
+    savedOrder.value = [...list, ...savedOrder.value.filter((id) => !list.includes(id))];
   }
 
   /* Перемещения считаются по ВИДИМЫМ соседям: скрытая карточка не должна
@@ -183,24 +208,24 @@ export const useDashboardStore = defineStore("dashboard", () => {
     const list = order.value.filter((x) => x !== id);
     const at = anchor ? list.indexOf(anchor) : list.length;
     list.splice(at < 0 ? list.length : at, 0, id);
-    order.value = list;
+    writeOrder(list);
   }
 
   function reset() {
-    order.value = [...IDS];
-    hidden.value = [];
-    spans.value = { ...DEFAULT_SPANS };
+    savedOrder.value = [];
+    savedHidden.value = [];
+    savedSpans.value = {};
   }
 
   return {
     order,
     hidden,
-    spans,
     tiles,
     visible,
     visibleCount,
     customized,
     isVisible,
+    titleOf,
     orderOf,
     spanOf,
     setSpan,

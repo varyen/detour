@@ -8,7 +8,7 @@
  */
 import { computed, inject } from "vue";
 import SectionIcon from "@/components/SectionIcon.vue";
-import { DASH_TILES, SPANS, useDashboardStore } from "@/stores/dashboard";
+import { SPANS, useDashboardStore } from "@/stores/dashboard";
 import { EDIT_KEY, type EditContext } from "./dash-edit";
 
 const props = defineProps<{ id: string }>();
@@ -16,7 +16,7 @@ const props = defineProps<{ id: string }>();
 const dash = useDashboardStore();
 const edit = inject<EditContext | null>(EDIT_KEY, null);
 
-const title = computed(() => DASH_TILES.find((t) => t.id === props.id)?.title ?? props.id);
+const title = computed(() => dash.titleOf(props.id));
 const editing = computed(() => !!edit?.editing.value);
 const index = computed(() => dash.visible.findIndex((t) => t.id === props.id));
 const held = computed(() => edit?.dragId.value === props.id);

@@ -53,9 +53,9 @@ def main():
 
     keenetic = str(cfg.get("platform", "")).lower() == "keenetic"
     # Новая панель — главная, поэтому цель это /detour/. Ниже каталог сносится
-    # целиком (rm -rf), и это безопасно ровно потому, что своего в нём ничего
-    # чужого не лежит: старая однофайловая панель переехала на /detour-old/,
-    # а CGI живёт отдельно в /www/cgi-bin/ (на Keenetic — /opt/share/www/cgi-bin/).
+    # целиком, КРОМЕ plugins/: там UI установленных плагинов, его кладут их
+    # пакеты. Старая однофайловая панель переехала на /detour-old/, а CGI живёт
+    # отдельно в /www/cgi-bin/ (на Keenetic — /opt/share/www/cgi-bin/).
     dest = "/opt/share/www/detour" if keenetic else "/www/detour"
 
     blob = make_tar()
@@ -63,7 +63,7 @@ def main():
 
     ssh = ssh_connect(cfg)
     try:
-        rc, _, err = run(ssh, f"rm -rf {dest} && mkdir -p {dest}")
+        rc, _, err = run(ssh, f"mkdir -p {dest} && find {dest} -mindepth 1 -maxdepth 1 ! -name plugins -exec rm -rf {{}} +")
         if rc != 0:
             sys.exit(f"не смог подготовить {dest}: {err.strip()}")
 

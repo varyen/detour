@@ -151,6 +151,11 @@ while :; do
     # что панель рисует их одинаково.
     [ -x /opt/sbin/detour-trafficlog ] &&         /opt/sbin/detour-trafficlog tick >/dev/null 2>&1
 
+    # Плагины: каждый тик, срок каждой задачи detour-plugin считает по интервалу
+    # из манифеста (интервал короче тика — значит каждый тик).
+    [ -x /opt/sbin/detour-plugin ] && \
+        /opt/sbin/detour-plugin tick >"$LOGDIR/detour-plugin.log" 2>&1
+
     n=$(((n + 1) % 72))
     sleep "$TICK"
 done
