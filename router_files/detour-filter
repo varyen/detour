@@ -28,9 +28,26 @@
 #   detour-filter tick                  проверки прокси (cron раз в минуту, цикл внутри)
 #   detour-filter status                JSON для панели
 #   detour-filter set-fallback direct|block
+#
+# Корневой сертификат фильтра — без него устройства видят ошибку на каждом
+# сайте. AdGuard отдаёт свой CA всем, кто ходит через его прокси, по
+# http://local.adguard.org/cert.cer, поэтому роутер забирает его сам (tick — пока
+# сертификата нет, не чаще раза в 10 минут); для других фильтров — загрузка из
+# панели. Устройствам его раздаёт CGI detour-ca без входа в панель: сертификат
+# публичный, а ставить его будут на чужих телефонах.
+#
+#   detour-filter ca-fetch [url]        забрать у прокси (по умолчанию — у всех из карты)
+#   detour-filter ca-set <файл>         свой сертификат, PEM или DER
+#   detour-filter ca-clear
+#   detour-filter ca-info               JSON: отпечаток, имя, срок, откуда
+#   detour-filter ca-der|ca-pem|ca-mobileconfig   сам сертификат для detour-ca
 
 DEV_MAP=/etc/sing-box/devices.map
 CONF=/etc/detour/filter.conf
+CA_DER=/etc/detour/filter-ca.der
+CA_META=/etc/detour/filter-ca.meta
+CA_URL=http://local.adguard.org/cert.cer
+CA_RETRY=600
 STATE=/var/state/detour-filter.state
 LOCK=/var/run/detour-filter.lock
 PUSH_BIN=/usr/sbin/detour-push
@@ -45,6 +62,8 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
     DEV_MAP=/opt/etc/sing-box/devices.map
     CONF=/opt/etc/detour/filter.conf
+    CA_DER=/opt/etc/detour/filter-ca.der
+    CA_META=/opt/etc/detour/filter-ca.meta
     STATE=/opt/var/state/detour-filter.state
     LOCK=/opt/var/run/detour-filter.lock
     PUSH_BIN=/opt/sbin/detour-push
@@ -186,6 +205,7 @@ cmd_tick() {
     start=$(date +%s)
     while :; do
         [ -n "$(check_once)" ] && cmd_apply
+        ca_auto
         [ $(( $(date +%s) - start + STEP )) -le "$BUDGET" ] || break
         sleep "$STEP"
     done
@@ -205,8 +225,200 @@ cmd_status() {
     printf ']}\n'
 }
 
+# ---- корневой сертификат фильтра ----
+
+# base64 силами Lua: у busybox на части прошивок нет апплета base64, а у
+# Keenetic нет и openssl. $1 — enc (stdin → одна строка) или dec.
+B64_LUA=$(cat <<'LUA'
+local A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local d = io.read("*a") or ""
+local out = {}
+if os.getenv("B64_MODE") == "enc" then
+  for i = 1, #d, 3 do
+    local a, b, c = d:byte(i, i + 2)
+    local n = a * 65536 + (b or 0) * 256 + (c or 0)
+    local s = ""
+    for k = 3, 0, -1 do
+      local v = math.floor(n / 64 ^ k) % 64
+      s = s .. A:sub(v + 1, v + 1)
+    end
+    if not b then s = s:sub(1, 2) .. "==" elseif not c then s = s:sub(1, 3) .. "=" end
+    out[#out + 1] = s
+  end
+  io.write(table.concat(out))
+else
+  local map = {}
+  for i = 1, 64 do map[A:byte(i)] = i - 1 end
+  local acc, bits = 0, 0
+  for ch in d:gmatch(".") do
+    local v = map[ch:byte()]
+    if v then
+      acc = acc * 64 + v; bits = bits + 6
+      if bits >= 8 then
+        bits = bits - 8
+        local byte = math.floor(acc / 2 ^ bits)
+        out[#out + 1] = string.char(byte)
+        acc = acc - byte * 2 ^ bits
+      end
+    end
+  end
+  io.write(table.concat(out))
+end
+LUA
+)
+# Программа — в -e: stdin занят данными.
+b64() { B64_MODE="$1" lua -e "$B64_LUA"; }
+
+# DER X.509 начинается с SEQUENCE (0x30) и весит от сотен байт до пары КБ;
+# HTML-страница или ошибка прокси сюда не пройдут.
+is_der() {
+    [ -s "$1" ] || return 1
+    # 0x30 — это ASCII «0»: od есть не во всякой сборке busybox.
+    [ "$(head -c 1 "$1")" = 0 ] || return 1
+    [ "$(wc -c < "$1")" -lt 20000 ] || return 1
+    command -v openssl >/dev/null 2>&1 || return 0
+    openssl x509 -inform DER -in "$1" -noout 2>/dev/null
+}
+
+ca_store() { # $1 — проверенный DER, $2 — откуда, $3 — adguard|manual
+    mkdir -p "${CA_DER%/*}"
+    mv "$1" "$CA_DER"
+    chmod 644 "$CA_DER"
+    printf 'SRC=%s\nFROM=%s\nTS=%s\n' "$2" "$3" "$(date +%s)" > "$CA_META"
+}
+
+meta() { sed -n "s/^$1=//p" "$CA_META" 2>/dev/null | tail -1; }
+
+cmd_ca_fetch() {
+    local urls url tmp="$CA_DER.new"
+    urls=${1:-$(filter_devices | awk '{ print $3 }' | sort -u)}
+    [ -n "$urls" ] || { echo "нет устройств с фильтром — не у кого забирать сертификат" >&2; return 1; }
+    mkdir -p "${CA_DER%/*}"
+    for url in $urls; do
+        rm -f "$tmp"
+        curl -fsS --connect-timeout 3 -m 10 -x "$url" -o "$tmp" "$CA_URL" 2>/dev/null || continue
+        if is_der "$tmp"; then
+            ca_store "$tmp" "$(shown "$url")" adguard
+            logger -t detour-filter "сертификат фильтра получен от $(shown "$url")"
+            echo "ok $(shown "$url")"
+            return 0
+        fi
+    done
+    rm -f "$tmp"
+    echo "прокси не отдал сертификат: это не AdGuard или он не отвечает — загрузите сертификат вручную" >&2
+    return 1
+}
+
+# Сам — пока сертификата нет: AdGuard мог быть выключен в момент сохранения
+# правила. Не чаще раза в CA_RETRY: у других фильтров этого адреса нет вовсе.
+ca_auto() {
+    local try="${STATE%/*}/detour-filter.ca-try" now last
+    [ -s "$CA_DER" ] && return 0
+    now=$(date +%s); last=$(cat "$try" 2>/dev/null)
+    [ $((now - ${last:-0})) -ge "$CA_RETRY" ] || return 0
+    echo "$now" > "$try"
+    cmd_ca_fetch >/dev/null 2>&1
+}
+
+cmd_ca_set() {
+    local src="$1" tmp="$CA_DER.new"
+    [ -s "$src" ] || { echo "пустой файл" >&2; return 1; }
+    if grep -q 'BEGIN CERTIFICATE' "$src" 2>/dev/null; then
+        tr -d '\r' < "$src" | awk '/BEGIN CERTIFICATE/ { on = 1; next } /END CERTIFICATE/ { exit } on' | b64 dec > "$tmp"
+    else
+        cp "$src" "$tmp"
+    fi
+    if ! is_der "$tmp"; then
+        rm -f "$tmp"
+        echo "это не сертификат X.509 (нужен .crt, .cer или .pem)" >&2
+        return 1
+    fi
+    ca_store "$tmp" "${2:-загружен вручную}" manual
+    echo ok
+}
+
+ca_sha256() {
+    local h
+    if command -v sha256sum >/dev/null 2>&1; then
+        h=$(sha256sum "$CA_DER" | cut -d' ' -f1)
+    else
+        h=$(openssl dgst -sha256 -r "$CA_DER" 2>/dev/null | cut -d' ' -f1)
+    fi
+    echo "$h" | tr a-f A-F | sed 's/../&:/g; s/:$//'
+}
+
+jesc() { sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n'; }
+
+cmd_ca_info() {
+    local subj="" until=""
+    if [ ! -s "$CA_DER" ]; then
+        echo '{"present":false}'
+        return 0
+    fi
+    if command -v openssl >/dev/null 2>&1; then
+        subj=$(openssl x509 -inform DER -in "$CA_DER" -noout -subject 2>/dev/null | sed 's/^subject= *//')
+        until=$(openssl x509 -inform DER -in "$CA_DER" -noout -enddate 2>/dev/null | sed 's/^notAfter=//' |
+            awk '{ m = index("JanFebMarAprMayJunJulAugSepOctNovDec", $1); if (m) printf "%s-%02d-%02d", $4, (m + 2) / 3, $2 }')
+    fi
+    printf '{"present":true,"sha256":"%s","subject":"%s","not_after":"%s","source":"%s","from":"%s","ts":%s}\n' \
+        "$(ca_sha256)" "$(printf '%s' "$subj" | jesc)" "$until" \
+        "$(meta SRC | jesc)" "$(meta FROM)" "$(meta TS | tr -cd 0-9)"
+}
+
+cmd_ca_pem() {
+    [ -s "$CA_DER" ] || return 1
+    echo "-----BEGIN CERTIFICATE-----"
+    b64 enc < "$CA_DER" | awk '{ for (i = 1; i <= length($0); i += 64) print substr($0, i, 64) }'
+    echo "-----END CERTIFICATE-----"
+}
+
+# Профиль конфигурации iOS/iPadOS/macOS: так сертификат ставится из Safari
+# как профиль, а не теряется в «Файлах». UUID выводятся из отпечатка, чтобы
+# повторная загрузка того же сертификата заменяла профиль, а не плодила копии.
+cmd_ca_mobileconfig() {
+    local fp u1 u2
+    [ -s "$CA_DER" ] || return 1
+    fp=$(ca_sha256 | tr -d ':')
+    u1=$(echo "$fp" | sed 's/^\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\).*/\1-\2-\3-\4-\5/')
+    u2=$(echo "$fp" | sed 's/^.\{32\}\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\).*/\1-\2-\3-\4-\5/')
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadCertificateFileName</key><string>detour-filter-ca.cer</string>
+      <key>PayloadContent</key><data>$(b64 enc < "$CA_DER")</data>
+      <key>PayloadDisplayName</key><string>Сертификат фильтра HTTPS</string>
+      <key>PayloadIdentifier</key><string>detour.filter-ca.cert.${fp%"${fp#????????}"}</string>
+      <key>PayloadType</key><string>com.apple.security.root</string>
+      <key>PayloadUUID</key><string>$u2</string>
+      <key>PayloadVersion</key><integer>1</integer>
+    </dict>
+  </array>
+  <key>PayloadDescription</key><string>Корневой сертификат фильтра HTTPS из сети Detour. Нужен, чтобы сайты открывались через фильтр.</string>
+  <key>PayloadDisplayName</key><string>Фильтр HTTPS (Detour)</string>
+  <key>PayloadIdentifier</key><string>detour.filter-ca.${fp%"${fp#????????}"}</string>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadUUID</key><string>$u1</string>
+  <key>PayloadVersion</key><integer>1</integer>
+</dict>
+</plist>
+EOF
+}
+
 case "$1" in
     apply) cmd_apply ;;
+    ca-fetch) cmd_ca_fetch "$2" ;;
+    ca-set) cmd_ca_set "$2" "$3" ;;
+    ca-clear) rm -f "$CA_DER" "$CA_META" "${STATE%/*}/detour-filter.ca-try" ;;
+    ca-info) cmd_ca_info ;;
+    ca-der) [ -s "$CA_DER" ] && cat "$CA_DER" ;;
+    b64-dec) b64 dec ;;
+    ca-pem) cmd_ca_pem ;;
+    ca-mobileconfig) cmd_ca_mobileconfig ;;
     clear)
         drop_jump
         filter_devices | while read -r n mac url; do gate "$n" off; done ;;
@@ -217,5 +429,5 @@ case "$1" in
         mkdir -p "${CONF%/*}"
         echo "FALLBACK=$2" > "$CONF"
         cmd_apply ;;
-    *) echo "usage: $0 apply|clear|tick|status|set-fallback direct|block" >&2; exit 2 ;;
+    *) echo "usage: $0 apply|clear|tick|status|set-fallback direct|block|ca-fetch|ca-set|ca-clear|ca-info|ca-der|ca-pem|ca-mobileconfig" >&2; exit 2 ;;
 esac

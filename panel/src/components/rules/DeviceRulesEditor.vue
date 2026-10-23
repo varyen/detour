@@ -7,6 +7,7 @@
 import { computed, ref, watch } from "vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import UiButton from "@/components/UiButton.vue";
+import FilterCertCard from "@/components/rules/FilterCertCard.vue";
 import type { FilterFallback, FilterStatus, LanClient } from "@/api";
 
 interface DeviceRule {
@@ -238,6 +239,8 @@ function filterTargetKnown(rule: DeviceRule): boolean {
 
     <UiButton class="add" @click="add">Добавить устройство</UiButton>
 
+    <FilterCertCard v-if="hasFilter && open" />
+
     <div v-if="hasFilter" class="card">
       <label class="fb-label" for="filter-fallback">Если прокси фильтра не отвечает</label>
       <select
@@ -252,8 +255,6 @@ function filterTargetKnown(rule: DeviceRule): boolean {
       </select>
       <p class="sub">
         Роутер проверяет прокси каждые 10 секунд и переключает устройства сам.
-        На устройство нужно поставить корневой сертификат фильтра — без него
-        сайты покажут ошибку сертификата.
       </p>
     </div>
 

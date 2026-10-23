@@ -1,0 +1,242 @@
+#!/bin/sh
+# detour-ca — страница установки корневого сертификата «Фильтра HTTPS» для
+# устройств в сети. Без входа в панель, нарочно: сертификат публичный (его и
+# так раздаёт сам фильтр), а ставить его будут на телефонах, у владельцев
+# которых учётки панели нет. Ничего из запроса в ответ не попадает.
+#
+#   /cgi-bin/detour-ca                    страница: шаги под систему устройства, проверка
+#   /cgi-bin/detour-ca?f=crt              DER  (Android, Windows)
+#   /cgi-bin/detour-ca?f=pem              PEM  (Linux, Firefox)
+#   /cgi-bin/detour-ca?f=mobileconfig     профиль iOS, iPadOS, macOS
+
+FILTER_BIN=/usr/sbin/detour-filter
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    FILTER_BIN=/opt/sbin/detour-filter
+fi
+
+F=$(printf '%s' "${QUERY_STRING:-}" | sed -n 's/^\(.*&\)\{0,1\}f=\([a-z]*\).*/\2/p')
+
+file_out() { # $1 тип, $2 имя файла, $3 команда detour-filter
+    local tmp="/tmp/detour-ca.$$"
+    if ! "$FILTER_BIN" "$3" > "$tmp" 2>/dev/null || [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        printf 'Status: 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nСертификата фильтра пока нет.\n'
+        exit 0
+    fi
+    printf 'Content-Type: %s\r\nContent-Disposition: attachment; filename="%s"\r\nContent-Length: %s\r\nCache-Control: no-store\r\n\r\n' \
+        "$1" "$2" "$(wc -c < "$tmp" | tr -d ' ')"
+    cat "$tmp"
+    rm -f "$tmp"
+    exit 0
+}
+
+case "$F" in
+    crt) file_out application/x-x509-ca-cert detour-filter-ca.crt ca-der ;;
+    pem) file_out application/x-pem-file detour-filter-ca.pem ca-pem ;;
+    mobileconfig) file_out application/x-apple-aspen-config detour-filter-ca.mobileconfig ca-mobileconfig ;;
+esac
+
+INFO='{"present":false}'
+[ -x "$FILTER_BIN" ] && INFO=$("$FILTER_BIN" ca-info 2>/dev/null)
+val() { printf '%s' "$INFO" | sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+PRESENT=false
+case "$INFO" in *'"present":true'*) PRESENT=true ;; esac
+SHA=$(val sha256); SUBJ=$(val subject); UNTIL=$(val not_after); FROM=$(val from)
+SUBJ_CN=$(printf '%s' "$SUBJ" | sed -n 's/.*CN *= *\([^,]*\).*/\1/p')
+[ -n "$SUBJ_CN" ] || SUBJ_CN=$SUBJ
+UNTIL_HTML=""
+UNTIL=$(printf '%s' "$UNTIL" | awk -F- 'NF == 3 { print $3 "." $2 "." $1 }')
+[ -n "$UNTIL" ] && UNTIL_HTML=" <span class=\"dim\">· действует до $UNTIL</span>"
+
+printf 'Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n'
+cat <<'HTML'
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сертификат фильтра HTTPS</title>
+<style>
+:root { --bg: #f6f7f9; --card: #fff; --ink: #15181d; --dim: #5b6470; --line: #dde1e6; --accent: #1b7f9e; --ok: #1f8a5b; --bad: #c0392b; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0f1216; --card: #171b21; --ink: #e8ebef; --dim: #9aa3ad; --line: #2a3038; --accent: #4cc3e0; --ok: #4ec98a; --bad: #ef6b5c; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 640px; margin: 0 auto; padding: 20px 16px 40px; }
+h1 { font-size: 22px; margin: 4px 0 8px; }
+h2 { font-size: 17px; margin: 0 0 8px; }
+p { margin: 0 0 10px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 14px 0; }
+.dim { color: var(--dim); font-size: 14px; }
+.fp { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; word-break: break-all; color: var(--dim); }
+.btn { display: inline-block; background: var(--accent); color: #fff; text-decoration: none; border: 0; border-radius: 10px; padding: 12px 18px; font: inherit; font-weight: 600; min-height: 46px; cursor: pointer; }
+.btn.sec { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+ol { margin: 10px 0 0; padding-left: 22px; }
+li { margin: 6px 0; }
+details { margin-top: 8px; }
+summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+.os { display: none; }
+.os.on { display: block; }
+.res { margin-top: 10px; font-weight: 600; }
+.res.ok { color: var(--ok); }
+.res.bad { color: var(--bad); }
+.warn { color: var(--bad); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Сертификат фильтра HTTPS</h1>
+HTML
+
+if [ "$PRESENT" != true ]; then
+    cat <<'HTML'
+<div class="card">
+<p>Роутер ещё не получил сертификат фильтра.</p>
+<p class="dim">Владельцу сети: откройте панель Detour → «Правила → Устройства» и в блоке
+«Сертификат фильтра» нажмите «Забрать у прокси» или загрузите файл сертификата.</p>
+</div>
+</main>
+</body>
+</html>
+HTML
+    exit 0
+fi
+
+cat <<HTML
+<p class="dim">Сайты на этом устройстве идут через фильтр рекламы. Чтобы они открывались
+без ошибки сертификата, устройству нужно доверять сертификату фильтра.
+Это делается один раз.</p>
+<div class="card">
+<p><b>${SUBJ_CN:-Сертификат фильтра}</b>$UNTIL_HTML</p>
+<p class="fp">SHA-256: $SHA</p>
+<p class="dim">Отпечаток должен совпадать с тем, что показывает панель Detour. Не совпадает —
+не ставьте: страницу подменили.</p>
+</div>
+HTML
+
+cat <<'HTML'
+<div class="card os" id="ios">
+<h2>iPhone и iPad</h2>
+<p><a class="btn" href="?f=mobileconfig">Скачать профиль</a></p>
+<p class="dim">Открывайте эту страницу в Safari — другие браузеры профиль не установят.</p>
+<ol>
+<li>На вопрос о загрузке профиля нажмите «Разрешить».</li>
+<li>«Настройки» → «Профиль загружен» (вверху) → «Установить», введите код-пароль.</li>
+<li>Обязательно: «Настройки» → «Основные» → «Об этом устройстве» → «Доверие сертификатам» → включите «Фильтр HTTPS». Без этого шага сайты не откроются.</li>
+</ol>
+</div>
+
+<div class="card os" id="android">
+<h2>Android</h2>
+<p><a class="btn" href="?f=crt">Скачать сертификат</a></p>
+<ol>
+<li>Откройте «Настройки» → «Безопасность» (у Samsung — «Биометрия и безопасность») → «Другие параметры безопасности» → «Установить из памяти устройства».</li>
+<li>Выберите «Сертификат ЦС» → «Всё равно установить» и укажите скачанный файл detour-filter-ca.crt.</li>
+</ol>
+<p class="warn">Android доверяет такому сертификату только в браузерах. Приложения (YouTube, банки, мессенджеры)
+его не принимают: в них фильтр работает только там, где сайт открывается в браузере.</p>
+</div>
+
+<div class="card os" id="windows">
+<h2>Windows</h2>
+<p><a class="btn" href="?f=crt">Скачать сертификат</a></p>
+<ol>
+<li>Откройте скачанный detour-filter-ca.crt → «Установить сертификат».</li>
+<li>«Текущий пользователь» → «Поместить все сертификаты в следующее хранилище» → «Обзор» → «Доверенные корневые центры сертификации» → «Готово».</li>
+<li>Firefox: «Настройки» → «Приватность и защита» → «Сертификаты» → «Просмотр сертификатов» → «Центры сертификации» → «Импортировать».</li>
+</ol>
+</div>
+
+<div class="card os" id="mac">
+<h2>Mac</h2>
+<p><a class="btn" href="?f=mobileconfig">Скачать профиль</a></p>
+<ol>
+<li>«Системные настройки» → «Конфиденциальность и безопасность» → «Профили» → «Фильтр HTTPS» → «Установить».</li>
+<li>Если сайты всё ещё ругаются: «Связка ключей» → найдите сертификат → «Доверие» → «Всегда доверять».</li>
+</ol>
+</div>
+
+<div class="card os" id="linux">
+<h2>Linux</h2>
+<p><a class="btn" href="?f=pem">Скачать сертификат (PEM)</a></p>
+<ol>
+<li>Debian, Ubuntu: <code>sudo cp detour-filter-ca.pem /usr/local/share/ca-certificates/detour-filter-ca.crt && sudo update-ca-certificates</code></li>
+<li>Chrome и Firefox держат свой список: импортируйте файл в их настройках сертификатов как центр сертификации.</li>
+</ol>
+</div>
+
+<details id="others"><summary>Другие устройства</summary><div id="others-body"></div></details>
+HTML
+
+# Проверка — только для AdGuard. Шаг 1: служебный http://local.adguard.org/cert.cer
+# отвечает (с CORS «*») лишь через сам фильтр — значит, устройство в фильтре.
+# Шаг 2: обычный HTTPS-сайт, который фильтр вскрывает своим сертификатом:
+# открылся — сертификату доверяют. Сам https://local.adguard.org для этого не
+# годится: sing-box отдаёт прокси CONNECT на IP, и AdGuard пропускает такое
+# соединение насквозь к настоящему адресу, который по HTTPS не отвечает.
+if [ "$FROM" = adguard ]; then
+cat <<'HTML'
+<div class="card">
+<h2>Проверить</h2>
+<p class="dim">После установки нажмите — устройство попробует открыть служебную страницу фильтра.</p>
+<button class="btn sec" id="check" type="button">Проверить сертификат</button>
+<p class="res" id="res"></p>
+</div>
+<script>
+(function () {
+  var res = document.getElementById("res");
+  function probe(url, opts) {
+    var ctl = "AbortController" in window ? new AbortController() : null;
+    var t = setTimeout(function () { if (ctl) ctl.abort(); }, 6000);
+    opts.cache = "no-store";
+    if (ctl) opts.signal = ctl.signal;
+    return fetch(url + (url.indexOf("?") < 0 ? "?" : "&") + "t=" + Date.now(), opts)
+      .then(function (r) { clearTimeout(t); return r; }, function (e) { clearTimeout(t); throw e; });
+  }
+  function say(ok, text) { res.className = "res " + (ok ? "ok" : "bad"); res.textContent = text; }
+  document.getElementById("check").onclick = function () {
+    res.className = "res"; res.textContent = "Проверяю…";
+    var viaFilter = location.protocol === "https:"
+      ? Promise.resolve(null)
+      : probe("http://local.adguard.org/cert.cer", {}).then(function (r) { return r.ok; }, function () { return false; });
+    viaFilter.then(function (through) {
+      if (through === false) {
+        say(false, "Это устройство идёт мимо фильтра: в панели Detour для него не включён «Фильтр HTTPS» или фильтр сейчас недоступен.");
+        return;
+      }
+      probe("https://www.gstatic.com/generate_204", { mode: "no-cors" }).then(function () {
+        say(true, "Готово: сертификат установлен, сайты идут через фильтр.");
+      }, function () {
+        say(false, "Сертификат ещё не доверен. Пройдите шаги выше до конца — на iPhone не забудьте «Доверие сертификатам».");
+      });
+    });
+  };
+})();
+</script>
+HTML
+fi
+
+cat <<'HTML'
+<script>
+(function () {
+  var ua = navigator.userAgent || "";
+  var id = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? "ios"
+    : /Android/.test(ua) ? "android"
+    : /Windows/.test(ua) ? "windows"
+    : /Macintosh|Mac OS X/.test(ua) ? "mac"
+    : /Linux|X11/.test(ua) ? "linux" : "";
+  var body = document.getElementById("others-body");
+  ["ios", "android", "windows", "mac", "linux"].forEach(function (k) {
+    var el = document.getElementById(k);
+    if (k === id) { el.classList.add("on"); }
+    else { el.classList.add("on"); body.appendChild(el); }
+  });
+  if (!id) document.getElementById("others").open = true;
+})();
+</script>
+</main>
+</body>
+</html>
+HTML

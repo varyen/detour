@@ -164,6 +164,27 @@ export interface FilterStatus {
   }[];
 }
 
+/** Корневой сертификат фильтра (`detour-filter ca-info`). */
+export interface FilterCa {
+  present: boolean;
+  /** SHA-256 в виде «AA:BB:…» */
+  sha256?: string;
+  subject?: string;
+  /** ГГГГ-ММ-ДД; пусто, если на роутере нет openssl */
+  not_after?: string;
+  /** откуда: «хост:порт» прокси или «загружен вручную» */
+  source?: string;
+  from?: "adguard" | "manual";
+  ts?: number;
+}
+
+/** Ответ `filter_ca`: сертификат и страница установки в локальной сети. */
+export interface FilterCaResponse {
+  ok: boolean;
+  ca: FilterCa;
+  url: string;
+}
+
 export interface ProfileSummary {
   id: string;
   type: string;

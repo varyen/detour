@@ -2,6 +2,7 @@ import { requestJson, requestJsonTolerant, requestRawText } from "./client";
 import type {
   BypassMode,
   BypassStatus,
+  FilterCaResponse,
   FilterFallback,
   FilterStatus,
   LanClient,
@@ -124,6 +125,12 @@ export const overview = {
     requestJson<{ ok: boolean }>("devices", { body: text, timeoutMs: RESTART_TIMEOUT }),
   filterFallbackSet: (fallback: FilterFallback) =>
     requestJson<{ ok: boolean }>("filter_fallback", { body: { fallback } }),
+  filterCaGet: () => requestJson<FilterCaResponse>("filter_ca"),
+  filterCaFetch: () => requestJson<FilterCaResponse>("filter_ca", { body: { op: "fetch" } }),
+  filterCaClear: () => requestJson<FilterCaResponse>("filter_ca", { body: { op: "clear" } }),
+  /** Свой сертификат: содержимое файла (PEM или DER) в base64. */
+  filterCaUpload: (b64: string, name: string) =>
+    requestJson<FilterCaResponse>("filter_ca", { body: { b64, name } }),
   dnsVpnGet: () => requestJson<{ enabled: boolean; supported: boolean }>("dns_vpn"),
   dnsVpnSet: (enabled: boolean) =>
     requestJson<{ ok: boolean }>("dns_vpn", {

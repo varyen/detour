@@ -69,6 +69,8 @@ FILES = [
     (os.path.join(ROUTER_FILES, "sw.js"), "opt/share/www/detour-old/sw.js", 0o644, False),
     (os.path.join(ROUTER_FILES, "favicon.svg"), "opt/share/www/detour-old/favicon.svg", 0o644, False),
     (os.path.join(ROUTER_FILES, "detour-api"), "opt/share/www/cgi-bin/detour-api", 0o755, True),
+    # Страница установки сертификата «Фильтра HTTPS» — без входа в панель.
+    (os.path.join(ROUTER_FILES, "detour-ca"), "opt/share/www/cgi-bin/detour-ca", 0o755, True),
     # Subscription refresh helper (Lua) + a bundled pure-Lua cjson.safe, since the
     # Entware feed has no lua-cjson. fix_shebang rewrites #!/usr/bin/lua → /opt/bin/lua.
     (os.path.join(ROUTER_FILES, "subscription-refresh"), "opt/sbin/subscription-refresh", 0o755, True),
@@ -323,7 +325,7 @@ chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-boots
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\
     /opt/sbin/detour-awg /opt/etc/init.d/S55detour-awg \\
     /opt/etc/lighttpd/conf.d/detour-ssl-helper.sh /opt/etc/lighttpd/conf.d/detour-portmap-helper.sh \\
-    /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api 2>/dev/null
+    /opt/etc/ndm/netfilter.d/50-detour.sh /opt/share/www/cgi-bin/detour-api /opt/share/www/cgi-bin/detour-ca 2>/dev/null
 # Swap file is NO LONGER created automatically — the operator creates it on demand
 # from the panel's SWAP modal (Detour → меню → «SWAP-файл»). Here we only ACTIVATE
 # an already-existing swap file (no-op on a fresh install); S05swap also re-activates

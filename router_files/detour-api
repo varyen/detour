@@ -5048,6 +5048,8 @@ devices)
             json_err "$(printf '%s' "$DV_ERR" | json_escape)"; exit 0
         fi
         mv "$DETOUR_DIR/devices.conf.tmp" "$DETOUR_DIR/devices.conf"
+        DV_NEED_CA=""
+        grep -q '^[^|]*|filter|' "$DETOUR_DIR/devices.conf" && DV_NEED_CA=1
         ACHAIN=$(get_active_chain)
         if [ -n "$ACHAIN" ]; then
             BUILD_ERR=$(build_config "$(get_singbox_mode)" "$ACHAIN")
@@ -5058,6 +5060,10 @@ devices)
         if [ -n "$(engine_pid)" ]; then
             $SINGBOX_INITD restart >/dev/null 2>&1
             sleep 2
+        fi
+        # Сертификат фильтра — сразу, в фоне: карта устройств уже пересобрана.
+        if [ -n "$DV_NEED_CA" ] && [ -x "$FILTER_BIN" ] && [ "$("$FILTER_BIN" ca-info 2>/dev/null)" = '{"present":false}' ]; then
+            ( "$FILTER_BIN" ca-fetch >/dev/null 2>&1 & )
         fi
         json_ok
     else
@@ -5078,6 +5084,51 @@ filter_fallback)
     [ -x "$FILTER_BIN" ] || { json_err "detour-filter не установлен"; exit 0; }
     "$FILTER_BIN" set-fallback "$FB" >/dev/null 2>&1
     json_ok
+    ;;
+
+# Корневой сертификат «Фильтра HTTPS». GET — сведения и адрес страницы
+# установки в локальной сети (для QR: устройство открывает её по LAN, даже если
+# панель открыта по внешнему имени). POST {"op":"fetch"} — забрать у прокси,
+# {"op":"clear"}, {"b64":"…","name":"…"} — свой файл (PEM или DER в base64).
+filter_ca)
+    [ -x "$FILTER_BIN" ] || { json_err "detour-filter не установлен"; exit 0; }
+    if [ "$REQUEST_METHOD" = "POST" ]; then
+        FC_OP=$(printf '%s' "$POST_DATA" | sed -n 's/.*"op"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' | head -1)
+        FC_B64=$(printf '%s' "$POST_DATA" | sed -n 's/.*"b64"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9+\/=]*\)".*/\1/p' | head -1)
+        if [ "$FC_OP" = fetch ]; then
+            FC_ERR=$("$FILTER_BIN" ca-fetch 2>&1 >/dev/null) || { json_err "$(printf '%s' "$FC_ERR" | json_escape)"; exit 0; }
+        elif [ "$FC_OP" = clear ]; then
+            "$FILTER_BIN" ca-clear
+        elif [ -n "$FC_B64" ]; then
+            FC_TMP="/tmp/detour-ca-upload.$$"
+            printf '%s' "$FC_B64" | "$FILTER_BIN" b64-dec > "$FC_TMP"
+            FC_NAME=$(printf '%s' "$POST_DATA" | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 | tr -cd 'A-Za-z0-9._ -' | cut -c1-60)
+            FC_ERR=$("$FILTER_BIN" ca-set "$FC_TMP" "${FC_NAME:+файл $FC_NAME}" 2>&1 >/dev/null)
+            FC_RC=$?
+            rm -f "$FC_TMP"
+            [ "$FC_RC" = 0 ] || { json_err "$(printf '%s' "$FC_ERR" | json_escape)"; exit 0; }
+        else
+            json_err "op: fetch, clear или b64"; exit 0
+        fi
+    fi
+    FC_INFO=$("$FILTER_BIN" ca-info 2>/dev/null)
+    if [ "$PLATFORM" = "keenetic" ]; then
+        FC_IP=$(ip -4 -o addr show "${LAN_IF:-br0}" 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4; exit }')
+        FC_PORT=$(sed -n 's/.*server\.port[^0-9]*\([0-9][0-9]*\).*/\1/p' "$OPT/etc/lighttpd/detour.conf" 2>/dev/null | head -1)
+        FC_PORT=${FC_PORT:-8080}
+    else
+        FC_IP=$(uci -q get network.lan.ipaddr | cut -d/ -f1)
+        FC_PORT=$(uci -q get uhttpd.main.listen_http | tr ' ' '\n' | sed -n 's/^0\.0\.0\.0:\([0-9]*\)$/\1/p' | head -1)
+        FC_PORT=${FC_PORT:-80}
+    fi
+    FC_URL=""
+    if [ -n "$FC_IP" ]; then
+        FC_URL="http://$FC_IP"
+        [ "$FC_PORT" = 80 ] || FC_URL="$FC_URL:$FC_PORT"
+        FC_URL="$FC_URL/cgi-bin/detour-ca"
+    fi
+    [ -n "$FC_INFO" ] || FC_INFO='{"present":false}'
+    printf '{"ok":true,"ca":%s,"url":"%s"}\n' "$FC_INFO" "$FC_URL"
     ;;
 
 # ==================== WHITELIST ====================

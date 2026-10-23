@@ -198,6 +198,8 @@ PANEL_FILES = [
     (("router_files", "detour-logbridge"), "usr/sbin/detour-logbridge", 0o755),
     (("router_files", "detour-logbridge.initd"), "etc/init.d/detour-logbridge", 0o755),
     (("router_files", "detour-api"), "www/cgi-bin/detour-api", 0o755),
+    # Страница установки сертификата «Фильтра HTTPS» — без входа в панель.
+    (("router_files", "detour-ca"), "www/cgi-bin/detour-ca", 0o755),
     # Старая однофайловая панель — переехала на /detour-old/ (главной стала Vue).
     # favicon.svg раньше не паковался вообще, хотя sw.js ссылался на него в
     # уведомлениях — иконка молча не грузилась; теперь кладём рядом.
@@ -495,7 +497,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
     /usr/sbin/detour-awg /etc/init.d/detour-awg \\
     /usr/sbin/detour-server /etc/init.d/detour-server \\
-    /www/cgi-bin/detour-api 2>/dev/null
+    /www/cgi-bin/detour-api /www/cgi-bin/detour-ca 2>/dev/null
 
 # 2b) Seed the health-check target list on first install (preserved on upgrade
 # via the keeplist + this guard). detour-health/health_urls fall back to built-in
