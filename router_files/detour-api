@@ -51,6 +51,7 @@ SPEEDCHECK_EXCLUDE="/etc/sing-box/speedcheck-exclude.list"
 # в конфиге sing-box ниже.
 TORRENT_ALLOW="/etc/sing-box/torrent-allow.list"
 TORRENT_BIN="/usr/sbin/detour-torrent"
+FILTER_BIN="/usr/sbin/detour-filter"
 TORRENT_STATE="/var/state/detour-torrent.json"
 # Что делать с торрентами на запрещающем профиле: «block» (по умолчанию),
 # «direct» или «via <id профиля/цепочки, где торренты разрешены>». Для «via»
@@ -202,6 +203,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SPEEDCHECK_EXCLUDE="$OPT/etc/sing-box/speedcheck-exclude.list"
     TORRENT_ALLOW="$OPT/etc/sing-box/torrent-allow.list"
     TORRENT_BIN="$OPT/sbin/detour-torrent"
+    FILTER_BIN="$OPT/sbin/detour-filter"
     TORRENT_STATE="$OPT/var/state/detour-torrent.json"
     TORRENT_ACTION_FILE="$OPT/etc/sing-box/torrent-action"
     TORRENT_MAP="$OPT/etc/sing-box/torrent.map"
@@ -1199,6 +1201,21 @@ LUA
 
 chain_exists() { [ -n "$(chain_hops_csv "$1")" ]; }
 
+# Входит ли профиль в работающий конфиг помимо активной цепочки: цели
+# маршрутов, правил устройств и торрентов собираются в него же. Цель — id
+# профиля или именованной цепочки, поэтому цепочка разворачивается в хопы.
+profile_in_extra_targets() { # $1 = profile id
+    local t
+    torrent_action_read
+    for t in $( { route_map_targets
+                  devices_conf_lines | awk -F'|' '$2 == "vpn" || $2 == "filter" { print $3 }'
+                  [ "$TA_MODE" = via ] && printf '%s\n' "$TA_VIA"; } | sort -u); do
+        [ "$t" = "$1" ] && return 0
+        csv_contains "$(chain_hops_csv "$t")" "$1" && return 0
+    done
+    return 1
+}
+
 # Создать/перезаписать цепочку. Печатает текст ошибки и возвращает 1, если что-то
 # не так. Единственный писатель chains.json — сюда же ходит detour-warp.
 chain_store_save() { # $1=id $2=name $3=hops CSV
@@ -1468,10 +1485,41 @@ compute_route_extras() {
 # «mac|mode|target» с MAC в нижнем регистре.
 devices_conf_lines() {
     [ -f "$DETOUR_DIR/devices.conf" ] && tr -d '\r' < "$DETOUR_DIR/devices.conf" | awk -F'|' '
-        $1 ~ /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]$/ && ($2 == "direct" || ($2 == "vpn" && $3 != "")) {
+        $1 ~ /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]$/ && ($2 == "direct" || (($2 == "vpn" || $2 == "filter") && $3 != "")) {
             print tolower($1) "|" $2 "|" $3
         }'
     server_device_lines
+}
+
+# «Фильтр HTTPS» (detour-filter): целью может быть только HTTP- или
+# SOCKS-профиль — через него идёт лишь TCP 80/443 устройства. Печатает адрес
+# прокси для curl -x, иначе ничего.
+filter_proxy_url() { # $1 = id профиля
+    local f="$SINGBOX_PROFILES_DIR/$1.json"
+    [ -f "$f" ] || return 0
+    lua - "$f" <<'LUA' 2>/dev/null
+local cjson = require("cjson.safe")
+local h = io.open(arg[1], "r"); if not h then return end
+local o = cjson.decode(h:read("*a") or "") or {}; h:close()
+local ob = type(o.outbound) == "table" and o.outbound or {}
+local srv, port = ob.server, tonumber(ob.server_port)
+if type(srv) ~= "string" or srv == "" or not port then return end
+if srv:find(":", 1, true) then srv = "[" .. srv .. "]" end
+local scheme
+if ob.type == "http" then
+  scheme = (type(ob.tls) == "table" and ob.tls.enabled) and "https" or "http"
+elseif ob.type == "socks" then
+  scheme = tostring(ob.version or "5") == "4" and "socks4" or "socks5h"
+else
+  return
+end
+local auth = ""
+if type(ob.username) == "string" and ob.username ~= "" then
+  local function enc(s) return (s:gsub("[^%w%-%._~]", function(c) return string.format("%%%02X", c:byte()) end)) end
+  auth = enc(ob.username) .. ":" .. enc(type(ob.password) == "string" and ob.password or "") .. "@"
+end
+io.write(scheme .. "://" .. auth .. srv .. ":" .. port)
+LUA
 }
 
 # Клиенты своего VPN-сервера с маршрутом (поле route в clients.list detour-server):
@@ -1534,7 +1582,7 @@ with_routing_mark() { # $1 JSON одной строкой, $2 метка (дес
 # «метка=порт,…»; третье — порт по умолчанию (первый канал).
 compute_device_extras() {
     local chain_csv="$1" udp_mode mac mode target marks k tag thops port uport seen inb key hit m mk alt
-    local first_port first_uport first_tag nl tab
+    local first_port first_uport first_tag nl tab furl
     DX_RULES=""; DX_MAP=""; TORRENT_PORT=""; TORRENT_UPORT=""
     udp_mode=$(udp_vpn_mode_val)
     k=0; seen=""
@@ -1548,6 +1596,26 @@ compute_device_extras() {
     while IFS='|' read -r mac mode target marks; do
         if [ "$mode" = direct ]; then
             DX_MAP="$DX_MAP$mac direct 0 0$nl"
+            continue
+        fi
+        # Фильтр HTTPS: вход sing-box только для TCP 80/443 устройства, исходящий —
+        # сам прокси без цепочки и без UDP. Адрес прокси уходит в карту — по нему
+        # detour-filter проверяет, жив ли прокси.
+        if [ "$mode" = filter ]; then
+            furl=$(filter_proxy_url "$target")
+            [ -n "$furl" ] || continue
+            key="filter#$target"
+            hit=$(printf '%s' "$seen" | awk -F"$tab" -v k="$key" '$1 == k { print $2; exit }')
+            if [ -z "$hit" ]; then
+                k=$((k + 1))
+                device_target_emit "$target" "" "dv_$k" "$k" 0 || { k=$((k - 1)); continue; }
+                hit=$((DEV_PORT_BASE + k))
+                RX_INBOUNDS="$RX_INBOUNDS,
+    {\"type\":\"redirect\",\"tag\":\"in_dev_$k\",\"listen\":\"::\",\"listen_port\":$hit}"
+                DX_RULES="$DX_RULES${DX_RULES:+,}{\"action\":\"route\",\"inbound\":[\"in_dev_$k\"],\"outbound\":\"dv_$k\"}"
+                seen="$seen$key$tab$hit$nl"
+            fi
+            DX_MAP="$DX_MAP$mac filter $hit 0 $furl$nl"
             continue
         fi
         # та же цель (и те же метки) у нескольких устройств — одни входы на всех
@@ -4661,7 +4729,7 @@ profile_save)
     PS_CHAIN=$(get_active_chain)
     case ",$PS_CHAIN," in
         *",$P_ID,"*) PS_APPLY=1 ;;
-        *) route_map_targets | grep -qx "$P_ID" && PS_APPLY=1 || PS_APPLY="" ;;
+        *) profile_in_extra_targets "$P_ID" && PS_APPLY=1 || PS_APPLY="" ;;
     esac
     if [ -n "$PS_APPLY" ] && [ -n "$PS_CHAIN" ]; then
         SBMODE=$(get_singbox_mode)
@@ -4958,10 +5026,28 @@ devices)
     if [ "$REQUEST_METHOD" = "POST" ]; then
         mkdir -p "$DETOUR_DIR"
         printf '%s\n' "$POST_DATA" | tr -d '\r' | awk -F'|' '
-            $1 ~ /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]$/ && ($2 == "direct" || ($2 == "vpn" && $3 ~ /^[A-Za-z0-9_.-]+$/)) {
+            $1 ~ /^([0-9A-Fa-f][0-9A-Fa-f]:){5}[0-9A-Fa-f][0-9A-Fa-f]$/ && ($2 == "direct" || (($2 == "vpn" || $2 == "filter") && $3 ~ /^[A-Za-z0-9_.-]+$/)) {
                 name = $4; gsub(/[|\t]/, " ", name)
-                print tolower($1) "|" $2 "|" ($2 == "vpn" ? $3 : "") "|" name
-            }' > "$DETOUR_DIR/devices.conf.tmp" && mv "$DETOUR_DIR/devices.conf.tmp" "$DETOUR_DIR/devices.conf"
+                print tolower($1) "|" $2 "|" ($2 == "direct" ? "" : $3) "|" name
+            }' > "$DETOUR_DIR/devices.conf.tmp"
+        DV_ERR=""
+        while IFS='|' read -r DV_MAC DV_MODE DV_T DV_NAME; do
+            [ "$DV_MODE" = filter ] || continue
+            DV_URL=$(filter_proxy_url "$DV_T")
+            if [ -z "$DV_URL" ]; then
+                DV_ERR="фильтр HTTPS для ${DV_NAME:-$DV_MAC}: «$DV_T» — не HTTP- и не SOCKS-профиль"; break
+            fi
+            # Машина с прокси сама в фильтре — её выход вернулся бы к ней же по кругу.
+            DV_HOST=${DV_URL#*://}; DV_HOST=${DV_HOST##*@}; DV_HOST=${DV_HOST%:*}
+            if ip neigh show "$DV_HOST" 2>/dev/null | grep -qi "lladdr $DV_MAC"; then
+                DV_ERR="${DV_NAME:-$DV_MAC} — это сама машина с прокси $DV_HOST: её нельзя пускать через фильтр"; break
+            fi
+        done < "$DETOUR_DIR/devices.conf.tmp"
+        if [ -n "$DV_ERR" ]; then
+            rm -f "$DETOUR_DIR/devices.conf.tmp"
+            json_err "$(printf '%s' "$DV_ERR" | json_escape)"; exit 0
+        fi
+        mv "$DETOUR_DIR/devices.conf.tmp" "$DETOUR_DIR/devices.conf"
         ACHAIN=$(get_active_chain)
         if [ -n "$ACHAIN" ]; then
             BUILD_ERR=$(build_config "$(get_singbox_mode)" "$ACHAIN")
@@ -4977,8 +5063,21 @@ devices)
     else
         DEV=""; [ -f "$DETOUR_DIR/devices.conf" ] && DEV=$(json_escape < "$DETOUR_DIR/devices.conf")
         VSUP=true; [ "$(get_singbox_mode)" = multi ] && VSUP=false
-        printf '{"devices":"%s","vpn_supported":%s}\n' "$DEV" "$VSUP"
+        FST=""
+        [ -x "$FILTER_BIN" ] && FST=$("$FILTER_BIN" status 2>/dev/null)
+        printf '{"devices":"%s","vpn_supported":%s,"filter":%s}\n' "$DEV" "$VSUP" "${FST:-null}"
     fi
+    ;;
+
+# Что делать устройствам с «Фильтром HTTPS», пока прокси не отвечает:
+# direct — идти без фильтра, block — оставаться без HTTPS.
+filter_fallback)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    FB=$(printf '%s' "$POST_DATA" | sed -n 's/.*"fallback"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' | head -1)
+    case "$FB" in direct|block) ;; *) json_err "fallback: direct или block"; exit 0 ;; esac
+    [ -x "$FILTER_BIN" ] || { json_err "detour-filter не установлен"; exit 0; }
+    "$FILTER_BIN" set-fallback "$FB" >/dev/null 2>&1
+    json_ok
     ;;
 
 # ==================== WHITELIST ====================

@@ -1,16 +1,18 @@
 <script setup lang="ts">
-/* Правила устройств: «мимо VPN» или «через свой VPN/цепочку». Файл на роутере —
-   строки «mac|mode|target|name» (mode: direct | vpn). Устройство узнаётся по MAC:
-   адрес от DHCP меняется, MAC — нет. «Отдельные маршруты» роутера главнее: их
-   сайты идут своим путём и с устройств из этого списка. */
+/* Правила устройств: «мимо VPN», «через свой VPN/цепочку» или «Фильтр HTTPS».
+   Файл на роутере — строки «mac|mode|target|name» (mode: direct | vpn | filter).
+   Устройство узнаётся по MAC: адрес от DHCP меняется, MAC — нет. «Отдельные
+   маршруты» роутера главнее: их сайты идут своим путём и с устройств из этого
+   списка (кроме фильтра — там выход прокси сам попадает под маршруты). */
 import { computed, ref, watch } from "vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import UiButton from "@/components/UiButton.vue";
-import type { LanClient } from "@/api";
+import type { FilterFallback, FilterStatus, LanClient } from "@/api";
 
 interface DeviceRule {
   mac: string;
-  /* "direct" — мимо VPN, иначе id профиля или цепочки. */
+  /* "direct" — мимо VPN, "filter:<id>" — фильтр через прокси-профиль,
+     иначе id профиля или цепочки. */
   route: string;
   name: string;
 }
@@ -25,16 +27,24 @@ const props = defineProps<{
   open: boolean;
   text: string;
   targets: TargetOption[];
+  /* HTTP- и SOCKS-профили — только они годятся в фильтр. */
+  filterTargets: TargetOption[];
+  filter?: FilterStatus | null;
   clients: LanClient[];
   vpnSupported: boolean;
   loading?: boolean;
   busy?: boolean;
 }>();
 
-const emit = defineEmits<{ close: []; save: [string] }>();
+const emit = defineEmits<{ close: []; save: [string]; fallback: [FilterFallback] }>();
 
 const rules = ref<DeviceRule[]>([]);
 const MAC = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/;
+const FILTER = "filter:";
+
+function isFilter(r: DeviceRule): boolean {
+  return r.route.startsWith(FILTER);
+}
 
 function normMac(v: string): string {
   return v.trim().toLowerCase().replace(/-/g, ":");
@@ -47,6 +57,7 @@ function parse(text: string): DeviceRule[] {
     if (!MAC.test(normMac(mac))) continue;
     if (mode === "direct") out.push({ mac: normMac(mac), route: "direct", name });
     else if (mode === "vpn" && target) out.push({ mac: normMac(mac), route: target, name });
+    else if (mode === "filter" && target) out.push({ mac: normMac(mac), route: FILTER + target, name });
   }
   return out;
 }
@@ -56,9 +67,9 @@ function serialize(list: DeviceRule[]): string {
     .filter((r) => MAC.test(normMac(r.mac)) && r.route)
     .map((r) => {
       const name = r.name.replace(/[|\n\r\t]/g, " ").trim();
-      return r.route === "direct"
-        ? `${normMac(r.mac)}|direct||${name}`
-        : `${normMac(r.mac)}|vpn|${r.route}|${name}`;
+      if (r.route === "direct") return `${normMac(r.mac)}|direct||${name}`;
+      if (isFilter(r)) return `${normMac(r.mac)}|filter|${r.route.slice(FILTER.length)}|${name}`;
+      return `${normMac(r.mac)}|vpn|${r.route}|${name}`;
     })
     .join("\n");
 }
@@ -112,15 +123,29 @@ const dup = computed(() => {
 });
 
 const ready = computed(() => rules.value.filter((r) => MAC.test(normMac(r.mac))).length);
+
+const hasFilter = computed(() => rules.value.some(isFilter));
+const fallback = computed<FilterFallback>(() => props.filter?.fallback ?? "direct");
+
+/* Состояние прокси — только у сохранённых правил: сторож проверяет то, что уже
+   применено на роутере. */
+function filterState(rule: DeviceRule) {
+  return props.filter?.devices.find((d) => d.mac === normMac(rule.mac));
+}
+
+function filterTargetKnown(rule: DeviceRule): boolean {
+  return props.filterTargets.some((t) => FILTER + t.id === rule.route);
+}
 </script>
 
 <template>
   <DrawerSheet :open="open" title="Устройства" wide @close="emit('close')">
     <template #sticky>
       <p class="hint">
-        <span>Отдельное правило для устройства в сети: весь его трафик мимо VPN
-          или через выбранный VPN или цепочку. «Отдельные маршруты» главнее —
-          их сайты идут своим путём и с этих устройств.</span>
+        <span>Отдельное правило для устройства в сети: весь его трафик мимо VPN,
+          через выбранный VPN или цепочку либо сайты — через фильтр HTTPS.
+          «Отдельные маршруты» главнее — их сайты идут своим путём и с этих
+          устройств.</span>
         <b class="num">{{ loading ? "загружаю…" : `${ready} из ${rules.length}` }}</b>
       </p>
     </template>
@@ -178,16 +203,59 @@ const ready = computed(() => rules.value.filter((r) => MAC.test(normMac(r.mac)))
             {{ t.name }}
           </option>
         </optgroup>
+        <optgroup label="Фильтр HTTPS через прокси">
+          <option v-for="t in filterTargets" :key="'f' + t.id" :value="FILTER + t.id" :disabled="!vpnSupported">
+            {{ t.name }}
+          </option>
+          <option v-if="!filterTargets.length" disabled value="">Нужен HTTP- или SOCKS-профиль</option>
+        </optgroup>
+        <option v-if="isFilter(rule) && !filterTargetKnown(rule)" :value="rule.route">
+          {{ rule.route.slice(FILTER.length) }} (не найден или не прокси — правило не сработает)
+        </option>
         <option
-          v-if="rule.route !== 'direct' && !targets.some((t) => t.id === rule.route)"
+          v-if="rule.route !== 'direct' && !isFilter(rule) && !targets.some((t) => t.id === rule.route)"
           :value="rule.route"
         >
           {{ rule.route }} (не найден — пойдёт через основной VPN)
         </option>
       </select>
+      <template v-if="isFilter(rule)">
+        <p class="sub">
+          Через прокси идут только сайты (HTTP и HTTPS), остальное — по общим
+          правилам роутера. HTTP/3 (QUIC) и IPv6 для сайтов закрыты: иначе браузер
+          обошёл бы фильтр.
+        </p>
+        <p v-if="filterState(rule)" class="state" :class="filterState(rule)!.state">
+          <template v-if="filterState(rule)!.state === 'up'">Прокси {{ filterState(rule)!.proxy }} отвечает</template>
+          <template v-else-if="filterState(rule)!.state === 'down'">
+            Прокси {{ filterState(rule)!.proxy }} не отвечает —
+            {{ fallback === "direct" ? "устройство идёт без фильтра" : "у устройства нет HTTPS" }}
+          </template>
+          <template v-else>Прокси {{ filterState(rule)!.proxy }} ещё не проверялся</template>
+        </p>
+      </template>
     </div>
 
     <UiButton class="add" @click="add">Добавить устройство</UiButton>
+
+    <div v-if="hasFilter" class="card">
+      <label class="fb-label" for="filter-fallback">Если прокси фильтра не отвечает</label>
+      <select
+        id="filter-fallback"
+        class="sel full"
+        :value="fallback"
+        :disabled="busy"
+        @change="emit('fallback', ($event.target as HTMLSelectElement).value as FilterFallback)"
+      >
+        <option value="direct">Пускать устройства без фильтра</option>
+        <option value="block">Оставить их без HTTPS, пока прокси не вернётся</option>
+      </select>
+      <p class="sub">
+        Роутер проверяет прокси каждые 10 секунд и переключает устройства сам.
+        На устройство нужно поставить корневой сертификат фильтра — без него
+        сайты покажут ошибку сертификата.
+      </p>
+    </div>
 
     <p v-if="!vpnSupported" class="note">
       «Через профиль или цепочку» работает только в обычном режиме sing-box — в
@@ -297,6 +365,25 @@ const ready = computed(() => rules.value.filter((r) => MAC.test(normMac(r.mac)))
 .add {
   width: 100%;
   justify-content: center;
+}
+.sub {
+  font-size: 12px;
+  color: var(--dim);
+}
+.state {
+  font-size: 12.5px;
+  color: var(--dim);
+}
+.state.up {
+  color: var(--ok);
+}
+.state.down {
+  color: var(--bad);
+}
+.fb-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
 }
 .note {
   margin-top: 12px;

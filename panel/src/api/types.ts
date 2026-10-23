@@ -148,6 +148,22 @@ export interface StatusResponse {
   power_off?: boolean;
 }
 
+/** Что делать устройствам с «Фильтром HTTPS», пока прокси не отвечает. */
+export type FilterFallback = "direct" | "block";
+
+/** Сторож «Фильтра HTTPS» (`detour-filter status`). */
+export interface FilterStatus {
+  fallback: FilterFallback;
+  devices: {
+    mac: string;
+    /** хост:порт прокси, без учётки */
+    proxy: string;
+    /** unknown — ещё не проверялся */
+    state: "up" | "down" | "unknown";
+    since: number;
+  }[];
+}
+
 export interface ProfileSummary {
   id: string;
   type: string;

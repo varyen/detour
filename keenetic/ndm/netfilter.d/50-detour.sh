@@ -55,9 +55,22 @@ device_match() {
     esac
 }
 
+# «Фильтр HTTPS» устройств (detour-filter): блок QUIC в FORWARD и обход прокси,
+# который не отвечает. Цепочки устройств строит этот хук, поэтому и правила
+# фильтра восстанавливаются отсюда — после каждой пересборки netfilter.
+filter_sync() {
+    [ -x /opt/sbin/detour-filter ] || return 0
+    if [ -f /opt/etc/detour/singbox.enabled ] && [ ! -f /opt/etc/detour/power.off ]; then
+        /opt/sbin/detour-filter apply >/dev/null 2>&1
+    else
+        /opt/sbin/detour-filter clear >/dev/null 2>&1
+    fi
+}
+
 # Панель остановлена целиком (detour-power off): снимаем всё своё и оставляем
 # только доступ к самой панели — иначе её не включить обратно.
 if [ -f /opt/etc/detour/power.off ]; then
+    filter_sync
     [ -x /opt/sbin/detour-power ] && /opt/sbin/detour-power fw-purge "$TYPE" >/dev/null 2>&1
     if [ "$TYPE" != ip6tables ]; then
         iptables -C INPUT -i "$LAN_IF" -p tcp --dport "$PANEL_PORT" -j ACCEPT 2>/dev/null || \
@@ -85,6 +98,9 @@ if [ "$TYPE" = "ip6tables" ]; then
             ip6tables -I FORWARD 1 -m mac --mac-source "$mac" -m comment --comment detour-dev -j ACCEPT 2>/dev/null
         done
     fi
+    # Пересборка ip6tables сносит и переход в DETOUR_FILTER (IPv6 80/443 устройств
+    # с фильтром) — восстановить.
+    filter_sync
     exit 0
 fi
 
@@ -403,6 +419,26 @@ if [ -f /opt/etc/detour/singbox.enabled ] && [ -s "$DEV_MAP" ]; then
         [ -n "$mac" ] || continue
         i=$((i + 1)); c="SINGBOX_DEV_$i"
         iptables -t nat -N "$c"
+        # «Фильтр HTTPS»: на прокси только TCP 80/443, остальное — RETURN, общим
+        # путём. Маршруты и zapret не повторяются: выход прокси идёт через роутер
+        # и попадает под них сам (как в device_filter_chain у OpenWrt).
+        if [ "$mode" = filter ]; then
+            for ip in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 100.64.0.0/10; do
+                iptables -t nat -A "$c" -d "$ip" -j RETURN
+            done
+            fhost=${alt#*://}; fhost=${fhost##*@}; fhost=${fhost%:*}
+            case "$fhost" in
+                *[!0-9.]*|"") ;;
+                *) iptables -t nat -A "$c" -d "$fhost" -j RETURN ;;
+            esac
+            if [ "$port" != 0 ]; then
+                iptables -t nat -A "$c" -p tcp --dport 80 -j REDIRECT --to-ports "$port"
+                iptables -t nat -A "$c" -p tcp --dport 443 -j REDIRECT --to-ports "$port"
+            fi
+            iptables -t nat -A "$c" -j RETURN
+            iptables -t nat -A SINGBOX_DEVICES $(device_match "$mac") -j "$c"
+            continue
+        fi
         route_map_slots > /tmp/detour-dev-slots.$$
         while read -r n id rport ipset; do
             [ -n "$ipset" ] && iptables -t nat -A "$c" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$rport"
@@ -438,6 +474,8 @@ if [ -f /opt/etc/detour/singbox.enabled ] && [ -s "$DEV_MAP" ]; then
         iptables -t nat -I PREROUTING 1 -i "$IF" -j SINGBOX_DEVICES
     done
 fi
+# Блок QUIC и обход недоступного прокси для «Фильтра HTTPS» — по состоянию сторожа.
+filter_sync
 
 # --- «UDP через VPN»: TPROXY в tproxy-входы sing-box (порт udp_vpn_up из sing-box.initd) ---
 # NDM сносит mangle вместе со всем остальным, поэтому цепочка собирается здесь

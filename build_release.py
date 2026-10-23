@@ -177,6 +177,7 @@ PANEL_FILES = [
     # Пер-профильный запрет торрентов: nft-матчеры uTP/DHT/трекеров перед nat
     # REDIRECT + счётчики, по которым панель показывает, кого и чем поймали.
     (("router_files", "detour-torrent"), "usr/sbin/detour-torrent", 0o755),
+    (("router_files", "detour-filter"), "usr/sbin/detour-filter", 0o755),
     # DPI-bypass engine switch (off|zapret|zapret2) + its boot applier.
     (("router_files", "detour-bypass"), "usr/sbin/detour-bypass", 0o755),
     (("router_files", "detour-bypass.initd"), "etc/init.d/detour-bypass", 0o755),
@@ -489,7 +490,7 @@ chmod 0755 /etc/init.d/sing-box /etc/init.d/zapret-tpws \\
     /usr/sbin/detour-update /usr/sbin/subscription-refresh \\
     /usr/sbin/vpn-keepalive /usr/sbin/detour-ping /usr/sbin/detour-health \\
     /usr/sbin/detour-push /usr/sbin/detour-cert /usr/sbin/detour-warp /usr/sbin/detour-meter /usr/sbin/detour-offload /usr/sbin/detour-portmap /usr/sbin/detour-hosts /etc/init.d/detour-hosts \\
-    /usr/sbin/detour-rulist /usr/sbin/detour-torrent \\
+    /usr/sbin/detour-rulist /usr/sbin/detour-torrent /usr/sbin/detour-filter \\
     /usr/sbin/detour-bypass /etc/init.d/detour-bypass /usr/sbin/detour-power \\
     /usr/sbin/detour-logbridge /etc/init.d/detour-logbridge \\
     /usr/sbin/detour-awg /etc/init.d/detour-awg \\
@@ -629,7 +630,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'proxy-admin-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent' | grep -v 'detour-server' | grep -v 'detour-plugin'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'proxy-admin-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent' | grep -v 'detour-filter' | grep -v 'detour-server' | grep -v 'detour-plugin'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -655,6 +656,9 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   # и, если они выросли, пишем событие для панели + шлём один Web Push на эпизод.
   # Правил нет → tick выходит сразу, так что на «разрешающем» профиле это бесплатно.
   echo "* * * * * /usr/sbin/detour-torrent tick >/dev/null 2>&1"
+  # «Фильтр HTTPS» устройств: жив ли внешний прокси (цикл 10 с внутри минуты). Без
+  # устройств с фильтром выходит сразу.
+  echo "* * * * * /usr/sbin/detour-filter tick >/dev/null 2>&1"
   # Статистика клиентов VPN-сервера: трафик, сессии. Сервер выключен → выход сразу.
   echo "* * * * * /usr/sbin/detour-server tick >/dev/null 2>&1"
   # Периодические задачи плагинов: интервалы — в их манифестах, срок решает detour-plugin.
@@ -757,6 +761,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-geo' \\
                       | grep -v 'detour-trafficlog' \\
                       | grep -v 'detour-torrent' \\
+                      | grep -v 'detour-filter' \\
                       | grep -v 'detour-server' \\
                       | grep -v 'detour-plugin' \\
                       | crontab - 2>/dev/null

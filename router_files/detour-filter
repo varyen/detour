@@ -1,0 +1,221 @@
+#!/bin/sh
+# detour-filter — «Фильтр HTTPS» для устройств: их TCP 80/443 идёт через внешний
+# фильтрующий прокси (AdGuard для Windows в режиме HTTP-прокси, Privoxy и т. п.),
+# всё остальное — общим путём роутера.
+#
+# Перехват делает механизм устройств: detour-api пишет в devices.map строку
+# «mac filter <порт> 0 <url прокси>», init заводит цепочку SINGBOX_DEV_<N> с
+# REDIRECT 80/443 на вход sing-box, исходящий которого — этот прокси. Здесь —
+# то, чего правилам перехвата не хватает:
+#
+#   QUIC   HTTP/3 идёт по UDP 443 мимо прокси, и браузер с ним фильтра не видит.
+#          UDP 443 устройства режется (REJECT — браузер сразу уходит на TCP), а
+#          по IPv6 режутся и TCP 80/443: перехват только IPv4, и без этого браузер
+#          с IPv6 ушёл бы мимо фильтра.
+#   Сторож Прокси живёт на чужой машине, которую выключают. Пока он не отвечает,
+#          REDIRECT уводит HTTPS устройства в никуда. tick проверяет прокси раз в
+#          10 с; после двух неудач подряд первым правилом цепочки устройства
+#          встаёт RETURN, и устройство идёт общим путём (FALLBACK=direct), пока
+#          прокси не ответит снова. FALLBACK=block оставляет перехват — без
+#          фильтра нет и HTTPS.
+#
+# Правила из apply держатся на состоянии (STATE), а не на памяти процесса:
+# init пересобирает цепочки устройств на каждом рестарте sing-box, KeeneticOS —
+# весь netfilter на любом своём событии, и оба зовут apply заново.
+#
+#   detour-filter apply                 правила по devices.map и STATE
+#   detour-filter clear                 снять всё (sing-box остановлен)
+#   detour-filter tick                  проверки прокси (cron раз в минуту, цикл внутри)
+#   detour-filter status                JSON для панели
+#   detour-filter set-fallback direct|block
+
+DEV_MAP=/etc/sing-box/devices.map
+CONF=/etc/detour/filter.conf
+STATE=/var/state/detour-filter.state
+LOCK=/var/run/detour-filter.lock
+PUSH_BIN=/usr/sbin/detour-push
+CHAIN=DETOUR_FILTER
+GATE=detour-filter-down
+PROBE_URL=http://connectivitycheck.gstatic.com/generate_204
+FAILS_DOWN=2
+STEP=10
+BUDGET=${FILTER_LOOP_BUDGET:-50}
+
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    DEV_MAP=/opt/etc/sing-box/devices.map
+    CONF=/opt/etc/detour/filter.conf
+    STATE=/opt/var/state/detour-filter.state
+    LOCK=/opt/var/run/detour-filter.lock
+    PUSH_BIN=/opt/sbin/detour-push
+fi
+mkdir -p "${STATE%/*}" "${LOCK%/*}" 2>/dev/null
+
+fallback() {
+    case "$(sed -n 's/^FALLBACK=//p' "$CONF" 2>/dev/null | tail -1)" in
+        block) echo block ;;
+        *) echo direct ;;
+    esac
+}
+
+# «N mac url» устройств с фильтром; N — номер строки карты, он же номер цепочки
+# SINGBOX_DEV_N (init нумерует все строки карты подряд).
+filter_devices() {
+    [ -s "$DEV_MAP" ] || return 0
+    awk '$1 != "" { n++; if ($2 == "filter" && $5 != "") print n, $1, $5 }' "$DEV_MAP"
+}
+
+proxy_state() { # $1 url → up|down (нет записи — up: не наказываем до первой проверки)
+    awk -v p="$1" '$1 == p { s = $2 } END { print (s == "down" ? "down" : "up") }' "$STATE" 2>/dev/null
+}
+
+# Адрес прокси без схемы и учётки — для журнала, уведомлений и панели.
+shown() { local a="${1#*://}"; echo "${a##*@}"; }
+
+match_of() { case "$1" in *.*) echo "-s $1" ;; *) echo "-m mac --mac-source $1" ;; esac; }
+
+ensure_jump() { # $1 iptables|ip6tables
+    "$1" -N "$CHAIN" 2>/dev/null
+    "$1" -F "$CHAIN"
+    "$1" -C FORWARD -j "$CHAIN" 2>/dev/null || "$1" -I FORWARD 1 -j "$CHAIN"
+}
+
+drop_jump() {
+    local t
+    for t in iptables ip6tables; do
+        command -v "$t" >/dev/null 2>&1 || continue
+        while "$t" -D FORWARD -j "$CHAIN" 2>/dev/null; do :; done
+        "$t" -F "$CHAIN" 2>/dev/null
+        "$t" -X "$CHAIN" 2>/dev/null
+    done
+}
+
+gate() { # $1 номер цепочки, $2 on|off
+    local c="SINGBOX_DEV_$1"
+    iptables -t nat -S "$c" >/dev/null 2>&1 || return 0
+    while iptables -t nat -D "$c" -m comment --comment "$GATE" -j RETURN 2>/dev/null; do :; done
+    [ "$2" = on ] && iptables -t nat -I "$c" 1 -m comment --comment "$GATE" -j RETURN
+}
+
+cmd_apply() {
+    local list fb n mac url m have6=""
+    list=$(filter_devices)
+    if [ -z "$list" ]; then drop_jump; return 0; fi
+    fb=$(fallback)
+    ensure_jump iptables
+    command -v ip6tables >/dev/null 2>&1 && { ensure_jump ip6tables; have6=1; }
+    echo "$list" | while read -r n mac url; do
+        m=$(match_of "$mac")
+        if [ "$(proxy_state "$url")" = down ] && [ "$fb" = direct ]; then
+            gate "$n" on
+            continue
+        fi
+        gate "$n" off
+        iptables -A "$CHAIN" $m -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable
+        case "$mac" in *.*) continue ;; esac
+        [ -n "$have6" ] || continue
+        ip6tables -A "$CHAIN" $m -p udp --dport 443 -j REJECT
+        ip6tables -A "$CHAIN" $m -p tcp -m multiport --dports 80,443 -j REJECT --reject-with tcp-reset 2>/dev/null || {
+            ip6tables -A "$CHAIN" $m -p tcp --dport 80 -j REJECT --reject-with tcp-reset
+            ip6tables -A "$CHAIN" $m -p tcp --dport 443 -j REJECT --reject-with tcp-reset
+        }
+    done
+}
+
+probe() { # $1 url → 0, если прокси довёл запрос
+    curl -s -o /dev/null --connect-timeout 3 -m 8 -x "$1" "$PROBE_URL" 2>/dev/null
+}
+
+push_alert() {
+    [ -x "$PUSH_BIN" ] || return 0
+    "$PUSH_BIN" send "$1" "$2" >/dev/null 2>&1
+}
+
+# Одна проверка всех прокси. Печатает 1, если чьё-то состояние сменилось.
+check_once() {
+    local urls url st fails since now new changed="" tmp
+    urls=$(filter_devices | awk '{ print $3 }' | sort -u)
+    [ -n "$urls" ] || return 0
+    now=$(date +%s)
+    tmp="$STATE.$$"
+    : > "$tmp"
+    for url in $urls; do
+        set -- $(awk -v p="$url" '$1 == p { print $2, $3, $4 }' "$STATE" 2>/dev/null)
+        st=${1:-up}; fails=${2:-0}; since=${3:-$now}
+        if probe "$url"; then
+            fails=0; new=up
+        else
+            fails=$((fails + 1))
+            [ "$fails" -ge "$FAILS_DOWN" ] && new=down || new=$st
+        fi
+        if [ "$new" != "$st" ]; then
+            since=$now; changed=1
+            report "$url" "$new"
+        fi
+        echo "$url $new $fails $since" >> "$tmp"
+    done
+    mv "$tmp" "$STATE"
+    [ -n "$changed" ] && echo 1
+}
+
+report() { # $1 url, $2 новое состояние
+    local where
+    where=$(shown "$1")
+    if [ "$2" = down ]; then
+        logger -t detour-filter "прокси $where не отвечает — фолбэк: $(fallback)"
+        if [ "$(fallback)" = direct ]; then
+            push_alert "Detour: фильтр HTTPS недоступен" "Прокси $where не отвечает. Устройства с фильтром идут без него."
+        else
+            push_alert "Detour: фильтр HTTPS недоступен" "Прокси $where не отвечает. У устройств с фильтром нет HTTPS, пока он не вернётся."
+        fi
+    else
+        logger -t detour-filter "прокси $where снова отвечает"
+        push_alert "Detour: фильтр HTTPS снова работает" "Прокси $where отвечает, устройства снова идут через него."
+    fi
+}
+
+cmd_tick() {
+    local start
+    [ -n "$(filter_devices)" ] || { rm -f "$STATE"; return 0; }
+    mkdir "$LOCK" 2>/dev/null || {
+        # Зависший прошлый тик (снят по питанию) не должен блокировать навсегда.
+        [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ] || return 0
+        rmdir "$LOCK" 2>/dev/null; mkdir "$LOCK" 2>/dev/null || return 0
+    }
+    trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+    start=$(date +%s)
+    while :; do
+        [ -n "$(check_once)" ] && cmd_apply
+        [ $(( $(date +%s) - start + STEP )) -le "$BUDGET" ] || break
+        sleep "$STEP"
+    done
+}
+
+cmd_status() {
+    local fb first=1 n mac url st since
+    fb=$(fallback)
+    printf '{"fallback":"%s","devices":[' "$fb"
+    filter_devices | while read -r n mac url; do
+        set -- $(awk -v p="$url" '$1 == p { print $2, $4 }' "$STATE" 2>/dev/null)
+        st=${1:-unknown}; since=${2:-0}
+        [ "$first" = 1 ] || printf ','
+        first=0
+        printf '{"mac":"%s","proxy":"%s","state":"%s","since":%s}' "$mac" "$(shown "$url")" "$st" "$since"
+    done
+    printf ']}\n'
+}
+
+case "$1" in
+    apply) cmd_apply ;;
+    clear)
+        drop_jump
+        filter_devices | while read -r n mac url; do gate "$n" off; done ;;
+    tick) cmd_tick ;;
+    status) cmd_status ;;
+    set-fallback)
+        case "$2" in direct|block) ;; *) echo "usage: $0 set-fallback direct|block" >&2; exit 2 ;; esac
+        mkdir -p "${CONF%/*}"
+        echo "FALLBACK=$2" > "$CONF"
+        cmd_apply ;;
+    *) echo "usage: $0 apply|clear|tick|status|set-fallback direct|block" >&2; exit 2 ;;
+esac

@@ -79,6 +79,12 @@ while :; do
     [ -x /opt/sbin/detour-torrent ] && \
         /opt/sbin/detour-torrent tick >"$LOGDIR/detour-torrent.log" 2>&1
 
+    # «Фильтр HTTPS» устройств: жив ли внешний прокси. В фоне и с бюджетом в
+    # тик — проверка раз в 10 с, как на OpenWrt, не держа общий цикл. Без
+    # устройств с фильтром выходит сразу; наложение тиков режет его lock.
+    [ -x /opt/sbin/detour-filter ] && \
+        FILTER_LOOP_BUDGET=$((TICK - 20)) /opt/sbin/detour-filter tick >"$LOGDIR/detour-filter.log" 2>&1 &
+
     # Свой VPN-сервер: статистика клиентов и самолечение (интерфейс WireguardN
     # не сохраняется в конфиг KeeneticOS — после перезагрузки его поднимает
     # этот tick). Без настроенного сервера выходит сразу.

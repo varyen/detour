@@ -28,6 +28,7 @@ INTERCEPT_MAP=/etc/sing-box/intercept.map
 # конфига (нумерацию портов целей задаёт он один).
 DEV_MAP=/etc/sing-box/devices.map
 DEV_CHAIN=SINGBOX_DEVICES
+FILTER_BIN=/usr/sbin/detour-filter
 # Блокировка торрентов на профилях, где провайдер их запрещает. Правила ставятся
 # ОТДЕЛЬНОЙ nft-таблицей (detour-torrent), а не здесь: они висят на prerouting
 # раньше nat REDIRECT и должны работать одинаково и для VPN-трафика, и для
@@ -679,6 +680,7 @@ teardown_intercept() {
 # решает за устройство. ACCEPT в nat — «больше ничего не перенаправлять».
 devices_down() {
     local c i
+    [ -x "$FILTER_BIN" ] && "$FILTER_BIN" clear
     for i in br-lan $(vpn_redirect_ifaces); do
         [ -n "$i" ] && iptables -t nat -D PREROUTING -i "$i" -j $DEV_CHAIN 2>/dev/null
     done
@@ -702,6 +704,12 @@ devices_up() {
         [ -n "$mac" ] || continue
         i=$((i + 1)); c="SINGBOX_DEV_$i"
         iptables -t nat -N "$c"
+        if [ "$mode" = filter ]; then
+            device_filter_chain "$c" "$port" "$alt"
+            iptables -t nat -A $DEV_CHAIN $(device_match "$mac") -j "$c" \
+                || logger -p daemon.err -t sing-box "правило устройства $mac не встало (нет xt_mac?)"
+            continue
+        fi
         if [ -s "$slots" ]; then
             while read -r n id rport ipset rest; do
                 [ -n "$ipset" ] && iptables -t nat -A "$c" -p tcp -m set --match-set "$ipset" dst -j REDIRECT --to-ports "$rport"
@@ -744,6 +752,30 @@ devices_up() {
     for i in br-lan $(vpn_redirect_ifaces); do
         [ -n "$i" ] && iptables -t nat -I PREROUTING 1 -i "$i" -j $DEV_CHAIN
     done
+    # Блок QUIC и обход недоступного прокси — по состоянию сторожа.
+    [ -x "$FILTER_BIN" ] && "$FILTER_BIN" apply
+}
+
+# «Фильтр HTTPS»: на прокси идёт только TCP 80/443, всё прочее — RETURN, то есть
+# общим путём роутера. Маршруты и zapret здесь не повторяются: выход прокси сам
+# идёт через роутер и попадает под них как трафик машины с прокси, а повтор увёл
+# бы их сайты мимо фильтра. $3 — адрес прокси из карты (схема://[учётка@]хост:порт).
+device_filter_chain() {
+    local c="$1" port="$2" host="${3#*://}" ip
+    host=${host##*@}; host=${host%:*}; host=${host#[}; host=${host%]}
+    for ip in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8; do
+        iptables -t nat -A "$c" -d "$ip" -j RETURN
+    done
+    case "$host" in
+        *[!0-9.]*|"") ;;
+        *) iptables -t nat -A "$c" -d "$host" -j RETURN ;;
+    esac
+    if [ "$port" != 0 ]; then
+        iptables -t nat -A "$c" -p tcp --dport 80 -j REDIRECT --to-ports "$port"
+        iptables -t nat -A "$c" -p tcp --dport 443 -j REDIRECT --to-ports "$port"
+        open_port_lan "$port"
+    fi
+    iptables -t nat -A "$c" -j RETURN
 }
 
 # Каналы по очереди (клиенты VPN-сервера): $2 — «метка=порт,…». Канал соединению

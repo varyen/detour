@@ -2,6 +2,8 @@ import { requestJson, requestJsonTolerant, requestRawText } from "./client";
 import type {
   BypassMode,
   BypassStatus,
+  FilterFallback,
+  FilterStatus,
   LanClient,
   StatusResponse,
   TrafficLanes,
@@ -115,10 +117,13 @@ export const overview = {
       body: { mode },
       timeoutMs: RESTART_TIMEOUT,
     }),
-  /** Правила устройств: текст «mac|mode|target|name» и поддержка «через X». */
-  devicesGet: () => requestJson<{ devices: string; vpn_supported: boolean }>("devices"),
+  /** Правила устройств: текст «mac|mode|target|name», поддержка «через X» и сторож «Фильтра HTTPS». */
+  devicesGet: () =>
+    requestJson<{ devices: string; vpn_supported: boolean; filter?: FilterStatus | null }>("devices"),
   devicesSet: (text: string) =>
     requestJson<{ ok: boolean }>("devices", { body: text, timeoutMs: RESTART_TIMEOUT }),
+  filterFallbackSet: (fallback: FilterFallback) =>
+    requestJson<{ ok: boolean }>("filter_fallback", { body: { fallback } }),
   dnsVpnGet: () => requestJson<{ enabled: boolean; supported: boolean }>("dns_vpn"),
   dnsVpnSet: (enabled: boolean) =>
     requestJson<{ ok: boolean }>("dns_vpn", {

@@ -13,7 +13,15 @@ import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
 import { overview, rules } from "@/api";
-import type { HostsStatus, LanClient, RoutingMode, RulistStatus, SingboxMode } from "@/api";
+import type {
+  FilterFallback,
+  FilterStatus,
+  HostsStatus,
+  LanClient,
+  RoutingMode,
+  RulistStatus,
+  SingboxMode,
+} from "@/api";
 import { useStatusStore } from "@/stores/status";
 import { useProfilesStore } from "@/stores/profiles";
 import { useToastStore } from "@/stores/toast";
@@ -572,6 +580,7 @@ const devicesLoading = ref(false);
 const devicesBusy = ref(false);
 const openDevices = ref(false);
 const lanClients = ref<LanClient[]>([]);
+const filterStatus = ref<FilterStatus | null>(null);
 
 async function loadDevices(force = false) {
   if (devicesLoaded.value && !force) return;
@@ -583,6 +592,7 @@ async function loadDevices(force = false) {
     ]);
     devicesText.value = d.devices ?? "";
     devicesVpn.value = d.vpn_supported !== false;
+    filterStatus.value = d.filter ?? null;
     lanClients.value = c?.clients ?? [];
     devicesLoaded.value = true;
   } catch (e) {
@@ -604,8 +614,23 @@ async function saveDevices(text: string) {
     devicesText.value = text;
     openDevices.value = false;
     toast.ok("Правила устройств применены");
+    devicesLoaded.value = false;
+    void loadDevices();
   } catch (e) {
     toast.fromError(e, "Не удалось применить правила устройств");
+  } finally {
+    devicesBusy.value = false;
+  }
+}
+
+async function saveFilterFallback(fallback: FilterFallback) {
+  devicesBusy.value = true;
+  try {
+    await overview.filterFallbackSet(fallback);
+    filterStatus.value = { ...(filterStatus.value ?? { devices: [] }), fallback };
+    toast.ok(fallback === "direct" ? "Без прокси устройства пойдут без фильтра" : "Без прокси у устройств не будет HTTPS");
+  } catch (e) {
+    toast.fromError(e, "Не удалось сохранить поведение фильтра");
   } finally {
     devicesBusy.value = false;
   }
@@ -702,6 +727,13 @@ const routeTargets = computed(() => [
     isChain: true,
   })),
 ]);
+
+/* Цели «Фильтра HTTPS»: только прокси-профили — через них уходит TCP 80/443. */
+const filterTargets = computed(() =>
+  profilesStore.items
+    .filter((p) => /^(https?-proxy|socks\d?)$/.test(p.type))
+    .map((p) => ({ id: p.id, name: p.group ? `${p.name} · ${p.group}` : p.name, isChain: false })),
+);
 
 /* ---------- загрузка по требованию ---------- */
 async function onExpand(id: string) {
@@ -1335,12 +1367,15 @@ onBeforeUnmount(() => unregister?.());
     :open="openDevices"
     :text="devicesText"
     :targets="routeTargets"
+    :filter-targets="filterTargets"
+    :filter="filterStatus"
     :clients="lanClients"
     :vpn-supported="devicesVpn"
     :loading="devicesLoading"
     :busy="devicesBusy"
     @close="openDevices = false"
     @save="saveDevices"
+    @fallback="saveFilterFallback"
   />
 </template>
 
