@@ -1,0 +1,59 @@
+{
+  "id": "homer",
+  "name": "Хомер",
+  "version": "1.0.1",
+  "description": "Сторож умного дома Хомер снаружи его компьютера: следит за сайдкаром, пишет в Telegram, когда дом замолчал, и будит ПК по Wake-on-LAN.",
+  "author": "Varyen",
+  "icon": "bolt",
+  "min_panel": "2.12.0",
+  "catalog": false,
+  "platforms": ["openwrt"],
+  "files": [
+    { "src": "router_files/detour-homer", "dst": "/usr/sbin/detour-homer", "mode": "0755" }
+  ],
+  "cron": [
+    { "op": "watch", "every": 60 }
+  ],
+  "ui": {
+    "card": {
+      "title": "Хомер",
+      "hint": "сайдкар, Home Assistant и узлы умного дома",
+      "span": 2,
+      "op": "card",
+      "poll": 30,
+      "actions": [
+        { "label": "Разбудить ПК", "op": "wake" }
+      ]
+    },
+    "sections": [
+      {
+        "id": "main",
+        "area": "services",
+        "title": "Хомер — сторож дома",
+        "icon": "bolt",
+        "op": "card",
+        "fields": [
+          { "key": "sidecar_url", "type": "text", "label": "Адрес сайдкара", "default": "http://192.168.8.240:8730", "maxlength": 200,
+            "hint": "откуда спрашивать /v1/health; компьютер дома — хост этого адреса" },
+          { "key": "down_after", "type": "number", "label": "Тревога через, мин", "default": 3, "min": 1, "max": 120,
+            "hint": "сколько сайдкар должен молчать, чтобы написать в Telegram" },
+          { "key": "tg_token", "type": "password", "label": "Токен бота Telegram",
+            "hint": "пусто — тревоги видны только здесь; роутер пишет через активный VPN, если напрямую Telegram закрыт" },
+          { "key": "tg_chat", "type": "text", "label": "Чат Telegram", "maxlength": 32, "pattern": "%-?%d+",
+            "hint": "номер чата, куда писать" },
+          { "key": "pc_ip", "type": "text", "label": "IP ПК с моделями", "default": "", "maxlength": 64,
+            "hint": "для Wake-on-LAN и строки состояния; пусто — не следить" },
+          { "key": "pc_mac", "type": "text", "label": "MAC ПК", "default": "", "maxlength": 17,
+            "hint": "пусто — возьмём из таблицы соседей роутера по IP" },
+          { "key": "auto_wol", "type": "bool", "label": "Будить ПК сам", "default": false,
+            "hint": "ПК не отвечает дольше порога — разбудить (не чаще раза в 30 минут). Выключенный руками ПК тоже разбудит" }
+        ],
+        "actions": [
+          { "label": "Проверить сейчас", "op": "watch" },
+          { "label": "Тестовое сообщение", "op": "test" },
+          { "label": "Разбудить ПК", "op": "wake" }
+        ]
+      }
+    ]
+  }
+}

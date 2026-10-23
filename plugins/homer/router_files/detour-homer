@@ -1,0 +1,3 @@
+#!/bin/sh
+# Сторож Хомера из консоли: detour-homer watch | card | test | wake
+exec detour-plugin call homer "$@"
