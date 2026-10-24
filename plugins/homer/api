@@ -66,7 +66,9 @@ pc_mac() {
 wake_pc() {
     mac=$(pc_mac)
     [ -n "$mac" ] || return 1
-    lua - "$mac" <<'EOF'
+    # Широковещательный адрес своей сети, а не чужой /24: роутеры стоят не только в 192.168.8.x.
+    brd=$(ip -4 addr show br-lan 2>/dev/null | sed -n 's/.* brd \([0-9.]*\).*/\1/p' | head -1)
+    lua - "$mac" "$brd" <<'EOF'
 local mac = arg[1]:gsub("[:-]", "")
 if #mac ~= 12 then os.exit(1) end
 local bin = mac:gsub("..", function(h) return string.char(tonumber(h, 16)) end)
@@ -74,13 +76,17 @@ local socket = require("socket")
 local u = socket.udp()
 u:setoption("broadcast", true)
 local pkt = string.rep("\255", 6) .. string.rep(bin, 16)
-for _, addr in ipairs({ "255.255.255.255", "192.168.8.255" }) do u:sendto(pkt, addr, 9) end
+local addrs = { "255.255.255.255" }
+if arg[2] and arg[2] ~= "" then addrs[2] = arg[2] end
+for _, addr in ipairs(addrs) do u:sendto(pkt, addr, 9) end
 u:close()
 EOF
 }
 
 watch() {
-    url=$(setting sidecar_url http://192.168.8.240:8730)
+    url=$(setting sidecar_url)
+    # Адреса нет — сайдкар не спрашиваем, но за ПК следить можно и без него.
+    [ -n "$url" ] || { rm -f "$S/health" "$S/down_since" "$S/alerted"; watch_pc; return; }
     after=$(( $(setting down_after 3) * 60 ))
     h=$(curl -s -m 6 "$url/v1/health" 2>/dev/null)
     if [ "$(jsonfilter -s "$h" -e '@.ok' 2>/dev/null)" = true ]; then
@@ -101,6 +107,11 @@ watch() {
             tg_send "⚫ Хомер молчит $(minutes "$since") мин: $why. Хаб тревог на нём же, поэтому пишет роутер." && put alerted 1
         fi
     fi
+    watch_pc
+}
+
+watch_pc() {
+    after=$(( $(setting down_after 3) * 60 ))
     pc=$(setting pc_ip)
     if [ -n "$pc" ]; then
         if pings "$pc"; then rm -f "$S/pc_down"; else [ -n "$(get pc_down)" ] || put pc_down "$(now)"; fi
@@ -116,7 +127,9 @@ watch() {
 card() {
     h=$(get health)
     since=$(get down_since)
-    if [ -n "$since" ]; then
+    if [ -z "$(setting sidecar_url)" ]; then
+        status="не настроен: впишите адрес сайдкара"; tone=warn
+    elif [ -n "$since" ]; then
         status="молчит $(minutes "$since") мин"; tone=bad
     elif [ -n "$h" ]; then
         status="отвечает"; tone=ok
@@ -135,7 +148,7 @@ card() {
     elif [ "${tg%% *}" = fail ]; then tgs="не доставлено"; tgt=bad
     else tgs="настроен"; tgt=ok; fi
     printf '{"ok":true,"status":{"text":"%s","tone":"%s"},' "$status" "$tone"
-    printf '"lead":"%s",' "$(json_str "дом Хомера: $(setting sidecar_url http://192.168.8.240:8730)")"
+    printf '"lead":"%s",' "$(json_str "дом Хомера: $(setting sidecar_url '—')")"
     printf '"metrics":['
     printf '{"label":"Home Assistant","value":"%s","tone":"%s"},' \
         "$([ "$ha" = true ] && echo на связи || echo нет)" "$([ "$ha" = true ] && echo ok || echo bad)"

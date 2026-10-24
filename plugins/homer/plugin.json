@@ -1,12 +1,12 @@
 {
   "id": "homer",
   "name": "Хомер",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Сторож умного дома Хомер снаружи его компьютера: следит за сайдкаром, пишет в Telegram, когда дом замолчал, и будит ПК по Wake-on-LAN.",
   "author": "Varyen",
   "icon": "bolt",
   "min_panel": "2.12.0",
-  "catalog": false,
+  "catalog": true,
   "platforms": ["openwrt"],
   "files": [
     { "src": "router_files/detour-homer", "dst": "/usr/sbin/detour-homer", "mode": "0755" }
@@ -33,8 +33,8 @@
         "icon": "bolt",
         "op": "card",
         "fields": [
-          { "key": "sidecar_url", "type": "text", "label": "Адрес сайдкара", "default": "http://192.168.8.240:8730", "maxlength": 200,
-            "hint": "откуда спрашивать /v1/health; компьютер дома — хост этого адреса" },
+          { "key": "sidecar_url", "type": "text", "label": "Адрес сайдкара", "default": "", "maxlength": 200,
+            "hint": "например http://192.168.1.10:8730 — откуда спрашивать /v1/health; компьютер дома — хост этого адреса" },
           { "key": "down_after", "type": "number", "label": "Тревога через, мин", "default": 3, "min": 1, "max": 120,
             "hint": "сколько сайдкар должен молчать, чтобы написать в Telegram" },
           { "key": "tg_token", "type": "password", "label": "Токен бота Telegram",
