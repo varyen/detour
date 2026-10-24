@@ -1,0 +1,30 @@
+{
+ "generated": "2026-10-24T05:53:33Z",
+ "plugins": [
+  {
+   "id": "homer",
+   "name": "Хомер",
+   "version": "1.0.2",
+   "description": "Сторож умного дома Хомер снаружи его компьютера: следит за сайдкаром, пишет в Telegram, когда дом замолчал, и будит ПК по Wake-on-LAN.",
+   "author": "Varyen",
+   "icon": "bolt",
+   "platforms": [
+    "openwrt"
+   ],
+   "min_panel": "2.12.0",
+   "has_card": true,
+   "files": {
+    "ipk": {
+     "path": "homer/detour-plugin-homer_1.0.2_all.ipk",
+     "sha256": "693bb94aa4f0beb3a3ee6b882a93dd3d80f038326b2a8f4d1232c4c9c404ea82",
+     "size": 5462
+    },
+    "apk": {
+     "path": "homer/detour-plugin-homer_1.0.2_noarch.apk",
+     "sha256": "bfb65f8b00269d4442854f8eb7ab51e51a3294b92c9c5dcdbab77bc2ebe2898d",
+     "size": 5553
+    }
+   }
+  }
+ ]
+}
