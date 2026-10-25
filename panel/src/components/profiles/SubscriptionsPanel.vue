@@ -445,7 +445,7 @@ defineExpose({ openNew, refreshAll, reload: load });
     </ul>
 
     <template #actions>
-      <UiButton variant="primary" @click="openNew">Добавить подписку</UiButton>
+      <UiButton variant="primary" @click="openNew()">Добавить подписку</UiButton>
       <UiButton :busy="busy === 'all'" :disabled="anyBusy || !items.length" @click="refreshAll">
         Обновить все
       </UiButton>
