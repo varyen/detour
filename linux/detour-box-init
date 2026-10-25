@@ -120,6 +120,13 @@ grep -v 'detour/.box' /etc/crontabs/root 2>/dev/null > /etc/crontabs/root.new
 echo "* * * * * $sync_cmd" >> /etc/crontabs/root.new
 mv /etc/crontabs/root.new /etc/crontabs/root
 
+# /etc/detour — том, и /etc/detour/version в нём остаётся от прежнего образа:
+# пакет в новом образе свежее, а панель и detour-update видели старую версию
+# (обновление «ставилось», но проверка после установки падала). Версия — из
+# базы apk этого образа.
+v=$(apk info -v 2>/dev/null | sed -n 's/^detour-\([0-9][0-9.]*\)-r[0-9]*$/\1/p' | head -1)
+[ -n "$v" ] && echo "$v" > /etc/detour/version
+
 mkdir -p /etc/detour/server
 {
     [ -n "${DETOUR_SERVER_PORT:-}" ] && echo "DEF_PORT=$DETOUR_SERVER_PORT"
