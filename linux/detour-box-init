@@ -14,10 +14,27 @@
 #   DETOUR_SERVER_PORT   UDP-порт VPN-сервера — тот, что опубликован на хосте
 #   DETOUR_ENDPOINT      внешний адрес хоста (IP или домен) для конфигов клиентов
 #   DETOUR_SUB_PORT      TCP-порт подписок клиентов, опубликованный на хосте
+#   DETOUR_TLS_PORT      TCP-порт входа VLESS+TLS, опубликованный на хосте
+#   DETOUR_HTTPS_PORT    порт панели по HTTPS внутри контейнера (опубликован тем же)
+#   DETOUR_ACME=1        80-й порт хоста проброшен на ACME_PORT — сертификат
+#                        выпускается из панели (HTTP-01)
 #   DETOUR_PANEL_WAN=1   пускать в панель всех; иначе — только сам хост
 
 ip4=$(ip -4 -o addr show dev eth0 2>/dev/null | awk '{ print $4; exit }')
 gw=$(ip -4 route show default 2>/dev/null | awk '{ print $3; exit }')
+
+ACME_PORT=8088
+ACME_WWW=/etc/detour/.acme-www
+mkdir -p "$ACME_WWW"
+# Признак Linux-сервера для detour-cert и detour-api: порты, под которыми
+# контейнер опубликован на хосте.
+{
+    echo "BOX=1"
+    echo "BOX_ACME=${DETOUR_ACME:-0}"
+    echo "BOX_ACME_PORT=$ACME_PORT"
+    echo "BOX_ACME_WWW=$ACME_WWW"
+    echo "BOX_HTTPS_PORT=${DETOUR_HTTPS_PORT:-}"
+} > /etc/detour/box.conf
 
 mkdir -p /etc/uci-defaults
 cat > /etc/uci-defaults/99-detour-box <<EOF
@@ -48,6 +65,41 @@ uci -q delete firewall.detour_panel.src_ip
 if [ "${DETOUR_PANEL_WAN:-0}" != 1 ] && [ -n "$gw" ]; then
     uci set firewall.detour_panel.src_ip='$gw'
 fi
+# Выпуск сертификата из панели: 80-й порт хоста приходит сюда, на отдельный
+# uhttpd, который отдаёт только каталог проверок ACME — панель за ним не видна.
+if [ "${DETOUR_ACME:-0}" = 1 ]; then
+    uci set uhttpd.acme=uhttpd
+    uci -q delete uhttpd.acme.listen_http
+    uci add_list uhttpd.acme.listen_http='0.0.0.0:$ACME_PORT'
+    uci set uhttpd.acme.home='$ACME_WWW'
+    uci set uhttpd.acme.rfc1918_filter='0'
+    uci set uhttpd.acme.no_dirlists='1'
+    uci commit uhttpd
+    uci set firewall.detour_acme=rule
+    uci set firewall.detour_acme.name='detour-acme'
+    uci set firewall.detour_acme.src='wan'
+    uci set firewall.detour_acme.proto='tcp'
+    uci set firewall.detour_acme.dest_port='$ACME_PORT'
+    uci set firewall.detour_acme.target='ACCEPT'
+else
+    uci -q delete uhttpd.acme && uci commit uhttpd
+    uci -q delete firewall.detour_acme
+fi
+# Панель по HTTPS (после выпуска сертификата) — снаружи, под паролем панели.
+# Фильтр RFC1918 uhttpd отбивал бы запросы с белых адресов на серый адрес
+# контейнера; порт 80 по-прежнему пускает только хост (правило выше).
+if [ -n "${DETOUR_HTTPS_PORT:-}" ]; then
+    uci set uhttpd.main.rfc1918_filter='0'
+    uci commit uhttpd
+    uci set firewall.detour_panel_tls=rule
+    uci set firewall.detour_panel_tls.name='detour-panel-https'
+    uci set firewall.detour_panel_tls.src='wan'
+    uci set firewall.detour_panel_tls.proto='tcp'
+    uci set firewall.detour_panel_tls.dest_port='${DETOUR_HTTPS_PORT:-}'
+    uci set firewall.detour_panel_tls.target='ACCEPT'
+else
+    uci -q delete firewall.detour_panel_tls
+fi
 uci commit firewall
 exit 0
 EOF
@@ -74,6 +126,7 @@ mkdir -p /etc/detour/server
     [ -n "${DETOUR_VLESS_PORT:-}" ] && echo "DEF_VPORT=$DETOUR_VLESS_PORT"
     [ -n "${DETOUR_ENDPOINT:-}" ] && echo "DEF_ENDPOINT=$DETOUR_ENDPOINT"
     [ -n "${DETOUR_SUB_PORT:-}" ] && echo "DEF_SPORT=$DETOUR_SUB_PORT"
+    [ -n "${DETOUR_TLS_PORT:-}" ] && echo "DEF_TPORT=$DETOUR_TLS_PORT"
 } > /etc/detour/server/defaults
 
 exec /sbin/init

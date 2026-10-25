@@ -63,6 +63,11 @@ NGINX_SNIPPET_LEGACY=/etc/nginx/conf.d/detour-acme.conf
 NGINX_PANEL_VHOST=/etc/nginx/conf.d/zz-detour-panel-tls.conf
 NGINX_SSL=/etc/nginx/ssl
 DETOUR_SSL="$DETOUR_DIR/ssl"               # uhttpd/lighttpd mode cert dir
+# Linux-сервер (linux/, контейнер OpenWrt): 80-й порт хоста проброшен на
+# отдельный uhttpd ($ACME_PORT, каталог $ACME_WWW), панель по HTTPS — на
+# $HTTPS_PORT контейнера. Пишет detour-box-init.
+BOX=0; BOX_ACME=0; BOX_ACME_PORT=8088; BOX_ACME_WWW=""; BOX_HTTPS_PORT=""
+[ -f /etc/detour/box.conf ] && . /etc/detour/box.conf
 LIGHTTPD_DOCROOT=/opt/share/www
 LIGHTTPD_SSL_CONF=/opt/etc/lighttpd/conf.d/detour-ssl.conf
 LIGHTTPD_CONF=/opt/etc/lighttpd/detour.conf
@@ -89,7 +94,10 @@ fi
 
 # LE staging (no rate limits, fake cert) — for safe end-to-end testing.
 LE_STAGING=""
-[ "$DETOUR_CERT_STAGING" = "1" ] && LE_STAGING="--staging"
+LE_SERVER=letsencrypt
+# --staging раньше шёл вместе с --server letsencrypt, и тот его перебивал: «тестовый»
+# выпуск уходил в боевой CA и тратил его лимиты.
+[ "$DETOUR_CERT_STAGING" = "1" ] && { LE_STAGING="--staging"; LE_SERVER=letsencrypt_test; }
 
 log() { echo "[$(date 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
 NOW=$(date +%s 2>/dev/null); [ -z "$NOW" ] && NOW=0
@@ -483,6 +491,10 @@ prepare_webroot() {  # $1 domain  $2 http80-server → echoes webroot, or fails
             nginx_add_snippet "$_d" "$ACME_WEBROOT" && probe_webroot "$_d" "$ACME_WEBROOT" && { echo "$ACME_WEBROOT"; return 0; }
             return 1 ;;
         uhttpd)
+            if [ "$BOX" = 1 ]; then
+                [ "$BOX_ACME" = 1 ] && [ -n "$BOX_ACME_WWW" ] && probe_webroot "$_d" "$BOX_ACME_WWW" "$BOX_ACME_PORT" && { echo "$BOX_ACME_WWW"; return 0; }
+                return 1
+            fi
             _wr=$(uci -q get uhttpd.main.home 2>/dev/null); [ -n "$_wr" ] || _wr=/www
             probe_webroot "$_d" "$_wr" && { echo "$_wr"; return 0; }
             return 1 ;;
@@ -510,6 +522,11 @@ configure_uhttpd() {  # $1 = cert dir
     command -v uci >/dev/null 2>&1 || return 1
     uci set uhttpd.main.cert="$_cd/fullchain.pem" 2>/dev/null
     uci set uhttpd.main.key="$_cd/privkey.pem" 2>/dev/null
+    # Linux-сервер: 443 контейнера занят входом VLESS — панель на своём порту.
+    if [ "$BOX" = 1 ] && [ -n "$BOX_HTTPS_PORT" ]; then
+        uci -q delete uhttpd.main.listen_https
+        uci add_list uhttpd.main.listen_https="0.0.0.0:$BOX_HTTPS_PORT" 2>/dev/null
+    fi
     # ensure an HTTPS listener exists (LuCI usually already has one)
     if ! uci -q get uhttpd.main.listen_https >/dev/null 2>&1; then
         uci add_list uhttpd.main.listen_https='0.0.0.0:443' 2>/dev/null
@@ -630,6 +647,8 @@ detect)
     printf '{"dns_provider":%s,"dns_ready":%s,"dns_plugin":%s,"challenge":%s,"alt_domains":%s,' \
         "$(json_str "$DNS_PROVIDER")" "$_dready" "$_dplug" \
         "$(json_str "${_chal:-http-01}")" "$(json_str "$_alts")"
+    printf '"box":%s,"box_acme":%s,"box_https_port":%s,' \
+        "$([ "$BOX" = 1 ] && echo true || echo false)" "$([ "$BOX_ACME" = 1 ] && echo true || echo false)" "${BOX_HTTPS_PORT:-0}"
     printf '"acme_present":%s,"http80":%s,"target":%s,"wan_ip":%s,"platform":%s,"domain":%s,"expiry":%s,"last_result":%s,"last_error":%s,"serving_ok":%s,"serving_cn":%s,"ok":true}\n' \
         "$( [ "$_acme" = yes ] && echo true || echo false )" \
         "$(json_str "$(http80_server)")" "$(json_str "$(target_mode)")" \
@@ -733,6 +752,10 @@ issue|issue-dns)
         WEBROOT=$(prepare_webroot "$DOMAIN_IN" "$H80") || {
             if [ "$PLATFORM" = keenetic ]; then
                 write_state error "panel lighttpd not serving the challenge on :$LIGHTTPD_PORT — is the panel running and WAN :80 forwarded to it?"
+            elif [ "$BOX" = 1 ] && [ "$BOX_ACME" != 1 ]; then
+                write_state error "80-й порт сервера не проброшен в контейнер — переустановите Detour через install.sh без --no-acme (порт 80 на хосте должен быть свободен)"
+            elif [ "$BOX" = 1 ]; then
+                write_state error "проверка ACME не прошла — A-запись $DOMAIN_IN должна указывать на этот сервер, а 80-й порт быть открыт снаружи"
             else
                 write_state error "could not serve the ACME challenge on :80 for $DOMAIN_IN (is port 80 reachable / the right web server?)"
             fi
@@ -759,7 +782,7 @@ issue|issue-dns)
     # publish a new name without touching the certificate again.
     ACME_D="-d $DOMAIN_IN"
     for _a in $ALTS; do ACME_D="$ACME_D -d $_a"; done
-    if ! "$ACME" --issue $LE_STAGING --server letsencrypt $ACME_D $ACME_CHALLENGE_ARGS \
+    if ! "$ACME" --issue --server "$LE_SERVER" $ACME_D $ACME_CHALLENGE_ARGS \
             --keylength ec-256 >>"$LOG" 2>&1; then
         if [ "$CHALLENGE" = dns-01 ]; then
             write_state error "выпуск по DNS-01 не удался — проверьте ключ DNS-API и что зона обслуживает $DOMAIN_IN (подробности в $LOG)"
@@ -817,6 +840,10 @@ EOF
     esac
 
     ensure_renewal
+    # Подписки (HTTPS на том же сертификате) и вход VLESS+TLS подхватывают
+    # сертификат при применении настроек сервера.
+    _srv=/usr/sbin/detour-server; [ "$PLATFORM" = keenetic ] && _srv=/opt/sbin/detour-server
+    [ -x "$_srv" ] && "$_srv" apply >/dev/null 2>&1
     write_state ok ""
     log "issue OK for $DOMAIN_IN (target=$TGT, dir=$CERT_DIR_V)"
     ;;

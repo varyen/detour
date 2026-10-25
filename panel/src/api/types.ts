@@ -503,6 +503,22 @@ export interface ServerVless {
   pubkey: string;
   short_id: string;
   net: string;
+  /** Вход VLESS поверх обычного TLS на настоящем сертификате (с 2.15.0). */
+  tls?: ServerVlessTls;
+}
+
+export interface ServerVlessTls {
+  enabled: boolean;
+  /** Включён, есть сертификат и домен — вход реально слушает. */
+  active: boolean;
+  port: number;
+  /** Домен, на который выписан сертификат (итоговый). */
+  domain: string;
+  /** Явно заданный домен; пусто — берётся домен панели. */
+  domain_set: string;
+  cert: boolean;
+  /** Почему включённый вход не работает. */
+  reason: string;
 }
 
 export interface ServerSub {
@@ -541,6 +557,9 @@ export interface ServerSettingsPatch {
   sub?: boolean;
   sport?: number;
   suburl?: string;
+  vtls?: boolean;
+  tport?: number;
+  tdomain?: string;
 }
 
 export interface ApplyLogResponse {

@@ -44,6 +44,11 @@ const props = defineProps<{
   /** Чем подтверждался нынешний сертификат и какие имена в него вошли. */
   challenge?: string;
   altDomains?: string;
+  /** Linux-сервер (контейнер): 80-й порт хоста проброшен на проверки ACME
+      (boxAcme), панель после выпуска — по HTTPS на boxHttpsPort. */
+  box?: boolean;
+  boxAcme?: boolean;
+  boxHttpsPort?: number;
 }>();
 
 const emit = defineEmits<{ close: []; done: [] }>();
@@ -188,15 +193,28 @@ const altSuggestion = computed(() => {
 });
 
 const wanNote = computed(() => {
-  if (!props.wanIp) return "";
+  /* В контейнере свой адрес — служебный, о внешнем говорит только хост. */
+  if (!props.wanIp || props.box) return "";
   if (/^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(props.wanIp)) {
     return `Внешний адрес роутера — ${props.wanIp}, он приватный: роутер стоит за чужим NAT, и удостоверяющий центр до него не достучится.`;
   }
   return `Внешний адрес роутера: ${props.wanIp}`;
 });
 
+/* Что даст сертификат на Linux-сервере — то, что на nl собиралось руками. */
+const boxNote = computed(() => {
+  if (!props.box) return "";
+  const d = domain.value.trim() || "домен";
+  const panel = props.boxHttpsPort ? `панель откроется по https://${d}:${props.boxHttpsPort}/detour/, ` : "";
+  return `Сервер получит сертификат на ${d}: ${panel}подписки клиентов перейдут на HTTPS, вход VLESS + TLS (если включён) возьмёт тот же сертификат. Продление — само.`;
+});
+
 const http80Note = computed(() => {
   if (method.value === "dns-01") return "";
+  if (props.box && !props.boxAcme) {
+    return "80-й порт сервера не проброшен в контейнер Detour (был занят при установке или задан --no-acme) — подтвердить владение по HTTP не выйдет. Освободите порт 80 и переустановите через install.sh или подтверждайте через DNS-API.";
+  }
+  if (props.box) return "";
   if (!props.http80 || props.http80 === "none") {
     return "На 80-м порту роутера сейчас никто не отвечает — подтвердить владение доменом не выйдет, пока порт 80 не открыт снаружи. Через DNS-API это ограничение снимается.";
   }
@@ -345,11 +363,16 @@ async function issue() {
 <template>
   <DrawerSheet :open="open" title="Свой домен и защищённое соединение" @close="emit('close')">
     <div class="form">
-      <p class="lead">
+      <p v-if="box" class="lead">
+        Сервер получит бесплатный сертификат Let's Encrypt. A-запись домена уже
+        должна указывать на этот сервер, а 80-й порт — быть открыт снаружи.
+      </p>
+      <p v-else class="lead">
         Роутер получит бесплатный сертификат Let's Encrypt и станет открываться по
         защищённому соединению. Домен уже должен указывать на роутер; чем подтвердить
         владение — выберите ниже.
       </p>
+      <p v-if="boxNote" class="hint">{{ boxNote }}</p>
 
       <div class="block">
         <span class="lbl">Как подтверждать владение</span>
@@ -361,7 +384,7 @@ async function issue() {
         <p class="hint">{{ methodHint }}</p>
       </div>
 
-      <FormField label="Домен" hint="Тот, что указывает на этот роутер">
+      <FormField label="Домен" :hint="box ? 'Тот, что указывает на этот сервер' : 'Тот, что указывает на этот роутер'">
         <input
           v-model="domain"
           type="text"

@@ -116,6 +116,10 @@ interface CertDetect {
   alt_domains?: string;
   dns_provider?: string;
   dns_ready?: boolean;
+  /** Linux-сервер: проброшен ли 80-й порт хоста и на каком порту панель по HTTPS. */
+  box?: boolean;
+  box_acme?: boolean;
+  box_https_port?: number;
 }
 
 interface OffloadState {
@@ -1622,6 +1626,9 @@ onBeforeUnmount(() => unregister?.());
     :panel-port="status.data?.panel_port"
     :challenge="certInfo?.challenge ?? ''"
     :alt-domains="certInfo?.alt_domains ?? ''"
+    :box="certInfo?.box === true"
+    :box-acme="certInfo?.box_acme === true"
+    :box-https-port="certInfo?.box_https_port || undefined"
     @close="sheetCert = false"
     @done="loadCert"
   />

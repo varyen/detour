@@ -354,7 +354,7 @@ port_busy() {
 tcp_port_busy() {
     netstat -lnt 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" { f = 1 } END { exit !f }' && return 0
     command -v uci >/dev/null 2>&1 || return 1
-    uci -q show firewall 2>/dev/null | grep -v "^firewall\.${ZONE}_vin\." | \
+    uci -q show firewall 2>/dev/null | grep -v -e "^firewall\.${ZONE}_vin\." -e "^firewall\.${ZONE}_tin\." | \
         grep -qE "\.(src_dport|dest_port)='$1'$"
 }
 
@@ -408,6 +408,9 @@ UPLINK=$UPLINK
 SUB=$SUB
 SPORT=$SPORT
 SUBURL=$SUBURL
+VTLS=$VTLS
+TPORT=$TPORT
+TDOMAIN=$TDOMAIN
 EOF
     mv "$CONF.tmp" "$CONF"
 }
@@ -428,6 +431,7 @@ load_conf() {
     PRIVKEY=""; PUBKEY=""
     AWG=1; VLESS=0; VPORT=""; VNET=""; VSNI=""; VPRIV=""; VPUB=""; VSID=""; NDMIF=""; UPLINK=""
     SUB=0; SPORT=""; SUBURL=""
+    VTLS=0; TPORT=""; TDOMAIN=""
     [ -f "$CONF" ] && . "$CONF"
     set_iface
 }
@@ -435,11 +439,12 @@ load_conf() {
 load_defaults() {
     # Detour в контейнере (linux/): порты обязаны совпасть с опубликованными, а
     # адрес — быть внешним адресом хоста. Их кладёт стартовый скрипт контейнера.
-    DEF_PORT=""; DEF_VPORT=""; DEF_ENDPOINT=""; DEF_SPORT=""
+    DEF_PORT=""; DEF_VPORT=""; DEF_ENDPOINT=""; DEF_SPORT=""; DEF_TPORT=""
     [ -f "$DIR/defaults" ] && . "$DIR/defaults"
     case "$DEF_PORT" in ''|*[!0-9]*) DEF_PORT="" ;; esac
     case "$DEF_VPORT" in ''|*[!0-9]*) DEF_VPORT="" ;; esac
     case "$DEF_SPORT" in ''|*[!0-9]*) DEF_SPORT="" ;; esac
+    case "$DEF_TPORT" in ''|*[!0-9]*) DEF_TPORT="" ;; esac
 }
 
 # Первичная инициализация: порт, подсеть, обфускация, затем ключи того входа,
@@ -501,6 +506,17 @@ ensure_conf() {
         fi
         changed=1
         log "init vless: port=$VPORT net=$VNET.0/24"
+    fi
+    if vless_ok && [ -z "$TPORT" ]; then
+        if [ -n "$DEF_TPORT" ]; then
+            # Контейнер: порт опубликован на хосте — вход включится, как только
+            # появится сертификат.
+            TPORT=$DEF_TPORT; VTLS=1
+        else
+            TPORT=8443
+            while tcp_port_busy "$TPORT" || [ "$TPORT" = "$VPORT" ]; do TPORT=$(rand_range 20000 60000); done
+        fi
+        changed=1
     fi
     if [ -z "$SPORT" ]; then
         if [ -n "$DEF_SPORT" ]; then
@@ -735,6 +751,18 @@ fw_apply() {
         want "${ZONE}_vin.target" DNAT
         want "${ZONE}_vin.enabled" "$(vless_on && echo 1 || echo 0)"
     fi
+    if [ -n "$TPORT" ] && [ -n "$VNET" ]; then
+        want "${ZONE}_tin" redirect
+        want "${ZONE}_tin.name" detour-server-vless-tls
+        want "${ZONE}_tin.src" wan
+        want "${ZONE}_tin.proto" tcp
+        want "${ZONE}_tin.src_dport" "$TPORT"
+        want "${ZONE}_tin.dest" "$ZONE"
+        want "${ZONE}_tin.dest_ip" "$VNET.254"
+        want "${ZONE}_tin.dest_port" "$TPORT"
+        want "${ZONE}_tin.target" DNAT
+        want "${ZONE}_tin.enabled" "$(vtls_on && echo 1 || echo 0)"
+    fi
     if [ -n "$SPORT" ]; then
         want "${ZONE}_sub" rule
         want "${ZONE}_sub.name" detour-server-sub
@@ -754,7 +782,7 @@ fw_apply() {
 fw_remove() {
     [ "$KEENETIC" = 1 ] && { ENABLED=0; keen_fw; return 0; }
     uci -q get "firewall.$ZONE" >/dev/null || return 0
-    for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_in" "${ZONE}_vin" "${ZONE}_sub"; do
+    for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_in" "${ZONE}_vin" "${ZONE}_tin" "${ZONE}_sub"; do
         uci -q delete "firewall.$s"
     done
     uci commit firewall
@@ -969,6 +997,7 @@ keen_fw() {
         vless_acct_up
     fi
     if sub_on; then keen_fw_add filter INPUT -p tcp --dport "$SPORT" -j ACCEPT; fi
+    if vtls_on; then keen_fw_add filter INPUT -p tcp --dport "$TPORT" -j ACCEPT; fi
 }
 
 # ---------- VLESS-Reality ----------
@@ -987,6 +1016,53 @@ vless_dns() { echo "${DNS:-$VNET.1}"; }
 # выход с адреса $VNET.<octet> (по нему роутер считает трафик и узнаёт клиента).
 # DNS клиентов перехватывается и уходит в dnsmasq роутера — так наполняются
 # ipset'ы доменных маршрутов, как у устройств LAN.
+vless_users() {
+    awk -F'|' '$2 == 1 && $10 != "" {
+        printf "%s{\"name\":\"%s\",\"uuid\":\"%s\",\"flow\":\"xtls-rprx-vision\"}", (n++ ? "," : ""), $1, $10
+    }' "$CLIENTS"
+}
+
+# ---------- вход VLESS + TLS ----------
+# Сертификат: $DIR/tls/{fullchain,privkey}.pem (сюда его кладёт сам хозяин —
+# например, deploy-хук certbot на хосте Linux-сервера), иначе сертификат панели.
+# Имя — TDOMAIN, иначе домен панели, иначе адрес для клиентов, если он домен.
+tls_cert() {
+    T_CRT=""; T_KEY=""; T_OWN=0
+    if [ -s "$DIR/tls/fullchain.pem" ] && [ -s "$DIR/tls/privkey.pem" ]; then
+        T_CRT=$DIR/tls/fullchain.pem; T_KEY=$DIR/tls/privkey.pem; T_OWN=1
+        return 0
+    fi
+    sub_cert || return 1
+    T_CRT=$SUB_CRT; T_KEY=$SUB_KEY
+}
+
+tls_domain() {
+    if [ -n "$TDOMAIN" ]; then printf '%s' "$TDOMAIN"; return; fi
+    tls_cert >/dev/null 2>&1
+    if [ "$T_OWN" != 1 ] && [ -n "$(panel_domain)" ]; then panel_domain; return; fi
+    case "$ENDPOINT" in *[A-Za-z]*) printf '%s' "$ENDPOINT" ;; esac
+}
+
+vtls_on() { vless_on && [ "$VTLS" = 1 ] && [ -n "$TPORT" ] && tls_cert && [ -n "$(tls_domain)" ]; }
+
+# Почему вход не работает — для панели.
+vtls_reason() {
+    [ "$VTLS" = 1 ] || return 0
+    tls_cert || { echo "нет сертификата: выпустите сертификат панели или положите fullchain.pem и privkey.pem в $DIR/tls"; return; }
+    [ -n "$(tls_domain)" ] || echo "не задан домен сертификата"
+}
+
+client_tls_link() {
+    line=$(client_line "$1")
+    [ -n "$line" ] || return 1
+    uuid=$(echo "$line" | cut -d'|' -f10)
+    [ -n "$uuid" ] && vtls_on || return 1
+    name=$(echo "$line" | cut -d'|' -f3)
+    d=$(tls_domain)
+    printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=tls&sni=%s&fp=%s&type=tcp#%s\n' \
+        "$uuid" "$d" "$TPORT" "$d" "${FP:-chrome}" "$(urlenc "$name TLS")"
+}
+
 vless_render() {  # $1 — 1 = с clash API (онлайн/адрес клиента)
     lan=$(lan_cidr)
     {
@@ -1003,11 +1079,18 @@ vless_render() {  # $1 — 1 = с clash API (онлайн/адрес клиен�
             printf '"dns":{"servers":[{"type":"udp","tag":"r","server":"%s"}]},' "$(vless_dns)"
         fi
         printf '"inbounds":[{"type":"vless","tag":"in","listen":"0.0.0.0","listen_port":%s,"users":[' "$VPORT"
-        awk -F'|' '$2 == 1 && $10 != "" {
-            printf "%s{\"name\":\"%s\",\"uuid\":\"%s\",\"flow\":\"xtls-rprx-vision\"}", (n++ ? "," : ""), $1, $10
-        }' "$CLIENTS"
+        vless_users
         printf '],"tls":{"enabled":true,"server_name":"%s","reality":{"enabled":true,' "$VSNI"
-        printf '"handshake":{"server":"%s","server_port":443},"private_key":"%s","short_id":["%s"]}}}],' "$VSNI" "$VPRIV" "$VSID"
+        printf '"handshake":{"server":"%s","server_port":443},"private_key":"%s","short_id":["%s"]}}}' "$VSNI" "$VPRIV" "$VSID"
+        # Второй вход — обычный TLS на настоящем сертификате (как VLESS в
+        # Marzban): там, где сеть портит Reality, он проходит.
+        if vtls_on; then
+            printf ',{"type":"vless","tag":"in-tls","listen":"0.0.0.0","listen_port":%s,"users":[' "$TPORT"
+            vless_users
+            printf '],"tls":{"enabled":true,"server_name":"%s","certificate_path":"%s","key_path":"%s"}}' \
+                "$(tls_domain)" "$T_CRT" "$T_KEY"
+        fi
+        printf '],'
         printf '"outbounds":[{"type":"direct","tag":"d"}'
         awk -F'|' -v vnet="$VNET" '$2 == 1 && $10 != "" {
             printf ",{\"type\":\"direct\",\"tag\":\"u-%s\",\"inet4_bind_address\":\"%s.%s\"}", $1, vnet, $4
@@ -1168,7 +1251,7 @@ noaccel_up() {
     modprobe nf_conntrack_snmp 2>/dev/null
     iptables -t raw -N "$NOACCEL" 2>/dev/null
     iptables -t raw -C PREROUTING -j "$NOACCEL" 2>/dev/null || iptables -t raw -I PREROUTING 1 -j "$NOACCEL"
-    sig="$VPORT"
+    sig="$VPORT $TPORT"
     if [ "$sig" = "$(cat "$RUN/detour-server.noaccel" 2>/dev/null)" ] && \
         iptables -t raw -C "$NOACCEL" -i "$VIF" -p tcp -j CT --helper irc 2>/dev/null; then
         return 0
@@ -1179,6 +1262,7 @@ noaccel_up() {
         iptables -t raw -A "$NOACCEL" -i "$i" -p udp -j CT --helper snmp 2>/dev/null
     done
     iptables -t raw -A "$NOACCEL" -p tcp --dport "$VPORT" -m addrtype --dst-type LOCAL -j CT --helper irc
+    [ -n "$TPORT" ] && iptables -t raw -A "$NOACCEL" -p tcp --dport "$TPORT" -m addrtype --dst-type LOCAL -j CT --helper irc
     echo "$sig" > "$RUN/detour-server.noaccel"
 }
 
@@ -1627,8 +1711,8 @@ client_link() {
     uuid=$(echo "$line" | cut -d'|' -f10)
     [ -n "$uuid" ] && [ -n "$VPUB" ] && [ -n "$VPORT" ] || return 1
     name=$(echo "$line" | cut -d'|' -f3)
-    printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s\n' \
-        "$uuid" "$(endpoint_host)" "$VPORT" "$VSNI" "$VPUB" "$VSID" "$(urlenc "$name")"
+    printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=tcp#%s\n' \
+        "$uuid" "$(endpoint_host)" "$VPORT" "$VSNI" "${FP:-chrome}" "$VPUB" "$VSID" "$(urlenc "$name")"
 }
 
 status_json() {
@@ -1682,9 +1766,13 @@ status_json() {
     printf '"configured":%s,"enabled":%s,"running":%s,"routed":%s,"awg_enabled":%s,"awg_running":%s,' \
         "$({ [ -n "$PRIVKEY" ] || [ -n "$VPRIV" ]; } && echo true || echo false)" "$([ "$ENABLED" = 1 ] && echo true || echo false)" \
         "$running" "$redir" "$([ "$AWG" = 1 ] && echo true || echo false)" "$arun"
-    printf '"vless":{"supported":%s,"reason":"%s","can_install":%s,"enabled":%s,"running":%s,"port":%s,"sni":"%s","pubkey":"%s","short_id":"%s","net":"%s"},' \
+    printf '"vless":{"supported":%s,"reason":"%s","can_install":%s,"enabled":%s,"running":%s,"port":%s,"sni":"%s","pubkey":"%s","short_id":"%s","net":"%s",' \
         "$vsup" "$(json_esc "$vr")" "$vinst" "$([ "$VLESS" = 1 ] && echo true || echo false)" "$vrun" "${VPORT:-0}" \
         "$(json_esc "$VSNI")" "$VPUB" "$VSID" "${VNET:+$VNET.0/24}"
+    tcert=false; tls_cert && tcert=true
+    printf '"tls":{"enabled":%s,"active":%s,"port":%s,"domain":"%s","domain_set":"%s","cert":%s,"reason":"%s"}},' \
+        "$([ "$VTLS" = 1 ] && echo true || echo false)" "$(vtls_on && echo true || echo false)" "${TPORT:-0}" \
+        "$(json_esc "$(tls_domain)")" "$(json_esc "$TDOMAIN")" "$tcert" "$(json_esc "$(vtls_reason)")"
     srun=false; [ -n "$(sub_pid)" ] && srun=true
     shttps=false; sub_https && shttps=true
     printf '"sub":{"enabled":%s,"running":%s,"port":%s,"https":%s,"url":"%s","base":"%s"},' \
@@ -1881,8 +1969,14 @@ sub_allowed() {  # «Только сеть дома»: подсеть серве
 sub_vless_json() {  # $1 tag
     printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s","flow":"xtls-rprx-vision",' \
         "$(json_esc "$1")" "$(json_esc "$host")" "$VPORT" "$uuid"
-    printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"chrome"},' "$VSNI"
+    printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"},' "$VSNI" "${FP:-chrome}"
     printf '"reality":{"enabled":true,"public_key":"%s","short_id":"%s"}}}' "$VPUB" "$VSID"
+}
+
+sub_vless_tls_json() {  # $1 tag
+    printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s","flow":"xtls-rprx-vision",' \
+        "$(json_esc "$1")" "$tdom" "$TPORT" "$uuid"
+    printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"}}}' "$tdom" "${FP:-chrome}"
 }
 
 # Профиль AmneziaWG в форме профилей Detour (detour-awg): ключи amnezia — mihomo.
@@ -1896,12 +1990,17 @@ sub_awg_json() {  # $1 tag
 }
 
 sub_clash() {
-    vn="$name · VLESS"; an="$name · AmneziaWG"
+    vn="$name · VLESS"; an="$name · AmneziaWG"; tn="$name · VLESS TLS"
     echo "proxies:"
+    if [ "$has_t" = 1 ]; then
+        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$tn" "$tdom" "$TPORT" "$uuid"
+        printf '    network: tcp\n    udp: true\n    tls: true\n    flow: xtls-rprx-vision\n'
+        printf '    servername: %s\n    client-fingerprint: %s\n' "$tdom" "${FP:-chrome}"
+    fi
     if [ "$has_v" = 1 ]; then
         printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$vn" "$host" "$VPORT" "$uuid"
         printf '    network: tcp\n    udp: true\n    tls: true\n    flow: xtls-rprx-vision\n'
-        printf '    servername: %s\n    client-fingerprint: chrome\n' "$VSNI"
+        printf '    servername: %s\n    client-fingerprint: %s\n' "$VSNI" "${FP:-chrome}"
         printf '    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$VPUB" "$VSID"
     fi
     if [ "$has_a" = 1 ]; then
@@ -1920,6 +2019,7 @@ sub_clash() {
     fi
     printf 'proxy-groups:\n  - name: "%s"\n    type: select\n    proxies:\n' "$name"
     [ "$has_v" = 1 ] && printf '      - "%s"\n' "$vn"
+    [ "$has_t" = 1 ] && printf '      - "%s"\n' "$tn"
     [ "$has_a" = 1 ] && printf '      - "%s"\n' "$an"
     echo "rules:"
     if [ "$mode" = lan ]; then
@@ -1931,12 +2031,22 @@ sub_clash() {
 }
 
 sub_singbox() {
+    # С входом TLS — переключатель из двух VLESS, иначе сразу Reality.
     tag="$name · VLESS"
+    [ "$has_t" = 1 ] && tag=$name
     printf '{"log":{"level":"warn"},'
     printf '"dns":{"servers":[{"type":"local","tag":"local"},{"type":"tls","tag":"remote","server":"1.1.1.1","detour":"%s"}],"final":"%s"},' \
         "$(json_esc "$tag")" "$([ "$mode" = lan ] && echo local || echo remote)"
     printf '"inbounds":[{"type":"tun","tag":"tun-in","address":["172.19.0.1/30"],"auto_route":true,"strict_route":true}],'
-    printf '"outbounds":['; sub_vless_json "$tag"; printf ',{"type":"direct","tag":"direct"}],'
+    printf '"outbounds":['
+    if [ "$has_t" = 1 ]; then
+        printf '{"type":"selector","tag":"%s","outbounds":["%s","%s"]},' "$(json_esc "$tag")" \
+            "$(json_esc "$name · VLESS")" "$(json_esc "$name · VLESS TLS")"
+        sub_vless_json "$name · VLESS"; printf ','; sub_vless_tls_json "$name · VLESS TLS"
+    else
+        sub_vless_json "$tag"
+    fi
+    printf ',{"type":"direct","tag":"direct"}],'
     printf '"route":{"auto_detect_interface":true,"default_domain_resolver":"local","rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"}'
     if [ "$mode" = lan ]; then
         printf ',{"ip_cidr":["%s"],"outbound":"%s"}],"final":"direct"}}\n' "$(sub_allowed | sed 's/ /","/g')" "$(json_esc "$tag")"
@@ -1966,10 +2076,14 @@ cmd_sub() {
     host=$(endpoint_host)
     has_v=0; vless_on && [ -n "$uuid" ] && [ -n "$VPUB" ] && has_v=1
     has_a=0; awg_on && [ -n "$priv" ] && [ -n "$PUBKEY" ] && has_a=1
+    has_t=0; [ "$has_v" = 1 ] && vtls_on && has_t=1 && tdom=$(tls_domain)
     f=$2
+    # Отпечаток TLS клиента выбирает CGI по приложению (iOS — safari): на части
+    # сетей с отпечатком chrome Reality не проходит.
+    case "$3" in chrome|safari|firefox|ios|edge|android|random|randomized|qq|360) FP=$3 ;; *) FP=chrome ;; esac
     [ "$f" = awg ] && [ "$has_a" != 1 ] && f=uri
     case "$f" in uri|singbox) [ "$has_v" = 1 ] || f=clash ;; esac
-    log "sub: $id ($name) формат $f${REMOTE_ADDR:+ с $REMOTE_ADDR}"
+    log "sub: $id ($name) формат $f, отпечаток $FP${REMOTE_ADDR:+ с $REMOTE_ADDR}${HTTP_USER_AGENT:+ ($(printf '%s' "$HTTP_USER_AGENT" | tr -cd 'A-Za-z0-9 ._/();:,+-' | cut -c1-80))}"
     printf 'Cache-Control: no-store\r\nprofile-update-interval: 12\r\n'
     printf 'profile-title: base64:%s\r\n' "$(printf '%s' "$name" | sub_b64)"
     case "$f" in
@@ -1978,6 +2092,7 @@ cmd_sub() {
         detour)
             printf 'Content-Type: application/json\r\n\r\n{"outbounds":['
             [ "$has_v" = 1 ] && sub_vless_json "$name · VLESS"
+            [ "$has_t" = 1 ] && { printf ','; sub_vless_tls_json "$name · VLESS TLS"; }
             [ "$has_v" = 1 ] && [ "$has_a" = 1 ] && printf ','
             [ "$has_a" = 1 ] && sub_awg_json "$name · AmneziaWG"
             printf ']}\n' ;;
@@ -1986,7 +2101,7 @@ cmd_sub() {
             client_conf "$id" ;;
         *)
             printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
-            client_link "$id" | sub_b64; echo ;;
+            { client_link "$id"; [ "$has_t" = 1 ] && client_tls_link "$id"; } | sub_b64; echo ;;
     esac
 }
 
@@ -2064,6 +2179,17 @@ cmd_set() {
                 esac
                 UPLINK=$v ;;
             sub) case "$v" in 0|1) SUB=$v ;; *) err "sub: 0 или 1" ;; esac ;;
+            vtls) case "$v" in 0|1) VTLS=$v ;; *) err "vtls: 0 или 1" ;; esac ;;
+            tport)
+                case "$v" in ''|*[!0-9]*) err "порт — число" ;; esac
+                [ "$v" -ge 1 ] && [ "$v" -le 65535 ] || err "порт 1–65535"
+                [ "$v" = "$VPORT" ] && err "TCP-порт $v занят входом VLESS-Reality"
+                [ "$v" = "$SPORT" ] && err "TCP-порт $v занят подписками"
+                if [ "$v" != "$TPORT" ] && tcp_port_busy "$v"; then err "TCP-порт $v уже занят на роутере"; fi
+                TPORT=$v ;;
+            tdomain)
+                [ -z "$v" ] || { valid_ipv4_host "$v" && echo "$v" | grep -q '[A-Za-z]'; } || err "домен сертификата"
+                TDOMAIN=$v ;;
             sport)
                 case "$v" in ''|*[!0-9]*) err "порт — число" ;; esac
                 [ "$v" -ge 1024 ] && [ "$v" -le 65535 ] || err "порт 1024–65535"
@@ -2233,8 +2359,11 @@ case "$1" in
     client-link)
         load_conf
         client_link "$2" || { echo "клиент не найден или VLESS не настроен" >&2; exit 1; } ;;
+    client-tls-link)
+        load_conf
+        client_tls_link "$2" || { echo "клиент не найден или вход VLESS+TLS не работает" >&2; exit 1; } ;;
     # Ответ CGI подписки (cgi-bin/sub): $2 токен, $3 формат.
-    sub) cmd_sub "$2" "$3" ;;
+    sub) cmd_sub "$2" "$3" "$4" ;;
     client-sub-url)
         # Клиенты до версии с подписками получают токен здесь.
         lock; ensure_conf >/dev/null

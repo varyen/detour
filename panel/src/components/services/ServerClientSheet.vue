@@ -34,6 +34,7 @@ const toast = useToastStore();
 const view = ref<Tab>("conf");
 const conf = ref("");
 const link = ref("");
+const tlsLink = ref("");
 const subUrl = ref("");
 const confirmReset = ref(false);
 const loading = ref(false);
@@ -49,6 +50,7 @@ function qrOf(text: string): string {
 }
 const qrSvg = computed(() => qrOf(conf.value));
 const linkQr = computed(() => qrOf(link.value));
+const tlsQr = computed(() => qrOf(tlsLink.value));
 const subQr = computed(() => qrOf(subUrl.value));
 
 const tabs = computed(() => {
@@ -89,7 +91,9 @@ async function loadLink() {
   loading.value = true;
   error.value = "";
   try {
-    link.value = (await services.serverClientLink(props.client.id)).link;
+    const r = await services.serverClientLink(props.client.id);
+    link.value = r.link;
+    tlsLink.value = r.tls_link ?? "";
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Не удалось получить ссылку";
   } finally {
@@ -152,6 +156,7 @@ watch(
     } else {
       conf.value = "";
       link.value = "";
+      tlsLink.value = "";
       subUrl.value = "";
       confirmReset.value = false;
       sessions.value = [];
@@ -291,6 +296,21 @@ function host(remote: string): string {
             <summary>Показать ссылку</summary>
             <pre>{{ link }}</pre>
           </details>
+          <template v-if="tlsLink">
+            <p class="lead">
+              Вторая ссылка — VLESS поверх обычного TLS на настоящем сертификате.
+              Пробуйте её, если с первой не подключается: часть сетей портит Reality.
+            </p>
+            <!-- SVG собирает qrcode-generator из наших же данных: только rect/path. -->
+            <div class="qr" v-html="tlsQr"></div>
+            <div class="actions">
+              <UiButton @click="copy(tlsLink, 'Ссылка')">Скопировать ссылку TLS</UiButton>
+            </div>
+            <details class="raw">
+              <summary>Показать ссылку TLS</summary>
+              <pre>{{ tlsLink }}</pre>
+            </details>
+          </template>
         </template>
       </template>
 

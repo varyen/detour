@@ -4,7 +4,8 @@
 # интернет через профили и цепочки Detour, с его маршрутами.
 #
 #   sh install.sh [--port 51820] [--vless-port 443] [--endpoint <IP или домен>]
-#                 [--panel-port 8080] [--sub-port 2096] [--sub-local]
+#                 [--panel-port 8080] [--sub-port 2096] [--sub-local] [--tls-port 4430]
+#                 [--https-port 8443] [--acme-port 80] [--no-acme]
 #                 [--panel-public] [--name detour] [--uninstall]
 #
 # Что делает:
@@ -24,6 +25,18 @@
 # веб-сервер на --sub-port, панели там нет. --sub-local публикует его только на
 # 127.0.0.1 — под свой реверс-прокси с TLS (его адрес задаётся в панели);
 # --sub-port 0 — без подписок.
+#
+# --tls-port публикует вход VLESS поверх обычного TLS на настоящем сертификате
+# (там, где сеть портит Reality). Сертификат контейнер берёт из тома
+# <name>-detour: server/tls/fullchain.pem и privkey.pem.
+#
+# Свой домен: 80-й порт хоста (если свободен; --no-acme — не трогать)
+# пробрасывается на служебный веб-сервер контейнера с одними проверками ACME —
+# тогда сертификат выпускается из панели («Свой домен и защищённое
+# соединение»). После выпуска панель открывается по HTTPS на --https-port
+# (0 — не публиковать), подписки переходят на HTTPS, вход VLESS+TLS (если
+# опубликован --tls-port) берёт тот же сертификат. --acme-port — другой порт
+# хоста, если 80-й держит свой веб-сервер, который отдаёт /.well-known/ туда.
 
 set -eu
 
@@ -35,6 +48,10 @@ ENDPOINT=""
 PANEL_PUBLIC=0
 SUB_PORT=2096
 SUB_LOCAL=0
+TLS_PORT=0
+HTTPS_PORT=8443
+ACME=1
+ACME_PORT=80
 UNINSTALL=0
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -47,9 +64,13 @@ while [ $# -gt 0 ]; do
         --panel-public) PANEL_PUBLIC=1; shift ;;
         --sub-port) SUB_PORT=$2; shift 2 ;;
         --sub-local) SUB_LOCAL=1; shift ;;
+        --tls-port) TLS_PORT=$2; shift 2 ;;
+        --https-port) HTTPS_PORT=$2; shift 2 ;;
+        --no-acme) ACME=0; shift ;;
+        --acme-port) ACME_PORT=$2; shift 2 ;;
         --name) NAME=$2; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
-        -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
         *) echo "неизвестный параметр: $1" >&2; exit 2 ;;
     esac
 done
@@ -70,6 +91,8 @@ fi
 
 case "$PORT" in ''|*[!0-9]*) die "--port — число" ;; esac
 case "$SUB_PORT" in ''|*[!0-9]*) die "--sub-port — число" ;; esac
+case "$TLS_PORT" in ''|*[!0-9]*) die "--tls-port — число" ;; esac
+case "$HTTPS_PORT" in ''|*[!0-9]*) die "--https-port — число" ;; esac
 case "$(uname -m)" in
     x86_64|amd64) OWRT=x86-64-25.12.0 ;;
     aarch64|arm64) OWRT=armsr-armv8-25.12.0 ;;
@@ -120,6 +143,23 @@ if [ "$SUB_PORT" != 0 ]; then
     SUB_BIND=""; [ "$SUB_LOCAL" = 1 ] && SUB_BIND=127.0.0.1:
     set -- -p "${SUB_BIND}${SUB_PORT}:${SUB_PORT}/tcp" -e DETOUR_SUB_PORT="$SUB_PORT"
 fi
+[ "$TLS_PORT" != 0 ] && set -- "$@" -p "$TLS_PORT:$TLS_PORT/tcp" -e DETOUR_TLS_PORT="$TLS_PORT"
+# Переустановка: порт держит наш же прежний контейнер — он сейчас уйдёт.
+own_port() { docker port "$NAME" 2>/dev/null | grep -q "0.0.0.0:$1\$"; }
+if [ "$HTTPS_PORT" != 0 ]; then
+    if tcp_busy "$HTTPS_PORT" && ! own_port "$HTTPS_PORT"; then
+        echo "   порт $HTTPS_PORT занят — панель по HTTPS не публикую (--https-port другой)"; HTTPS_PORT=0
+    else
+        set -- "$@" -p "$HTTPS_PORT:$HTTPS_PORT/tcp" -e DETOUR_HTTPS_PORT="$HTTPS_PORT"
+    fi
+fi
+if [ "$ACME" = 1 ]; then
+    if tcp_busy "$ACME_PORT" && ! own_port "$ACME_PORT"; then
+        echo "   порт $ACME_PORT хоста занят — выпуск сертификата из панели недоступен (HTTP-01; см. --acme-port)"; ACME=0
+    else
+        set -- "$@" -p "$ACME_PORT:8088/tcp" -e DETOUR_ACME=1
+    fi
+fi
 
 say "Запуск контейнера $NAME"
 # --privileged: OpenWrt внутри управляет своим файрволом и интерфейсами (tun,
@@ -155,5 +195,6 @@ cat <<EOF
             «Сервисы → Свой VPN-сервер» — включить и завести клиентов.
             Порты сервера уже совпадают с опубликованными ($PORT/udp, $VPORT/tcp).
   Подписки: порт $SUB_PORT/tcp (0 — выключены); ссылка — в карточке клиента.
+  Домен:    $([ "$ACME" = 1 ] && echo "A-запись домена на этот сервер, затем в панели «Свой домен и защищённое соединение»; панель — https://<домен>:$HTTPS_PORT/detour/" || echo "80-й порт не проброшен — сертификат выпускать вручную")
   Удалить:  sh $0 --uninstall
 EOF

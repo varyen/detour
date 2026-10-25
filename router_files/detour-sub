@@ -29,9 +29,20 @@ if [ -z "$f" ]; then
 fi
 case "$f" in uri|clash|singbox|detour|awg) ;; *) f=uri ;; esac
 
+# Отпечаток TLS (uTLS) в ссылках. На части сетей Reality с отпечатком chrome
+# не проходит, а safari проходит (Happ на iPhone, проверено 25.10.2026), поэтому
+# приложениям Apple — safari. ?fp= перекрывает.
+fp=$(qs_get fp | tr -cd 'a-z0-9' | cut -c1-16)
+if [ -z "$fp" ]; then
+    case "$(printf '%s' "$HTTP_USER_AGENT" | tr 'A-Z' 'a-z')" in
+        *ios*|*iphone*|*ipad*|*darwin*|*cfnetwork*|*macintosh*|*mac\ os*|*shadowrocket*|*streisand*|*foxray*|sfi/*|sfm/*|sft/*) fp=safari ;;
+        *) fp=chrome ;;
+    esac
+fi
+
 if [ "$REQUEST_METHOD" != GET ] && [ "$REQUEST_METHOD" != HEAD ]; then
     printf 'Status: 405 Method Not Allowed\r\nContent-Type: text/plain\r\n\r\n'
     exit 0
 fi
 [ -x "$BIN" ] || { printf 'Status: 503 Service Unavailable\r\nContent-Type: text/plain\r\n\r\n'; exit 0; }
-exec "$BIN" sub "$t" "$f"
+exec "$BIN" sub "$t" "$f" "$fp"

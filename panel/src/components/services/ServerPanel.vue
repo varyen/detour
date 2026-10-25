@@ -215,6 +215,20 @@ async function toggleServer(on: boolean) {
   }
 }
 
+const vt = computed(() => vl.value?.tls);
+async function toggleTls(on: boolean) {
+  busy.value = "vtls";
+  try {
+    await services.serverSet({ vtls: on });
+    toast.ok(on ? "Вход VLESS + TLS включён" : "Вход VLESS + TLS выключен");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить вход");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
 async function toggleSub(on: boolean) {
   busy.value = "sub";
   try {
@@ -253,7 +267,7 @@ const entriesHint = computed(() => {
   return `${parts.join(" · ")} · сеть ${s.net}`;
 });
 
-const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "", sport: "", suburl: "" });
+const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "", sport: "", suburl: "", tport: "", tdomain: "" });
 const showSettings = ref(false);
 watch(showSettings, (v) => {
   if (!v || !st.value) return;
@@ -265,6 +279,8 @@ watch(showSettings, (v) => {
   form.dns = st.value.dns;
   form.mtu = String(st.value.mtu || "");
   form.sport = String(sb.value?.port || "");
+  form.tport = String(vt.value?.port || "");
+  form.tdomain = vt.value?.domain_set ?? "";
   form.suburl = sb.value?.url ?? "";
 });
 
@@ -281,6 +297,10 @@ async function saveSettings() {
     if (Number(form.vport) && Number(form.vport) !== vl.value.port) patch.vport = Number(form.vport);
     if (form.sni.trim() && form.sni.trim() !== vl.value.sni) patch.sni = form.sni.trim();
   }
+  if (vt.value) {
+    if (Number(form.tport) && Number(form.tport) !== vt.value.port) patch.tport = Number(form.tport);
+    if (form.tdomain.trim() !== vt.value.domain_set) patch.tdomain = form.tdomain.trim();
+  }
   if (sb.value) {
     if (Number(form.sport) && Number(form.sport) !== sb.value.port) patch.sport = Number(form.sport);
     if (form.suburl.trim() !== sb.value.url) patch.suburl = form.suburl.trim();
@@ -294,7 +314,7 @@ async function saveSettings() {
     await services.serverSet(patch);
     toast.ok("Настройки сервера сохранены");
     showSettings.value = false;
-    if (patch.port || patch.net || patch.endpoint || patch.dns || patch.mtu || patch.vport || patch.sni) {
+    if (patch.port || patch.net || patch.endpoint || patch.dns || patch.mtu || patch.vport || patch.sni || patch.tport || patch.tdomain !== undefined) {
       /* Без HTTPS и своего адреса ссылка подписки собрана из адреса для клиентов. */
       const subMoved = patch.endpoint !== undefined && !sb.value?.https && !sb.value?.url;
       toast.push(
@@ -613,6 +633,14 @@ function hint(c: ServerClient): string {
             @update:model-value="toggleEntry('vless', $event)"
           />
           <SwitchToggle
+            v-if="vt && vlessOn"
+            :model-value="vt.enabled"
+            label="VLESS + TLS"
+            :hint="vt.active ? `TCP ${vt.port} · ${vt.domain} · обычный TLS на своём сертификате — где сеть портит Reality` : vt.enabled ? vt.reason || 'не работает' : 'Второй VLESS-вход на настоящем сертификате, как в Marzban'"
+            :busy="busy === 'vtls'"
+            @update:model-value="toggleTls"
+          />
+          <SwitchToggle
             v-if="sb"
             :model-value="sb.enabled"
             label="Подписки"
@@ -838,6 +866,17 @@ function hint(c: ServerClient): string {
                   :hint="`Пусто — ${sb.base}. Свой реверс-прокси с HTTPS — например https://vpn.example.com:8443`"
                 >
                   <input v-model="form.suburl" type="text" placeholder="авто" />
+                </FormField>
+              </template>
+              <template v-if="vt && vlessReady">
+                <FormField label="TCP-порт VLESS + TLS">
+                  <input v-model="form.tport" type="number" min="1" max="65535" />
+                </FormField>
+                <FormField
+                  label="Домен сертификата VLESS + TLS"
+                  :hint="`Пусто — ${vt.domain || 'домен панели'}. Свой сертификат кладётся в /etc/detour/server/tls (fullchain.pem, privkey.pem)`"
+                >
+                  <input v-model="form.tdomain" type="text" placeholder="авто" />
                 </FormField>
               </template>
               <FormField label="Подсеть клиентов" hint="Частная /24, не пересекающаяся с домашней сетью">
