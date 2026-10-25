@@ -120,3 +120,36 @@ impl Backend {
         self.reapply().await
     }
 }
+
+impl Backend {
+    /// Правила приложений. GET → текст и что умеет платформа, POST — текст
+    /// целиком (`match|mode|target|name`), с пересборкой.
+    pub(super) async fn app_rules(&self, req: &Request, body: String) -> Result<Response> {
+        if req.body.is_none() {
+            return Ok(Response::json(&json!({
+                "supported": crate::apps::SUPPORTED,
+                "by": if cfg!(target_os = "android") { "package" } else { "process" },
+                "rules": self.store.read_text(store::APP_RULES),
+            })));
+        }
+        if !crate::apps::SUPPORTED {
+            bail!("на этой платформе правила приложений недоступны");
+        }
+        let text = crate::apps::serialize(&crate::apps::parse(&body));
+        self.store.write_text(store::APP_RULES, &text)?;
+        self.reapply().await.map_err(|e| anyhow!("config build failed: {e:#}"))?;
+        Ok(Response::json(&json!({ "ok": true })))
+    }
+
+    /// Из чего выбирать: на Android — установленные приложения, на десктопе —
+    /// запущенные сейчас программы (служба видит процессы всех сессий).
+    pub(super) async fn apps_list(&self) -> Result<Response> {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if let Some(raw) = crate::engine::tunnel::get().and_then(|t| t.apps()) {
+            let apps: Value = serde_json::from_str(&raw)?;
+            return Ok(Response::json(&json!({ "source": "installed", "apps": apps })));
+        }
+        let apps = tokio::task::spawn_blocking(crate::apps::running).await?;
+        Ok(Response::json(&json!({ "source": "running", "apps": apps })))
+    }
+}

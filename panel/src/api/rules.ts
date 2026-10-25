@@ -5,7 +5,24 @@ import type { HostsStatus, RoutingMode, RulistStatus, SingboxMode } from "./type
    сбросом conntrack — это десятки секунд на роутере с большим whitelist. */
 const LIST_SAVE_TIMEOUT = 180_000;
 
+export interface PickApp {
+  match: string;
+  name: string;
+  path?: string;
+  system?: boolean;
+  /* PNG 48×48 в base64 — только Android */
+  icon?: string;
+}
+
 export const rules = {
+  /* --- правила приложений (только приложение Detour) --- */
+  appRulesGet: () =>
+    requestJson<{ supported: boolean; by: "package" | "process"; rules: string }>("app_rules"),
+  appRulesSave: (text: string) =>
+    requestJson<{ ok: boolean }>("app_rules", { body: text, timeoutMs: LIST_SAVE_TIMEOUT }),
+  appsList: () =>
+    requestJson<{ source: "installed" | "running"; apps: PickApp[] }>("apps_list", { timeoutMs: 45_000 }),
+
   /* --- домены через VPN --- */
   domainsGet: () => requestJson<{ domains: string }>("domains", { timeoutMs: 45_000 }),
   domainsSave: (text: string) =>

@@ -1,3 +1,4 @@
+pub mod apps;
 pub mod awg;
 pub mod backend;
 pub mod chains;

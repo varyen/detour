@@ -355,6 +355,7 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
     };
 
     server_client_rules(store, &mut b, &mut rules, server_at, final_out, p.awg_inline)?;
+    let excluded = app_rules(store, p.chain, allvpn, &mut b, &mut rules, server_at, p.awg_inline)?;
     // Клиенты VLESS присылают имя, а не адрес: без резолва правила по подсетям
     // («напрямую» для российских адресов и т. п.) их не видят, и сайт уходил в
     // VPN или в цель клиента. Домен для доменных правил при этом сохраняется.
@@ -378,6 +379,9 @@ pub fn render(store: &Store, settings: &Settings, p: &Params) -> Result<Rendered
     });
     if cfg!(windows) {
         tun["interface_name"] = json!(TUN_NAME);
+    }
+    if !excluded.is_empty() {
+        tun["exclude_package"] = json!(excluded);
     }
     let main_in = if p.tun {
         tun
@@ -570,6 +574,73 @@ fn server_client_rules(store: &Store, b: &mut Builder, rules: &mut Vec<Value>, a
         }
     }
     Ok(())
+}
+
+/// Правила приложений — после карты маршрутов и обхода DPI, как правила
+/// устройств роутера: сайты из «Отдельных маршрутов» идут своим путём и из
+/// этих приложений. «Мимо VPN» при «Всё через VPN» не действует — режим
+/// обещает, что напрямую не уходит ничего. Пропавшая цель — приложение идёт
+/// общим путём. Возвращает пакеты, которые Android выводит из туннеля целиком:
+/// так их трафик (включая DNS и UDP) вообще не заходит в TUN.
+fn app_rules(
+    store: &Store,
+    active: &[String],
+    allvpn: bool,
+    b: &mut Builder,
+    rules: &mut Vec<Value>,
+    at: usize,
+    inline: bool,
+) -> Result<Vec<String>> {
+    let list = crate::apps::load(store);
+    let mut direct: Vec<&str> = Vec::new();
+    let mut via: Vec<(String, Vec<&str>)> = Vec::new();
+    let mut out = Vec::new();
+    for r in &list {
+        match &r.target {
+            None if allvpn => {}
+            None => direct.push(&r.matcher),
+            Some(t) => match via.iter_mut().find(|(id, _)| id == t) {
+                Some((_, apps)) => apps.push(&r.matcher),
+                None => via.push((t.clone(), vec![&r.matcher])),
+            },
+        }
+    }
+    let mut n = 0usize;
+    for (target, apps) in via {
+        let hops = crate::torrent::target_hops(store, &target);
+        if hops.is_empty() {
+            continue;
+        }
+        let tag = if hops == active {
+            "proxy".to_owned()
+        } else {
+            n += 1;
+            let base = format!("app_{n}");
+            let last = hops.len();
+            for (i, h) in hops.iter().enumerate() {
+                let tag = if i + 1 == last { base.clone() } else { format!("{base}_{}", i + 1) };
+                let detour = (i > 0).then(|| format!("{base}_{i}"));
+                let hop = hop(store, h, &tag, detour.as_deref(), &mut b.awg, inline)?;
+                b.push(hop);
+            }
+            base
+        };
+        let mut r = crate::apps::matcher(&apps);
+        r["outbound"] = json!(tag);
+        out.push(r);
+    }
+    let mut excluded = Vec::new();
+    if cfg!(target_os = "android") {
+        excluded = direct.iter().map(|s| s.to_string()).collect();
+    } else if !direct.is_empty() {
+        let mut r = crate::apps::matcher(&direct);
+        r["outbound"] = json!("direct");
+        out.insert(0, r);
+    }
+    for (i, r) in out.into_iter().enumerate() {
+        rules.insert(at + i, r);
+    }
+    Ok(excluded)
 }
 
 /// Карта маршрутов. Цель — профиль или цепочка; пропавшая цель не уходит в
@@ -915,6 +986,64 @@ mod tests {
         let m = crate::mihomo::convert(&r.config, Some(&r.rulesets)).unwrap();
         assert_eq!(m["hosts"]["pinned.example.com"], json!(["203.0.113.7"]));
         assert_eq!(m["dns"]["direct-nameserver"], json!(["https://dns.example.com/dns-query"]));
+    }
+
+    #[test]
+    fn app_rules_direct_or_via_target() {
+        let s = tmp_store("apps");
+        put_profile(&s, "main", json!({ "type": "trojan", "server": "vpn.example.com", "server_port": 443 }));
+        put_profile(&s, "alt", json!({ "type": "trojan", "server": "alt.example.com", "server_port": 443 }));
+        s.write_text(store::ROUTE_MAP, "// === route:alt ===
+example.org
+").unwrap();
+        s.write_text(store::DPI_DOMAINS, "blocked.example.com
+").unwrap();
+        s.write_text(
+            store::APP_RULES,
+            "bank.exe|direct||Банк
+chat.exe|vpn|alt|
+game.exe|vpn|alt|
+main.exe|vpn|main|
+lost.exe|vpn|gone|
+",
+        )
+        .unwrap();
+        let chain = vec!["main".to_owned()];
+        let mut p = params(&chain, s.root());
+        p.dpi = DpiRoute::Direct;
+        let r = render(&s, &Settings::default(), &p).unwrap();
+        let rules = r.config["route"]["rules"].as_array().unwrap();
+        let app = |name: &str| {
+            rules.iter().position(|x| {
+                x.get("process_path_regex").or(x.get("package_name")).is_some_and(|v| v.to_string().contains(name))
+            })
+        };
+        if cfg!(target_os = "ios") {
+            assert!(app("chat").is_none());
+            return;
+        }
+        let via = app("chat").expect("через alt");
+        assert_eq!(rules[via]["outbound"], "app_1");
+        assert_eq!(app("game"), Some(via), "приложения одной цели — одним правилом");
+        assert_eq!(rules[app("main").unwrap()]["outbound"], "proxy", "цель = активная цепочка — общий выход");
+        assert!(app("lost").is_none(), "пропавшая цель — общий путь");
+        let route = rules.iter().position(|x| x["domain_suffix"] == json!(["example.org"])).unwrap();
+        let dpi = rules.iter().position(|x| x["rule_set"] == json!(["dpi"])).unwrap();
+        assert!(route < via && dpi < via, "карта маршрутов и обход DPI главнее");
+        if cfg!(target_os = "android") {
+            assert!(app("bank").is_none());
+            assert_eq!(r.config["inbounds"][0]["exclude_package"], json!(["bank.exe"]));
+        } else {
+            assert_eq!(rules[app("bank").unwrap()]["outbound"], "direct");
+            let m = crate::mihomo::convert(&r.config, Some(&r.rulesets)).unwrap();
+            assert!(m["rules"].as_array().unwrap().iter().any(|x| x.as_str().is_some_and(|x| x.starts_with("PROCESS-PATH-REGEX,") && x.ends_with(",DIRECT"))));
+        }
+        let mut allvpn = Settings::default();
+        allvpn.set("allvpn", "1");
+        let r = render(&s, &allvpn, &p).unwrap();
+        let s2 = r.config.to_string();
+        assert!(!s2.contains("bank"), "«Всё через VPN» отменяет «мимо VPN»");
+        assert!(s2.contains("chat"));
     }
 
     #[test]

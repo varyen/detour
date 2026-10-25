@@ -19,6 +19,7 @@ const HUE: Record<string, string> = {
   dpi: "amber",
   bolt: "amber",
   devices: "teal",
+  apps: "teal",
   intercept: "slate",
   waves: "teal",
   block: "red",

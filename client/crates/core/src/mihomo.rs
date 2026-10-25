@@ -512,6 +512,10 @@ fn rule_lines(r: &Value, ctx: &mut RuleCtx) -> Result<Vec<String>, String> {
         matchers += 1;
         add("PROCESS-NAME", strs(Some(v)), "", &mut out, ctx);
     }
+    if let Some(v) = r.get("process_path_regex") {
+        matchers += 1;
+        add("PROCESS-PATH-REGEX", strs(Some(v)), "", &mut out, ctx);
+    }
     if let Some(v) = r.get("rule_set") {
         matchers += 1;
         for t in strs(Some(v)) {

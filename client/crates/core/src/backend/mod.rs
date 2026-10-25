@@ -266,6 +266,8 @@ impl Backend {
             "whitelist_save_restart" => self.text_file(req, store::WHITELIST, "whitelist", body()?, true).await?,
             "zapret_domains" => self.dpi_domains(req, body()?, false).await?,
             "zapret_domains_save_restart" => self.dpi_domains(req, body()?, true).await?,
+            "app_rules" => self.app_rules(req, body()?).await?,
+            "apps_list" => self.apps_list().await?,
             "egress_blocklist" => self.egress_blocklist(req, body()?).await?,
             "udp_vpn" => self.udp_vpn(req, body()?).await?,
             "udp_vpn_list" => self.udp_vpn_list(req, body()?).await?,
@@ -480,6 +482,12 @@ impl Backend {
             .iter()
             .cloned()
             .chain(lists::parse_route_map(&self.store.read_text(store::ROUTE_MAP)).into_iter().map(|s| s.target))
+            .chain(
+                crate::apps::load(&self.store)
+                    .into_iter()
+                    .filter_map(|r| r.target)
+                    .flat_map(|t| crate::torrent::target_hops(&self.store, &t)),
+            )
             .filter(|id| {
                 crate::profiles::load(&self.store, id)
                     .and_then(|p| crate::profiles::outbound(&p).map(crate::awg::is_awg))

@@ -97,6 +97,12 @@ defineProps<{ name: string; size?: number }>();
       <path d="M6 19h6M9 15v4" />
       <rect x="17.5" y="9" width="4" height="10" rx="1" />
     </template>
+    <template v-else-if="name === 'apps'">
+      <rect x="4" y="4" width="7" height="7" rx="2" />
+      <rect x="13" y="4" width="7" height="7" rx="2" />
+      <rect x="4" y="13" width="7" height="7" rx="2" />
+      <path d="M16.5 13.5v6M13.5 16.5h6" />
+    </template>
     <template v-else-if="name === 'intercept'">
       <path d="M4 5h16l-6 7v6l-4 2v-8z" />
     </template>

@@ -26,6 +26,7 @@ pub const TORRENT_ALLOW: &str = "flags/torrent-allow.list";
 /// «block» | «direct» | «via <id>» — что делать с торрентами на профиле, где
 /// они запрещены (тот же формат, что `/etc/sing-box/torrent-action` роутера).
 pub const TORRENT_ACTION: &str = "flags/torrent-action";
+pub const APP_RULES: &str = "app-rules.list";
 pub const AUTOSTART_SINGBOX: &str = "flags/autostart.singbox";
 pub const AUTOSTART_DPI: &str = "flags/autostart.dpi";
 /// Стратегия winws2 одной строкой — как `nfqws2.strategy` на роутере.

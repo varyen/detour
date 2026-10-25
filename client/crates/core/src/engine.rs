@@ -32,6 +32,11 @@ pub mod tunnel {
         fn check(&self, config: &Path) -> Result<(), String>;
         /// Версия ядра, вкомпилированного в приложение.
         fn version(&self) -> Option<String>;
+        /// Установленные приложения для правил по пакету (JSON-массив
+        /// `apps::App`); `None` — платформа не умеет.
+        fn apps(&self) -> Option<String> {
+            None
+        }
     }
 
     static TUNNEL: OnceLock<Box<dyn Tunnel>> = OnceLock::new();

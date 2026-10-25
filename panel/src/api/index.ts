@@ -6,6 +6,7 @@ export type { PanelRole, PanelUser } from "./auth";
 export { overview } from "./overview";
 export { profiles, chains, subscriptions, warp, awg } from "./profiles";
 export { rules } from "./rules";
+export type { PickApp } from "./rules";
 export { diag } from "./diag";
 export { services } from "./services";
 export type { LogName } from "./diag";

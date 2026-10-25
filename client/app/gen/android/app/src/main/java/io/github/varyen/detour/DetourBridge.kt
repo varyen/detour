@@ -44,6 +44,50 @@ object DetourBridge {
         t.message ?: t.toString()
     }
 
+    /**
+     * Приложения с доступом в сеть — для правил «приложение мимо VPN / через
+     * VPN». JSON-массив `{match, name, system, icon}`; иконка — PNG 48×48 в
+     * base64. «Системное» — без значка в лаунчере: службы, которые человек
+     * сам не открывает.
+     */
+    @JvmStatic
+    fun installedApps(): String {
+        val ctx = DetourVpn.context() ?: return ""
+        return try { appsJson(ctx) } catch (t: Throwable) { "" }
+    }
+
+    private fun appsJson(ctx: android.content.Context): String {
+        val pm = ctx.packageManager
+        val out = org.json.JSONArray()
+        @Suppress("DEPRECATION")
+        val pkgs = pm.getInstalledPackages(android.content.pm.PackageManager.GET_PERMISSIONS)
+        for (p in pkgs) {
+            val ai = p.applicationInfo ?: continue
+            if (p.packageName == ctx.packageName) continue
+            if (p.requestedPermissions?.contains(android.Manifest.permission.INTERNET) != true) continue
+            val launcher = pm.getLaunchIntentForPackage(p.packageName) != null
+            val o = org.json.JSONObject()
+            o.put("match", p.packageName)
+            o.put("name", ai.loadLabel(pm).toString())
+            if (!launcher) o.put("system", true)
+            if (launcher) runCatching { o.put("icon", iconPng(ai.loadIcon(pm))) }
+            out.put(o)
+        }
+        return out.toString()
+    }
+
+    private fun iconPng(d: android.graphics.drawable.Drawable): String {
+        val px = 48
+        val bmp = android.graphics.Bitmap.createBitmap(px, px, android.graphics.Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(bmp)
+        d.setBounds(0, 0, px, px)
+        d.draw(c)
+        val buf = java.io.ByteArrayOutputStream()
+        bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, buf)
+        bmp.recycle()
+        return android.util.Base64.encodeToString(buf.toByteArray(), android.util.Base64.NO_WRAP)
+    }
+
     @JvmStatic
     fun tunnelVersion(): String = runCatching { Libbox.version() }.getOrDefault("")
 

@@ -144,4 +144,15 @@ impl Tunnel for AndroidTunnel {
         .ok()
         .filter(|v| !v.is_empty())
     }
+
+    fn apps(&self) -> Option<String> {
+        with_java(|env, class| {
+            let value = env.call_static_method(class, "installedApps", "()Ljava/lang/String;", &[])?;
+            let text: JString = value.l()?.into();
+            let out = String::from(env.get_string(&text)?);
+            Ok(out)
+        })
+        .ok()
+        .filter(|v| v.starts_with('['))
+    }
 }

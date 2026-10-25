@@ -1,5 +1,5 @@
 # Все e2e-наборы подряд, каждый на свежем каталоге данных и своей службе.
-#   cargo build; pwsh client/scripts/e2e-all.ps1 -SingBox <путь к sing-box.exe> [-Work <каталог>] [-Only health,live]
+#   cargo build; pwsh client/scripts/e2e-all.ps1 -SingBox <путь к sing-box.exe> [-Work <каталог>] [-Only health,live,apps]
 param(
   [Parameter(Mandatory)] [string] $SingBox,
   [string] $Work = (Join-Path ([IO.Path]::GetTempPath()) "detour-e2e"),
@@ -11,7 +11,8 @@ $suites = @(
   @{ name = "backend"; args = @(); live = $false },
   @{ name = "subscriptions"; args = @(); live = $false },
   @{ name = "health"; args = @($SingBox); live = $false },
-  @{ name = "live"; args = @($SingBox); live = $true }
+  @{ name = "live"; args = @($SingBox); live = $true },
+  @{ name = "apps"; args = @($SingBox); live = $true }
 )
 $failed = 0
 foreach ($s in $suites) {

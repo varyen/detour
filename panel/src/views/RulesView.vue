@@ -8,6 +8,7 @@ import RuleSection from "@/components/rules/RuleSection.vue";
 import ListDrawer from "@/components/rules/ListDrawer.vue";
 import RouteMapEditor from "@/components/rules/RouteMapEditor.vue";
 import DeviceRulesEditor from "@/components/rules/DeviceRulesEditor.vue";
+import AppRulesEditor from "@/components/rules/AppRulesEditor.vue";
 import TorrentPolicy from "@/components/rules/TorrentPolicy.vue";
 import UiButton from "@/components/UiButton.vue";
 import SwitchToggle from "@/components/SwitchToggle.vue";
@@ -18,6 +19,7 @@ import type {
   FilterStatus,
   HostsStatus,
   LanClient,
+  PickApp,
   RoutingMode,
   RulistStatus,
   SingboxMode,
@@ -727,6 +729,78 @@ const routeTargets = computed(() => [
     isChain: true,
   })),
 ]);
+/* ---------- приложения (только приложение Detour) ---------- */
+const appsText = ref("");
+const appsLoaded = ref(false);
+const appsSupported = ref(true);
+const appsBy = ref<"package" | "process">("process");
+const appsLoading = ref(false);
+const appsBusy = ref(false);
+const openApps = ref(false);
+const pickApps = ref<PickApp[]>([]);
+const pickSource = ref<"installed" | "running" | "">("");
+const pickLoading = ref(false);
+
+const appRuleCount = computed(
+  () => appsText.value.split("\n").filter((l) => /^[^|/][^|]*\|(direct|vpn)\|/.test(l.trim())).length,
+);
+
+async function loadApps(force = false) {
+  if (appsLoaded.value && !force) return;
+  appsLoading.value = true;
+  try {
+    const r = await rules.appRulesGet();
+    appsText.value = r.rules ?? "";
+    appsSupported.value = r.supported !== false;
+    appsBy.value = r.by ?? "process";
+    appsLoaded.value = true;
+  } catch (e) {
+    toast.fromError(e, "Не удалось загрузить правила приложений");
+  } finally {
+    appsLoading.value = false;
+  }
+}
+
+async function loadPickApps() {
+  pickLoading.value = true;
+  try {
+    const r = await rules.appsList();
+    pickApps.value = r.apps ?? [];
+    pickSource.value = r.source;
+  } catch (e) {
+    toast.fromError(e, "Не удалось получить список приложений");
+  } finally {
+    pickLoading.value = false;
+  }
+}
+
+async function openAppsEditor() {
+  openApps.value = true;
+  void loadPickApps();
+  await loadApps(true);
+}
+
+async function saveApps(text: string) {
+  appsBusy.value = true;
+  try {
+    await rules.appRulesSave(text);
+    appsText.value = text;
+    openApps.value = false;
+    toast.ok("Правила приложений применены");
+  } catch (e) {
+    toast.fromError(e, "Не удалось применить правила приложений");
+  } finally {
+    appsBusy.value = false;
+  }
+}
+
+const appsSummary = computed(() =>
+  !appsLoaded.value
+    ? "свои правила для отдельных приложений"
+    : appRuleCount.value
+      ? `${appRuleCount.value} ${plural(appRuleCount.value, ["приложение", "приложения", "приложений"])} со своим правилом`
+      : "у всех приложений общее правило",
+);
 
 /* Цели «Фильтра HTTPS»: только прокси-профили — через них уходит TCP 80/443. */
 const filterTargets = computed(() =>
@@ -742,6 +816,7 @@ async function onExpand(id: string) {
   else if (id === "zapret") await ensureList("zapret");
   else if (id === "routes") await ensureList("routemap");
   else if (id === "devices") await loadDevices();
+  else if (id === "apps") await loadApps();
   else if (id === "udp") await ensureList("udp");
   else if (id === "egress") await ensureList("egress");
   else if (id === "rulist") await ensureList("ruexclude");
@@ -1005,6 +1080,27 @@ onBeforeUnmount(() => unregister?.());
       <div class="row">
         <UiButton variant="primary" @click="openDevicesEditor">Настроить устройства</UiButton>
         <UiButton :busy="devicesLoading" @click="loadDevices(true)">Перечитать</UiButton>
+      </div>
+    </RuleSection>
+
+    <!-- 5а'. Приложения (только приложение: на роутере процессов клиентов не видно) -->
+    <RuleSection
+      v-if="status.isClient && appsSupported"
+      id="rule-apps"
+      icon="apps"
+      title="Приложения"
+      :summary="appsSummary"
+      :open="!!opened.apps"
+      @toggle="toggle('apps')"
+    >
+      <p class="hint">
+        Отдельное правило для приложения: весь его трафик мимо VPN или через
+        выбранный VPN или цепочку. Сайты из «Отдельных маршрутов» всё равно идут
+        своим путём.
+      </p>
+      <div class="row">
+        <UiButton variant="primary" @click="openAppsEditor">Настроить приложения</UiButton>
+        <UiButton :busy="appsLoading" @click="loadApps(true)">Перечитать</UiButton>
       </div>
     </RuleSection>
 
@@ -1360,6 +1456,22 @@ onBeforeUnmount(() => unregister?.());
     :busy="listBusy === 'apply'"
     @close="openRoutes = false"
     @save="(text) => saveList('routemap', true, text)"
+  />
+
+  <AppRulesEditor
+    v-if="status.isClient"
+    :open="openApps"
+    :text="appsText"
+    :targets="routeTargets"
+    :by="appsBy"
+    :apps="pickApps"
+    :apps-source="pickSource"
+    :apps-loading="pickLoading"
+    :loading="appsLoading"
+    :busy="appsBusy"
+    @close="openApps = false"
+    @save="saveApps"
+    @refresh-apps="loadPickApps"
   />
 
   <DeviceRulesEditor
