@@ -56,6 +56,12 @@ fn save(store: &Store, db: &Db) -> Result<()> {
     Ok(())
 }
 
+/// Последние известные адреса серверов профилей (id → IPv4): журнал sing-box
+/// пишет адрес, а не имя из профиля.
+pub fn known_ips(store: &Store) -> BTreeMap<String, String> {
+    load(store).entries.into_iter().map(|(id, e)| (id, e.ip)).collect()
+}
+
 pub fn countries(store: &Store) -> BTreeMap<String, String> {
     load(store)
         .entries

@@ -10,6 +10,7 @@ pub mod http;
 pub mod ids;
 pub mod ipc;
 pub mod lists;
+pub mod logdiag;
 pub mod mihomo;
 pub mod paths;
 pub mod ping;

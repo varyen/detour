@@ -106,6 +106,7 @@ const logName = ref<LogName>("singbox");
 const logText = ref("");
 const logPath = ref("");
 const logMissing = ref(false);
+const logDiag = ref<{ level: "bad" | "warn"; title: string; text: string }[]>([]);
 const logBusy = ref(false);
 const logAuto = ref(false);
 const logAt = ref(0);
@@ -129,6 +130,7 @@ async function loadLog(quiet = false) {
     logText.value = r.log ?? "";
     logPath.value = r.path ?? "";
     logMissing.value = r.missing === true;
+    logDiag.value = r.diagnosis ?? [];
     logAt.value = Date.now() / 1000;
   } catch (e) {
     if (!quiet) toast.fromError(e, "Не удалось прочитать журнал");
@@ -1175,6 +1177,10 @@ onBeforeUnmount(() => {
 
       <p v-if="logPath" class="path mono">{{ logPath }}</p>
 
+      <div v-for="d in logDiag" :key="d.title" class="logdiag" :class="d.level">
+        <b>{{ d.title }}</b>
+        <span>{{ d.text }}</span>
+      </div>
       <LogPane
         :text="logText"
         :missing="logMissing"
@@ -2018,5 +2024,25 @@ onBeforeUnmount(() => {
   .ssize {
     padding-left: 0;
   }
+}
+.logdiag {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--dim);
+}
+.logdiag.bad {
+  border-left-color: var(--bad);
+}
+.logdiag b {
+  color: var(--ink);
+  font-size: 14px;
 }
 </style>

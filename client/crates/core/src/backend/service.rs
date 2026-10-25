@@ -42,7 +42,29 @@ impl Backend {
         };
         let lines: Vec<&str> = text.lines().collect();
         let tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
-        Ok(Response::json(&json!({ "ok": true, "name": name, "path": path, "log": tail })))
+        let diagnosis = if name == "singbox" {
+            crate::logdiag::diagnose(&tail, &self.profile_servers())
+        } else {
+            Vec::new()
+        };
+        Ok(Response::json(&json!({ "ok": true, "name": name, "path": path, "log": tail, "diagnosis": diagnosis })))
+    }
+
+    /// `адрес:порт` серверов всех профилей — и как в профиле, и последний
+    /// известный IP — с именем профиля.
+    fn profile_servers(&self) -> Vec<(String, String)> {
+        let ips = crate::geo::known_ips(&self.store);
+        let mut out = Vec::new();
+        for id in crate::profiles::list_ids(&self.store) {
+            let Some(p) = crate::profiles::load(&self.store, &id) else { continue };
+            let Some((host, port)) = crate::profiles::outbound(&p).and_then(crate::ping::endpoint) else { continue };
+            let name = p.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or(&id).to_owned();
+            out.push((format!("{host}:{port}"), name.clone()));
+            if let Some(ip) = ips.get(&id).filter(|ip| **ip != host) {
+                out.push((format!("{ip}:{port}"), name));
+            }
+        }
+        out
     }
 
     pub(super) fn logs_clear(&self, req: &Request) -> Result<()> {

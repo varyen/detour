@@ -37,7 +37,15 @@ export const diag = {
 
   /* --- журналы --- */
   logsView: (name: LogName) =>
-    requestJson<{ ok: boolean; name: string; path: string; log: string; missing?: boolean }>(
+    requestJson<{
+      ok: boolean;
+      name: string;
+      path: string;
+      log: string;
+      missing?: boolean;
+      /* сводка причин — только у приложения Detour */
+      diagnosis?: { level: "bad" | "warn"; title: string; text: string }[];
+    }>(
       "logs_view",
       { params: { name }, timeoutMs: 45_000 },
     ),
