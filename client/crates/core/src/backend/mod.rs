@@ -228,7 +228,7 @@ impl Backend {
                 ok()
             }
             "profile_delete" => {
-                self.profile_delete(req)?;
+                self.profile_delete(req).await?;
                 ok()
             }
             "profile_activate" => {

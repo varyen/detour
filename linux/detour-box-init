@@ -15,6 +15,8 @@
 #   DETOUR_ENDPOINT      внешний адрес хоста (IP или домен) для конфигов клиентов
 #   DETOUR_SUB_PORT      TCP-порт подписок клиентов, опубликованный на хосте
 #   DETOUR_TLS_PORT      TCP-порт входа VLESS+TLS, опубликованный на хосте
+#   DETOUR_WS_PORT       TCP-порт входа VLESS WebSocket (на 127.0.0.1 хоста)
+#   DETOUR_XHTTP_PORT    TCP-порт входа VLESS xhttp (на 127.0.0.1 хоста)
 #   DETOUR_HTTPS_PORT    порт панели по HTTPS внутри контейнера (опубликован тем же)
 #   DETOUR_ACME=1        80-й порт хоста проброшен на ACME_PORT — сертификат
 #                        выпускается из панели (HTTP-01)
@@ -134,6 +136,8 @@ mkdir -p /etc/detour/server
     [ -n "${DETOUR_ENDPOINT:-}" ] && echo "DEF_ENDPOINT=$DETOUR_ENDPOINT"
     [ -n "${DETOUR_SUB_PORT:-}" ] && echo "DEF_SPORT=$DETOUR_SUB_PORT"
     [ -n "${DETOUR_TLS_PORT:-}" ] && echo "DEF_TPORT=$DETOUR_TLS_PORT"
+    [ -n "${DETOUR_WS_PORT:-}" ] && echo "DEF_WSPORT=$DETOUR_WS_PORT"
+    [ -n "${DETOUR_XHTTP_PORT:-}" ] && echo "DEF_XHPORT=$DETOUR_XHTTP_PORT"
 } > /etc/detour/server/defaults
 
 exec /sbin/init

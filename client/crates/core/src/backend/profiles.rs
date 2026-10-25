@@ -61,16 +61,25 @@ impl Backend {
         Ok(())
     }
 
-    pub(super) fn profile_delete(&self, req: &Request) -> Result<()> {
+    /// Выбранный профиль при выключенном VPN удаляется вместе с выбором: иначе
+    /// последний профиль не удалить никак — выбор в клиенте есть всегда.
+    pub(super) async fn profile_delete(&self, req: &Request) -> Result<()> {
         let id = ids::sanitize(req.param("name").ok_or_else(|| anyhow!("name required"))?);
-        if Settings::load(&self.store).active_chain().contains(&id) {
-            bail!("cannot delete active chain profile");
+        let mut settings = Settings::load(&self.store);
+        let active = settings.active_chain().contains(&id);
+        if active && self.engine.pid().await.is_some() {
+            bail!("профиль сейчас подключён — выключите VPN или выберите другой");
         }
         let used = ChainStore::load(&self.store).using(&id);
         if !used.is_empty() {
             bail!("профиль используется в цепочке: {}", used.join(", "));
         }
-        profiles::delete(&self.store, &id)
+        profiles::delete(&self.store, &id)?;
+        if active {
+            settings.set_active_chain(&[]);
+            settings.save(&self.store)?;
+        }
+        Ok(())
     }
 
     pub(super) async fn profile_activate(&self, req: &Request) -> Result<()> {

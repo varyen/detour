@@ -453,7 +453,7 @@ async function bulkDelete() {
     selected.value = failed;
     if (failed.length) {
       toast.error(
-        `Удалено ${done}, отказано ${failed.length}: активный профиль и хопы цепочек роутер удалять не даёт`,
+        `Удалено ${done}, отказано ${failed.length}: подключённый профиль и хопы цепочек удалить нельзя`,
       );
     } else {
       toast.ok(`Удалено профилей: ${done}`);

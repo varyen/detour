@@ -1215,6 +1215,17 @@ cmd_ttyd_apply() {
 # ---- AmneziaWG для VPN-сервера (detour-server) ----
 # kmod-amneziawg + amneziawg-tools — из штатного фида прошивки (у GL.iNet они
 # собраны под её ядро). Нет модуля — userspace detour-awg-go из фида Detour.
+# Вход VLESS xhttp держит xray (sing-box xhttp не умеет). Ставится, только
+# если вход включён: бинарник ~25 МБ — флеш роутера на него не тратим зря.
+# Пакет — из штатного фида: OpenWrt xray-core, Entware xray.
+server_xray_maybe() {
+    local conf=/etc/detour/server/server.conf pkg=xray-core
+    [ "$KEENETIC" = 1 ] && { conf=/opt/etc/detour/server/server.conf; pkg=xray; }
+    grep -q '^XH=1$' "$conf" 2>/dev/null || return 0
+    if command -v xray >/dev/null 2>&1; then log "xray уже есть"; return 0; fi
+    pkg_install "$pkg" 2>&1 || log "WARNING: $pkg не установился — вход VLESS xhttp будет недоступен"
+}
+
 cmd_server_apply() {
     [ -e "$LOCKFILE" ] && die "another apply in progress ($LOCKFILE)"
     : > "$LOCKFILE"
@@ -1240,6 +1251,7 @@ cmd_server_apply() {
             ensure_feed
             feed_curl_install "$AWGGO_PKG" || kerr="$AWGGO_PKG не установился из фида Detour"
         fi
+        server_xray_maybe
         [ -x /opt/sbin/detour-server ] && /opt/sbin/detour-server start >/dev/null 2>&1
         [ -z "$kerr" ] || die "$kerr"
         log "VPN-сервер: компоненты готовы"
@@ -1276,6 +1288,7 @@ cmd_server_apply() {
         modprobe tun 2>/dev/null
         [ -z "$awg_err" ] && [ ! -c /dev/net/tun ] && awg_err="нет /dev/net/tun (kmod-tun) — userspace AmneziaWG не поднимется"
     fi
+    server_xray_maybe
     [ -x /usr/sbin/detour-server ] && /usr/sbin/detour-server start >/dev/null 2>&1
     [ -z "$awg_err" ] || die "$awg_err"
     log "AmneziaWG готов"

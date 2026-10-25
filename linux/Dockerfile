@@ -41,6 +41,14 @@ RUN apk add --no-cache curl \
     | tar -xz -C /tmp \
  && cp "/tmp/sing-box-$SINGBOX-linux-$a-musl/sing-box" /sing-box-vless
 
+# xray — вход VLESS xhttp (sing-box xhttp не умеет).
+FROM alpine:3.20 AS xray
+ARG XRAY=26.10.21
+RUN apk add --no-cache curl unzip \
+ && case "$(uname -m)" in x86_64) a=64 ;; aarch64) a=arm64-v8a ;; *) exit 1 ;; esac \
+ && curl -fsSL -o /tmp/x.zip "https://github.com/XTLS/Xray-core/releases/download/v$XRAY/Xray-linux-$a.zip" \
+ && unzip -o /tmp/x.zip xray -d / && chmod 755 /xray
+
 # --- сам Detour -------------------------------------------------------------
 FROM openwrt/rootfs:${OWRT}
 ARG DETOUR_REPO=varyen/detour
@@ -48,6 +56,7 @@ ARG DETOUR_REPO=varyen/detour
 COPY --from=awg-go /amneziawg-go /usr/bin/amneziawg-go
 COPY --from=awg-tools /awg /usr/bin/awg
 COPY --from=sb-vless /sing-box-vless /usr/bin/sing-box-vless
+COPY --from=xray /xray /usr/bin/xray
 # Пакет можно подложить рядом (detour_*_noarch.apk в контексте сборки) — тогда
 # сборка не ходит за ним на GitHub. Иначе берётся последний релиз. Глоб с
 # detour-box-init в одной строке: COPY с глобом, не совпавшим ни с чем, падает.

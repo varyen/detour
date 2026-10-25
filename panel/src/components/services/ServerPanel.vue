@@ -229,6 +229,34 @@ async function toggleTls(on: boolean) {
   }
 }
 
+const vw = computed(() => vl.value?.ws);
+async function toggleWs(on: boolean) {
+  busy.value = "ws";
+  try {
+    await services.serverSet({ ws: on });
+    toast.ok(on ? "Вход VLESS WebSocket включён" : "Вход VLESS WebSocket выключен");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить вход");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
+const vx = computed(() => vl.value?.xhttp);
+async function toggleXhttp(on: boolean) {
+  busy.value = "xhttp";
+  try {
+    await services.serverSet({ xhttp: on });
+    toast.ok(on ? "Вход VLESS xhttp включён" : "Вход VLESS xhttp выключен");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить вход");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
 async function toggleSub(on: boolean) {
   busy.value = "sub";
   try {
@@ -267,7 +295,7 @@ const entriesHint = computed(() => {
   return `${parts.join(" · ")} · сеть ${s.net}`;
 });
 
-const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "", sport: "", suburl: "", tport: "", tdomain: "" });
+const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "", sport: "", suburl: "", tport: "", tdomain: "", wsport: "", wspath: "", wspub: "", xhport: "", xhpath: "" });
 const showSettings = ref(false);
 watch(showSettings, (v) => {
   if (!v || !st.value) return;
@@ -281,6 +309,11 @@ watch(showSettings, (v) => {
   form.sport = String(sb.value?.port || "");
   form.tport = String(vt.value?.port || "");
   form.tdomain = vt.value?.domain_set ?? "";
+  form.wsport = String(vw.value?.port || "");
+  form.wspath = vw.value?.path ?? "";
+  form.wspub = vw.value?.public ?? "";
+  form.xhport = String(vx.value?.port || "");
+  form.xhpath = vx.value?.path ?? "";
   form.suburl = sb.value?.url ?? "";
 });
 
@@ -301,6 +334,15 @@ async function saveSettings() {
     if (Number(form.tport) && Number(form.tport) !== vt.value.port) patch.tport = Number(form.tport);
     if (form.tdomain.trim() !== vt.value.domain_set) patch.tdomain = form.tdomain.trim();
   }
+  if (vw.value) {
+    if (Number(form.wsport) && Number(form.wsport) !== vw.value.port) patch.wsport = Number(form.wsport);
+    if (form.wspath.trim() && form.wspath.trim() !== vw.value.path) patch.wspath = form.wspath.trim();
+    if (form.wspub.trim() !== vw.value.public) patch.wspub = form.wspub.trim();
+  }
+  if (vx.value) {
+    if (Number(form.xhport) && Number(form.xhport) !== vx.value.port) patch.xhport = Number(form.xhport);
+    if (form.xhpath.trim() && form.xhpath.trim() !== vx.value.path) patch.xhpath = form.xhpath.trim();
+  }
   if (sb.value) {
     if (Number(form.sport) && Number(form.sport) !== sb.value.port) patch.sport = Number(form.sport);
     if (form.suburl.trim() !== sb.value.url) patch.suburl = form.suburl.trim();
@@ -314,7 +356,7 @@ async function saveSettings() {
     await services.serverSet(patch);
     toast.ok("Настройки сервера сохранены");
     showSettings.value = false;
-    if (patch.port || patch.net || patch.endpoint || patch.dns || patch.mtu || patch.vport || patch.sni || patch.tport || patch.tdomain !== undefined) {
+    if (patch.port || patch.net || patch.endpoint || patch.dns || patch.mtu || patch.vport || patch.sni || patch.tport || patch.tdomain !== undefined || patch.wspath || patch.wspub !== undefined || patch.xhpath) {
       /* Без HTTPS и своего адреса ссылка подписки собрана из адреса для клиентов. */
       const subMoved = patch.endpoint !== undefined && !sb.value?.https && !sb.value?.url;
       toast.push(
@@ -641,6 +683,25 @@ function hint(c: ServerClient): string {
             @update:model-value="toggleTls"
           />
           <SwitchToggle
+            v-if="vw && vlessOn"
+            :model-value="vw.enabled"
+            label="VLESS + WebSocket"
+            :hint="vw.active ? `${vw.host}:${vw.public_port}${vw.public ? ' через реверс-прокси' : ''} · для DPI — обычный HTTPS к сайту` : vw.enabled ? vw.reason || 'не работает' : 'Туннель за своим nginx с настоящим сайтом — где режут и Reality, и голый TLS'"
+            :busy="busy === 'ws'"
+            @update:model-value="toggleWs"
+          />
+          <SwitchToggle
+            v-if="vx && vw && vlessOn"
+            :model-value="vx.enabled"
+            label="VLESS + xhttp"
+            :hint="vx.active ? `${vw.host}:${vw.public_port}${vw.public ? ' через реверс-прокси' : ''} · xray · Happ, v2rayNG, Hiddify, Detour` : vx.enabled ? vx.reason || 'не работает' : 'Как WebSocket, но запросами HTTP — ещё ближе к обычному сайту; нужен xray'"
+            :busy="busy === 'xhttp'"
+            @update:model-value="toggleXhttp"
+          />
+          <div v-if="vx?.enabled && !vx.installed" class="actions">
+            <UiButton :busy="busy === 'install'" @click="install">Установить xray</UiButton>
+          </div>
+          <SwitchToggle
             v-if="sb"
             :model-value="sb.enabled"
             label="Подписки"
@@ -878,6 +939,34 @@ function hint(c: ServerClient): string {
                 >
                   <input v-model="form.tdomain" type="text" placeholder="авто" />
                 </FormField>
+              </template>
+              <template v-if="vw && vlessReady">
+                <FormField
+                  label="Адрес реверс-прокси для WebSocket"
+                  hint="Домен[:порт] вашего nginx с сертификатом, например vpn.example.com:8443. Пусто — вход сам держит TLS на сертификате VLESS + TLS"
+                >
+                  <input v-model="form.wspub" type="text" placeholder="без прокси" />
+                </FormField>
+                <FormField
+                  label="TCP-порт входа WebSocket"
+                  :hint="vw.public ? 'Сюда проксирует nginx (без TLS); на Linux-сервере — порт из install.sh --ws-port' : 'Открывается с WAN, пока вход включён'"
+                >
+                  <input v-model="form.wsport" type="number" min="1" max="65535" />
+                </FormField>
+                <FormField label="Путь WebSocket" hint="Секрет: nginx отдаёт туннель только по нему, остальное — сайт">
+                  <input v-model="form.wspath" type="text" />
+                </FormField>
+                <template v-if="vx">
+                  <FormField
+                    label="TCP-порт входа xhttp"
+                    :hint="vw.public ? 'Сюда проксирует nginx (без TLS, с http2 на внешней стороне); на Linux-сервере — install.sh --xhttp-port' : 'Открывается с WAN, пока вход включён'"
+                  >
+                    <input v-model="form.xhport" type="number" min="1" max="65535" />
+                  </FormField>
+                  <FormField label="Путь xhttp" hint="Секрет, как у WebSocket; nginx проксирует его префиксом (location без «=»)">
+                    <input v-model="form.xhpath" type="text" />
+                  </FormField>
+                </template>
               </template>
               <FormField label="Подсеть клиентов" hint="Частная /24, не пересекающаяся с домашней сетью">
                 <input v-model="form.net" type="text" />

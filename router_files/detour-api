@@ -5950,6 +5950,13 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             v=$(srv_bool vtls);    [ -n "$v" ] && set -- "$@" "vtls=$v"
             v=$(srv_num tport);    [ -n "$v" ] && set -- "$@" "tport=$v"
             printf '%s' "$POST_DATA" | grep -q '"tdomain"' && set -- "$@" "tdomain=$(srv_str tdomain)"
+            v=$(srv_bool ws);      [ -n "$v" ] && set -- "$@" "ws=$v"
+            v=$(srv_num wsport);   [ -n "$v" ] && set -- "$@" "wsport=$v"
+            v=$(srv_str wspath);   [ -n "$v" ] && set -- "$@" "wspath=$v"
+            v=$(srv_bool xhttp);   [ -n "$v" ] && set -- "$@" "xhttp=$v"
+            v=$(srv_num xhport);   [ -n "$v" ] && set -- "$@" "xhport=$v"
+            v=$(srv_str xhpath);   [ -n "$v" ] && set -- "$@" "xhpath=$v"
+            printf '%s' "$POST_DATA" | grep -q '"wspub"' && set -- "$@" "wspub=$(srv_str wspub)"
             v=$(srv_num sport);    [ -n "$v" ] && set -- "$@" "sport=$v"
             printf '%s' "$POST_DATA" | grep -q '"suburl"' && set -- "$@" "suburl=$(srv_str suburl)"
             [ $# -gt 0 ] || { json_err "нечего менять"; exit 0; }
@@ -6004,8 +6011,11 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             SRV_LINK=$("$SERVER_BIN" client-link "$SRV_ID" 2>/dev/null) || { json_err "у клиента нет VLESS или вход не настроен"; exit 0; }
             # Имя в ссылке percent-encoded — кавычек и обратных слэшей там нет.
             SRV_TLINK=$("$SERVER_BIN" client-tls-link "$SRV_ID" 2>/dev/null)
-            printf '{"ok":true,"link":"%s","tls_link":"%s"}\n' "$(printf '%s' "$SRV_LINK" | tr -d '\n"\\')" \
-                "$(printf '%s' "$SRV_TLINK" | tr -d '\n"\\')" ;;
+            SRV_WLINK=$("$SERVER_BIN" client-ws-link "$SRV_ID" 2>/dev/null)
+            SRV_XLINK=$("$SERVER_BIN" client-xhttp-link "$SRV_ID" 2>/dev/null)
+            printf '{"ok":true,"link":"%s","tls_link":"%s","ws_link":"%s","xhttp_link":"%s"}\n' "$(printf '%s' "$SRV_LINK" | tr -d '\n"\\')" \
+                "$(printf '%s' "$SRV_TLINK" | tr -d '\n"\\')" "$(printf '%s' "$SRV_WLINK" | tr -d '\n"\\')" \
+                "$(printf '%s' "$SRV_XLINK" | tr -d '\n"\\')" ;;
         server_client_sub)
             SRV_URL=$("$SERVER_BIN" client-sub-url "$SRV_ID" 2>/dev/null) || { json_err "клиент не найден"; exit 0; }
             printf '{"ok":true,"url":"%s"}\n' "$(printf '%s' "$SRV_URL" | tr -d '\n"\\')" ;;

@@ -35,6 +35,8 @@ const view = ref<Tab>("conf");
 const conf = ref("");
 const link = ref("");
 const tlsLink = ref("");
+const wsLink = ref("");
+const xhLink = ref("");
 const subUrl = ref("");
 const confirmReset = ref(false);
 const loading = ref(false);
@@ -51,6 +53,8 @@ function qrOf(text: string): string {
 const qrSvg = computed(() => qrOf(conf.value));
 const linkQr = computed(() => qrOf(link.value));
 const tlsQr = computed(() => qrOf(tlsLink.value));
+const wsQr = computed(() => qrOf(wsLink.value));
+const xhQr = computed(() => qrOf(xhLink.value));
 const subQr = computed(() => qrOf(subUrl.value));
 
 const tabs = computed(() => {
@@ -94,6 +98,8 @@ async function loadLink() {
     const r = await services.serverClientLink(props.client.id);
     link.value = r.link;
     tlsLink.value = r.tls_link ?? "";
+    wsLink.value = r.ws_link ?? "";
+    xhLink.value = r.xhttp_link ?? "";
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Не удалось получить ссылку";
   } finally {
@@ -157,6 +163,8 @@ watch(
       conf.value = "";
       link.value = "";
       tlsLink.value = "";
+      wsLink.value = "";
+      xhLink.value = "";
       subUrl.value = "";
       confirmReset.value = false;
       sessions.value = [];
@@ -309,6 +317,34 @@ function host(remote: string): string {
             <details class="raw">
               <summary>Показать ссылку TLS</summary>
               <pre>{{ tlsLink }}</pre>
+            </details>
+          </template>
+          <template v-if="wsLink">
+            <p class="lead">
+              Ссылка WebSocket — туннель под видом обычного сайта. Для сетей, где не
+              проходят ни Reality, ни TLS.
+            </p>
+            <div class="qr" v-html="wsQr"></div>
+            <div class="actions">
+              <UiButton @click="copy(wsLink, 'Ссылка')">Скопировать ссылку WebSocket</UiButton>
+            </div>
+            <details class="raw">
+              <summary>Показать ссылку WebSocket</summary>
+              <pre>{{ wsLink }}</pre>
+            </details>
+          </template>
+          <template v-if="xhLink">
+            <p class="lead">
+              Ссылка xhttp — туннель обычными HTTP-запросами к сайту. Приложения на
+              Xray и mihomo: Happ, v2rayNG, Hiddify, Detour.
+            </p>
+            <div class="qr" v-html="xhQr"></div>
+            <div class="actions">
+              <UiButton @click="copy(xhLink, 'Ссылка')">Скопировать ссылку xhttp</UiButton>
+            </div>
+            <details class="raw">
+              <summary>Показать ссылку xhttp</summary>
+              <pre>{{ xhLink }}</pre>
             </details>
           </template>
         </template>

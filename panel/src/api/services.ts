@@ -72,7 +72,7 @@ export const services = {
   serverClientConf: (id: string) =>
     requestJson<{ ok: boolean; conf: string }>("server_client_conf", { body: { id } }),
   serverClientLink: (id: string) =>
-    requestJson<{ ok: boolean; link: string; tls_link?: string }>("server_client_link", { body: { id } }),
+    requestJson<{ ok: boolean; link: string; tls_link?: string; ws_link?: string; xhttp_link?: string }>("server_client_link", { body: { id } }),
   /** URL подписки — в нём секрет клиента, поэтому тоже POST. */
   serverClientSub: (id: string) =>
     requestJson<{ ok: boolean; url: string }>("server_client_sub", { body: { id } }),

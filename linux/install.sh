@@ -5,7 +5,8 @@
 #
 #   sh install.sh [--port 51820] [--vless-port 443] [--endpoint <IP или домен>]
 #                 [--panel-port 8080] [--sub-port 2096] [--sub-local] [--tls-port 4430]
-#                 [--https-port 8443] [--acme-port 80] [--no-acme]
+#                 [--https-port 8443] [--acme-port 80] [--no-acme] [--ws-port 10080]
+#                 [--xhttp-port 10081]
 #                 [--panel-public] [--name detour] [--uninstall]
 #
 # Что делает:
@@ -30,6 +31,13 @@
 # (там, где сеть портит Reality). Сертификат контейнер берёт из тома
 # <name>-detour: server/tls/fullchain.pem и privkey.pem.
 #
+# --ws-port публикует на 127.0.0.1 хоста вход VLESS через WebSocket без TLS —
+# под свой nginx с настоящим сайтом и сертификатом (location <путь> →
+# proxy_pass http://127.0.0.1:<порт> с Upgrade). Для DPI это обычный HTTPS к
+# сайту. Адрес прокси и путь задаются в панели («Свой VPN-сервер»).
+# --xhttp-port — то же для входа VLESS xhttp (xray). nginx там нужен с http2:
+# клиенты xhttp поверх TLS ходят по HTTP/2.
+#
 # Свой домен: 80-й порт хоста (если свободен; --no-acme — не трогать)
 # пробрасывается на служебный веб-сервер контейнера с одними проверками ACME —
 # тогда сертификат выпускается из панели («Свой домен и защищённое
@@ -49,6 +57,8 @@ PANEL_PUBLIC=0
 SUB_PORT=2096
 SUB_LOCAL=0
 TLS_PORT=0
+WS_PORT=0
+XHTTP_PORT=0
 HTTPS_PORT=8443
 ACME=1
 ACME_PORT=80
@@ -65,12 +75,14 @@ while [ $# -gt 0 ]; do
         --sub-port) SUB_PORT=$2; shift 2 ;;
         --sub-local) SUB_LOCAL=1; shift ;;
         --tls-port) TLS_PORT=$2; shift 2 ;;
+        --ws-port) WS_PORT=$2; shift 2 ;;
+        --xhttp-port) XHTTP_PORT=$2; shift 2 ;;
         --https-port) HTTPS_PORT=$2; shift 2 ;;
         --no-acme) ACME=0; shift ;;
         --acme-port) ACME_PORT=$2; shift 2 ;;
         --name) NAME=$2; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
-        -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
         *) echo "неизвестный параметр: $1" >&2; exit 2 ;;
     esac
 done
@@ -92,6 +104,8 @@ fi
 case "$PORT" in ''|*[!0-9]*) die "--port — число" ;; esac
 case "$SUB_PORT" in ''|*[!0-9]*) die "--sub-port — число" ;; esac
 case "$TLS_PORT" in ''|*[!0-9]*) die "--tls-port — число" ;; esac
+case "$WS_PORT" in ''|*[!0-9]*) die "--ws-port — число" ;; esac
+case "$XHTTP_PORT" in ''|*[!0-9]*) die "--xhttp-port — число" ;; esac
 case "$HTTPS_PORT" in ''|*[!0-9]*) die "--https-port — число" ;; esac
 case "$(uname -m)" in
     x86_64|amd64) OWRT=x86-64-25.12.0 ;;
@@ -144,6 +158,9 @@ if [ "$SUB_PORT" != 0 ]; then
     set -- -p "${SUB_BIND}${SUB_PORT}:${SUB_PORT}/tcp" -e DETOUR_SUB_PORT="$SUB_PORT"
 fi
 [ "$TLS_PORT" != 0 ] && set -- "$@" -p "$TLS_PORT:$TLS_PORT/tcp" -e DETOUR_TLS_PORT="$TLS_PORT"
+# Вход WebSocket — только для реверс-прокси хоста (TLS и сайт держит он).
+[ "$WS_PORT" != 0 ] && set -- "$@" -p "127.0.0.1:$WS_PORT:$WS_PORT/tcp" -e DETOUR_WS_PORT="$WS_PORT"
+[ "$XHTTP_PORT" != 0 ] && set -- "$@" -p "127.0.0.1:$XHTTP_PORT:$XHTTP_PORT/tcp" -e DETOUR_XHTTP_PORT="$XHTTP_PORT"
 # Переустановка: порт держит наш же прежний контейнер — он сейчас уйдёт.
 own_port() { docker port "$NAME" 2>/dev/null | grep -q "0.0.0.0:$1\$"; }
 if [ "$HTTPS_PORT" != 0 ]; then

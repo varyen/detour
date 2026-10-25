@@ -505,6 +505,37 @@ export interface ServerVless {
   net: string;
   /** Вход VLESS поверх обычного TLS на настоящем сертификате (с 2.15.0). */
   tls?: ServerVlessTls;
+  /** Вход VLESS через WebSocket (за реверс-прокси или на своём TLS, с 2.17.0). */
+  ws?: ServerVlessWs;
+  /** Вход VLESS xhttp на xray, за тем же реверс-прокси, что и WebSocket (с 2.17.0). */
+  xhttp?: ServerVlessXhttp;
+}
+
+export interface ServerVlessXhttp {
+  enabled: boolean;
+  active: boolean;
+  running: boolean;
+  /** xray установлен (ставится «Установить недостающее»). */
+  installed: boolean;
+  port: number;
+  path: string;
+  reason: string;
+}
+
+export interface ServerVlessWs {
+  enabled: boolean;
+  /** Включён и есть куда подключаться (адрес прокси или сертификат). */
+  active: boolean;
+  /** Порт, на котором слушает сам вход. */
+  port: number;
+  /** Путь WebSocket — секрет, по нему прокси отличает туннель от сайта. */
+  path: string;
+  /** Адрес реверс-прокси «хост[:порт]»; пусто — вход сам держит TLS. */
+  public: string;
+  /** Хост и порт в ссылках клиентов (итоговые). */
+  host: string;
+  public_port: number;
+  reason: string;
 }
 
 export interface ServerVlessTls {
@@ -560,6 +591,13 @@ export interface ServerSettingsPatch {
   vtls?: boolean;
   tport?: number;
   tdomain?: string;
+  ws?: boolean;
+  wsport?: number;
+  wspath?: string;
+  wspub?: string;
+  xhttp?: boolean;
+  xhport?: number;
+  xhpath?: string;
 }
 
 export interface ApplyLogResponse {
