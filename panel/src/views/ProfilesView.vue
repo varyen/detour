@@ -299,6 +299,66 @@ async function switchProto(r: ProfileRow) {
   await healthOne(store.rows.find((x) => x.id === r.id) ?? r);
 }
 
+/* ---------- массовая проверка выделенных ---------- */
+
+/* Строго по очереди: проверка скорости поднимает временный sing-box и качает
+   замер, десяток параллельных положили бы и роутер, и канал. */
+const bulkProbe = ref("");
+/* Флаги нужны редко, а на телефоне панель выделения закрывает пол-экрана. */
+const bulkMore = ref(false);
+const bulkStop = ref(false);
+
+async function bulkRun(kind: "ping" | "health") {
+  const ids = selected.value.filter((id) => store.rows.some((r) => r.id === id));
+  if (!ids.length || bulkProbe.value) return;
+  busy.value = "bulk:probe";
+  bulkStop.value = false;
+  let ok = 0;
+  let checked = 0;
+  try {
+    for (let i = 0; i < ids.length; i++) {
+      if (bulkStop.value) break;
+      const r = store.rows.find((x) => x.id === ids[i]);
+      if (!r) continue;
+      bulkProbe.value = `${kind === "ping" ? "пинг" : "скорость"}: ${i + 1} из ${ids.length} — ${r.name}`;
+      probing.value = r.id;
+      try {
+        if (kind === "ping") {
+          const res = await diag.pingCheck(r.id);
+          store.ping[r.id] = res;
+          if (res.ok) ok++;
+        } else {
+          const res = (await diag.healthCheckOne(r.id)) as unknown as { result?: { ok?: boolean } };
+          await store.loadProbes();
+          if (res.result?.ok ?? store.health[r.id]?.ok === true) ok++;
+        }
+        checked++;
+      } catch {
+        checked++;
+      } finally {
+        probing.value = "";
+      }
+    }
+    toast[ok ? "ok" : "error"](
+      (kind === "ping" ? `Пинг: отвечают ${ok} из ${checked}` : `Проверка скорости: прошли ${ok} из ${checked}`) +
+        (bulkStop.value ? " (остановлено)" : "") +
+        (kind === "health" ? " — отсортируйте по скорости, чтобы увидеть лучшие" : ""),
+    );
+  } finally {
+    bulkProbe.value = "";
+    bulkStop.value = false;
+    busy.value = "";
+  }
+}
+
+function bulkPing() {
+  void bulkRun("ping");
+}
+
+function bulkHealth() {
+  void bulkRun("health");
+}
+
 /** Флаг одного профиля: то же, что массовая операция, но на один id. */
 async function setFlag(
   r: ProfileRow,
@@ -525,7 +585,7 @@ async function moveSelected() {
   if (target === NEW_FOLDER) {
     target = moveName.value.trim();
     if (!target) {
-      toast.error("Введите название папки");
+      toast.error("Введите название группы");
       return;
     }
     if (target === NEW_FOLDER) {
@@ -536,7 +596,7 @@ async function moveSelected() {
   busy.value = "bulk:group";
   try {
     const done = await applyGroup(ids, target);
-    const where = target ? `в «${target}»` : "из папок";
+    const where = target ? `в «${target}»` : "из групп";
     toast[done === ids.length ? "ok" : "error"](
       done === ids.length
         ? `Перенесено профилей ${where}: ${done}`
@@ -570,7 +630,7 @@ async function renameFolder() {
      профили нельзя, поэтому спрашиваем. */
   if (
     groups.value.includes(to) &&
-    !window.confirm(`Папка «${to}» уже есть — профили (${ids.length}) сложатся вместе. Продолжить?`)
+    !window.confirm(`Группа «${to}» уже есть — профили (${ids.length}) сложатся вместе. Продолжить?`)
   ) {
     return;
   }
@@ -579,7 +639,7 @@ async function renameFolder() {
     const done = await applyGroup(ids, to);
     toast[done === ids.length ? "ok" : "error"](
       done === ids.length
-        ? `Папка переименована в «${to}» (профилей: ${done})`
+        ? `Группа переименована в «${to}» (профилей: ${done})`
         : `Переименовано ${done} из ${ids.length} профилей — остальные роутер не отдал`,
     );
     renamingFrom.value = "";
@@ -589,11 +649,36 @@ async function renameFolder() {
   }
 }
 
-async function deleteFolder(name: string) {
+async function deleteFolder(name: string, withProfiles = false) {
   const ids = idsInGroup(name);
+  if (withProfiles) {
+    if (
+      !window.confirm(
+        `Удалить группу «${name}» вместе со всеми её профилями (${ids.length})? Отменить будет нельзя.`,
+      )
+    ) {
+      return;
+    }
+    busy.value = `folder:${name}`;
+    try {
+      const r = await store.removeMany(ids, (i, n) => (groupProgress.value = `Удаляю ${i} из ${n}`));
+      groupProgress.value = "";
+      toast[r.failed.length ? "error" : "ok"](
+        r.failed.length
+          ? `Удалено ${r.done} из ${ids.length}: подключённый профиль и хопы цепочек удалить нельзя`
+          : `Группа «${name}» удалена вместе с профилями (${r.done})`,
+      );
+      selected.value = selected.value.filter((id) => !ids.includes(id) || r.failed.includes(id));
+      if (renamingFrom.value === name) renamingFrom.value = "";
+      await reload(true);
+    } finally {
+      busy.value = "";
+    }
+    return;
+  }
   if (
     !window.confirm(
-      `Удалить папку «${name}»? Профили (${ids.length}) останутся, но окажутся без папки.`,
+      `Удалить группу «${name}»? Профили (${ids.length}) останутся, но окажутся без группы.`,
     )
   ) {
     return;
@@ -603,7 +688,7 @@ async function deleteFolder(name: string) {
     const done = await applyGroup(ids, "");
     toast[done === ids.length ? "ok" : "error"](
       done === ids.length
-        ? `Папка «${name}» удалена, профилей освобождено: ${done}`
+        ? `Группа «${name}» удалена, профилей без группы: ${done}`
         : `Освобождено ${done} из ${ids.length} профилей — остальные роутер не отдал`,
     );
     if (renamingFrom.value === name) renamingFrom.value = "";
@@ -716,7 +801,7 @@ onMounted(async () => {
     },
     {
       id: "pr:folders",
-      title: "Управление папками профилей",
+      title: "Группы профилей",
       group: "профили",
       keywords: "группы переименовать удалить папку",
       run: () => {
@@ -787,6 +872,7 @@ onBeforeUnmount(() => unregister?.());
         @health="healthOne"
         @flag="setFlag($event.row, $event.kind, $event.value)"
         @geoscan="scanGeo"
+        @folders="foldersOpen = true"
       />
       <template #actions>
         <UiButton variant="primary" @click="addProfile">Добавить профиль</UiButton>
@@ -799,9 +885,7 @@ onBeforeUnmount(() => unregister?.());
         <UiButton @click="$router.push({ path: '/journal', query: { focus: 'health' } })">
           Настройки проверки
         </UiButton>
-        <UiButton :disabled="!folders.length" @click="foldersOpen = true">
-          Управление папками
-        </UiButton>
+        <UiButton @click="foldersOpen = true">Группы</UiButton>
         <input
           ref="fileInput"
           class="hidden-file"
@@ -813,30 +897,42 @@ onBeforeUnmount(() => unregister?.());
     </TileCard>
 
     <div v-if="selected.length" class="bulk" role="group" aria-label="Действия над выбранными">
-      <span class="bcount">Выбрано: {{ selected.length }}</span>
-      <UiButton :busy="busy === 'bulk:group'" @click="openMove">Перенести в папку</UiButton>
-      <UiButton :busy="busy === 'bulk:autoswitch'" @click="bulkFlag('autoswitch', true)">
-        Разрешить авто-переключение
+      <span class="bcount">Выбрано: {{ selected.length }}<template v-if="bulkProbe"> · {{ bulkProbe }}</template></span>
+      <UiButton :busy="busy === 'bulk:probe'" :disabled="!!bulkProbe" @click="bulkPing">
+        Проверить пинг
       </UiButton>
-      <UiButton :busy="busy === 'bulk:autoswitch'" @click="bulkFlag('autoswitch', false)">
-        Запретить авто-переключение
+      <UiButton :busy="busy === 'bulk:probe'" :disabled="!!bulkProbe" @click="bulkHealth">
+        Проверить скорость
       </UiButton>
-      <UiButton :busy="busy === 'bulk:speedcheck'" @click="bulkFlag('speedcheck', true)">
-        Разрешить проверку скорости
-      </UiButton>
-      <UiButton :busy="busy === 'bulk:speedcheck'" @click="bulkFlag('speedcheck', false)">
-        Запретить проверку скорости
-      </UiButton>
-      <UiButton :busy="busy === 'bulk:torrents'" @click="bulkFlag('torrents', true)">
-        Разрешить торренты
-      </UiButton>
-      <UiButton :busy="busy === 'bulk:torrents'" @click="bulkFlag('torrents', false)">
-        Запретить торренты
-      </UiButton>
+      <UiButton v-if="bulkProbe" @click="bulkStop = true">Остановить проверку</UiButton>
+      <UiButton :busy="busy === 'bulk:group'" @click="openMove">Перенести в группу</UiButton>
       <UiButton variant="danger" :busy="busy === 'bulk:del'" @click="bulkDelete">
         Удалить выбранные
       </UiButton>
       <UiButton @click="selected = []">Снять выделение</UiButton>
+      <UiButton :aria-expanded="bulkMore" @click="bulkMore = !bulkMore">
+        {{ bulkMore ? "Скрыть флаги" : "Флаги…" }}
+      </UiButton>
+      <template v-if="bulkMore">
+        <UiButton :busy="busy === 'bulk:autoswitch'" @click="bulkFlag('autoswitch', true)">
+          Разрешить авто-переключение
+        </UiButton>
+        <UiButton :busy="busy === 'bulk:autoswitch'" @click="bulkFlag('autoswitch', false)">
+          Запретить авто-переключение
+        </UiButton>
+        <UiButton :busy="busy === 'bulk:speedcheck'" @click="bulkFlag('speedcheck', true)">
+          Разрешить проверку скорости
+        </UiButton>
+        <UiButton :busy="busy === 'bulk:speedcheck'" @click="bulkFlag('speedcheck', false)">
+          Запретить проверку скорости
+        </UiButton>
+        <UiButton :busy="busy === 'bulk:torrents'" @click="bulkFlag('torrents', true)">
+          Разрешить торренты
+        </UiButton>
+        <UiButton :busy="busy === 'bulk:torrents'" @click="bulkFlag('torrents', false)">
+          Запретить торренты
+        </UiButton>
+      </template>
     </div>
     <PluginSections v-if="!status.isClient" area="profiles" />
   </div>
@@ -944,23 +1040,23 @@ onBeforeUnmount(() => unregister?.());
 
   <!-- Перенос выбранных профилей в папку: та же операция, что и правка поля
        «Папка» в самом профиле, только сразу по всему выделению. -->
-  <DrawerSheet :open="moveOpen" title="Перенести в папку" @close="moveOpen = false">
+  <DrawerSheet :open="moveOpen" title="Перенести в группу" @close="moveOpen = false">
     <p class="lead">
-      Выбрано профилей: {{ selected.length }}. Папка — это метка у профиля, на
+      Выбрано профилей: {{ selected.length }}. Группа — это метка у профиля, на
       подключение она не влияет.
     </p>
     <div class="mgrid">
       <PField label="Куда перенести">
         <select v-model="moveTarget">
-          <option value="">Без папки</option>
+          <option value="">Без группы</option>
           <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
-          <option :value="NEW_FOLDER">Новая папка…</option>
+          <option :value="NEW_FOLDER">Новая группа…</option>
         </select>
       </PField>
       <PField
         v-if="moveTarget === NEW_FOLDER"
-        label="Название новой папки"
-        hint="Папка появится, как только в неё попадёт первый профиль"
+        label="Название новой группы"
+        hint="Группа появится, как только в неё попадёт первый профиль"
       >
         <input
           v-model="moveName"
@@ -987,13 +1083,14 @@ onBeforeUnmount(() => unregister?.());
 
   <!-- Папки целиком: переименование и удаление. Создание — переносом профилей
        (см. шторку выше): папки без профилей роутер не хранит. -->
-  <DrawerSheet :open="foldersOpen" title="Папки профилей" @close="foldersOpen = false">
+  <DrawerSheet :open="foldersOpen" title="Группы профилей" @close="foldersOpen = false">
     <p class="lead">
-      Переименование меняет папку у всех её профилей, удаление папки профили не
-      удаляет — они остаются без папки. Новая папка создаётся переносом:
-      выделите профили в списке и нажмите «Перенести в папку».
+      Группа — метка у профилей; подписка складывает свои профили в свою группу.
+      Переименование меняет группу у всех её профилей. «Убрать группу» оставляет
+      профили без группы, «Удалить с профилями» удаляет и сами профили. Новая
+      группа создаётся переносом: выделите профили и нажмите «Перенести в группу».
     </p>
-    <p v-if="!folders.length" class="lead">Пока ни один профиль не разложен по папкам.</p>
+    <p v-if="!folders.length" class="lead">Пока ни один профиль не разложен по группам.</p>
     <ul v-else class="folders">
       <li v-for="f in folders" :key="f.name">
         <template v-if="renamingFrom === f.name">
@@ -1002,7 +1099,7 @@ onBeforeUnmount(() => unregister?.());
             class="rn"
             type="text"
             spellcheck="false"
-            :aria-label="`Новое название папки ${f.name}`"
+            :aria-label="`Новое название группы ${f.name}`"
             @keydown.enter.prevent="renameFolder"
             @keydown.esc="renamingFrom = ''"
           />
@@ -1018,12 +1115,18 @@ onBeforeUnmount(() => unregister?.());
           </span>
           <UiButton :disabled="!!busy" @click="startRename(f.name)">Переименовать</UiButton>
           <UiButton
-            variant="danger"
             :busy="busy === `folder:${f.name}`"
             :disabled="!!busy && busy !== `folder:${f.name}`"
             @click="deleteFolder(f.name)"
           >
-            Удалить
+            Убрать группу
+          </UiButton>
+          <UiButton
+            variant="danger"
+            :disabled="!!busy"
+            @click="deleteFolder(f.name, true)"
+          >
+            Удалить с профилями
           </UiButton>
         </template>
       </li>

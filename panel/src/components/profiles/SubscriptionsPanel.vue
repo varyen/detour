@@ -374,12 +374,31 @@ async function refreshAll() {
 }
 
 async function remove(s: SubRecord) {
-  if (!window.confirm(`Удалить подписку «${labelOf(s)}»? Уже загруженные профили останутся.`))
-    return;
+  if (!window.confirm(`Удалить подписку «${labelOf(s)}»?`)) return;
+  /* Профили подписки — это её группа. Без группы их не отличить от своих,
+     поэтому тогда и не предлагаем. */
+  const group = s.group || "";
+  const ids = group ? store.idsInGroup(group) : [];
+  const withProfiles =
+    ids.length > 0 &&
+    window.confirm(
+      `Удалить заодно все профили этой подписки (${ids.length}, группа «${group}»)?\n` +
+        "«Отмена» — подписка удалится, профили останутся.",
+    );
   busy.value = `del:${s.id}`;
   try {
     await subscriptions.deleteOne(s.id);
-    toast.ok("Подписка удалена");
+    if (withProfiles) {
+      const r = await store.removeMany(ids);
+      toast[r.failed.length ? "error" : "ok"](
+        r.failed.length
+          ? `Подписка удалена, профилей удалено ${r.done} из ${ids.length}: подключённый и хопы цепочек удалить нельзя`
+          : `Подписка удалена вместе с профилями (${r.done})`,
+      );
+      await store.load(true);
+    } else {
+      toast.ok("Подписка удалена");
+    }
     await load();
   } catch (e) {
     toast.fromError(e, "Не удалось удалить подписку");

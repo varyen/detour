@@ -129,6 +129,31 @@ export const useProfilesStore = defineStore("profiles", () => {
     }
   }
 
+  /** id профилей группы (подписка раскладывает профили в свою группу). */
+  function idsInGroup(group: string): string[] {
+    return rows.value.filter((r) => (r.group || "") === group).map((r) => r.id);
+  }
+
+  /* Роутер удаляет профили по одному; подключённый (и хопы цепочек) он не
+     отдаёт — такие возвращаются в failed, остальные удаляются. */
+  async function removeMany(
+    ids: string[],
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<{ done: number; failed: string[] }> {
+    const failed: string[] = [];
+    let done = 0;
+    for (let i = 0; i < ids.length; i++) {
+      onProgress?.(i + 1, ids.length);
+      try {
+        await profilesApi.remove(ids[i]);
+        done++;
+      } catch {
+        failed.push(ids[i]);
+      }
+    }
+    return { done, failed };
+  }
+
   return {
     items,
     chainList,
@@ -148,5 +173,7 @@ export const useProfilesStore = defineStore("profiles", () => {
     loadChains,
     activate,
     activateChain,
+    idsInGroup,
+    removeMany,
   };
 });

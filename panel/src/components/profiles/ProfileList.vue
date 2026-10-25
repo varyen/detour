@@ -44,6 +44,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:selected": [string[]];
+  folders: [];
   open: [ProfileRow];
   connect: [ProfileRow];
   stop: [ProfileRow];
@@ -186,6 +187,20 @@ function toggleAll() {
   } else {
     emit("update:selected", [...new Set([...props.selected, ...ids])]);
   }
+  lastIndex = -1;
+}
+
+/* Чекбокс в шапке на телефоне не виден (шапка скрыта), а выделять сотню
+   профилей по одному — пытка: отдельные кнопки «все» и «вся группа». */
+function selectAll() {
+  emit("update:selected", props.rows.map((r) => r.id));
+  lastIndex = -1;
+}
+
+function selectGroup() {
+  const g = group.value;
+  const ids = props.rows.filter((r) => (r.group || "Без группы") === g).map((r) => r.id);
+  emit("update:selected", [...new Set([...props.selected, ...ids])]);
   lastIndex = -1;
 }
 
@@ -373,6 +388,9 @@ function stateTile(r: ProfileRow): string {
         <option value="">Все группы</option>
         <option v-for="g in groups" :key="g" :value="g">{{ g }}</option>
       </select>
+      <button class="grpbtn" type="button" title="Переименовать или удалить группы" @click="emit('folders')">
+        Группы
+      </button>
       <!-- Список стран пуст, пока detour-geo не отработал: показывать выпадашку
            с одним пунктом «Все страны» незачем — вместо неё кнопка запуска. -->
       <select v-if="countries.length" v-model="country" aria-label="Страна">
@@ -431,6 +449,15 @@ function stateTile(r: ProfileRow): string {
     <p class="count">
       {{ visible.length }} из {{ rows.length }}<template v-if="selected.length">
         · выбрано {{ selected.length }}</template>
+      <span class="selbtns">
+        <button v-if="rows.length" type="button" class="lnk" @click="selectAll">Выбрать все</button>
+        <button v-if="group" type="button" class="lnk" @click="selectGroup">
+          Выбрать группу «{{ group }}»
+        </button>
+        <button v-if="selected.length" type="button" class="lnk" @click="emit('update:selected', [])">
+          Снять
+        </button>
+      </span>
       <!-- Требование лицензии CC-BY базы DB-IP: там, где показаны её результаты,
            обязана быть ссылка на источник. Убирать нельзя. -->
       <template v-if="countries.length">
@@ -690,6 +717,32 @@ function stateTile(r: ProfileRow): string {
 </template>
 
 <style scoped>
+.selbtns {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-left: 10px;
+}
+.lnk {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent, #4fd1c5);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.grpbtn {
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  background: transparent;
+  color: inherit;
+  border-radius: 10px;
+  padding: 0 12px;
+  font: inherit;
+  cursor: pointer;
+  min-height: 38px;
+}
 .wrap {
   display: flex;
   flex-direction: column;
