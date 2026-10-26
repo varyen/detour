@@ -423,6 +423,7 @@ WSPUB=$WSPUB
 XH=$XH
 XHPORT=$XHPORT
 XHPATH=$XHPATH
+XHSEC=$XHSEC
 EOF
     mv "$CONF.tmp" "$CONF"
 }
@@ -445,7 +446,7 @@ load_conf() {
     SUB=0; SPORT=""; SUBURL=""
     VTLS=0; TPORT=""; TDOMAIN=""
     WS=0; WSPORT=""; WSPATH=""; WSPUB=""
-    XH=0; XHPORT=""; XHPATH=""
+    XH=0; XHPORT=""; XHPATH=""; XHSEC=reality
     [ -f "$CONF" ] && . "$CONF"
     set_iface
 }
@@ -1203,9 +1204,17 @@ xray_xhttp_ok() {
 # Порт xhttp в ссылках: за прокси — его порт, иначе свой порт входа.
 xh_port() { if [ -n "$WSPUB" ]; then ws_port; else printf '%s' "$XHPORT"; fi; }
 
+# Свой вход без прокси маскируется Reality (ключи и SNI — те же, что у входа
+# VLESS-Reality) или TLS на своём сертификате. Reality — по умолчанию: на
+# мобильных сетях ТСПУ глотает ClientHello TLS к неизвестному сайту на
+# нестандартном порту, а Reality выглядит как обращение к SNI-сайту.
+xh_reality() { [ -z "$WSPUB" ] && [ "$XHSEC" != tls ]; }
+xh_host() { if xh_reality; then endpoint_host; else ws_host; fi; }
+
 xh_on() {
     vless_on && [ "$XH" = 1 ] && [ -n "$XHPORT" ] && [ -n "$XHPATH" ] && xray_xhttp_ok || return 1
     [ -n "$WSPUB" ] && return 0
+    xh_reality && return 0
     tls_cert && [ -n "$(tls_domain)" ]
 }
 
@@ -1214,7 +1223,8 @@ xh_reason() {
     [ -n "$(xray_bin)" ] || { echo "xray не установлен"; return; }
     xray_xhttp_ok || { echo "xray $(xray_ver | tr ' ' .) не умеет xhttp (нужен 24.11+) — нажмите «Установить недостающее»"; return; }
     [ -n "$WSPUB" ] && return 0
-    tls_cert || { echo "нет сертификата: задайте адрес реверс-прокси или выпустите сертификат"; return; }
+    xh_reality && return 0
+    tls_cert || { echo "нет сертификата: задайте адрес реверс-прокси, выпустите сертификат или выберите Reality"; return; }
     [ -n "$(tls_domain)" ] || echo "не задан домен сертификата"
 }
 
@@ -1224,6 +1234,11 @@ client_xh_link() {
     uuid=$(echo "$line" | cut -d'|' -f10)
     [ -n "$uuid" ] && xh_on || return 1
     name=$(echo "$line" | cut -d'|' -f3)
+    if xh_reality; then
+        printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=xhttp&path=%s&mode=auto#%s\n' \
+            "$uuid" "$(endpoint_host)" "$XHPORT" "$VSNI" "${FP:-chrome}" "$VPUB" "$VSID" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
+        return 0
+    fi
     h=$(ws_host)
     printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=%s&type=xhttp&host=%s&path=%s&mode=auto#%s\n' \
         "$uuid" "$h" "$(xh_port)" "$h" "${FP:-chrome}" "$h" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
@@ -1235,8 +1250,13 @@ xh_render() {
     printf '"inbounds":[{"tag":"in-xhttp","listen":"0.0.0.0","port":%s,"protocol":"vless","settings":{"clients":[' "$XHPORT"
     awk -F'|' '$2 == 1 && $10 != "" { printf "%s{\"id\":\"%s\",\"email\":\"%s\"}", (n++ ? "," : ""), $10, $1 }' "$CLIENTS"
     printf '],"decryption":"none"},"streamSettings":{"network":"xhttp","xhttpSettings":{"path":"%s","mode":"auto"}' "$XHPATH"
-    [ -z "$WSPUB" ] && printf ',"security":"tls","tlsSettings":{"serverName":"%s","certificates":[{"certificateFile":"%s","keyFile":"%s"}]}' \
-        "$(tls_domain)" "$T_CRT" "$T_KEY"
+    if xh_reality; then
+        printf ',"security":"reality","realitySettings":{"show":false,"target":"%s:443","serverNames":["%s"],"privateKey":"%s","shortIds":["%s"]}' \
+            "$VSNI" "$VSNI" "$VPRIV" "$VSID"
+    elif [ -z "$WSPUB" ]; then
+        printf ',"security":"tls","tlsSettings":{"serverName":"%s","certificates":[{"certificateFile":"%s","keyFile":"%s"}]}' \
+            "$(tls_domain)" "$T_CRT" "$T_KEY"
+    fi
     printf '},"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}}],'
     printf '"outbounds":[{"tag":"d","protocol":"freedom","streamSettings":{"sockopt":{"domainStrategy":"UseIPv4"}}},{"tag":"dns-out","protocol":"dns"},{"tag":"block","protocol":"blackhole"}'
     awk -F'|' -v vnet="$VNET" '$2 == 1 && $10 != "" {
@@ -1265,7 +1285,16 @@ xh_pid() {
 xh_down() {
     p=$(xh_pid)
     [ -n "$p" ] && kill "$p" 2>/dev/null
-    rm -f "$XPID" "$XRENDER"
+    rm -f "$XPID" "$XPID.bin" "$XRENDER"
+}
+
+# DNS для процессов в netns: ip netns exec подставляет /etc/netns/<ns>/resolv.conf
+# вместо общего (там 127.0.0.1 — в netns его нет). Нужен xray-Reality: за
+# сертификатом SNI-сайта он ходит системным резолвером. 0 — файл изменился.
+ns_resolv() {
+    want="nameserver $(vless_dns)"
+    [ "$(cat "/etc/netns/$NS/resolv.conf" 2>/dev/null)" = "$want" ] && return 1
+    mkdir -p "/etc/netns/$NS" && printf '%s\n' "$want" > "/etc/netns/$NS/resolv.conf"
 }
 
 xh_up() {
@@ -1277,7 +1306,12 @@ xh_up() {
         rm -f "$XNEW"
         return 1
     fi
-    if [ -n "$(xh_pid)" ] && cmp -s "$XNEW" "$XRENDER"; then
+    rchg=1
+    [ "$KEENETIC" = 1 ] || { ns_resolv; rchg=$?; }
+    # Обновлённый пакетом бинарник: процесс держит старый (deleted) — перезапуск.
+    xbin="$xb $(date -r "$xb" +%s 2>/dev/null)"
+    [ "$(cat "$XPID.bin" 2>/dev/null)" = "$xbin" ] || rchg=0
+    if [ "$rchg" != 0 ] && [ -n "$(xh_pid)" ] && cmp -s "$XNEW" "$XRENDER"; then
         rm -f "$XNEW"
         return 0
     fi
@@ -1304,6 +1338,7 @@ xh_up() {
     echo $! > "$XPID"
     sleep 1
     [ -n "$(xh_pid)" ] || { log "xhttp: xray не запустился, см. $XLOG"; return 1; }
+    printf '%s\n' "$xbin" > "$XPID.bin"
     log "xhttp: xray запущен (порт $XHPORT)"
 }
 
@@ -2040,9 +2075,10 @@ status_json() {
     xrun=false; [ -n "$(xh_pid)" ] && xrun=true
     xinst=false; xray_xhttp_ok && xinst=true
     xpp=$(xh_port); case "$xpp" in ''|*[!0-9]*) xpp=0 ;; esac
-    printf '"xhttp":{"enabled":%s,"active":%s,"running":%s,"installed":%s,"port":%s,"public_port":%s,"path":"%s","reason":"%s"}},' \
+    xsec=tls; xh_reality && xsec=reality; [ -n "$WSPUB" ] && xsec=proxy
+    printf '"xhttp":{"enabled":%s,"active":%s,"running":%s,"installed":%s,"port":%s,"public_port":%s,"path":"%s","security":"%s","host":"%s","reason":"%s"}},' \
         "$([ "$XH" = 1 ] && echo true || echo false)" "$(xh_on && echo true || echo false)" "$xrun" "$xinst" \
-        "${XHPORT:-0}" "$xpp" "$(json_esc "$XHPATH")" "$(json_esc "$(xh_reason)")"
+        "${XHPORT:-0}" "$xpp" "$(json_esc "$XHPATH")" "$xsec" "$(json_esc "$(xh_host)")" "$(json_esc "$(xh_reason)")"
     srun=false; [ -n "$(sub_pid)" ] && srun=true
     shttps=false; sub_https && shttps=true
     printf '"sub":{"enabled":%s,"running":%s,"port":%s,"https":%s,"url":"%s","base":"%s"},' \
@@ -2259,6 +2295,14 @@ sub_vless_ws_json() {  # $1 tag
 # xhttp sing-box не умеет: в формате Detour такой профиль поднимает сайдкар
 # mihomo (как xhttp из чужих подписок), в формат sing-box он не попадает.
 sub_vless_xh_json() {  # $1 tag
+    if xh_reality; then
+        printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s",' \
+            "$(json_esc "$1")" "$(json_esc "$host")" "$XHPORT" "$uuid"
+        printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"},' "$VSNI" "${FP:-chrome}"
+        printf '"reality":{"enabled":true,"public_key":"%s","short_id":"%s"}},' "$VPUB" "$VSID"
+        printf '"transport":{"type":"xhttp","path":"%s"}}' "$(json_esc "$XHPATH")"
+        return
+    fi
     printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s",' \
         "$(json_esc "$1")" "$wdom" "$(xh_port)" "$uuid"
     printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"}},' "$wdom" "${FP:-chrome}"
@@ -2278,7 +2322,13 @@ sub_awg_json() {  # $1 tag
 sub_clash() {
     vn="$name · VLESS"; an="$name · AmneziaWG"; tn="$name · VLESS TLS"; wn="$name · VLESS WS"; xn="$name · VLESS XHTTP"
     echo "proxies:"
-    if [ "$has_x" = 1 ]; then
+    if [ "$has_x" = 1 ] && xh_reality; then
+        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$xn" "$host" "$XHPORT" "$uuid"
+        printf '    network: xhttp\n    udp: true\n    tls: true\n'
+        printf '    servername: %s\n    client-fingerprint: %s\n' "$VSNI" "${FP:-chrome}"
+        printf '    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$VPUB" "$VSID"
+        printf '    xhttp-opts:\n      path: "%s"\n' "$XHPATH"
+    elif [ "$has_x" = 1 ]; then
         printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$xn" "$wdom" "$(xh_port)" "$uuid"
         printf '    network: xhttp\n    udp: true\n    tls: true\n'
         printf '    servername: %s\n    client-fingerprint: %s\n' "$wdom" "${FP:-chrome}"
@@ -2506,6 +2556,7 @@ cmd_set() {
                 if [ "$v" != "$WSPORT" ] && tcp_port_busy "$v"; then err "TCP-порт $v уже занят на роутере"; fi
                 WSPORT=$v ;;
             xhttp) case "$v" in 0|1) XH=$v ;; *) err "xhttp: 0 или 1" ;; esac ;;
+            xhsec) case "$v" in reality|tls) XHSEC=$v ;; *) err "xhsec: reality или tls" ;; esac ;;
             xhport)
                 case "$v" in ''|*[!0-9]*) err "порт — число" ;; esac
                 [ "$v" -ge 1 ] && [ "$v" -le 65535 ] || err "порт 1–65535"

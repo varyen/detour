@@ -521,6 +521,10 @@ export interface ServerVlessXhttp {
   /** Порт в ссылках: за прокси — его, иначе свой. */
   public_port?: number;
   path: string;
+  /** Маскировка своего входа: reality / tls; proxy — за реверс-прокси (2.17.3+). */
+  security?: "reality" | "tls" | "proxy";
+  /** Адрес в ссылках клиентов. */
+  host?: string;
   reason: string;
 }
 
@@ -600,6 +604,7 @@ export interface ServerSettingsPatch {
   xhttp?: boolean;
   xhport?: number;
   xhpath?: string;
+  xhsec?: "reality" | "tls";
 }
 
 export interface ApplyLogResponse {

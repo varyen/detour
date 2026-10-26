@@ -630,8 +630,9 @@ feed_available_version() {
 # it's the same path the panel self-update already uses for the release .ipk.
 # --force-overwrite takes the binary over from a previous owner (Entware sing-box-go
 # or an old bundled-tpws panel). Returns 0 only on a confirmed opkg install.
-feed_curl_install() {
+feed_curl_install() {   # <pkg> [доп. флаги установки]
     local pkg="$1" base file tmp v4
+    shift
     base=$(feed_base); v4=$(feed_curl_v4)
     file=$(gh_curl_retry $v4 -fsSL --max-time 30 "$base/Packages" 2>/dev/null \
         | awk -v p="$pkg" '$1=="Package:"{c=$2} $1=="Filename:" && c==p {print $2; exit}')
@@ -640,7 +641,7 @@ feed_curl_install() {
     log "feed: downloading $file via curl${v4:+ (IPv4)} ..."
     gh_curl_retry $v4 -fsSL --max-time 300 -o "$tmp" "$base/$file" \
         || { log "feed: download of $file failed"; rm -f "$tmp"; return 1; }
-    if ! pkg_install_file "$tmp" --force-overwrite 2>&1; then
+    if ! pkg_install_file "$tmp" --force-overwrite "$@" 2>&1; then
         log "feed: install of $file failed"; rm -f "$tmp"; return 1
     fi
     rm -f "$tmp"
@@ -1220,21 +1221,20 @@ cmd_ttyd_apply() {
 # 1.8.x). Ставится, только если вход включён: бинарник ~25 МБ — флеш роутера на
 # него не тратим зря. Уже стоящий пакет обновляется.
 server_xray_maybe() {
-    local conf=/etc/detour/server/server.conf pkg=xray-detour
+    local conf=/etc/detour/server/server.conf pkg=xray-detour have want
     [ "$KEENETIC" = 1 ] && conf=/opt/etc/detour/server/server.conf
     grep -q '^XH=1$' "$conf" 2>/dev/null || return 0
     bypass_feed_available || { log "WARNING: xray-detour под этот роутер в фиде нет — вход VLESS xhttp недоступен"; return 0; }
     ensure_feed
-    if use_curl_feed; then
-        feed_curl_install "$pkg" || log "WARNING: $pkg не установился из фида — вход VLESS xhttp недоступен"
-    else
-        opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
-        if pkg_is_installed "$pkg"; then
-            pkg_upgrade "$pkg" 2>&1 || pkg_install "$pkg" 2>&1 || log "WARNING: обновление $pkg не удалось"
-        else
-            pkg_install "$pkg" 2>&1 || log "WARNING: $pkg не установился — вход VLESS xhttp недоступен"
-        fi
-    fi
+    # Ставим ровно версию фида, даже если она СТАРШЕ установленной: фид держит
+    # xray, совместимый с клиентами mihomo (Reality xray 26.10 их не пускает),
+    # а менеджер пакетов сам назад не откатывает. Поэтому — файлом через curl.
+    have=$(pkg_installed_version "$pkg" | sed 's/-r\{0,1\}[0-9]*$//')
+    want=$(feed_available_version "$pkg" | sed 's/-r\{0,1\}[0-9]*$//')
+    if [ -n "$want" ] && [ "$have" = "$want" ]; then log "$pkg $have — как в фиде"; return 0; fi
+    local flags=""
+    [ "$PKGM" = apk ] || flags="--force-downgrade"
+    feed_curl_install "$pkg" $flags || log "WARNING: $pkg не установился из фида — вход VLESS xhttp недоступен"
 }
 
 cmd_server_apply() {

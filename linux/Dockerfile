@@ -43,7 +43,7 @@ RUN apk add --no-cache curl \
 
 # xray — вход VLESS xhttp (sing-box xhttp не умеет).
 FROM alpine:3.20 AS xray
-ARG XRAY=26.10.21
+ARG XRAY=26.3.27
 RUN apk add --no-cache curl unzip \
  && case "$(uname -m)" in x86_64) a=64 ;; aarch64) a=arm64-v8a ;; *) exit 1 ;; esac \
  && curl -fsSL -o /tmp/x.zip "https://github.com/XTLS/Xray-core/releases/download/v$XRAY/Xray-linux-$a.zip" \

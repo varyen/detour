@@ -18,7 +18,10 @@ Safety:
   * mihomo (MetaCubeX/mihomo, сайдкар AmneziaWG) — тоже до latest и во ВСЕХ
     каталогах. Передаётся в каждый прогон build_feed: каталог пересобирается
     целиком, и прогон без --mihomo-version выбросил бы mihomo из фида.
-  * xray-detour (XTLS/Xray-core, вход xhttp VPN-сервера) — так же, как mihomo.
+  * xray-detour (XTLS/Xray-core, вход xhttp VPN-сервера) — во всех каталогах,
+    но ПРИКОЛОТ к major.minor фида, как sing-box: Reality в xray 26.10 перестал
+    пускать клиентов mihomo (Detour, Home Auto, Clash) — новая ветка xray
+    публикуется только руками, после проверки с mihomo.
   * If the feed's Packages can't be read, it refuses to guess and exits non-zero
     (never publishes from an unknown baseline).
 
@@ -182,8 +185,9 @@ def main():
     nfq_latest = latest_release_tag(ZAPRET2_REPO)
     mih_latest = latest_release_tag(MIHOMO_REPO)
     cur_mih = feed.get("mihomo")
-    xray_latest = latest_release_tag(XRAY_REPO)
     cur_xray = feed.get("xray-detour")
+    xray_pin = ".".join(cur_xray.split("-")[0].split(".")[:2]) if cur_xray else None
+    xray_latest, xray_any = latest_in_minor(XRAY_REPO, xray_pin) if xray_pin else (None, None)
 
     sb_t = sb_best if (sb_best and vtuple(sb_best) > vtuple(cur_sb)) else cur_sb
     tpws_t = tpws_latest if (tpws_latest and vtuple(tpws_latest) > vtuple(cur_tpws)) else cur_tpws
@@ -198,7 +202,10 @@ def main():
     print(f"tpws     : feed {cur_tpws} | latest {tpws_latest} -> {tpws_t}")
     print(f"nfqws2   : feed {cur_nfq} | latest {nfq_latest} -> {nfq_t}  (opkg: aarch64 only)")
     print(f"mihomo   : feed {cur_mih or '-'} | latest {mih_latest} -> {mih_t}  (all arches)")
-    print(f"xray     : feed {cur_xray or '-'} | latest {xray_latest} -> {xray_t}  (all arches)")
+    print(f"xray     : feed {cur_xray or '-'} | pin {xray_pin}.x | latest-in-pin {xray_latest} -> {xray_t}  (all arches)")
+    if xray_any and xray_t and vtuple(xray_any) > vtuple(xray_t):
+        print(f"  NOTE: xray {xray_any} is out upstream but crosses the {xray_pin} pin — "
+              f"check Reality with a mihomo client, then bump the feed by hand.")
 
     # aarch64 republishes if any of its three packages move; mipsel republishes if its
     # sing-box/tpws lag the targets (covers both an upstream bump AND seeding a fresh
