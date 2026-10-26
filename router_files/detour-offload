@@ -81,7 +81,15 @@ ecm_flush() {
     sleep 1
     for n in $_cycled; do echo 0 > "$ECM/$n" 2>/dev/null; done
 }
-ecm_restart() { [ -x /etc/init.d/qca-nss-ecm ] && /etc/init.d/qca-nss-ecm restart >/dev/null 2>&1; }
+ecm_restart() {
+    [ -x /etc/init.d/qca-nss-ecm ] || return 1
+    /etc/init.d/qca-nss-ecm restart >/dev/null 2>&1
+    # ECM снова включает bridge-nf-call-iptables, а с ним TPROXY «UDP через VPN» с
+    # br-lan не работает (см. udp_vpn_bridge_nf_off в sing-box.initd).
+    if [ -f /var/run/detour-bridge-nf.off ] && iptables -t mangle -nL UDP_VPN >/dev/null 2>&1; then
+        echo 0 > /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null
+    fi
+}
 
 push_alert() { [ -x "$PUSH_BIN" ] && "$PUSH_BIN" send "$1" "$2" >/dev/null 2>&1; return 0; }
 

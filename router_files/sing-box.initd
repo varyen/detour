@@ -88,6 +88,8 @@ UDP_VPN_TABLE=106                         # policy-routing table (local default 
 UDP_VPN_CHAIN=UDP_VPN                     # mangle-цепочка с TPROXY-правилами
 UDP_VPN_IPSET=singbox_udp_vpn             # ipset для IP/CIDR/доменов списка
 UDP_VPN_LEGACY_CHAIN=DISCORD_VPN          # чистим при апгрейде с v1.27.0
+BRIDGE_NF=/proc/sys/net/bridge/bridge-nf-call-iptables
+BRIDGE_NF_MARK=/var/run/detour-bridge-nf.off   # мы выключили — нам и включать обратно
 VPNSERVERS_IPSET=singbox_vpnservers       # ip,порт серверов всех профилей (detour-vpnservers)
 
 # Detect whether nftables (fw4) is available on this router.
@@ -979,9 +981,27 @@ udp_vpn_up() {
         iptables -t mangle -D PREROUTING -i "$IIF" -j "$UDP_VPN_CHAIN" 2>/dev/null
         iptables -t mangle -I PREROUTING 1 -i "$IIF" -j "$UDP_VPN_CHAIN"
     done
+    udp_vpn_bridge_nf_off
+}
+
+# br_netfilter прогоняет iptables для LAN-пакета ещё на мосту, и TPROXY привязывает
+# сокет там же — а ip_rcv_core потом делает skb_orphan, и пакет приходит в INPUT
+# без сокета: UDP с br-lan молча пропадает (dsrv*/wgserver не мост — у них работает).
+# qca-nss-ecm (GL 4.10.x, ускорение моста) включает bridge-nf-call-iptables=1.
+udp_vpn_bridge_nf_off() {
+    [ "$(cat "$BRIDGE_NF" 2>/dev/null)" = 1 ] || return 0
+    echo 0 > "$BRIDGE_NF" && : > "$BRIDGE_NF_MARK"
+    logger -t sing-box "UDP через VPN: bridge-nf-call-iptables=1 ломает TPROXY с br-lan — выключен"
+}
+
+udp_vpn_bridge_nf_restore() {
+    [ -f "$BRIDGE_NF_MARK" ] || return 0
+    rm -f "$BRIDGE_NF_MARK"
+    [ -e "$BRIDGE_NF" ] && echo 1 > "$BRIDGE_NF"
 }
 
 udp_vpn_down() {
+    udp_vpn_bridge_nf_restore
     local IIF
     for IIF in br-lan $(vpn_redirect_ifaces); do
         [ -n "$IIF" ] || continue

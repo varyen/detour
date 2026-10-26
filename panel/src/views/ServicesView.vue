@@ -34,6 +34,7 @@ import { useProfilesStore } from "@/stores/profiles";
 import { usePowerStore } from "@/stores/power";
 import { fmtAgo, fmtDate, fmtInt } from "@/lib/format";
 import { useFocusTarget } from "@/lib/deeplink";
+import { saveFile, savedWhere } from "@/lib/download";
 import { getRegistration, swSupported } from "@/pwa";
 
 const status = useStatusStore();
@@ -744,24 +745,14 @@ async function removeSwap() {
 /* ---------------- резервная копия ---------------- */
 
 function saveJson(data: unknown, name: string) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${name}-${new Date().toISOString().slice(0, 10)}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return saveFile(`${name}-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data, null, 2));
 }
 
 async function exportConfig() {
   busy.value = "export";
   try {
-    saveJson(await services.exportConfig(), "detour");
-    toast.ok("Копия сохранена на устройство");
+    const where = await saveJson(await services.exportConfig(), "detour");
+    toast.ok(savedWhere(where, "Копия сохранена на устройство"));
   } catch (e) {
     toast.fromError(e, "Не удалось выгрузить настройки");
   } finally {
@@ -774,8 +765,8 @@ async function exportConfig() {
 async function exportFull() {
   busy.value = "export-full";
   try {
-    saveJson(await services.exportFull(), "detour-full");
-    toast.ok("Полная копия сохранена на устройство");
+    const where = await saveJson(await services.exportFull(), "detour-full");
+    toast.ok(savedWhere(where, "Полная копия сохранена на устройство"));
   } catch (e) {
     toast.fromError(e, "Не удалось выгрузить полную копию");
   } finally {

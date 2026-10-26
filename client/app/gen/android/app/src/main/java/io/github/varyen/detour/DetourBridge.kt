@@ -92,6 +92,43 @@ object DetourBridge {
     fun tunnelVersion(): String = runCatching { Libbox.version() }.getOrDefault("")
 
     /**
+     * Файл из панели (экспорт настроек, конфиг клиента): WebView загрузки
+     * blob-ссылок молча игнорирует. Android 10+ — в «Загрузки/Detour» без
+     * разрешений; раньше туда без WRITE_EXTERNAL_STORAGE не пишут, поэтому
+     * системный диалог «Поделиться». Ответ "ok:<куда>" или текст ошибки.
+     */
+    @JvmStatic
+    fun saveFile(name: String, content: String, mime: String): String {
+        val ctx = DetourVpn.context() ?: return "приложение ещё не запущено"
+        return try { saveFileWith(ctx, name, content.toByteArray(), mime) } catch (t: Throwable) { t.message ?: t.toString() }
+    }
+
+    private fun saveFileWith(ctx: android.content.Context, name: String, data: ByteArray, mime: String): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val dir = android.os.Environment.DIRECTORY_DOWNLOADS + "/Detour"
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, dir)
+            }
+            val resolver = ctx.contentResolver
+            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: return "система не дала создать файл в «Загрузках»"
+            resolver.openOutputStream(uri)?.use { it.write(data) } ?: return "не удалось открыть файл на запись"
+            return "ok:$dir/$name"
+        }
+        val out = File(ctx.cacheDir, name)
+        out.writeBytes(data)
+        val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", out)
+        val send = Intent(Intent.ACTION_SEND)
+            .setType(mime)
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        ctx.startActivity(Intent.createChooser(send, name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        return "ok:share"
+    }
+
+    /**
      * Обновление приложения: системный диалог установки APK, который ядро
      * скачало и проверило по подписи. Пустая строка — диалог показан;
      * "need_permission" — открыта настройка «Установка неизвестных

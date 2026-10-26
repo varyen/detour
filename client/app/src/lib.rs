@@ -64,6 +64,27 @@ async fn api(
     core_call(&req).await
 }
 
+/// Сохранение файла из панели. Нужно только на Android: там WebView молча
+/// игнорирует загрузку blob-ссылки. Остальным платформам — `unsupported`,
+/// и панель скачивает файл как в браузере.
+#[tauri::command]
+async fn save_file(name: String, content: String, mime: Option<String>) -> Result<String, String> {
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    let _ = (&name, &content, &mime);
+    #[cfg(target_os = "android")]
+    {
+        let mime = mime.unwrap_or_else(|| "application/octet-stream".into());
+        return tauri::async_runtime::spawn_blocking(move || android::save_file(&name, &content, &mime))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    #[allow(unreachable_code)]
+    Err("unsupported".into())
+}
+
 async fn core_call(req: &Request) -> Result<Response, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -153,7 +174,7 @@ async fn launch_installer(path: std::path::PathBuf) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![api]);
+    let builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![api, save_file]);
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let builder = builder.setup(|app| {
         use tauri::Manager;

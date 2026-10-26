@@ -68,6 +68,27 @@ pub fn install_apk(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Сохранить файл панели: «Загрузки/Detour» или системное «Поделиться».
+/// Ответ — куда лёг файл (`share` — отдан в диалог).
+pub fn save_file(name: &str, content: &str, mime: &str) -> Result<String, String> {
+    let out = with_java(|env, class| {
+        let n = env.new_string(name)?;
+        let c = env.new_string(content)?;
+        let m = env.new_string(mime)?;
+        let value = env.call_static_method(
+            class,
+            "saveFile",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(&n), JValue::Object(&c), JValue::Object(&m)],
+        )?;
+        let text: JString = value.l()?.into();
+        let out = String::from(env.get_string(&text)?);
+        Ok(out)
+    })
+    .map_err(|e| format!("{e:#}"))?;
+    out.strip_prefix("ok:").map(str::to_owned).ok_or(out)
+}
+
 fn with_java<T>(f: impl FnOnce(&mut JNIEnv, &JClass) -> Result<T>) -> Result<T> {
     let bridge = BRIDGE.get().context("мост в приложение ещё не поднят")?;
     let mut env = bridge.vm.attach_current_thread()?;

@@ -10,6 +10,7 @@ import SegmentedControl from "@/components/SegmentedControl.vue";
 import { services } from "@/api";
 import type { ServerClient, ServerSession } from "@/api";
 import { fmtBytes } from "@/lib/format";
+import { saveFile, savedWhere } from "@/lib/download";
 import { useToastStore } from "@/stores/toast";
 
 type Tab = "sub" | "conf" | "vless" | "history";
@@ -174,13 +175,13 @@ watch(
 );
 watch(view, load);
 
-function download() {
-  const url = URL.createObjectURL(new Blob([conf.value], { type: "text/plain" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName.value;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+async function download() {
+  try {
+    const where = await saveFile(fileName.value, conf.value, "text/plain");
+    if (where) toast.ok(savedWhere(where, ""));
+  } catch (e) {
+    toast.fromError(e, "Не удалось сохранить файл");
+  }
 }
 
 async function copy(text: string, what: string) {

@@ -559,6 +559,11 @@ if [ "$UDP_MODE" != off ] || [ -n "$UDP_SLOTS" ]; then
 fi
 if [ -n "$TP_STATUS" ]; then
     IPT_TP=${TP_STATUS#ok }
+    # С br_netfilter TPROXY с моста не доходит до сокета (ip_rcv_core делает
+    # skb_orphan) — на GL это чинит sing-box.initd. Здесь трогать sysctl под NDM
+    # вслепую не решаемся, только говорим причину.
+    [ "$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null)" = 1 ] && \
+        logger -t detour "UDP через VPN: bridge-nf-call-iptables=1 — UDP из домашней сети через TPROXY не пройдёт"
     TP="-j TPROXY --on-ip 127.0.0.1 --on-port $UDP_VPN_PORT --tproxy-mark $UDP_VPN_MARK/$UDP_VPN_MARK"
     ip -4 rule add fwmark "$UDP_VPN_MARK/$UDP_VPN_MARK" lookup "$UDP_VPN_TABLE" pref 12106
     ip -4 route replace local default dev lo table "$UDP_VPN_TABLE"

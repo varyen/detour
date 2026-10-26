@@ -185,6 +185,13 @@ function num(v: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+/** PersistentKeepalive в AWG 3 бывает диапазоном («25-35»), а sing-box и
+ *  mihomo принимают только число: берём нижнюю границу. */
+function keepaliveSec(v: unknown): number | undefined {
+  const m = String(v ?? "").match(/^\s*(\d+)\s*(?:-\s*\d+\s*)?$/);
+  return m ? num(m[1]) : undefined;
+}
+
 function str(v: unknown): string {
   if (v === null || v === undefined) return "";
   if (typeof v === "string") return v;
@@ -282,7 +289,8 @@ export function outboundFromDraft(d: ProfileDraft): Record<string, unknown> {
       if (d.type === "amneziawg") {
         const awg = awgFromText(d.awg);
         if (Object.keys(awg).length) o.amnezia = awg;
-        if (num(d.keepalive)) o.persistent_keepalive_interval = num(d.keepalive);
+        const keep = keepaliveSec(d.keepalive);
+        if (keep) o.persistent_keepalive_interval = keep;
       }
       break;
     }

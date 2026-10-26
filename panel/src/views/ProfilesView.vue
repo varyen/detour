@@ -9,6 +9,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import TileCard from "@/components/TileCard.vue";
+import { saveFile, savedWhere } from "@/lib/download";
 import UiButton from "@/components/UiButton.vue";
 import DrawerSheet from "@/components/DrawerSheet.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
@@ -704,14 +705,11 @@ async function exportAll() {
   busy.value = "export";
   try {
     const data = await profilesApi.exportAll();
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `detour-profiles-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.ok("Файл с профилями сохранён");
+    const where = await saveFile(
+      `detour-profiles-${new Date().toISOString().slice(0, 10)}.json`,
+      JSON.stringify(data, null, 2),
+    );
+    toast.ok(savedWhere(where, "Файл с профилями сохранён"));
   } catch (e) {
     toast.fromError(e, "Экспорт не удался");
   } finally {
