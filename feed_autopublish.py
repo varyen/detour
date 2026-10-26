@@ -18,6 +18,7 @@ Safety:
   * mihomo (MetaCubeX/mihomo, сайдкар AmneziaWG) — тоже до latest и во ВСЕХ
     каталогах. Передаётся в каждый прогон build_feed: каталог пересобирается
     целиком, и прогон без --mihomo-version выбросил бы mihomo из фида.
+  * xray-detour (XTLS/Xray-core, вход xhttp VPN-сервера) — так же, как mihomo.
   * If the feed's Packages can't be read, it refuses to guess and exits non-zero
     (never publishes from an unknown baseline).
 
@@ -52,6 +53,7 @@ APK_REF_ARCH = "apk-x86_64"
 ZAPRET_REPO = "bol-van/zapret"
 ZAPRET2_REPO = "bol-van/zapret2"
 MIHOMO_REPO = "MetaCubeX/mihomo"
+XRAY_REPO = "XTLS/Xray-core"
 
 
 def _token():
@@ -180,10 +182,13 @@ def main():
     nfq_latest = latest_release_tag(ZAPRET2_REPO)
     mih_latest = latest_release_tag(MIHOMO_REPO)
     cur_mih = feed.get("mihomo")
+    xray_latest = latest_release_tag(XRAY_REPO)
+    cur_xray = feed.get("xray-detour")
 
     sb_t = sb_best if (sb_best and vtuple(sb_best) > vtuple(cur_sb)) else cur_sb
     tpws_t = tpws_latest if (tpws_latest and vtuple(tpws_latest) > vtuple(cur_tpws)) else cur_tpws
     nfq_t = nfq_latest if (nfq_latest and vtuple(nfq_latest) > vtuple(cur_nfq)) else cur_nfq
+    xray_t = xray_latest if (xray_latest and (not cur_xray or vtuple(xray_latest) > vtuple(cur_xray))) else cur_xray
     mih_t = mih_latest if (mih_latest and (not cur_mih or vtuple(mih_latest) > vtuple(cur_mih))) else cur_mih
 
     print(f"sing-box : feed {cur_sb} | pin {sb_pin}.x | latest-in-pin {sb_best} -> {sb_t}")
@@ -193,16 +198,17 @@ def main():
     print(f"tpws     : feed {cur_tpws} | latest {tpws_latest} -> {tpws_t}")
     print(f"nfqws2   : feed {cur_nfq} | latest {nfq_latest} -> {nfq_t}  (opkg: aarch64 only)")
     print(f"mihomo   : feed {cur_mih or '-'} | latest {mih_latest} -> {mih_t}  (all arches)")
+    print(f"xray     : feed {cur_xray or '-'} | latest {xray_latest} -> {xray_t}  (all arches)")
 
     # aarch64 republishes if any of its three packages move; mipsel republishes if its
     # sing-box/tpws lag the targets (covers both an upstream bump AND seeding a fresh
     # or drifted mipsel feed). Targets are shared so the two arches stay in lockstep.
     aarch64_changed = (sb_t != cur_sb or tpws_t != cur_tpws or nfq_t != cur_nfq
-                       or mih_t != cur_mih)
+                       or mih_t != cur_mih or xray_t != cur_xray)
     mips_changed = (sb_t != mips.get("sing-box") or tpws_t != mips.get("tpws-zapret")
-                    or mih_t != mips.get("mihomo"))
+                    or mih_t != mips.get("mihomo") or xray_t != mips.get("xray-detour"))
     apk_changed = (tpws_t != apkfeed.get("tpws-zapret") or nfq_t != apkfeed.get("nfqws2")
-                   or mih_t != apkfeed.get("mihomo"))
+                   or mih_t != apkfeed.get("mihomo") or xray_t != apkfeed.get("xray-detour"))
     cur_mips_sb, cur_mips_tpws = mips.get("sing-box", "-"), mips.get("tpws-zapret", "-")
     print(f"mipsel   : feed sing-box {cur_mips_sb} / tpws {cur_mips_tpws} "
           f"-> {sb_t} / {tpws_t}  (changed={mips_changed})")
@@ -236,6 +242,8 @@ def main():
                      "--tpws-version", tpws_t, "--nfqws2-version", nfq_t, *awg_apk])
 
     mih_args = ["--mihomo-version", mih_t] if mih_t else []
+    if xray_t:
+        mih_args += ["--xray-version", xray_t]
     for extra in runs:
         cmd = [sys.executable, os.path.join(HERE, "build_feed.py"), *extra, *mih_args]
         if not args.dry_run:

@@ -1215,15 +1215,26 @@ cmd_ttyd_apply() {
 # ---- AmneziaWG для VPN-сервера (detour-server) ----
 # kmod-amneziawg + amneziawg-tools — из штатного фида прошивки (у GL.iNet они
 # собраны под её ядро). Нет модуля — userspace detour-awg-go из фида Detour.
-# Вход VLESS xhttp держит xray (sing-box xhttp не умеет). Ставится, только
-# если вход включён: бинарник ~25 МБ — флеш роутера на него не тратим зря.
-# Пакет — из штатного фида: OpenWrt xray-core, Entware xray.
+# Вход VLESS xhttp держит xray (sing-box xhttp не умеет). Пакет xray-detour из
+# фида Detour: штатный xray-core прошивок бывает без xhttp (OpenWrt 23.05 —
+# 1.8.x). Ставится, только если вход включён: бинарник ~25 МБ — флеш роутера на
+# него не тратим зря. Уже стоящий пакет обновляется.
 server_xray_maybe() {
-    local conf=/etc/detour/server/server.conf pkg=xray-core
-    [ "$KEENETIC" = 1 ] && { conf=/opt/etc/detour/server/server.conf; pkg=xray; }
+    local conf=/etc/detour/server/server.conf pkg=xray-detour
+    [ "$KEENETIC" = 1 ] && conf=/opt/etc/detour/server/server.conf
     grep -q '^XH=1$' "$conf" 2>/dev/null || return 0
-    if command -v xray >/dev/null 2>&1; then log "xray уже есть"; return 0; fi
-    pkg_install "$pkg" 2>&1 || log "WARNING: $pkg не установился — вход VLESS xhttp будет недоступен"
+    bypass_feed_available || { log "WARNING: xray-detour под этот роутер в фиде нет — вход VLESS xhttp недоступен"; return 0; }
+    ensure_feed
+    if use_curl_feed; then
+        feed_curl_install "$pkg" || log "WARNING: $pkg не установился из фида — вход VLESS xhttp недоступен"
+    else
+        opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
+        if pkg_is_installed "$pkg"; then
+            pkg_upgrade "$pkg" 2>&1 || pkg_install "$pkg" 2>&1 || log "WARNING: обновление $pkg не удалось"
+        else
+            pkg_install "$pkg" 2>&1 || log "WARNING: $pkg не установился — вход VLESS xhttp недоступен"
+        fi
+    fi
 }
 
 cmd_server_apply() {

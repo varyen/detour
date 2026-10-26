@@ -1176,10 +1176,35 @@ client_ws_link() {
 # пространстве, что и sing-box входа VLESS. Устроен как вход WebSocket: за
 # реверс-прокси (WSPUB) без TLS, иначе со своим TLS. Клиенты выходят так же —
 # каждый со своего адреса $VNET.<octet> (sendThrough), DNS — в dnsmasq роутера.
-xray_bin() { command -v xray 2>/dev/null; }
+# Свой xray-detour из фида Detour — штатный xray-core прошивок бывает старым
+# (OpenWrt 23.05: 1.8.x), а xhttp в Xray появился в 24.11.
+xray_bin() { command -v xray-detour 2>/dev/null || command -v xray 2>/dev/null; }
+
+# Версия xray «старшая младшая» (кэш по пути и mtime, как у sing-box).
+xray_ver() {
+    xb=$(xray_bin); [ -n "$xb" ] || return 1
+    vc="$RUN/detour-server.xrayver"
+    key="$xb $(date -r "$xb" +%s 2>/dev/null)"
+    v=""
+    [ -f "$vc" ] && [ "$(sed -n 1p "$vc")" = "$key" ] && v=$(sed -n 2p "$vc")
+    if [ -z "$v" ]; then
+        v=$("$xb" version 2>/dev/null | sed -n '1s/^Xray \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
+        [ -n "$v" ] && mkdir -p "$RUN" && printf '%s\n%s\n' "$key" "$v" > "$vc"
+    fi
+    echo "$v"
+}
+
+xray_xhttp_ok() {
+    set -- $(xray_ver)
+    [ -n "$2" ] || return 1
+    [ "$1" -gt 24 ] || { [ "$1" -eq 24 ] && [ "$2" -ge 11 ]; }
+}
+
+# Порт xhttp в ссылках: за прокси — его порт, иначе свой порт входа.
+xh_port() { if [ -n "$WSPUB" ]; then ws_port; else printf '%s' "$XHPORT"; fi; }
 
 xh_on() {
-    vless_on && [ "$XH" = 1 ] && [ -n "$XHPORT" ] && [ -n "$XHPATH" ] && [ -n "$(xray_bin)" ] || return 1
+    vless_on && [ "$XH" = 1 ] && [ -n "$XHPORT" ] && [ -n "$XHPATH" ] && xray_xhttp_ok || return 1
     [ -n "$WSPUB" ] && return 0
     tls_cert && [ -n "$(tls_domain)" ]
 }
@@ -1187,6 +1212,7 @@ xh_on() {
 xh_reason() {
     [ "$XH" = 1 ] || return 0
     [ -n "$(xray_bin)" ] || { echo "xray не установлен"; return; }
+    xray_xhttp_ok || { echo "xray $(xray_ver | tr ' ' .) не умеет xhttp (нужен 24.11+) — нажмите «Установить недостающее»"; return; }
     [ -n "$WSPUB" ] && return 0
     tls_cert || { echo "нет сертификата: задайте адрес реверс-прокси или выпустите сертификат"; return; }
     [ -n "$(tls_domain)" ] || echo "не задан домен сертификата"
@@ -1200,7 +1226,7 @@ client_xh_link() {
     name=$(echo "$line" | cut -d'|' -f3)
     h=$(ws_host)
     printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=%s&type=xhttp&host=%s&path=%s&mode=auto#%s\n' \
-        "$uuid" "$h" "$(ws_port)" "$h" "${FP:-chrome}" "$h" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
+        "$uuid" "$h" "$(xh_port)" "$h" "${FP:-chrome}" "$h" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
 }
 
 xh_render() {
@@ -2012,10 +2038,11 @@ status_json() {
         "$([ "$WS" = 1 ] && echo true || echo false)" "$(ws_on && echo true || echo false)" "${WSPORT:-0}" \
         "$(json_esc "$WSPATH")" "$(json_esc "$WSPUB")" "$(json_esc "$(ws_host)")" "$wpp" "$(json_esc "$(ws_reason)")"
     xrun=false; [ -n "$(xh_pid)" ] && xrun=true
-    xinst=false; [ -n "$(xray_bin)" ] && xinst=true
-    printf '"xhttp":{"enabled":%s,"active":%s,"running":%s,"installed":%s,"port":%s,"path":"%s","reason":"%s"}},' \
+    xinst=false; xray_xhttp_ok && xinst=true
+    xpp=$(xh_port); case "$xpp" in ''|*[!0-9]*) xpp=0 ;; esac
+    printf '"xhttp":{"enabled":%s,"active":%s,"running":%s,"installed":%s,"port":%s,"public_port":%s,"path":"%s","reason":"%s"}},' \
         "$([ "$XH" = 1 ] && echo true || echo false)" "$(xh_on && echo true || echo false)" "$xrun" "$xinst" \
-        "${XHPORT:-0}" "$(json_esc "$XHPATH")" "$(json_esc "$(xh_reason)")"
+        "${XHPORT:-0}" "$xpp" "$(json_esc "$XHPATH")" "$(json_esc "$(xh_reason)")"
     srun=false; [ -n "$(sub_pid)" ] && srun=true
     shttps=false; sub_https && shttps=true
     printf '"sub":{"enabled":%s,"running":%s,"port":%s,"https":%s,"url":"%s","base":"%s"},' \
@@ -2233,7 +2260,7 @@ sub_vless_ws_json() {  # $1 tag
 # mihomo (как xhttp из чужих подписок), в формат sing-box он не попадает.
 sub_vless_xh_json() {  # $1 tag
     printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s",' \
-        "$(json_esc "$1")" "$wdom" "$(ws_port)" "$uuid"
+        "$(json_esc "$1")" "$wdom" "$(xh_port)" "$uuid"
     printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"}},' "$wdom" "${FP:-chrome}"
     printf '"transport":{"type":"xhttp","path":"%s","host":"%s"}}' "$(json_esc "$XHPATH")" "$wdom"
 }
@@ -2252,7 +2279,7 @@ sub_clash() {
     vn="$name · VLESS"; an="$name · AmneziaWG"; tn="$name · VLESS TLS"; wn="$name · VLESS WS"; xn="$name · VLESS XHTTP"
     echo "proxies:"
     if [ "$has_x" = 1 ]; then
-        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$xn" "$wdom" "$(ws_port)" "$uuid"
+        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$xn" "$wdom" "$(xh_port)" "$uuid"
         printf '    network: xhttp\n    udp: true\n    tls: true\n'
         printf '    servername: %s\n    client-fingerprint: %s\n' "$wdom" "${FP:-chrome}"
         printf '    xhttp-opts:\n      path: "%s"\n      host: %s\n' "$XHPATH" "$wdom"

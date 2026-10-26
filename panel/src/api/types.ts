@@ -518,6 +518,8 @@ export interface ServerVlessXhttp {
   /** xray установлен (ставится «Установить недостающее»). */
   installed: boolean;
   port: number;
+  /** Порт в ссылках: за прокси — его, иначе свой. */
+  public_port?: number;
   path: string;
   reason: string;
 }

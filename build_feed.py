@@ -100,16 +100,20 @@ APK_FEED_PREFIX = "apk-"
 # mihomo: amd64-v1 — без AVX (старые x86-роутеры), armv5 и *-softfloat — по той
 # же причине, что и zapret linux-arm: работают и на железе с FPU, обратное неверно.
 APK_TARGETS = {
-    "x86_64":  {"zapret": "linux-x86_64", "mihomo": "amd64-v1",         "elf": (2, 1, 0x3E)},
-    "x86":     {"zapret": "linux-x86",    "mihomo": "386",              "elf": (1, 1, 0x03)},
-    "aarch64": {"zapret": "linux-arm64",  "mihomo": "arm64",            "elf": (2, 1, 0xB7)},
+    "x86_64":  {"zapret": "linux-x86_64", "mihomo": "amd64-v1",         "xray": "64",        "elf": (2, 1, 0x3E)},
+    "x86":     {"zapret": "linux-x86",    "mihomo": "386",              "xray": "32",        "elf": (1, 1, 0x03)},
+    "aarch64": {"zapret": "linux-arm64",  "mihomo": "arm64",            "xray": "arm64-v8a", "elf": (2, 1, 0xB7)},
     # zapret собирает linux-arm soft-float — на hard-float armv7 такой статический
     # бинарник запускается штатно, обратное неверно, поэтому берём именно его.
-    "arm":     {"zapret": "linux-arm",    "mihomo": "armv5",            "elf": (1, 1, 0x28)},
-    "mipsel":  {"zapret": "linux-mipsel", "mihomo": "mipsle-softfloat", "elf": (1, 1, 0x08)},
-    "mips":    {"zapret": "linux-mips",   "mihomo": "mips-softfloat",   "elf": (1, 2, 0x08)},
+    "arm":     {"zapret": "linux-arm",    "mihomo": "armv5",            "xray": "arm32-v5",  "elf": (1, 1, 0x28)},
+    "mipsel":  {"zapret": "linux-mipsel", "mihomo": "mipsle-softfloat", "xray": "mips32le",  "elf": (1, 1, 0x08)},
+    "mips":    {"zapret": "linux-mips",   "mihomo": "mips-softfloat",   "xray": "mips32",    "elf": (1, 2, 0x08)},
 }
 MIHOMO_REPO = "MetaCubeX/mihomo"
+# xray — вход VLESS xhttp своего VPN-сервера (sing-box xhttp не умеет). Штатный
+# xray-core прошивок бывает старым (OpenWrt 23.05: 1.8.x, без xhttp), поэтому
+# свой пакет xray-detour с бинарником /usr/bin/xray-detour — без конфликта с ним.
+XRAY_REPO = "XTLS/Xray-core"
 
 # Кэш скачанных бинарников: router-backup/apk/<семейство>/<имя>. router-backup
 # в .gitignore, поэтому в репозиторий ничего не попадает.
@@ -151,6 +155,8 @@ GO_TARGETS = {
     "mips":    ("mips", {"GOMIPS": "softfloat"}),
 }
 MIHOMO_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "mihomo")
+XRAY_BINARY = os.path.join(BACKUP_HOME, "usr", "bin", "xray-detour")
+XRAY_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "xray-detour")
 AWGGO_BINARY_MIPSEL = os.path.join(BACKUP_HOME, "keenetic", "opt", "bin", "amneziawg-go")
 
 # Upstream source repos for --fetch-upstream (CI auto-publish needs no
@@ -273,6 +279,25 @@ set +e
 chmod 0755 /opt/bin/amneziawg-go 2>/dev/null
 exit 0
 """
+# xray-detour: после установки — пересобрать вход xhttp (detour-server apply).
+_XRAY_POSTINST = """#!/bin/sh
+set +e
+chmod 0755 /usr/bin/xray-detour 2>/dev/null
+[ -x /usr/sbin/detour-server ] && /usr/sbin/detour-server apply >/dev/null 2>&1
+exit 0
+"""
+_XRAY_POSTINST_MIPSEL = """#!/bin/sh
+set +e
+chmod 0755 /opt/bin/xray-detour 2>/dev/null
+[ -x /opt/sbin/detour-server ] && /opt/sbin/detour-server apply >/dev/null 2>&1
+exit 0
+"""
+_XRAY_PRERM = """#!/bin/sh
+exit 0
+"""
+_XRAY_DESC = ("Xray-core (XTLS) as xray-detour. Detour feed build - VLESS xhttp inbound "
+              "of the Detour VPN server (sing-box has no xhttp).")
+
 _MIHOMO_DESC = ("mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar "
                 "for AmneziaWG profiles (sing-box has no AmneziaWG).")
 
@@ -308,6 +333,12 @@ PKG_SPECS = {
         "postinst": _MIHOMO_POSTINST,
         "prerm": _MIHOMO_PRERM,
         "description": _MIHOMO_DESC,
+    },
+    "xray-detour": {
+        "files": [(XRAY_BINARY, "usr/bin/xray-detour", 0o755)],
+        "postinst": _XRAY_POSTINST,
+        "prerm": _XRAY_PRERM,
+        "description": _XRAY_DESC,
     },
     "detour-awg-go": {
         "files": [(AWGGO_BINARY, "usr/bin/amneziawg-go", 0o755)],
@@ -381,6 +412,12 @@ PKG_SPECS_MIPSEL = {
         "prerm": _MIHOMO_PRERM_MIPSEL,
         "description": _MIHOMO_DESC + " Keenetic/Entware (mipsel soft-float).",
     },
+    "xray-detour": {
+        "files": [(XRAY_BINARY_MIPSEL, "opt/bin/xray-detour", 0o755)],
+        "postinst": _XRAY_POSTINST_MIPSEL,
+        "prerm": _XRAY_PRERM,
+        "description": _XRAY_DESC + " Keenetic/Entware (mipsel soft-float).",
+    },
     "detour-awg-go": {
         "files": [(AWGGO_BINARY_MIPSEL, "opt/bin/amneziawg-go", 0o755)],
         "postinst": _AWGGO_POSTINST_MIPSEL,
@@ -417,6 +454,10 @@ def apk_pkg_specs(cpu):
         "mihomo": dict(
             PKG_SPECS_OPENWRT["mihomo"],
             files=[(apk_bin_path(cpu, "mihomo"), "usr/bin/mihomo", 0o755)],
+        ),
+        "xray-detour": dict(
+            PKG_SPECS_OPENWRT["xray-detour"],
+            files=[(apk_bin_path(cpu, "xray-detour"), "usr/bin/xray-detour", 0o755)],
         ),
         "detour-awg-go": dict(
             PKG_SPECS_OPENWRT["detour-awg-go"],
@@ -704,6 +745,24 @@ def fetch_mihomo(version, suffix, elf, dest):
     print(f"  fetching mihomo {version} ({suffix}) ...")
     data = gzip.decompress(_http_get(url))
     _assert_static_elf(data, f"mihomo {version} [{suffix}]", elf)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "wb") as f:
+        f.write(data)
+    os.chmod(dest, 0o755)
+    print(f"    -> {dest} ({len(data):,} B)")
+
+
+def fetch_xray(version, suffix, elf, dest):
+    """Скачать Xray <version> (ассет Xray-linux-<suffix>.zip) и положить бинарник xray
+    в dest. Xray собирается с CGO_ENABLED=0 — статический; ELF-проверка ловит
+    чужую архитектуру."""
+    import zipfile
+    url = (f"https://github.com/{XRAY_REPO}/releases/download/v{version}/"
+           f"Xray-linux-{suffix}.zip")
+    print(f"  fetching xray {version} ({suffix}) ...")
+    with zipfile.ZipFile(io.BytesIO(_http_get(url))) as z:
+        data = z.read("xray")
+    _assert_static_elf(data, f"xray {version} [{suffix}]", elf)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     with open(dest, "wb") as f:
         f.write(data)
@@ -1133,7 +1192,7 @@ def expand_arches(spec):
     return [spec]
 
 
-def build_arch(arch, args, sb_ver, tpws_ver, nfqws2_ver, mihomo_ver=None):
+def build_arch(arch, args, sb_ver, tpws_ver, nfqws2_ver, mihomo_ver=None, xray_ver=None):
     """Собрать и проиндексировать фид одной архитектуры. Возвращает (имя, путь)."""
     select_arch(arch)
     is_apk = PKG_FORMAT == "apk"
@@ -1189,6 +1248,16 @@ def build_arch(arch, args, sb_ver, tpws_ver, nfqws2_ver, mihomo_ver=None):
         fetch_mihomo(mihomo_ver, t["mihomo"], t["elf"], dest)
         build_versions["mihomo"] = f"{mihomo_ver}-{args.revision}"
 
+    if xray_ver:
+        if is_apk:
+            t = APK_TARGETS[cpu]
+            dest = apk_bin_path(cpu, "xray-detour")
+        else:
+            t = APK_TARGETS["mipsel" if arch == "mipsel" else "aarch64"]
+            dest = XRAY_BINARY_MIPSEL if arch == "mipsel" else XRAY_BINARY
+        fetch_xray(xray_ver, t["xray"], t["elf"], dest)
+        build_versions["xray-detour"] = f"{xray_ver}-{args.revision}"
+
     awggo_ver = getattr(args, "awg_go_version", None)
     if awggo_ver:
         if arch == "mipsel":
@@ -1200,7 +1269,7 @@ def build_arch(arch, args, sb_ver, tpws_ver, nfqws2_ver, mihomo_ver=None):
 
     if not build_versions and not os.path.isdir(FEED_OUT):
         die(f"nothing to build for {arch}: pass --version / --tpws-version / "
-            "--nfqws2-version / --mihomo-version / --awg-go-version")
+            "--nfqws2-version / --mihomo-version / --xray-version / --awg-go-version")
 
     label = ", ".join(f"{k} {v}" for k, v in build_versions.items()) or "(re-index only)"
     fmt = "apk" if is_apk else "opkg"
@@ -1218,6 +1287,8 @@ def main():
                     f"(fetched from {ZAPRET2_REPO}@{ZAPRET2_REL})")
     ap.add_argument("--mihomo-version", help="mihomo (MetaCubeX) version to build, e.g. 1.19.31 "
                     "— сайдкар AmneziaWG; всегда качается из апстрима")
+    ap.add_argument("--xray-version", help="Xray-core (XTLS) version, e.g. 26.10.21 — пакет "
+                    "xray-detour для входа VLESS xhttp; всегда качается из апстрима")
     ap.add_argument("--awg-go-version", help="версия пакета detour-awg-go (userspace AmneziaWG "
                     "для своего VPN-сервера), e.g. 1.0.0 — собирается из tools/awg-go")
     ap.add_argument("--revision", default=DEFAULT_REVISION,
@@ -1242,6 +1313,7 @@ def main():
     tpws_ver = parse_version(args.tpws_version, "tpws-version") if args.tpws_version else None
     nfqws2_ver = parse_version(args.nfqws2_version, "nfqws2-version") if args.nfqws2_version else None
     mihomo_ver = parse_version(args.mihomo_version, "mihomo-version") if args.mihomo_version else None
+    xray_ver = parse_version(args.xray_version, "xray-version") if args.xray_version else None
 
     arches = expand_arches(args.arch)
     overlays = {}
@@ -1249,7 +1321,7 @@ def main():
         # mipsel не умеет nfqws2 — на групповых сборках просто не передаём его туда,
         # иначе build_arch честно упал бы и увёл с собой весь прогон.
         nf = None if arch == "mipsel" else nfqws2_ver
-        name, path = build_arch(arch, args, sb_ver, tpws_ver, nf, mihomo_ver)
+        name, path = build_arch(arch, args, sb_ver, tpws_ver, nf, mihomo_ver, xray_ver)
         overlays[name] = path
 
     if args.publish:

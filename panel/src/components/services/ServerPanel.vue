@@ -694,7 +694,7 @@ function hint(c: ServerClient): string {
             v-if="vx && vw && vlessOn"
             :model-value="vx.enabled"
             label="VLESS + xhttp"
-            :hint="vx.active ? `${vw.host}:${vw.public_port}${vw.public ? ' через реверс-прокси' : ''} · xray · Happ, v2rayNG, Hiddify, Detour` : vx.enabled ? vx.reason || 'не работает' : 'Как WebSocket, но запросами HTTP — ещё ближе к обычному сайту; нужен xray'"
+            :hint="vx.active ? `${vw.host}:${vx.public_port || vw.public_port}${vw.public ? ' через реверс-прокси' : ''} · xray · Happ, v2rayNG, Hiddify, Detour` : vx.enabled ? vx.reason || 'не работает' : 'Как WebSocket, но запросами HTTP — ещё ближе к обычному сайту; нужен xray'"
             :busy="busy === 'xhttp'"
             @update:model-value="toggleXhttp"
           />
