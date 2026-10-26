@@ -446,7 +446,7 @@ load_conf() {
     SUB=0; SPORT=""; SUBURL=""
     VTLS=0; TPORT=""; TDOMAIN=""
     WS=0; WSPORT=""; WSPATH=""; WSPUB=""
-    XH=0; XHPORT=""; XHPATH=""; XHSEC=reality
+    XH=0; XHPORT=""; XHPATH=""; XHSEC=""
     [ -f "$CONF" ] && . "$CONF"
     set_iface
 }
@@ -454,7 +454,7 @@ load_conf() {
 load_defaults() {
     # Detour в контейнере (linux/): порты обязаны совпасть с опубликованными, а
     # адрес — быть внешним адресом хоста. Их кладёт стартовый скрипт контейнера.
-    DEF_PORT=""; DEF_VPORT=""; DEF_ENDPOINT=""; DEF_SPORT=""; DEF_TPORT=""; DEF_WSPORT=""; DEF_XHPORT=""
+    DEF_PORT=""; DEF_VPORT=""; DEF_ENDPOINT=""; DEF_SPORT=""; DEF_TPORT=""; DEF_WSPORT=""; DEF_XHPORT=""; DEF_XHSEC=""
     [ -f "$DIR/defaults" ] && . "$DIR/defaults"
     case "$DEF_PORT" in ''|*[!0-9]*) DEF_PORT="" ;; esac
     case "$DEF_VPORT" in ''|*[!0-9]*) DEF_VPORT="" ;; esac
@@ -462,6 +462,9 @@ load_defaults() {
     case "$DEF_TPORT" in ''|*[!0-9]*) DEF_TPORT="" ;; esac
     case "$DEF_WSPORT" in ''|*[!0-9]*) DEF_WSPORT="" ;; esac
     case "$DEF_XHPORT" in ''|*[!0-9]*) DEF_XHPORT="" ;; esac
+    # install.sh --xhttp-reality: вход xhttp опубликован наружу — режим Reality,
+    # пока его не сменили в панели.
+    [ -z "$XHSEC" ] && [ "${DEF_XHSEC:-}" = reality ] && XHSEC=reality
 }
 
 # Первичная инициализация: порт, подсеть, обфускация, затем ключи того входа,
@@ -1201,20 +1204,27 @@ xray_xhttp_ok() {
     [ "$1" -gt 24 ] || { [ "$1" -eq 24 ] && [ "$2" -ge 11 ]; }
 }
 
-# Порт xhttp в ссылках: за прокси — его порт, иначе свой порт входа.
-xh_port() { if [ -n "$WSPUB" ]; then ws_port; else printf '%s' "$XHPORT"; fi; }
-
-# Свой вход без прокси маскируется Reality (ключи и SNI — те же, что у входа
-# VLESS-Reality) или TLS на своём сертификате. Reality — по умолчанию: на
-# мобильных сетях ТСПУ глотает ClientHello TLS к неизвестному сайту на
-# нестандартном порту, а Reality выглядит как обращение к SNI-сайту.
-xh_reality() { [ -z "$WSPUB" ] && [ "$XHSEC" != tls ]; }
-xh_host() { if xh_reality; then endpoint_host; else ws_host; fi; }
+# Режим входа xhttp (XHSEC): reality — свой порт, маскировка Reality (ключи и
+# SNI входа VLESS-Reality); tls — свой порт, TLS на своём сертификате; proxy —
+# за реверс-прокси WebSocket (WSPUB). Пусто — как до 2.17.4: proxy, если прокси
+# задан, иначе reality. Reality — выбор по умолчанию: на мобильных сетях ТСПУ
+# глотает ClientHello TLS к неизвестному сайту на нестандартном порту.
+xh_mode() {
+    case "$XHSEC" in
+        reality|tls) echo "$XHSEC" ;;
+        proxy) if [ -n "$WSPUB" ]; then echo proxy; else echo reality; fi ;;
+        *) if [ -n "$WSPUB" ]; then echo proxy; else echo reality; fi ;;
+    esac
+}
+xh_reality() { [ "$(xh_mode)" = reality ]; }
+# Порт и домен в ссылках: за прокси — его, иначе свой порт входа.
+xh_port() { if [ "$(xh_mode)" = proxy ]; then ws_port; else printf '%s' "$XHPORT"; fi; }
+xh_dom() { if [ "$(xh_mode)" = proxy ]; then ws_host; else tls_domain; fi; }
+xh_host() { if xh_reality; then endpoint_host; else xh_dom; fi; }
 
 xh_on() {
     vless_on && [ "$XH" = 1 ] && [ -n "$XHPORT" ] && [ -n "$XHPATH" ] && xray_xhttp_ok || return 1
-    [ -n "$WSPUB" ] && return 0
-    xh_reality && return 0
+    [ "$(xh_mode)" = tls ] || return 0
     tls_cert && [ -n "$(tls_domain)" ]
 }
 
@@ -1222,8 +1232,7 @@ xh_reason() {
     [ "$XH" = 1 ] || return 0
     [ -n "$(xray_bin)" ] || { echo "xray не установлен"; return; }
     xray_xhttp_ok || { echo "xray $(xray_ver | tr ' ' .) не умеет xhttp (нужен 24.11+) — нажмите «Установить недостающее»"; return; }
-    [ -n "$WSPUB" ] && return 0
-    xh_reality && return 0
+    [ "$(xh_mode)" = tls ] || return 0
     tls_cert || { echo "нет сертификата: задайте адрес реверс-прокси, выпустите сертификат или выберите Reality"; return; }
     [ -n "$(tls_domain)" ] || echo "не задан домен сертификата"
 }
@@ -1239,7 +1248,7 @@ client_xh_link() {
             "$uuid" "$(endpoint_host)" "$XHPORT" "$VSNI" "${FP:-chrome}" "$VPUB" "$VSID" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
         return 0
     fi
-    h=$(ws_host)
+    h=$(xh_dom)
     printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=%s&type=xhttp&host=%s&path=%s&mode=auto#%s\n' \
         "$uuid" "$h" "$(xh_port)" "$h" "${FP:-chrome}" "$h" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
 }
@@ -1253,7 +1262,7 @@ xh_render() {
     if xh_reality; then
         printf ',"security":"reality","realitySettings":{"show":false,"target":"%s:443","serverNames":["%s"],"privateKey":"%s","shortIds":["%s"]}' \
             "$VSNI" "$VSNI" "$VPRIV" "$VSID"
-    elif [ -z "$WSPUB" ]; then
+    elif [ "$(xh_mode)" = tls ]; then
         printf ',"security":"tls","tlsSettings":{"serverName":"%s","certificates":[{"certificateFile":"%s","keyFile":"%s"}]}' \
             "$(tls_domain)" "$T_CRT" "$T_KEY"
     fi
@@ -2075,7 +2084,7 @@ status_json() {
     xrun=false; [ -n "$(xh_pid)" ] && xrun=true
     xinst=false; xray_xhttp_ok && xinst=true
     xpp=$(xh_port); case "$xpp" in ''|*[!0-9]*) xpp=0 ;; esac
-    xsec=tls; xh_reality && xsec=reality; [ -n "$WSPUB" ] && xsec=proxy
+    xsec=$(xh_mode)
     printf '"xhttp":{"enabled":%s,"active":%s,"running":%s,"installed":%s,"port":%s,"public_port":%s,"path":"%s","security":"%s","host":"%s","reason":"%s"}},' \
         "$([ "$XH" = 1 ] && echo true || echo false)" "$(xh_on && echo true || echo false)" "$xrun" "$xinst" \
         "${XHPORT:-0}" "$xpp" "$(json_esc "$XHPATH")" "$xsec" "$(json_esc "$(xh_host)")" "$(json_esc "$(xh_reason)")"
@@ -2303,10 +2312,11 @@ sub_vless_xh_json() {  # $1 tag
         printf '"transport":{"type":"xhttp","path":"%s"}}' "$(json_esc "$XHPATH")"
         return
     fi
+    xdom=$(xh_dom)
     printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s",' \
-        "$(json_esc "$1")" "$wdom" "$(xh_port)" "$uuid"
-    printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"}},' "$wdom" "${FP:-chrome}"
-    printf '"transport":{"type":"xhttp","path":"%s","host":"%s"}}' "$(json_esc "$XHPATH")" "$wdom"
+        "$(json_esc "$1")" "$xdom" "$(xh_port)" "$uuid"
+    printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"}},' "$xdom" "${FP:-chrome}"
+    printf '"transport":{"type":"xhttp","path":"%s","host":"%s"}}' "$(json_esc "$XHPATH")" "$xdom"
 }
 
 # Профиль AmneziaWG в форме профилей Detour (detour-awg): ключи amnezia — mihomo.
@@ -2329,10 +2339,11 @@ sub_clash() {
         printf '    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$VPUB" "$VSID"
         printf '    xhttp-opts:\n      path: "%s"\n' "$XHPATH"
     elif [ "$has_x" = 1 ]; then
-        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$xn" "$wdom" "$(xh_port)" "$uuid"
+        xdom=$(xh_dom)
+        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$xn" "$xdom" "$(xh_port)" "$uuid"
         printf '    network: xhttp\n    udp: true\n    tls: true\n'
-        printf '    servername: %s\n    client-fingerprint: %s\n' "$wdom" "${FP:-chrome}"
-        printf '    xhttp-opts:\n      path: "%s"\n      host: %s\n' "$XHPATH" "$wdom"
+        printf '    servername: %s\n    client-fingerprint: %s\n' "$xdom" "${FP:-chrome}"
+        printf '    xhttp-opts:\n      path: "%s"\n      host: %s\n' "$XHPATH" "$xdom"
     fi
     if [ "$has_w" = 1 ]; then
         printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$wn" "$wdom" "$(ws_port)" "$uuid"
@@ -2556,7 +2567,7 @@ cmd_set() {
                 if [ "$v" != "$WSPORT" ] && tcp_port_busy "$v"; then err "TCP-порт $v уже занят на роутере"; fi
                 WSPORT=$v ;;
             xhttp) case "$v" in 0|1) XH=$v ;; *) err "xhttp: 0 или 1" ;; esac ;;
-            xhsec) case "$v" in reality|tls) XHSEC=$v ;; *) err "xhsec: reality или tls" ;; esac ;;
+            xhsec) case "$v" in reality|tls|proxy) XHSEC=$v ;; *) err "xhsec: reality, tls или proxy" ;; esac ;;
             xhport)
                 case "$v" in ''|*[!0-9]*) err "порт — число" ;; esac
                 [ "$v" -ge 1 ] && [ "$v" -le 65535 ] || err "порт 1–65535"

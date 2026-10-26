@@ -295,11 +295,13 @@ const entriesHint = computed(() => {
   return `${parts.join(" · ")} · сеть ${s.net}`;
 });
 
-const XH_SEC_OPTIONS: { value: "reality" | "tls"; label: string; hint?: string }[] = [
+const XH_SEC_ALL: { value: "reality" | "tls" | "proxy"; label: string; hint?: string }[] = [
   { value: "reality", label: "Reality", hint: "Ключи и SNI входа VLESS-Reality, сертификат не нужен — проходит там, где режут TLS" },
-  { value: "tls", label: "TLS (сертификат)" },
+  { value: "tls", label: "TLS (сертификат)", hint: "Свой порт, TLS на сертификате домена" },
+  { value: "proxy", label: "Через прокси", hint: "За тем же реверс-прокси, что и WebSocket" },
 ];
-const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "", sport: "", suburl: "", tport: "", tdomain: "", wsport: "", wspath: "", wspub: "", xhport: "", xhpath: "", xhsec: "reality" as "reality" | "tls" });
+const xhSecOptions = computed(() => XH_SEC_ALL.filter((o) => o.value !== "proxy" || form.wspub.trim()));
+const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "", sport: "", suburl: "", tport: "", tdomain: "", wsport: "", wspath: "", wspub: "", xhport: "", xhpath: "", xhsec: "reality" as "reality" | "tls" | "proxy" });
 const showSettings = ref(false);
 watch(showSettings, (v) => {
   if (!v || !st.value) return;
@@ -318,7 +320,7 @@ watch(showSettings, (v) => {
   form.wspub = vw.value?.public ?? "";
   form.xhport = String(vx.value?.port || "");
   form.xhpath = vx.value?.path ?? "";
-  form.xhsec = vx.value?.security === "tls" ? "tls" : "reality";
+  form.xhsec = vx.value?.security ?? "reality";
   form.suburl = sb.value?.url ?? "";
 });
 
@@ -347,7 +349,7 @@ async function saveSettings() {
   if (vx.value) {
     if (Number(form.xhport) && Number(form.xhport) !== vx.value.port) patch.xhport = Number(form.xhport);
     if (form.xhpath.trim() && form.xhpath.trim() !== vx.value.path) patch.xhpath = form.xhpath.trim();
-    if (vx.value.security && vx.value.security !== "proxy" && form.xhsec !== vx.value.security) patch.xhsec = form.xhsec;
+    if (vx.value.security && form.xhsec !== vx.value.security) patch.xhsec = form.xhsec;
   }
   if (sb.value) {
     if (Number(form.sport) && Number(form.sport) !== sb.value.port) patch.sport = Number(form.sport);
@@ -965,7 +967,7 @@ function hint(c: ServerClient): string {
                 <template v-if="vx">
                   <FormField
                     label="TCP-порт входа xhttp"
-                    :hint="vw.public ? 'Сюда проксирует nginx (без TLS, с http2 на внешней стороне); на Linux-сервере — install.sh --xhttp-port' : 'Открывается с WAN, пока вход включён'"
+                    :hint="form.xhsec === 'proxy' ? 'Сюда проксирует nginx (без TLS, с http2 на внешней стороне); на Linux-сервере — install.sh --xhttp-port' : 'Открывается с WAN, пока вход включён'"
                   >
                     <input v-model="form.xhport" type="number" min="1" max="65535" />
                   </FormField>
@@ -973,10 +975,10 @@ function hint(c: ServerClient): string {
                     <input v-model="form.xhpath" type="text" />
                   </FormField>
                   <SegmentedControl
-                    v-if="!form.wspub.trim() && vx.security"
+                    v-if="vx.security"
                     v-model="form.xhsec"
-                    label="Маскировка xhttp без реверс-прокси"
-                    :options="XH_SEC_OPTIONS"
+                    label="Маскировка xhttp"
+                    :options="xhSecOptions"
                   />
                 </template>
               </template>

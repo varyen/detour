@@ -604,7 +604,7 @@ export interface ServerSettingsPatch {
   xhttp?: boolean;
   xhport?: number;
   xhpath?: string;
-  xhsec?: "reality" | "tls";
+  xhsec?: "reality" | "tls" | "proxy";
 }
 
 export interface ApplyLogResponse {
