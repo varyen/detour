@@ -12,6 +12,10 @@
 
 ## Установка
 
+> 🐧 **Ставите на VPS / Linux-сервер, а не на роутер?** Пакеты ниже не для
+> него — на сервере Detour работает в Docker, ставится одной командой
+> `install.sh`. Пошаговая инструкция: [`linux/README.md`](linux/README.md).
+
 Если вы просто хотите поставить Detour на роутер, а не разрабатывать его,
 используйте готовый пакет из [GitHub Releases](https://github.com/varyen/detour/releases).
 
@@ -84,6 +88,21 @@ opkg install /tmp/detour-keenetic_X.Y.Z_all.ipk
 После установки панель доступна по адресу `http://<IP-роутера>:8080/detour/`.
 Дальше обновляться проще всего из самой панели или командой `detour-update apply`
 на роутере.
+
+### Linux-сервер (VPS)
+
+Свой VPN-сервер (AmneziaWG, VLESS-Reality, VLESS+TLS, WebSocket, xhttp) на
+обычном VPS с Ubuntu/Debian, x86_64 или arm64. Detour живёт в контейнере с
+настоящим OpenWrt 25.12, файрвол хоста не трогает:
+
+```sh
+curl -fsSL https://get.docker.com | sh          # если Docker ещё нет
+git clone https://github.com/varyen/detour /root/detour
+sh /root/detour/linux/install.sh
+```
+
+Дальше — открыть порты у провайдера VPS и зайти в панель через SSH-туннель.
+Всё по шагам, параметры, свой домен и nginx — в [`linux/README.md`](linux/README.md).
 
 ### Клиент для устройства (Windows, macOS, Android)
 
