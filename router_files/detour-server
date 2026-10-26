@@ -424,6 +424,7 @@ XH=$XH
 XHPORT=$XHPORT
 XHPATH=$XHPATH
 XHSEC=$XHSEC
+XHSNI=$XHSNI
 EOF
     mv "$CONF.tmp" "$CONF"
 }
@@ -446,7 +447,7 @@ load_conf() {
     SUB=0; SPORT=""; SUBURL=""
     VTLS=0; TPORT=""; TDOMAIN=""
     WS=0; WSPORT=""; WSPATH=""; WSPUB=""
-    XH=0; XHPORT=""; XHPATH=""; XHSEC=""
+    XH=0; XHPORT=""; XHPATH=""; XHSEC=""; XHSNI=""
     [ -f "$CONF" ] && . "$CONF"
     set_iface
 }
@@ -462,9 +463,6 @@ load_defaults() {
     case "$DEF_TPORT" in ''|*[!0-9]*) DEF_TPORT="" ;; esac
     case "$DEF_WSPORT" in ''|*[!0-9]*) DEF_WSPORT="" ;; esac
     case "$DEF_XHPORT" in ''|*[!0-9]*) DEF_XHPORT="" ;; esac
-    # install.sh --xhttp-reality: вход xhttp опубликован наружу — режим Reality,
-    # пока его не сменили в панели.
-    [ -z "$XHSEC" ] && [ "${DEF_XHSEC:-}" = reality ] && XHSEC=reality
 }
 
 # Первичная инициализация: порт, подсеть, обфускация, затем ключи того входа,
@@ -482,6 +480,9 @@ ensure_conf() {
     mkdir -p "$DIR"; chmod 700 "$DIR"
     load_defaults
     changed=0
+    # install.sh --xhttp-reality: вход xhttp опубликован наружу — режим Reality,
+    # пока его не сменили в панели.
+    if [ -z "$XHSEC" ] && [ "$DEF_XHSEC" = reality ]; then XHSEC=reality; changed=1; fi
     if [ -z "$PORT" ]; then
         if [ -n "$DEF_PORT" ]; then
             PORT=$DEF_PORT
@@ -1217,6 +1218,11 @@ xh_mode() {
     esac
 }
 xh_reality() { [ "$(xh_mode)" = reality ]; }
+# Сайт-маска Reality у xhttp — своя: Reality в xray не дожимает рукопожатие с
+# сайтами, у которых большая цепочка сертификатов (www.microsoft.com,
+# www.apple.com — маски входа VLESS-Reality по умолчанию), а sing-box с ними
+# справляется. Пусто — ya.ru (проверен с мобильных сетей).
+xh_sni() { echo "${XHSNI:-ya.ru}"; }
 # Порт и домен в ссылках: за прокси — его, иначе свой порт входа.
 xh_port() { if [ "$(xh_mode)" = proxy ]; then ws_port; else printf '%s' "$XHPORT"; fi; }
 xh_dom() { if [ "$(xh_mode)" = proxy ]; then ws_host; else tls_domain; fi; }
@@ -1245,7 +1251,7 @@ client_xh_link() {
     name=$(echo "$line" | cut -d'|' -f3)
     if xh_reality; then
         printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=xhttp&path=%s&mode=auto#%s\n' \
-            "$uuid" "$(endpoint_host)" "$XHPORT" "$VSNI" "${FP:-chrome}" "$VPUB" "$VSID" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
+            "$uuid" "$(endpoint_host)" "$XHPORT" "$(xh_sni)" "${FP:-chrome}" "$VPUB" "$VSID" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
         return 0
     fi
     h=$(xh_dom)
@@ -1261,7 +1267,7 @@ xh_render() {
     printf '],"decryption":"none"},"streamSettings":{"network":"xhttp","xhttpSettings":{"path":"%s","mode":"auto"}' "$XHPATH"
     if xh_reality; then
         printf ',"security":"reality","realitySettings":{"show":false,"target":"%s:443","serverNames":["%s"],"privateKey":"%s","shortIds":["%s"]}' \
-            "$VSNI" "$VSNI" "$VPRIV" "$VSID"
+            "$(xh_sni)" "$(xh_sni)" "$VPRIV" "$VSID"
     elif [ "$(xh_mode)" = tls ]; then
         printf ',"security":"tls","tlsSettings":{"serverName":"%s","certificates":[{"certificateFile":"%s","keyFile":"%s"}]}' \
             "$(tls_domain)" "$T_CRT" "$T_KEY"
@@ -2085,9 +2091,9 @@ status_json() {
     xinst=false; xray_xhttp_ok && xinst=true
     xpp=$(xh_port); case "$xpp" in ''|*[!0-9]*) xpp=0 ;; esac
     xsec=$(xh_mode)
-    printf '"xhttp":{"enabled":%s,"active":%s,"running":%s,"installed":%s,"port":%s,"public_port":%s,"path":"%s","security":"%s","host":"%s","reason":"%s"}},' \
+    printf '"xhttp":{"enabled":%s,"active":%s,"running":%s,"installed":%s,"port":%s,"public_port":%s,"path":"%s","security":"%s","host":"%s","sni":"%s","reason":"%s"}},' \
         "$([ "$XH" = 1 ] && echo true || echo false)" "$(xh_on && echo true || echo false)" "$xrun" "$xinst" \
-        "${XHPORT:-0}" "$xpp" "$(json_esc "$XHPATH")" "$xsec" "$(json_esc "$(xh_host)")" "$(json_esc "$(xh_reason)")"
+        "${XHPORT:-0}" "$xpp" "$(json_esc "$XHPATH")" "$xsec" "$(json_esc "$(xh_host)")" "$(json_esc "$(xh_sni)")" "$(json_esc "$(xh_reason)")"
     srun=false; [ -n "$(sub_pid)" ] && srun=true
     shttps=false; sub_https && shttps=true
     printf '"sub":{"enabled":%s,"running":%s,"port":%s,"https":%s,"url":"%s","base":"%s"},' \
@@ -2307,7 +2313,7 @@ sub_vless_xh_json() {  # $1 tag
     if xh_reality; then
         printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s",' \
             "$(json_esc "$1")" "$(json_esc "$host")" "$XHPORT" "$uuid"
-        printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"},' "$VSNI" "${FP:-chrome}"
+        printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"},' "$(xh_sni)" "${FP:-chrome}"
         printf '"reality":{"enabled":true,"public_key":"%s","short_id":"%s"}},' "$VPUB" "$VSID"
         printf '"transport":{"type":"xhttp","path":"%s"}}' "$(json_esc "$XHPATH")"
         return
@@ -2335,7 +2341,7 @@ sub_clash() {
     if [ "$has_x" = 1 ] && xh_reality; then
         printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$xn" "$host" "$XHPORT" "$uuid"
         printf '    network: xhttp\n    udp: true\n    tls: true\n'
-        printf '    servername: %s\n    client-fingerprint: %s\n' "$VSNI" "${FP:-chrome}"
+        printf '    servername: %s\n    client-fingerprint: %s\n' "$(xh_sni)" "${FP:-chrome}"
         printf '    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$VPUB" "$VSID"
         printf '    xhttp-opts:\n      path: "%s"\n' "$XHPATH"
     elif [ "$has_x" = 1 ]; then
@@ -2523,6 +2529,10 @@ cmd_set() {
                 valid_ipv4_host "$v" && echo "$v" | grep -q '[A-Za-z]' && echo "$v" | grep -q '\.' || \
                     err "маскировочный сайт: домен, например www.microsoft.com"
                 VSNI=$v ;;
+            xhsni)
+                valid_ipv4_host "$v" && echo "$v" | grep -q '[A-Za-z]' && echo "$v" | grep -q '\.' || \
+                    err "сайт-маска xhttp: домен, например ya.ru"
+                XHSNI=$v ;;
             net)
                 v=${v%.0/24}; v=${v%.0}
                 echo "$v" | grep -qE '^10\.[0-9]{1,3}\.[0-9]{1,3}$|^192\.168\.[0-9]{1,3}$|^172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}$' || \

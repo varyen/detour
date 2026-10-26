@@ -5957,6 +5957,7 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
             v=$(srv_num xhport);   [ -n "$v" ] && set -- "$@" "xhport=$v"
             v=$(srv_str xhpath);   [ -n "$v" ] && set -- "$@" "xhpath=$v"
             v=$(srv_str xhsec);    [ -n "$v" ] && set -- "$@" "xhsec=$v"
+            v=$(srv_str xhsni);    [ -n "$v" ] && set -- "$@" "xhsni=$v"
             printf '%s' "$POST_DATA" | grep -q '"wspub"' && set -- "$@" "wspub=$(srv_str wspub)"
             v=$(srv_num sport);    [ -n "$v" ] && set -- "$@" "sport=$v"
             printf '%s' "$POST_DATA" | grep -q '"suburl"' && set -- "$@" "suburl=$(srv_str suburl)"

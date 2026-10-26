@@ -301,7 +301,7 @@ const XH_SEC_ALL: { value: "reality" | "tls" | "proxy"; label: string; hint?: st
   { value: "proxy", label: "Через прокси", hint: "За тем же реверс-прокси, что и WebSocket" },
 ];
 const xhSecOptions = computed(() => XH_SEC_ALL.filter((o) => o.value !== "proxy" || form.wspub.trim()));
-const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "", sport: "", suburl: "", tport: "", tdomain: "", wsport: "", wspath: "", wspub: "", xhport: "", xhpath: "", xhsec: "reality" as "reality" | "tls" | "proxy" });
+const form = reactive({ endpoint: "", port: "", net: "", dns: "", mtu: "", vport: "", sni: "", sport: "", suburl: "", tport: "", tdomain: "", wsport: "", wspath: "", wspub: "", xhport: "", xhpath: "", xhsec: "reality" as "reality" | "tls" | "proxy", xhsni: "" });
 const showSettings = ref(false);
 watch(showSettings, (v) => {
   if (!v || !st.value) return;
@@ -321,6 +321,7 @@ watch(showSettings, (v) => {
   form.xhport = String(vx.value?.port || "");
   form.xhpath = vx.value?.path ?? "";
   form.xhsec = vx.value?.security ?? "reality";
+  form.xhsni = vx.value?.sni ?? "";
   form.suburl = sb.value?.url ?? "";
 });
 
@@ -350,6 +351,7 @@ async function saveSettings() {
     if (Number(form.xhport) && Number(form.xhport) !== vx.value.port) patch.xhport = Number(form.xhport);
     if (form.xhpath.trim() && form.xhpath.trim() !== vx.value.path) patch.xhpath = form.xhpath.trim();
     if (vx.value.security && form.xhsec !== vx.value.security) patch.xhsec = form.xhsec;
+    if (vx.value.sni !== undefined && form.xhsni.trim() && form.xhsni.trim() !== vx.value.sni) patch.xhsni = form.xhsni.trim();
   }
   if (sb.value) {
     if (Number(form.sport) && Number(form.sport) !== sb.value.port) patch.sport = Number(form.sport);
@@ -980,6 +982,13 @@ function hint(c: ServerClient): string {
                     label="Маскировка xhttp"
                     :options="xhSecOptions"
                   />
+                  <FormField
+                    v-if="form.xhsec === 'reality' && vx.sni !== undefined"
+                    label="Сайт-маска xhttp"
+                    hint="Свой у xhttp: Reality в xray не справляется с сайтами с большой цепочкой сертификатов (www.microsoft.com, www.apple.com)"
+                  >
+                    <input v-model="form.xhsni" type="text" placeholder="ya.ru" />
+                  </FormField>
                 </template>
               </template>
               <FormField label="Подсеть клиентов" hint="Частная /24, не пересекающаяся с домашней сетью">

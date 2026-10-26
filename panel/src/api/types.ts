@@ -525,6 +525,8 @@ export interface ServerVlessXhttp {
   security?: "reality" | "tls" | "proxy";
   /** Адрес в ссылках клиентов. */
   host?: string;
+  /** Сайт-маска Reality у xhttp (2.17.5+). */
+  sni?: string;
   reason: string;
 }
 
@@ -605,6 +607,7 @@ export interface ServerSettingsPatch {
   xhport?: number;
   xhpath?: string;
   xhsec?: "reality" | "tls" | "proxy";
+  xhsni?: string;
 }
 
 export interface ApplyLogResponse {
