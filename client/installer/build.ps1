@@ -122,7 +122,7 @@ Sign @((Join-Path $stage 'detour-svc.exe'), (Join-Path $stage 'detour-app.exe'))
 $outfile = Join-Path $Out "detour-setup-$version.exe"
 $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
 if (-not (Test-Path $makensis)) { throw "NSIS не установлен: winget install NSIS.NSIS" }
-& $makensis /V2 "/DVERSION=$version" "/DSTAGE=$stage" "/DOUTFILE=$outfile" (Join-Path $PSScriptRoot 'detour.nsi')
+& $makensis /V2 /INPUTCHARSET UTF8 "/DVERSION=$version" "/DSTAGE=$stage" "/DOUTFILE=$outfile" (Join-Path $PSScriptRoot 'detour.nsi')
 if ($LASTEXITCODE) { throw "makensis не собрал установщик" }
 Sign @($outfile)
 
