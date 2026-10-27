@@ -1592,7 +1592,9 @@ compute_device_extras() {
     devices_conf_lines > "/tmp/detour-devices.$$"
     # Профиль для торрентов — та же цель «через X», что у устройства, только трафик
     # на её вход заворачивает detour-torrent по метке, а не правило по MAC.
-    [ -n "$TORRENT_VIA" ] && echo "torrent|vpn|$TORRENT_VIA" >> "/tmp/detour-devices.$$"
+    # Канал для торрентов — routing_mark первого хопа цели, как у клиентов
+    # VPN-сервера.
+    [ -n "$TORRENT_VIA" ] && echo "torrent|vpn|$TORRENT_VIA|$TORRENT_VIA_MARK" >> "/tmp/detour-devices.$$"
     while IFS='|' read -r mac mode target marks; do
         if [ "$mode" = direct ]; then
             DX_MAP="$DX_MAP$mac direct 0 0$nl"
@@ -1734,7 +1736,8 @@ append_device_rules() {
     fi
 }
 
-# Режим торрентов на запрещающем профиле: TA_MODE block|direct|via, TA_VIA — id.
+# Режим торрентов на запрещающем профиле: TA_MODE block|direct|via, TA_VIA — id,
+# TA_UPLINK — канал (вторая строка «uplink <id>», detour-wanpin), пусто — как роутер.
 torrent_action_read() {
     local l
     TA_MODE=block; TA_VIA=""
@@ -1745,6 +1748,17 @@ torrent_action_read() {
             TA_VIA=$(printf '%s' "${l#via }" | tr -cd 'a-zA-Z0-9_-')
             [ -n "$TA_VIA" ] && TA_MODE=via ;;
     esac
+    TA_UPLINK=$(sed -n 's/^uplink //p' "$TORRENT_ACTION_FILE" 2>/dev/null | head -1 | tr -cd 'a-zA-Z0-9_.-')
+}
+
+# «id iface mark table usable ip» по каналам; пусто — каналов не знаем.
+torrent_uplinks() {
+    [ -x "$WANPIN_BIN" ] && "$WANPIN_BIN" marks 2>/dev/null
+}
+
+torrent_uplink_mark() { # $1 id канала → метка (0x…) или пусто
+    [ -n "$1" ] || return 0
+    torrent_uplinks | awk -v u="$1" '$1 == u && $3 ~ /^0x[0-9a-fA-F]+$/ { print $3; exit }'
 }
 
 # Разрешены ли торренты на ВСЕХ хопах цели (профиль или именованная цепочка).
@@ -2302,7 +2316,7 @@ build_config() {
     # процессы и входа цели нет) и только на цель, где торренты разрешены на
     # всех хопах; иначе остаётся запрет. «direct» при «Всё через VPN» тоже
     # запрет: этот режим обещает, что напрямую не уходит ничего.
-    TORRENT_OUT=""; TORRENT_VIA=""; TORRENT_PORT=""; TORRENT_UPORT=""
+    TORRENT_OUT=""; TORRENT_VIA=""; TORRENT_VIA_MARK=""; TORRENT_PORT=""; TORRENT_UPORT=""
     if [ "$TORRENT_REJECT" = 1 ]; then
         torrent_action_read
         case "$TA_MODE" in
@@ -2311,7 +2325,11 @@ build_config() {
                    ! iptables -t nat -C PREROUTING -i "$LAN_IF" -j SINGBOX_ALLVPN 2>/dev/null; then
                     TORRENT_OUT=direct
                 fi ;;
-            via) [ "$mode" != multi ] && target_allows_torrents "$TA_VIA" && TORRENT_VIA=$TA_VIA ;;
+            via)
+                if [ "$mode" != multi ] && target_allows_torrents "$TA_VIA"; then
+                    TORRENT_VIA=$TA_VIA
+                    TORRENT_VIA_MARK=$(torrent_uplink_mark "$TA_UPLINK")
+                fi ;;
         esac
     fi
 
@@ -4605,11 +4623,13 @@ torrent_set)
     ;;
 
 torrent_action)
-    # GET → {mode, via, via_ok}; POST {"mode":"block|direct|via","via":"<id>"}.
+    # GET → {mode, via, via_ok, uplink, uplink_pinned, uplinks}; POST
+    # {"mode":"block|direct|via","via":"<id>","uplink":"<id канала>|"}.
     # «via» допустим только на цель, где торренты разрешены на всех хопах.
     if [ "$REQUEST_METHOD" = "POST" ]; then
         TA_NEW=$(printf '%s' "$POST_DATA" | sed -n 's/.*"mode"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' | head -1)
         TA_NEWVIA=$(printf '%s' "$POST_DATA" | sed -n 's/.*"via"[[:space:]]*:[[:space:]]*"\([a-zA-Z0-9_-]*\)".*/\1/p' | head -1)
+        TA_NEWUPL=$(printf '%s' "$POST_DATA" | sed -n 's/.*"uplink"[[:space:]]*:[[:space:]]*"\([a-zA-Z0-9_.-]*\)".*/\1/p' | head -1)
         case "$TA_NEW" in
             block|direct) TA_LINE=$TA_NEW ;;
             via)
@@ -4618,8 +4638,13 @@ torrent_action)
                 TA_LINE="via $TA_NEWVIA" ;;
             *) json_err "режим: block, direct или via"; exit 0 ;;
         esac
+        if [ -n "$TA_NEWUPL" ] && [ "$TA_NEW" != block ]; then
+            [ -n "$(torrent_uplink_mark "$TA_NEWUPL")" ] || { json_err "нет такого канала в интернет: $TA_NEWUPL"; exit 0; }
+            TA_LINE="$TA_LINE
+uplink $TA_NEWUPL"
+        fi
         mkdir -p "$(dirname "$TORRENT_ACTION_FILE")" 2>/dev/null
-        echo "$TA_LINE" > "$TORRENT_ACTION_FILE"
+        printf '%s\n' "$TA_LINE" > "$TORRENT_ACTION_FILE"
         # Действует, только пока активная цепочка торренты запрещает.
         TA_CHAIN=$(get_active_chain)
         TA_DENY=0
@@ -4642,7 +4667,12 @@ torrent_action)
     torrent_action_read
     TA_OK=false
     [ "$TA_MODE" = via ] && target_allows_torrents "$TA_VIA" && TA_OK=true
-    printf '{"ok":true,"mode":"%s","via":"%s","via_ok":%s}\n' "$TA_MODE" "$TA_VIA" "$TA_OK"
+    TA_PIN=false
+    [ -x "$WANPIN_BIN" ] && "$WANPIN_BIN" installed 2>/dev/null && TA_PIN=true
+    printf '{"ok":true,"mode":"%s","via":"%s","via_ok":%s,"uplink":"%s","uplink_pinned":%s,"uplinks":[%s]}\n' \
+        "$TA_MODE" "$TA_VIA" "$TA_OK" "$TA_UPLINK" "$TA_PIN" \
+        "$(torrent_uplinks | awk '{ printf "%s{\"id\":\"%s\",\"iface\":\"%s\",\"usable\":%s,\"ip\":\"%s\"}", \
+            (n++ ? "," : ""), $1, $2, ($5 == 1 ? "true" : "false"), ($6 == "-" ? "" : $6) }')"
     ;;
 
 torrent_status)

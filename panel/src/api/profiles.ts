@@ -97,9 +97,9 @@ export const profiles = {
   torrentStatus: () => requestJsonTolerant<TorrentStatus>("torrent_status"),
   /** Запрет, «напрямую» или «через профиль, где торренты разрешены». */
   torrentAction: () => requestJsonTolerant<TorrentAction>("torrent_action"),
-  setTorrentAction: (mode: TorrentActionMode, via = "") =>
+  setTorrentAction: (mode: TorrentActionMode, via = "", uplink = "") =>
     requestJson<TorrentAction>("torrent_action", {
-      body: { mode, via },
+      body: { mode, via, uplink },
       timeoutMs: 180_000,
     }),
 

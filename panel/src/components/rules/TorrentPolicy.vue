@@ -12,6 +12,7 @@ import type { TorrentAction, TorrentActionMode, TorrentStatus } from "@/api";
 import { useProfilesStore } from "@/stores/profiles";
 import { useStatusStore } from "@/stores/status";
 import { useToastStore } from "@/stores/toast";
+import { uplinkName } from "@/lib/uplink";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ toggle: [] }>();
@@ -24,6 +25,7 @@ const action = ref<TorrentAction | null>(null);
 const st = ref<TorrentStatus | null>(null);
 const mode = ref<TorrentActionMode>("block");
 const via = ref("");
+const uplink = ref("");
 const busy = ref(false);
 
 const MODES: { value: TorrentActionMode; label: string; hint: string }[] = [
@@ -33,6 +35,13 @@ const MODES: { value: TorrentActionMode; label: string; hint: string }[] = [
 ];
 
 const allowed = computed(() => store.rows.filter((r) => r.torrents === true));
+
+/* Канал в интернет — только у роутера и только когда каналов больше одного. */
+const uplinks = computed(() => action.value?.uplinks ?? []);
+const showUplink = computed(() => !status.isClient && uplinks.value.length >= 2);
+function uplinkLabel(id: string): string {
+  return id ? `«${uplinkName(id)}»` : "";
+}
 
 async function load() {
   const [a, s] = await Promise.all([
@@ -44,6 +53,7 @@ async function load() {
   if (a) {
     mode.value = a.mode;
     via.value = a.via;
+    uplink.value = a.uplink ?? "";
   }
   if (!store.rows.length) void store.load();
 }
@@ -59,17 +69,27 @@ void load();
 const summary = computed(() => {
   const a = action.value;
   if (!a) return "Читаю настройку…";
-  if (a.mode === "direct") return "Пускать напрямую, мимо VPN";
+  const ch = a.uplink ? `, канал ${uplinkLabel(a.uplink)}` : "";
+  if (a.mode === "direct") return `Пускать напрямую, мимо VPN${ch}`;
   if (a.mode === "via") {
     const name = store.rows.find((r) => r.id === a.via)?.name ?? a.via;
-    return a.via_ok ? `Через «${name}»` : `Через «${name}» — но там торренты больше не разрешены, сейчас блок`;
+    return a.via_ok ? `Через «${name}»${ch}` : `Через «${name}» — но там торренты больше не разрешены, сейчас блок`;
   }
   return "Блокировать";
 });
 
 const dirty = computed(
-  () => !!action.value && (mode.value !== action.value.mode || (mode.value === "via" && via.value !== action.value.via)),
+  () =>
+    !!action.value &&
+    (mode.value !== action.value.mode ||
+      (mode.value === "via" && via.value !== action.value.via) ||
+      (mode.value !== "block" && uplink.value !== (action.value.uplink ?? ""))),
 );
+
+const uplinkDead = computed(() => {
+  const u = uplinks.value.find((x) => x.id === uplink.value);
+  return !!u && !u.usable;
+});
 
 async function save() {
   if (mode.value === "via" && !via.value) {
@@ -78,7 +98,11 @@ async function save() {
   }
   busy.value = true;
   try {
-    action.value = await profilesApi.setTorrentAction(mode.value, mode.value === "via" ? via.value : "");
+    action.value = await profilesApi.setTorrentAction(
+      mode.value,
+      mode.value === "via" ? via.value : "",
+      mode.value !== "block" && showUplink.value ? uplink.value : "",
+    );
     toast.ok("Сохранено");
     st.value = await profilesApi.torrentStatus().catch(() => null);
   } catch (e) {
@@ -133,6 +157,33 @@ async function save() {
       </label>
     </template>
 
+    <template v-if="mode !== 'block' && showUplink">
+      <label class="pick">
+        <span>Канал в интернет</span>
+        <select v-model="uplink">
+          <option value="">Как у роутера</option>
+          <option v-for="u in uplinks" :key="u.id" :value="u.id">
+            {{ uplinkName(u.id) }} · {{ u.iface }}{{ u.ip ? ` · ${u.ip}` : "" }}{{ u.usable ? "" : " · не работает" }}
+          </option>
+        </select>
+      </label>
+      <p v-if="uplink" class="hint">
+        <template v-if="mode === 'direct'">
+          Новые соединения торрент-клиента выходят в интернет через {{ uplinkLabel(uplink) }} — с его адресом.
+        </template>
+        <template v-else>
+          Туннель профиля для торрентов набирается через {{ uplinkLabel(uplink) }}; основной VPN остаётся на своём канале.
+        </template>
+        Если канал упадёт — каналом роутера. Входящие соединения от пиров на канал с серым адресом
+        (CGNAT) не приходят: качать и раздавать можно, но только тем пирам, к которым подключаетесь вы.
+      </p>
+      <p v-if="uplink && uplinkDead" class="warn">Канал сейчас не работает — торренты идут каналом роутера.</p>
+      <p v-if="uplink && action?.uplink_pinned === false" class="warn">
+        Правила каналов на роутере сейчас не стоят (второй канал не обнаружен или
+        «Отвечать тем же каналом» выключено) — выбор вступит в силу, когда они появятся.
+      </p>
+    </template>
+
     <p v-if="mode === 'direct'" class="warn">
       Провайдер увидит торрент-трафик с вашего домашнего адреса. При включённом
       «Всё через VPN» роутер всё равно блокирует — этот режим обещает, что
@@ -145,7 +196,9 @@ async function save() {
     </p>
 
     <p v-if="st?.enforcing && st.action && st.action !== 'block'" class="ok">
-      Сейчас работает: торренты идут {{ st.action === "direct" ? "напрямую" : `через «${st.via_name || st.via}»` }}<template
+      Сейчас работает: торренты идут {{ st.action === "direct" ? "напрямую" : `через «${st.via_name || st.via}»` }}{{
+        st.uplink ? `, канал ${uplinkLabel(st.uplink)}` : ""
+      }}<template
         v-if="st.clients?.length"
       >, торрент-клиенты: {{ st.clients.join(", ") }}</template>.
     </p>

@@ -223,6 +223,19 @@ export interface TorrentAction {
   via: string;
   /** На нём торренты всё ещё разрешены — иначе роутер откатится в запрет. */
   via_ok: boolean;
+  /** Канал в интернет для торрентов (id detour-wanpin), пусто — как роутер (роутер, с 2.18.0). */
+  uplink?: string;
+  /** Правила меток каналов стоят — без них выбор канала ничего не меняет. */
+  uplink_pinned?: boolean;
+  uplinks?: TorrentUplink[];
+}
+
+export interface TorrentUplink {
+  id: string;
+  iface: string;
+  /** Канал поднят и есть шлюз. */
+  usable: boolean;
+  ip: string;
 }
 
 export interface TorrentStatus {
@@ -231,6 +244,8 @@ export interface TorrentStatus {
   action?: TorrentActionMode;
   via?: string;
   via_name?: string;
+  /** Канал, через который реально идут торренты (пусто — как роутер). */
+  uplink?: string;
   profile?: string;
   profile_name?: string;
   /** Суммарно отброшено пакетов с момента установки правил. */

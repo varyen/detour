@@ -20,6 +20,7 @@ import { fmtAgo, fmtBitrate, fmtBytes } from "@/lib/format";
 import { useProfilesStore } from "@/stores/profiles";
 import { useStatusStore } from "@/stores/status";
 import { useToastStore } from "@/stores/toast";
+import { uplinkName } from "@/lib/uplink";
 
 const open = defineModel<boolean>("open", { required: true });
 const toast = useToastStore();
@@ -406,16 +407,6 @@ async function regen() {
 /* Принимает клиентов только канал с белым адресом, а выходить в интернет их
    трафик может любым: прямой — по метке соединения, туннель VPN — через свой
    вход sing-box с routing_mark канала. */
-/* Те же подписи, что у detour-wan-link (uplink_label). */
-const UPLINK_NAMES: Record<string, string> = {
-  wan: "Основной",
-  secondwan: "Второй",
-  wwan: "Wi-Fi репитер",
-  tethering: "USB-модем",
-};
-function uplinkName(id: string): string {
-  return UPLINK_NAMES[id] ?? (id.startsWith("modem") ? "Мобильный" : id);
-}
 const uplinks = computed(() => st.value?.uplinks ?? []);
 const showUplink = computed(() => !status.isClient && uplinks.value.length >= 2);
 const uplinkOptions = computed(() => [
