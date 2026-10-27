@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +18,21 @@ use crate::appupdate;
 const APPLY_LOG: &str = "run/apply.log";
 const SENTINEL: &str = "===DETOUR_APPLY_DONE rc=";
 const AUTOCHECK_EVERY: i64 = 6 * 3600;
+/// Сводка, открытая при устаревшей проверке, запускает её сама, но не чаще
+/// этого: без сети каждая неудачная попытка иначе повторялась бы на каждом
+/// заходе на «Обзор».
+const AUTOCHECK_RETRY: i64 = 600;
+static AUTOCHECK_RUNNING: AtomicBool = AtomicBool::new(false);
+static AUTOCHECK_TRIED: AtomicI64 = AtomicI64::new(0);
+
+fn last_check_epoch(st: &Value) -> i64 {
+    st.get("last_check")
+        .and_then(Value::as_str)
+        .and_then(|t| humantime::parse_rfc3339(t).ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// Отказ для платформ, где движки зашиты в приложение.
 fn bundled() -> Option<Response> {
@@ -129,11 +145,7 @@ impl Backend {
         let proxy = self.fetch_proxy().await;
         let was_running = self.dpi.pid().await.is_some();
         self.dpi.stop().await;
-        let mut lines = Vec::new();
-        let res = updater::dpi_install(&self.store, &self.dpi, proxy.as_deref(), &mut |l| lines.push(l)).await;
-        for l in &lines {
-            self.log_line(l);
-        }
+        let res = updater::dpi_install(&self.store, &self.dpi, proxy.as_deref(), &mut |l| self.log_line(&l)).await;
         let rc = match res {
             Ok(_) => {
                 if was_running {
@@ -175,11 +187,7 @@ impl Backend {
 
     pub(super) async fn bins_apply_job(&self) {
         let proxy = self.fetch_proxy().await;
-        let mut lines = Vec::new();
-        let res = updater::install(&self.store, &self.engine, proxy.as_deref(), &mut |l| lines.push(l)).await;
-        for l in &lines {
-            self.log_line(l);
-        }
+        let res = updater::install(&self.store, &self.engine, proxy.as_deref(), &mut |l| self.log_line(&l)).await;
         let rc = match res {
             Ok(_) => {
                 if self.engine.pid().await.is_some() {
@@ -235,6 +243,7 @@ impl Backend {
         if !appupdate::supported() {
             return Response::json(&json!({ "ok": false, "error": "на этой платформе приложение обновляется не из панели" }));
         }
+        appupdate::set_install_error(&self.store, "");
         let _ = self.store.write_text(APPLY_LOG, "обновление приложения: начинаю\n");
         let _ = self.jobs.send(Job::AppDownload);
         Response::json(&json!({ "ok": true, "status": "started" }))
@@ -242,18 +251,16 @@ impl Backend {
 
     async fn app_download_job(&self) {
         let proxy = self.fetch_proxy().await;
-        let mut lines = Vec::new();
-        let res = appupdate::download(&self.store, proxy.as_deref(), &mut |l| lines.push(l)).await;
-        for l in &lines {
-            self.log_line(l);
-        }
+        let res = appupdate::download(&self.store, proxy.as_deref(), &mut |l| self.log_line(&l)).await;
         let rc = match res {
             Ok(_) => {
                 self.log_line("сборка скачана и проверена — запускаю установку");
                 0
             }
             Err(e) => {
-                self.log_line(&format!("ошибка: {e:#}"));
+                let msg = format!("{e:#}");
+                self.log_line(&format!("ошибка: {msg}"));
+                appupdate::set_install_error(&self.store, &msg);
                 1
             }
         };
@@ -280,6 +287,7 @@ impl Backend {
     }
 
     pub(super) async fn updates_overview(&self) -> Response {
+        let checking = self.autocheck_kick();
         let app = appupdate::state(&self.store);
         let st = updater::state(&self.store);
         let s = |k: &str| st.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
@@ -294,10 +302,17 @@ impl Backend {
                 "current_version": crate::VERSION,
                 "last_check": a("last_check"),
                 "changelog_b64": a("changelog_b64"),
-                "error": if a("status") == "error" { a("message") } else { String::new() },
+                "error": if a("status") == "error" {
+                    a("message")
+                } else if app["update_available"].as_bool().unwrap_or(false) && !a("install_error").is_empty() {
+                    format!("установка не удалась: {}", a("install_error"))
+                } else {
+                    String::new()
+                },
             })
         });
         Response::json(&json!({
+            "checking": checking,
             "panel": panel,
             "singbox": {
                 "update_available": has_update,
@@ -339,32 +354,55 @@ impl Backend {
             }
         }
         self.hosts_maintenance().await;
-        if self.autocheck_on() && appupdate::supported() {
-            let last = appupdate::state(&self.store)
-                .get("last_check")
-                .and_then(Value::as_str)
-                .and_then(|t| humantime::parse_rfc3339(t).ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            if now_epoch() - last >= AUTOCHECK_EVERY {
-                let proxy = self.fetch_proxy().await;
-                let _ = appupdate::check(&self.store, proxy.as_deref()).await;
-            }
+        self.autocheck().await;
+    }
+
+    fn app_check_due(&self) -> bool {
+        self.autocheck_on()
+            && appupdate::supported()
+            && now_epoch() - last_check_epoch(&appupdate::state(&self.store)) >= AUTOCHECK_EVERY
+    }
+
+    fn bins_check_due(&self) -> bool {
+        self.autocheck_on()
+            && crate::dpi::UPDATABLE
+            && self.engine.present()
+            && now_epoch() - last_check_epoch(&updater::state(&self.store)) >= AUTOCHECK_EVERY
+    }
+
+    /// На Android ядро живёт в процессе окна, а система замораживает его, едва
+    /// приложение уходит с экрана: часовой таймер maintenance почти никогда не
+    /// доживает до срабатывания, и «Проверять обновления сама» молчала сутками.
+    /// Поэтому устаревшую проверку запускает и сама сводка обновлений.
+    /// Возвращает, идёт ли сейчас проверка.
+    fn autocheck_kick(&self) -> bool {
+        if AUTOCHECK_RUNNING.load(Ordering::SeqCst) {
+            return true;
         }
-        if self.autocheck_on() && crate::dpi::UPDATABLE && self.engine.present() {
-            let st = updater::state(&self.store);
-            let last = st
-                .get("last_check")
-                .and_then(Value::as_str)
-                .and_then(|t| humantime::parse_rfc3339(t).ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            if now_epoch() - last >= AUTOCHECK_EVERY {
-                let proxy = self.fetch_proxy().await;
-                let _ = updater::check(&self.store, &self.engine, proxy.as_deref()).await;
-            }
+        if !self.app_check_due() && !self.bins_check_due() {
+            return false;
+        }
+        let now = now_epoch();
+        if now - AUTOCHECK_TRIED.load(Ordering::SeqCst) < AUTOCHECK_RETRY {
+            return false;
+        }
+        AUTOCHECK_TRIED.store(now, Ordering::SeqCst);
+        AUTOCHECK_RUNNING.store(true, Ordering::SeqCst);
+        if self.jobs.send(Job::AutoCheck).is_err() {
+            AUTOCHECK_RUNNING.store(false, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    async fn autocheck(&self) {
+        if self.app_check_due() {
+            let proxy = self.fetch_proxy().await;
+            let _ = appupdate::check(&self.store, proxy.as_deref()).await;
+        }
+        if self.bins_check_due() {
+            let proxy = self.fetch_proxy().await;
+            let _ = updater::check(&self.store, &self.engine, proxy.as_deref()).await;
         }
     }
 
@@ -374,6 +412,10 @@ impl Backend {
             Job::BinsApply => self.bins_apply_job().await,
             Job::DpiApply => self.dpi_apply_job().await,
             Job::AppDownload => self.app_download_job().await,
+            Job::AutoCheck => {
+                self.autocheck().await;
+                AUTOCHECK_RUNNING.store(false, Ordering::SeqCst);
+            }
         }
     }
 }
@@ -416,7 +458,7 @@ impl Backend {
         every(&self, 60, 600, |b| async move { b.refresh_due_subscriptions().await });
         every(&self, 90, 120, |b| async move { b.health_tick(false).await });
         every(&self, 20, 120, |b| async move { b.ping_all().await });
-        every(&self, 300, 3600, |b| async move { b.maintenance().await });
+        every(&self, 60, 3600, |b| async move { b.maintenance().await });
         every(&self, 5, 3600, |b| async move { b.ensure_downloads().await });
         // Раз в секунду: соединение, открывшееся и закрывшееся между опросами,
         // в `/connections` не видно вовсе, и его байты приходится угадывать.

@@ -376,6 +376,8 @@ export interface UpdateChannelState {
 }
 
 export interface UpdatesOverview {
+  /** Клиент: сводка сама запустила устаревшую проверку, итог будет позже. */
+  checking?: boolean;
   panel?: UpdateChannelState;
   singbox?: UpdateChannelState;
   tpws?: UpdateChannelState;

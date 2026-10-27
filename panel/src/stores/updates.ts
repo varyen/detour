@@ -85,6 +85,11 @@ export const useUpdatesStore = defineStore("updates", () => {
   /** Обновление самой панели — единственное, ради которого стоит звать по имени. */
   const panelHot = computed(() => hot.value.find((h) => h.key === "panel") ?? null);
 
+  /* Клиент запускает просроченную проверку прямо из сводки и отвечает
+     checking — тогда перечитываем её, пока проверка не закончится. */
+  let recheck: ReturnType<typeof setTimeout> | undefined;
+  let rechecks = 0;
+
   async function load(force = false) {
     if (!force && data.value && Date.now() - loadedAt.value < FRESH_MS) return;
     if (loading.value) return;
@@ -94,6 +99,13 @@ export const useUpdatesStore = defineStore("updates", () => {
       if (o) {
         data.value = o;
         loadedAt.value = Date.now();
+        clearTimeout(recheck);
+        if (o.checking && rechecks < 8) {
+          rechecks += 1;
+          recheck = setTimeout(() => void load(true), 15_000);
+        } else {
+          rechecks = 0;
+        }
       }
     } catch {
       /* Сводка — не то, ради чего стоит показывать ошибку на главной: канал

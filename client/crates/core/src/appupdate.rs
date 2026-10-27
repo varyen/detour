@@ -148,33 +148,89 @@ pub async fn check(store: &Store, proxy: Option<&str>) -> Result<Value> {
     Ok(state(store))
 }
 
-async fn fetch(url: &str, proxy: Option<&str>, timeout: Duration, cap: usize) -> Result<Vec<u8>> {
+/// Причина последней неудачной установки — для карточки «Приложение»: шторку
+/// с журналом часто закрывают, не дождавшись конца. Пустая строка стирает.
+pub fn set_install_error(store: &Store, msg: &str) {
+    let mut st = store.read_json(STATE).unwrap_or_else(|| json!({}));
+    if let Some(o) = st.as_object_mut() {
+        if msg.is_empty() {
+            o.remove("install_error");
+        } else {
+            o.insert("install_error".into(), json!(msg));
+        }
+        let _ = store.write_json(STATE, &st);
+    }
+}
+
+fn mb(n: usize) -> f64 {
+    n as f64 / 1048576.0
+}
+
+async fn fetch(
+    url: &str,
+    proxy: Option<&str>,
+    timeout: Duration,
+    cap: usize,
+    mut progress: Option<&mut (dyn FnMut(String) + Send)>,
+) -> Result<Vec<u8>> {
     let mut resp = get_any(url, proxy, timeout).await?;
+    let total = resp.content_length().map(|n| n as usize);
+    // Отметка раз в 10 % (или раз в 8 МБ, если размер не пришёл): на мобильной
+    // сети сборка качается минутами, и без хода журнал выглядит зависшим.
+    let step = total.map(|t| (t / 10).max(1 << 20)).unwrap_or(8 << 20);
+    let mut next = step;
     let mut buf = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
         buf.extend_from_slice(&chunk);
         if buf.len() > cap {
             bail!("файл больше {} МБ — это не наша сборка", cap >> 20);
         }
+        if buf.len() >= next {
+            next = buf.len() + step;
+            if let Some(p) = progress.as_mut() {
+                p(match total {
+                    Some(t) => format!("скачано {:.1} из {:.1} МБ ({}%)", mb(buf.len()), mb(t), buf.len() * 100 / t.max(1)),
+                    None => format!("скачано {:.1} МБ", mb(buf.len())),
+                });
+            }
+        }
     }
     Ok(buf)
 }
 
-/// Скачать и проверить сборку из последней проверки. Возвращает путь к файлу.
+/// Перепроверить релизы и скачать свежую сборку. Версию из прошлой проверки
+/// берём, только если GitHub сейчас не ответил: она могла устареть на
+/// несколько релизов.
 pub async fn download(store: &Store, proxy: Option<&str>, log: &mut (dyn FnMut(String) + Send)) -> Result<PathBuf> {
-    let st = state(store);
+    log("проверяю последнюю версию".into());
+    let st = match check(store, proxy).await {
+        Ok(st) => st,
+        Err(e) => {
+            log(format!("проверка не удалась ({e:#}) — беру версию из прошлой проверки"));
+            state(store)
+        }
+    };
     let available = st["available"].as_str().unwrap_or("").to_owned();
     if !newer(&available) {
-        bail!("новой версии нет — сначала «Проверить»");
+        bail!("новой версии нет — установлена {}", crate::VERSION);
     }
     let asset = asset_name(&available).ok_or_else(|| anyhow!("для этой архитектуры сборки нет"))?;
+    // Повтор после отказа установщика не должен заново тянуть сотню мегабайт.
+    if let Some(p) = st["downloaded"].as_str().map(PathBuf::from) {
+        if p.file_name().is_some_and(|n| n == asset.as_str()) && verify_file(&p).is_ok() {
+            log(format!("версия {available} уже скачана и проверена"));
+            return Ok(p);
+        }
+    }
     let base = format!("https://github.com/{REPO}/releases/download/v{available}/{asset}");
-    log(format!("скачиваю {asset}"));
-    let sig = fetch(&format!("{base}.sig"), proxy, Duration::from_secs(60), 4096)
+    log(format!("версия {available}, скачиваю {asset}"));
+    let sig = fetch(&format!("{base}.sig"), proxy, Duration::from_secs(60), 4096, None)
         .await
         .context("подпись .sig не скачалась")?;
-    let bytes = fetch(&base, proxy, Duration::from_secs(900), MAX_ASSET).await.context("сборка не скачалась")?;
-    log(format!("скачано {:.1} МБ, проверяю подпись", bytes.len() as f64 / 1048576.0));
+    let bytes = fetch(&base, proxy, Duration::from_secs(900), MAX_ASSET, Some(&mut *log))
+        .await
+        .context("сборка не скачалась")?;
+    log(format!("скачано {:.1} МБ, проверяю подпись", mb(bytes.len())));
     verify(&bytes, &sig)?;
     log("подпись верна".into());
 
@@ -333,8 +389,13 @@ mod live {
         eprintln!("available={} update={}", st["available"], st["update_available"]);
         let v = st["available"].as_str().unwrap();
         let base = format!("https://github.com/{REPO}/releases/download/v{v}/{}", asset_name(v).unwrap());
-        let sig = fetch(&format!("{base}.sig"), None, Duration::from_secs(60), 4096).await.unwrap();
-        let bytes = fetch(&base, None, Duration::from_secs(600), MAX_ASSET).await.unwrap();
+        let sig = fetch(&format!("{base}.sig"), None, Duration::from_secs(60), 4096, None).await.unwrap();
+        let mut steps = Vec::new();
+        let bytes =
+            fetch(&base, None, Duration::from_secs(600), MAX_ASSET, Some(&mut |l| steps.push(l))).await.unwrap();
+        eprintln!("{}", steps.join("
+"));
+        assert!(steps.len() >= 5, "ход скачивания не отмечался: {steps:?}");
         verify(&bytes, &sig).expect("подпись сборки приложения");
         eprintln!("сборка {} МБ, подпись верна", bytes.len() >> 20);
         let _ = std::fs::remove_dir_all(dir);

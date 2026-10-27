@@ -612,6 +612,18 @@ async function installApp() {
   }
 }
 
+/* Шторку с журналом часто закрывают, не дождавшись конца, — тогда причина
+   остаётся только в тосте. Берём строку «ошибка: …», иначе последнюю. */
+function failReason(log?: string): string {
+  const lines = String(log ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const err = [...lines].reverse().find((l) => /^(ошибка|error)[:\s]/i.test(l));
+  const line = (err ?? lines[lines.length - 1] ?? "").replace(/^(ошибка|error):?\s*/i, "");
+  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
+}
+
 /** Живой хвост отсоединённой установки: единственный способ узнать её исход. */
 async function followApply(title: string, panelish: boolean, okText = "обновление установлено") {
   /* Версия ДО установки — по её смене фолбэк отличает свежий «applied» в
@@ -640,8 +652,11 @@ async function followApply(title: string, panelish: boolean, okText = "обно�
         : "Готово.";
       toast.ok(`${title}: ${okText}`);
     } else if (r?.done === true && rc !== null) {
-      applyNote.value = `Установка завершилась с кодом ${rc}. Что именно не получилось — видно в журнале.`;
-      toast.error(`${title}: установка не удалась`);
+      const why = failReason(r.log);
+      applyNote.value = why
+        ? `Установка не удалась: ${why}`
+        : `Установка завершилась с кодом ${rc}. Что именно не получилось — видно в журнале.`;
+      toast.error(why ? `${title}: ${why}` : `${title}: установка не удалась`);
     } else if (panelish) {
       /* Ни кода возврата, ни признака конца — идём за состоянием установщика. */
       await followPanelStatus(preVersion, title);

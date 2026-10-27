@@ -63,6 +63,7 @@ enum Job {
     BinsApply,
     DpiApply,
     AppDownload,
+    AutoCheck,
 }
 
 pub struct Backend {
