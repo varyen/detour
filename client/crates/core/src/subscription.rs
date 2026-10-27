@@ -863,9 +863,9 @@ mod tests {
 
     #[test]
     fn decodes_b64_title() {
-        assert_eq!(decode_title("base64:dGlsdG9zaWs=").as_deref(), Some("tiltosik"));
+        assert_eq!(decode_title("base64:RXhhbXBsZSBWUE4=").as_deref(), Some("Example VPN"));
         assert_eq!(decode_title("base64:0J/RgNC40LLQtdGC").as_deref(), Some("Привет"));
-        assert_eq!(decode_title("tiltosik"), None);
+        assert_eq!(decode_title("Example VPN"), None);
         assert_eq!(decode_title("base64:!!!"), None);
     }
 
