@@ -89,6 +89,11 @@ impl Backend {
             log.push("подписок нет".to_owned());
         }
         for id in &ids {
+            match sub::migrate_b64_group(&self.store, id) {
+                Ok(true) => log.push(format!("{id}: группа «base64:…» раскодирована")),
+                Ok(false) => {}
+                Err(e) => log.push(format!("{id}: группа не переименована: {e}")),
+            }
             let Some(s) = sub::load(&self.store, id) else {
                 last_error = Some(format!("{id}: not found"));
                 continue;

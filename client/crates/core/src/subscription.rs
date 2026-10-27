@@ -619,6 +619,42 @@ pub async fn fetch_and_parse(
     Err(errors.join("; "))
 }
 
+/// `profile-title` по соглашению Happ/v2rayN бывает «base64:<UTF-8 в base64>».
+pub fn decode_title(t: &str) -> Option<String> {
+    let rest = t.strip_prefix("base64:")?;
+    let bytes = sharelink::b64decode_bytes(rest.trim())?;
+    let s = String::from_utf8(bytes).ok()?;
+    (!s.trim().is_empty() && !s.chars().any(char::is_control)).then(|| s.trim().to_owned())
+}
+
+/// До 2.17.7 панель брала такой заголовок в имя группы как есть. Раскодировать
+/// группу и название подписки и переименовать группу у её профилей — иначе
+/// поиск устаревших по имени группы задвоил бы их.
+pub fn migrate_b64_group(store: &Store, id: &str) -> Result<bool> {
+    let Some(mut m) = load(store, id) else { return Ok(false) };
+    let mut changed = false;
+    if let Some(t) = decode_title(&text(&m, "title")) {
+        m.insert("title".into(), json!(t));
+        changed = true;
+    }
+    let old = text(&m, "group");
+    if let Some(new) = decode_title(&old) {
+        for pid in profiles::list_ids(store) {
+            let Some(mut p) = profiles::load(store, &pid) else { continue };
+            if p.get("group").and_then(Value::as_str) == Some(old.as_str()) {
+                p["group"] = json!(new);
+                store.write_json(&format!("{}/{pid}.json", store::PROFILES_DIR), &p)?;
+            }
+        }
+        m.insert("group".into(), json!(new));
+        changed = true;
+    }
+    if changed {
+        store.write_json(&rel(id), &Value::Object(m))?;
+    }
+    Ok(changed)
+}
+
 /// Разобранное тело → файлы профилей. Удаление устаревших идёт только по
 /// непустой группе и не трогает профили активной и сохранённых цепочек.
 pub fn apply_parsed(
@@ -823,6 +859,14 @@ mod tests {
         let p = parse_body(body, false);
         assert_eq!(p.entries.len(), 1);
         assert_eq!(p.entries[0].1["transport"], json!({ "type": "xhttp", "path": "/x", "mode": "packet-up", "x_padding_bytes": "10-20" }));
+    }
+
+    #[test]
+    fn decodes_b64_title() {
+        assert_eq!(decode_title("base64:dGlsdG9zaWs=").as_deref(), Some("tiltosik"));
+        assert_eq!(decode_title("base64:0J/RgNC40LLQtdGC").as_deref(), Some("Привет"));
+        assert_eq!(decode_title("tiltosik"), None);
+        assert_eq!(decode_title("base64:!!!"), None);
     }
 
     #[test]

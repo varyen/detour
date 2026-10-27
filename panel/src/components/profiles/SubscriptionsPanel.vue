@@ -248,6 +248,17 @@ function readUserinfo(raw: string): string[] {
   return out;
 }
 
+// profile-title по соглашению Happ/v2rayN бывает «base64:<UTF-8 в base64>».
+function decodeTitle(t: string): string {
+  if (!t.startsWith("base64:")) return t;
+  try {
+    const bin = atob(t.slice(7).trim());
+    return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+  } catch {
+    return t;
+  }
+}
+
 async function tryFetch() {
   const url = draft.value.url.trim();
   if (!url) return;
@@ -258,7 +269,8 @@ async function tryFetch() {
     const r = await subscriptions.fetch(url, draft.value.user_agent || undefined);
     const h = r.headers ?? {};
     const lines: string[] = [];
-    if (h["profile-title"]) lines.push(`Название у поставщика: ${h["profile-title"]}`);
+    const title = h["profile-title"] ? decodeTitle(h["profile-title"]) : "";
+    if (title) lines.push(`Название у поставщика: ${title}`);
     if (h["subscription-userinfo"]) lines.push(...readUserinfo(h["subscription-userinfo"]));
     if (h["profile-update-interval"]) {
       lines.push(`Рекомендованный интервал: ${h["profile-update-interval"]} ч`);
@@ -267,7 +279,7 @@ async function tryFetch() {
     const bytes = (r.body ?? "").length;
     probe.value = `Ответ получен, ${fmtInt(bytes)} символов.`;
     probeLines.value = lines;
-    if (!draft.value.title && h["profile-title"]) draft.value.title = h["profile-title"];
+    if (!draft.value.title && title) draft.value.title = title;
     autoFill();
   } catch (e) {
     probe.value = e instanceof Error ? e.message : "Не удалось загрузить";
