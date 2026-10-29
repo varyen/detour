@@ -114,14 +114,9 @@ pub async fn check(store: &Store, proxy: Option<&str>) -> Result<Value> {
                 rel["body"].as_str().unwrap_or("").chars().take(8000).collect::<String>(),
             )
         }
-        // Анонимный API режется лимитом по IP; страница релиза — нет.
-        Err(e) => {
-            let page = format!("https://github.com/{REPO}/releases/latest");
-            let resp = get_any(&page, proxy, Duration::from_secs(30)).await.map_err(|_| e)?;
-            let url = resp.url().as_str().to_owned();
-            let tag = url.split("/releases/tag/").nth(1).unwrap_or("").split(['?', '#', '/']).next().unwrap_or("");
-            (tag.trim_start_matches('v').to_owned(), String::new())
-        }
+        // Анонимный API режется лимитом по IP; лента релизов — нет. В ней не
+        // видно ассетов, поэтому наличие сборки проверяем по её подписи.
+        Err(e) => (latest_with_asset(proxy).await.map_err(|_| e)?, String::new()),
     };
     if available.is_empty() {
         // Ни в одном из свежих релизов нет сборки этой платформы — обновляться не на что.
@@ -146,6 +141,31 @@ pub async fn check(store: &Store, proxy: Option<&str>) -> Result<Value> {
     }
     store.write_json(STATE, &st)?;
     Ok(state(store))
+}
+
+fn atom_versions(atom: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in atom.split("/releases/tag/").skip(1) {
+        let tag = part.split(['"', '<', '?', '#', '/']).next().unwrap_or("");
+        let v = tag.trim_start_matches('v').to_owned();
+        if semver(&v).is_some() && !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+async fn latest_with_asset(proxy: Option<&str>) -> Result<String> {
+    let feed = format!("https://github.com/{REPO}/releases.atom");
+    let atom = get_any(&feed, proxy, Duration::from_secs(30)).await?.text().await?;
+    for v in atom_versions(&atom) {
+        let Some(asset) = asset_name(&v) else { continue };
+        let sig = format!("https://github.com/{REPO}/releases/download/v{v}/{asset}.sig");
+        if fetch(&sig, proxy, Duration::from_secs(30), 4096, None).await.is_ok() {
+            return Ok(v);
+        }
+    }
+    Ok(String::new())
 }
 
 /// Причина последней неудачной установки — для карточки «Приложение»: шторку
@@ -370,6 +390,15 @@ mod tests {
         assert!(!newer("0.0.1"));
         assert!(newer("999.0.0"));
     }
+
+    #[test]
+    fn atom_tags() {
+        let atom = r#"<link rel="alternate" href="https://github.com/varyen/detour/releases/tag/v2.18.0"/>
+<id>tag:github.com,2008:Repository/1/v2.18.0</id>
+<link rel="alternate" href="https://github.com/varyen/detour/releases/tag/v2.17.8"/>
+<link rel="alternate" href="https://github.com/varyen/detour/releases/tag/nightly"/>"#;
+        assert_eq!(atom_versions(atom), vec!["2.18.0", "2.17.8"]);
+    }
 }
 
 #[cfg(test)]
@@ -399,5 +428,17 @@ mod live {
         verify(&bytes, &sig).expect("подпись сборки приложения");
         eprintln!("сборка {} МБ, подпись верна", bytes.len() >> 20);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Запасной путь без API: релиз без сборки приложения (как 2.18.0) пропускается.
+    #[tokio::test]
+    async fn feed_fallback_skips_router_only() {
+        if std::env::var("DETOUR_LIVE").is_err() {
+            return;
+        }
+        let v = latest_with_asset(None).await.expect("feed");
+        eprintln!("feed → {v}");
+        assert!(semver(&v).is_some());
+        assert_ne!(v, "2.18.0");
     }
 }
