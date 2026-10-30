@@ -444,6 +444,55 @@ async function setUplink(v: string) {
   }
 }
 
+/* ---------------- адреса домашней сети ---------------- */
+
+/* Внутри туннеля адрес клиента прежний — роутер подменяет его на адрес из
+   LAN (NAT 1:1) и отвечает за него в ARP, поэтому конфиги не меняются. */
+const lanAddr = computed(() => st.value?.lanaddr ?? null);
+const showLanAddr = computed(
+  () => !status.isClient && !limited.value && !!lanAddr.value && (!!lanAddr.value.cidr || lanAddr.value.enabled),
+);
+const lanRange = ref("");
+const lanRangeLabel = computed(() => {
+  const l = lanAddr.value;
+  return l?.from ? `${l.from}–${l.to.split(".").pop()}` : "";
+});
+watch(
+  () => [lanAddr.value?.from, lanAddr.value?.to, lanAddr.value?.auto],
+  () => {
+    const l = lanAddr.value;
+    lanRange.value = l && !l.auto && l.from ? `${l.from}-${l.to}` : "";
+  },
+  { immediate: true },
+);
+
+async function toggleLanAddr(on: boolean) {
+  busy.value = "lanaddr";
+  try {
+    await services.serverSet({ lanaddr: on });
+    toast.ok(on ? "Клиенты получают адреса домашней сети" : "Адреса домашней сети выключены");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить адреса домашней сети");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
+async function saveLanRange(auto = false) {
+  const v = auto ? "" : lanRange.value.trim().replace(/\s*[–—]\s*/g, "-");
+  busy.value = "lanrange";
+  try {
+    await services.serverSet({ lanrange: v });
+    toast.ok(v ? "Диапазон сохранён" : "Диапазон выбирается автоматически");
+  } catch (e) {
+    toast.fromError(e, "Не удалось сохранить диапазон");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
 /* ---------------- клиенты ---------------- */
 
 const newName = ref("");
@@ -589,7 +638,8 @@ function hint(c: ServerClient): string {
   const mode = c.mode === "lan" ? "только дом" : "весь трафик";
   const route = c.route ? ` ${routeLabel(c.route)}` : "";
   const owner = !limited.value && c.owner ? ` · админ ${c.owner}` : "";
-  return `${c.ip} · ${mode}${route}${owner} · ${presence(c)}`;
+  const lan = c.lan_ip ? ` → ${c.lan_ip}${c.lan_conflict ? " (адрес занят в LAN!)" : ""}` : "";
+  return `${c.ip}${lan} · ${mode}${route}${owner} · ${presence(c)}`;
 }
 </script>
 
@@ -773,6 +823,52 @@ function hint(c: ServerClient): string {
             Правила каналов на роутере сейчас не стоят (второй канал не обнаружен или
             «Отвечать тем же каналом» выключено) — выбор вступит в силу, когда они появятся.
           </p>
+        </div>
+
+        <div v-if="showLanAddr && lanAddr && st.configured" class="uplink">
+          <h3 class="sub">Адреса в домашней сети</h3>
+          <SwitchToggle
+            :model-value="lanAddr.enabled"
+            label="Клиенты — как устройства домашней сети"
+            :hint="
+              lanAddr.cidr
+                ? `Каждому клиенту — свой адрес из ${lanRangeLabel || lanAddr.cidr}: устройства дома видят его и подключаются к нему сами`
+                : 'У домашней сети нет IPv4-адреса'
+            "
+            :busy="busy === 'lanaddr'"
+            @update:model-value="toggleLanAddr"
+          />
+          <template v-if="lanAddr.enabled">
+            <div class="lan-range">
+              <FormField
+                label="Диапазон адресов"
+                :hint="
+                  lanAddr.pool_from
+                    ? `Вне пула DHCP ${lanAddr.pool_from}–${lanAddr.pool_to.split('.').pop()}. Пусто — автоматически`
+                    : 'Вне пула DHCP. Пусто — автоматически'
+                "
+              >
+                <input
+                  v-model="lanRange"
+                  type="text"
+                  inputmode="decimal"
+                  :placeholder="lanAddr.from ? `${lanAddr.from}-${lanAddr.to}` : '192.168.1.200-192.168.1.230'"
+                  @keydown.enter.prevent="saveLanRange()"
+                />
+              </FormField>
+              <div class="actions">
+                <UiButton :busy="busy === 'lanrange'" @click="saveLanRange()">Сохранить</UiButton>
+                <UiButton v-if="!lanAddr.auto" :disabled="busy === 'lanrange'" @click="saveLanRange(true)">Автоматически</UiButton>
+              </div>
+            </div>
+            <p v-if="lanAddr.error" class="note warn">{{ lanAddr.error }}</p>
+            <p class="note faint">
+              В приложении клиента адрес остаётся прежним ({{ st.net }}), заново подключать
+              устройства не нужно: роутер сам подменяет его на адрес домашней сети и отвечает
+              за него соседям. Широковещательный поиск (Chromecast, AirPlay, DLNA) через
+              туннель не проходит — подключайтесь к устройствам по адресу.
+            </p>
+          </template>
         </div>
 
         <template v-if="st.configured">
@@ -1083,6 +1179,17 @@ function hint(c: ServerClient): string {
   display: grid;
   gap: 8px;
   min-width: 0;
+}
+.lan-range {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+@media (max-width: 560px) {
+  .lan-range {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .sub {
   font-size: 13px;

@@ -4,6 +4,7 @@
 #   detour-server status                 — JSON: поддержка, состояние, клиенты
 #   detour-server start | stop | apply   — поднять / погасить / пересобрать
 #   detour-server set КЛЮЧ=ЗНАЧ…         — enabled port net endpoint dns mtu uplink
+#                                          lanaddr lanrange …
 #   detour-server client-add <имя> [full|lan]
 #   detour-server client-set <id> КЛЮЧ=ЗНАЧ…   — name mode enabled route
 #   detour-server client-del <id>
@@ -425,6 +426,9 @@ XHPORT=$XHPORT
 XHPATH=$XHPATH
 XHSEC=$XHSEC
 XHSNI=$XHSNI
+LANADDR=$LANADDR
+LANFROM=$LANFROM
+LANTO=$LANTO
 EOF
     mv "$CONF.tmp" "$CONF"
 }
@@ -448,6 +452,7 @@ load_conf() {
     VTLS=0; TPORT=""; TDOMAIN=""
     WS=0; WSPORT=""; WSPATH=""; WSPUB=""
     XH=0; XHPORT=""; XHPATH=""; XHSEC=""; XHSNI=""
+    LANADDR=0; LANFROM=""; LANTO=""
     [ -f "$CONF" ] && . "$CONF"
     set_iface
 }
@@ -784,6 +789,11 @@ fw_apply() {
     want "${ZONE}_lan" forwarding
     want "${ZONE}_lan.src" "$ZONE"
     want "${ZONE}_lan.dest" lan
+    # Адреса домашней сети: устройства LAN подключаются к клиентам сами.
+    want "${ZONE}_fromlan" forwarding
+    want "${ZONE}_fromlan.src" lan
+    want "${ZONE}_fromlan.dest" "$ZONE"
+    want "${ZONE}_fromlan.enabled" "$([ "$ENABLED" = 1 ] && [ "$LANADDR" = 1 ] && echo 1 || echo 0)"
     want "${ZONE}_in" rule
     want "${ZONE}_in.name" detour-server
     want "${ZONE}_in.src" wan
@@ -858,7 +868,7 @@ fw_apply() {
 fw_remove() {
     [ "$KEENETIC" = 1 ] && { ENABLED=0; keen_fw; return 0; }
     uci -q get "firewall.$ZONE" >/dev/null || return 0
-    for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_in" "${ZONE}_vin" "${ZONE}_tin" "${ZONE}_win" "${ZONE}_xin" "${ZONE}_sub"; do
+    for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_fromlan" "${ZONE}_in" "${ZONE}_vin" "${ZONE}_tin" "${ZONE}_win" "${ZONE}_xin" "${ZONE}_sub"; do
         uci -q delete "firewall.$s"
     done
     uci commit firewall
@@ -1062,6 +1072,7 @@ keen_fw() {
         keen_fw_add filter FORWARD -i "$IFACE" -j ACCEPT
         keen_fw_add filter FORWARD -o "$IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
         keen_fw_add nat POSTROUTING -s "$NET.0/24" ! -o "$IFACE" -j MASQUERADE
+        [ "$LANADDR" = 1 ] && keen_fw_add filter FORWARD -i "$LAN_IF" -o "$IFACE" -j ACCEPT
     fi
     if vless_on && [ -n "$VNET" ]; then
         keen_fw_add filter INPUT -p tcp --dport "$VPORT" -j ACCEPT
@@ -1787,7 +1798,238 @@ uplink_apply() {
     log "канал выхода: $UPLINK — метки $marks на $ifs"
 }
 
+# ---------- адреса домашней сети ----------
+#
+# LANADDR=1: у каждого клиента свой адрес из LAN ($LANFROM–$LANTO, вне пула
+# DHCP), карта — $LANMAP (id|ip). Внутри туннеля адрес прежний ($NET.N/$VNET.N),
+# конфиги клиентов не меняются: на выходе в LAN источник подменяется на адрес
+# клиента (SNAT), входящие на него — обратно (DNAT, только AWG: у VLESS-клиента
+# своего адреса нет, к нему не подключиться). На ARP за эти адреса в LAN
+# отвечает роутер — proxy-запись соседа + маршрут /32 мимо $LAN_IF (без него
+# ядро proxy-запись не применяет). Цепочки — $LAN_PRE/$LAN_OUT/$LAN_POST в nat,
+# переходы в них — первыми (на Keenetic выше MASQUERADE из keen_fw).
+LANMAP="$DIR/lan.map"
+LAN_PRE=DSRV_LAN_PRE
+LAN_OUT=DSRV_LAN_OUT
+LAN_POST=DSRV_LAN_POST
+LAN_SIG="$RUN/detour-server.lanaddr"
+LAN_ROUTES="$RUN/detour-server.lanroutes"
+LAN_AUTO_SIZE=30
+
+ip2n() { echo "$1" | awk -F. 'NF == 4 { printf "%.0f\n", (($1 * 256 + $2) * 256 + $3) * 256 + $4 }'; }
+n2ip() { awk -v n="$1" 'BEGIN { printf "%d.%d.%d.%d\n", int(n / 16777216) % 256, int(n / 65536) % 256, int(n / 256) % 256, n % 256 }'; }
+
+# Пул DHCP LAN: «первый последний» или пусто (DHCP выключен / не узнать).
+dhcp_pool() {
+    if [ "$KEENETIC" = 1 ]; then
+        # Не проверено на железе: поля begin/end ответа `show ip dhcp pool`.
+        r=$(rci '{"parse":"show ip dhcp pool"}')
+        b=$(printf '%s' "$r" | sed -n 's/.*"begin": *"\([0-9.]*\)".*/\1/p' | head -1)
+        e=$(printf '%s' "$r" | sed -n 's/.*"end": *"\([0-9.]*\)".*/\1/p' | head -1)
+        [ -n "$b" ] && [ -n "$e" ] && echo "$b $e"
+        return 0
+    fi
+    sec=lan
+    [ "$(uci -q get dhcp.lan.interface)" = lan ] || \
+        sec=$(uci -q show dhcp | sed -n "s/^dhcp\.\([^.]*\)\.interface='lan'$/\1/p" | head -1)
+    [ -n "$sec" ] && [ "$(uci -q get "dhcp.$sec")" = dhcp ] || return 0
+    [ "$(uci -q get "dhcp.$sec.ignore")" = 1 ] && return 0
+    st=$(uci -q get "dhcp.$sec.start"); st=${st:-100}
+    lm=$(uci -q get "dhcp.$sec.limit"); lm=${lm:-150}
+    case "$st$lm" in *[!0-9]*) return 0 ;; esac
+    [ -n "$LAN_NETN" ] || return 0
+    f=$((LAN_NETN + st)); l=$((f + lm - 1))
+    [ "$l" -lt "$LAN_BCN" ] || l=$((LAN_BCN - 1))
+    echo "$(n2ip "$f") $(n2ip "$l")"
+}
+
+# LAN_IP/LAN_CIDR/LAN_NETN/LAN_BCN/POOL_FN/POOL_TN; код 1 — у LAN нет IPv4.
+lan_info() {
+    LAN_CIDR=$(lan_cidr)
+    [ -n "$LAN_CIDR" ] || return 1
+    LAN_IP=$(ipr -4 -o addr show "$LAN_IF" 2>/dev/null | awk '{ sub(/\/.*/, "", $4); print $4; exit }')
+    LAN_NETN=$(ip2n "${LAN_CIDR%/*}")
+    LAN_BCN=$((LAN_NETN + (1 << (32 - ${LAN_CIDR#*/})) - 1))
+    POOL_FN=""; POOL_TN=""
+    set -- $(dhcp_pool)
+    [ $# = 2 ] && { POOL_FN=$(ip2n "$1"); POOL_TN=$(ip2n "$2"); }
+    return 0
+}
+
+# Диапазон по умолчанию: хвост самого большого промежутка вне пула DHCP
+# (начало подсети обычно занято статическими адресами).
+lan_range_auto() {
+    lo=$((LAN_NETN + 2)); hi=$((LAN_BCN - 1))
+    if [ -n "$POOL_FN" ]; then
+        a=$((POOL_FN - lo)); b=$((hi - POOL_TN))
+        if [ "$a" -ge "$b" ]; then hi=$((POOL_FN - 1)); else lo=$((POOL_TN + 1)); fi
+    fi
+    [ "$hi" -ge "$lo" ] || return 1
+    f=$((hi - LAN_AUTO_SIZE + 1)); [ "$f" -ge "$lo" ] || f=$lo
+    AUTO_FN=$f; AUTO_TN=$hi
+}
+
+# Пусто — диапазон годится, иначе причина.
+lan_range_err() {  # $1 $2 — числа
+    [ "$1" -gt "$LAN_NETN" ] && [ "$2" -lt "$LAN_BCN" ] && [ "$1" -le "$2" ] || { echo "диапазон вне сети $LAN_CIDR"; return; }
+    [ $(($2 - $1)) -lt 254 ] || { echo "не больше 254 адресов"; return; }
+    lip=$(ip2n "$LAN_IP")
+    [ -n "$lip" ] && [ "$lip" -ge "$1" ] && [ "$lip" -le "$2" ] && { echo "в диапазоне адрес роутера $LAN_IP"; return; }
+    if [ -n "$POOL_FN" ] && [ "$1" -le "$POOL_TN" ] && [ "$2" -ge "$POOL_FN" ]; then
+        echo "диапазон пересекается с пулом DHCP $(n2ip "$POOL_FN")–$(n2ip "$POOL_TN")"
+    fi
+}
+
+# Действующий диапазон: заданный, если он в нынешней LAN, иначе автоматический.
+lan_range() {
+    RANGE_AUTO=1
+    if [ -n "$LANFROM" ] && [ -n "$LANTO" ]; then
+        RANGE_FN=$(ip2n "$LANFROM"); RANGE_TN=$(ip2n "$LANTO")
+        if [ -n "$RANGE_FN" ] && [ -n "$RANGE_TN" ] && [ -z "$(lan_range_err "$RANGE_FN" "$RANGE_TN")" ]; then
+            RANGE_AUTO=0; return 0
+        fi
+    fi
+    lan_range_auto || return 1
+    RANGE_FN=$AUTO_FN; RANGE_TN=$AUTO_TN
+}
+
+# Адреса LAN, которые уже чьи-то: роутер, аренды и статические привязки DHCP,
+# соседи в ARP.
+lan_used() {
+    echo "$LAN_IP"
+    if [ "$KEENETIC" = 1 ]; then
+        rci '{"parse":"show ip dhcp bindings"}' | sed -n 's/.*"ip": *"\([0-9.]*\)".*/\1/p'
+    else
+        [ -f /tmp/dhcp.leases ] && awk '{ print $3 }' /tmp/dhcp.leases
+        uci -q show dhcp | sed -n "s/^dhcp\.[^.]*\.ip='\([0-9.]*\)'$/\1/p"
+    fi
+    ipr -4 neigh show dev "$LAN_IF" 2>/dev/null | awk '!/FAILED|INCOMPLETE/ { print $1 }'
+}
+
+# Закрепить за каждым клиентом адрес из диапазона. Прежний сохраняется, пока он
+# в диапазоне и не занят устройством LAN.
+lan_map_sync() {
+    lan_info && lan_range || { log "lanaddr: нет IPv4 на $LAN_IF или свободного диапазона"; return 1; }
+    [ -f "$LANMAP" ] || : > "$LANMAP"
+    umask 077
+    lan_used | awk -F'|' -v lf="$RANGE_FN" -v lt="$RANGE_TN" '
+        function n(ip,  a) { if (split(ip, a, ".") != 4) return -1; return ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4] }
+        function s(x) { return sprintf("%d.%d.%d.%d", int(x / 16777216) % 256, int(x / 65536) % 256, int(x / 256) % 256, x % 256) }
+        FILENAME == "-" { if ($0 != "") used[n($0)] = 1; next }
+        FILENAME == ARGV[2] { if ($1 != "") had[$1] = $2; next }
+        $1 == "" { next }
+        {
+            id[++c] = $1; x = (($1 in had) ? n(had[$1]) : -1)
+            if (x >= lf && x <= lt && !(x in used) && !(x in taken)) { taken[x] = 1; got[$1] = x }
+            else if ($1 in had) print "!lanaddr: " $1 " " had[$1] " вне диапазона или занят"
+        }
+        END {
+            p = lf
+            for (i = 1; i <= c; i++) {
+                if (id[i] in got) continue
+                while (p <= lt && ((p in used) || (p in taken))) p++
+                if (p > lt) { print "!lanaddr: диапазон исчерпан, " id[i] " без адреса"; continue }
+                taken[p] = 1; got[id[i]] = p
+            }
+            for (i = 1; i <= c; i++) if (id[i] in got) print id[i] "|" s(got[id[i]])
+        }' - "$LANMAP" "$CLIENTS" > "$LANMAP.tmp" || return 1
+    grep '^!' "$LANMAP.tmp" | while read -r l; do log "${l#!}"; done
+    grep -v '^!' "$LANMAP.tmp" > "$LANMAP"; rm -f "$LANMAP.tmp"
+}
+
+lan_jumps() {  # $1 — -D или -I
+    for h in "PREROUTING $LAN_PRE" "OUTPUT $LAN_OUT" "POSTROUTING $LAN_POST"; do
+        set -- "$1" $h
+        if [ "$1" = -I ]; then
+            while iptables -t nat -D "$2" -j "$3" 2>/dev/null; do :; done
+            iptables -t nat -I "$2" 1 -j "$3"
+        else
+            while iptables -t nat -D "$2" -j "$3" 2>/dev/null; do :; done
+        fi
+    done
+}
+
+lan_routes_set() {  # stdin — «ip dev» на строку
+    want=$(cat)
+    if [ -f "$LAN_ROUTES" ]; then
+        while read -r a d; do
+            [ -n "$a" ] || continue
+            printf '%s\n' "$want" | grep -qx "$a $d" && continue
+            ipr route del "$a/32" dev "$d" 2>/dev/null
+            ipr neigh del proxy "$a" dev "$LAN_IF" 2>/dev/null
+        done < "$LAN_ROUTES"
+    fi
+    printf '%s\n' "$want" | while read -r a d; do
+        [ -n "$a" ] || continue
+        ipr route replace "$a/32" dev "$d"
+        ipr neigh show proxy 2>/dev/null | grep -q "^$a dev $LAN_IF " || ipr neigh add proxy "$a" dev "$LAN_IF"
+    done
+    mkdir -p "$RUN"
+    printf '%s\n' "$want" | grep . > "$LAN_ROUTES"
+}
+
+lan_up() {
+    LAN_CIDR=$(lan_cidr)
+    [ -n "$LAN_CIDR" ] || return 1
+    # Иначе первый ответ на ARP за клиента задерживается до 0,8 с.
+    echo 0 > "/proc/sys/net/ipv4/neigh/$LAN_IF/proxy_delay" 2>/dev/null
+    rules=$(awk -F'|' -v net="$NET" -v vnet="$VNET" -v awg="$(awg_on && echo 1)" -v vl="$(vless_on && echo 1)" \
+            -v lif="$LAN_IF" -v awgif="$IFACE" -v vif="$VIF" '
+        FILENAME == ARGV[1] { m[$1] = $2; next }
+        $2 == 1 && ($1 in m) {
+            L = m[$1]; a = (awg == 1 && $5 != ""); v = (vl == 1 && $10 != "")
+            if (!a && !v) next
+            print "R " L " " (a ? awgif : vif)
+            if (a) {
+                print "PRE -d " L " -j DNAT --to-destination " net "." $4
+                print "OUT -d " L " -j DNAT --to-destination " net "." $4
+                print "POST -s " net "." $4 " -o " lif " -j SNAT --to-source " L
+            }
+            if (v) print "POST -s " vnet "." $4 " -o " lif " -j SNAT --to-source " L
+        }' "$LANMAP" "$CLIENTS")
+    printf '%s\n' "$rules" | sed -n 's/^R //p' | lan_routes_set
+    if [ "$rules" != "$(cat "$LAN_SIG" 2>/dev/null)" ] || ! iptables -t nat -L "$LAN_POST" -n >/dev/null 2>&1; then
+        for c in "$LAN_PRE" "$LAN_OUT" "$LAN_POST"; do
+            iptables -t nat -N "$c" 2>/dev/null
+            iptables -t nat -F "$c"
+        done
+        printf '%s\n' "$rules" | while read -r k r; do
+            case "$k" in
+                PRE) iptables -t nat -A "$LAN_PRE" $r ;;
+                OUT) iptables -t nat -A "$LAN_OUT" $r ;;
+                POST) iptables -t nat -A "$LAN_POST" $r ;;
+            esac
+        done
+        printf '%s\n' "$rules" > "$LAN_SIG"
+        log "lanaddr: $(printf '%s\n' "$rules" | grep -c '^R ') адр. в $LAN_CIDR"
+    fi
+    # Всегда заново наверх: перестройка правил (keen_fw, sing-box) вставляет
+    # свои выше.
+    lan_jumps -I
+}
+
+lan_down() {
+    [ -f "$LAN_SIG" ] || [ -f "$LAN_ROUTES" ] || iptables -t nat -L "$LAN_POST" -n >/dev/null 2>&1 || return 0
+    lan_jumps -D
+    for c in "$LAN_PRE" "$LAN_OUT" "$LAN_POST"; do
+        iptables -t nat -F "$c" 2>/dev/null
+        iptables -t nat -X "$c" 2>/dev/null
+    done
+    : | lan_routes_set
+    rm -f "$LAN_SIG" "$LAN_ROUTES"
+    log "lanaddr: снято"
+}
+
+lan_apply() {
+    if [ "$ENABLED" = 1 ] && [ "$LANADDR" = 1 ] && { awg_on || vless_on; }; then
+        lan_map_sync && lan_up
+    else
+        lan_down
+    fi
+}
+
 do_stop() {
+    lan_down
     uplink_down
     awg_down
     vless_down
@@ -1812,6 +2054,7 @@ do_apply() {
     if sub_on; then sub_up || rc=1; else sub_down; fi
     fw_apply
     uplink_apply
+    lan_apply || rc=1
     set --
     awg_on && set -- "$@" "$IFACE"
     vless_on && set -- "$@" "$VIF"
@@ -2107,6 +2350,31 @@ status_json() {
     # ничего не меняет: детект второго канала ещё не прошёл или он один).
     upl_pinned=false
     [ -x "$WANPIN_BIN" ] && "$WANPIN_BIN" installed 2>/dev/null && upl_pinned=true
+    # Адреса домашней сети: действующий диапазон (заданный или автоматический).
+    lcidr=""; lrf=""; lrt=""; lauto=true; lpf=""; lpt=""; lover=false; lerr=""
+    if lan_info; then
+        lcidr=$LAN_CIDR
+        [ -n "$POOL_FN" ] && { lpf=$(n2ip "$POOL_FN"); lpt=$(n2ip "$POOL_TN"); }
+        if lan_range; then
+            lrf=$(n2ip "$RANGE_FN"); lrt=$(n2ip "$RANGE_TN")
+            [ "$RANGE_AUTO" = 0 ] && lauto=false
+        else
+            lerr="вне пула DHCP нет свободных адресов"
+        fi
+        # Заданный диапазон потом накрыл пул DHCP (или сменилась сеть LAN).
+        if [ -n "$LANFROM" ] && [ "$RANGE_AUTO" = 1 ]; then
+            lover=true
+            lerr="заданный диапазон $LANFROM–$LANTO не годится ($(lan_range_err "$(ip2n "$LANFROM")" "$(ip2n "$LANTO")")), взят автоматический"
+        fi
+    else
+        lerr="у домашней сети нет IPv4-адреса"
+    fi
+    printf '"lanaddr":{"enabled":%s,"active":%s,"cidr":"%s","router":"%s","from":"%s","to":"%s","auto":%s,"pool_from":"%s","pool_to":"%s","invalid":%s,"error":"%s"},' \
+        "$([ "$LANADDR" = 1 ] && echo true || echo false)" "$([ -f "$LAN_SIG" ] && echo true || echo false)" \
+        "$lcidr" "${LAN_IP:-}" "$lrf" "$lrt" "$lauto" "$lpf" "$lpt" "$lover" "$(json_esc "$lerr")"
+    # Устройство LAN с тем же адресом, что у клиента, — его видно в ARP.
+    lconf=$(ipr -4 neigh show dev "$LAN_IF" 2>/dev/null | awk '!/FAILED|INCOMPLETE/ { printf "%s,", $1 }')
+    lmap=/dev/null; [ "$LANADDR" = 1 ] && [ -f "$LANMAP" ] && lmap=$LANMAP
     printf '"uplink":"%s","uplink_pinned":%s,"uplinks":[%s],"clients":[' \
         "$(json_esc "${UPLINK:-auto}")" "$upl_pinned" \
         "$(uplink_table | awk '{ printf "%s{\"id\":\"%s\",\"iface\":\"%s\",\"usable\":%s,\"ip\":\"%s\",\"private\":%s}", \
@@ -2119,7 +2387,7 @@ status_json() {
     # (+ ещё не учтённая дельта, чтобы цифры не отставали на минуту).
     # DETOUR_SRV_OWNER — админ с доступом только к серверу: видны лишь его клиенты.
     [ -f "$CLIENTS" ] && printf '%s\n' "$dump" | awk -F'|' -v net="$NET" -v now="$now" -v on_sec="$ONLINE_SEC" \
-        -v own="${DETOUR_SRV_OWNER:-}" \
+        -v own="${DETOUR_SRV_OWNER:-}" -v lconf=",$lconf" \
         -v mon="$(date +%Y%m)" -v day="$(date +%Y%m%d)" '
         function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
         FILENAME == "-" {
@@ -2128,6 +2396,7 @@ status_json() {
             next
         }
         FILENAME == ARGV[2] { S[$1] = $0; next }
+        FILENAME == ARGV[3] { LM[$1] = $2; next }
         own != "" && $13 != own { next }
         {
             k = $5; vk = "v:" $1
@@ -2159,12 +2428,14 @@ status_json() {
                 (n++ ? "," : ""), $1, ($2 == 1 ? "true" : "false"), esc($3), net, $4, ($8 == "" ? "full" : $8), $9 + 0,
                 ($5 != "" ? "true" : "false"), ($10 != "" ? "true" : "false"), esc($11)
             printf "\"owner\":\"%s\",", esc($13)
+            lip = ($1 in LM) ? LM[$1] : ""
+            printf "\"lan_ip\":\"%s\",\"lan_conflict\":%s,", lip, (lip != "" && index(lconf, "," lip ",") ? "true" : "false")
             printf "\"online\":%s,\"handshake\":%d,\"handshake_ago\":%d,\"last_seen\":%d,\"rx\":%.0f,\"tx\":%.0f,\"remote\":\"%s\",",
                 (online ? "true" : "false"), h, (h > 0 ? now - h : -1), seen, crx + vrx, ctx + vtx, rem
             printf "\"session_start\":%d,\"session_rx\":%.0f,\"session_tx\":%.0f,", sst, srx, stx
             printf "\"day_rx\":%.0f,\"day_tx\":%.0f,\"month_rx\":%.0f,\"month_tx\":%.0f,\"total_rx\":%.0f,\"total_tx\":%.0f}",
                 dyrx, dytx, mrx, mtx, a[4] + drx, a[5] + dtx
-        }' - "$(stats_src)" "$CLIENTS"
+        }' - "$(stats_src)" "$lmap" "$CLIENTS"
     printf '],"now":%s}\n' "$now"
 }
 
@@ -2612,6 +2883,25 @@ cmd_set() {
                 [ -z "$v" ] || printf '%s' "$v" | grep -qE '^https?://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$' || \
                     err "адрес подписок: http(s)://домен[:порт][/путь]"
                 SUBURL=$v ;;
+            lanaddr)
+                case "$v" in 0|1) ;; *) err "lanaddr: 0 или 1" ;; esac
+                [ "$v" = 1 ] && ! lan_info && err "у домашней сети ($LAN_IF) нет IPv4-адреса"
+                LANADDR=$v ;;
+            lanrange)
+                # «от-до»: полные адреса или «192.168.8.200-230»; пусто/auto — сам.
+                case "$v" in
+                    ''|auto) LANFROM=""; LANTO="" ;;
+                    *-*)
+                        lan_info || err "у домашней сети ($LAN_IF) нет IPv4-адреса"
+                        a=${v%%-*}; b=${v#*-}
+                        case "$b" in *.*) ;; *) b=${a%.*}.$b ;; esac
+                        fa=$(ip2n "$a"); fb=$(ip2n "$b")
+                        printf '%s\n%s\n' "$a" "$b" | grep -cE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | grep -qx 2 && \
+                            [ -n "$fa" ] && [ -n "$fb" ] || err "диапазон: 192.168.1.200-192.168.1.230"
+                        e=$(lan_range_err "$fa" "$fb"); [ -z "$e" ] || err "$e"
+                        LANFROM=$(n2ip "$fa"); LANTO=$(n2ip "$fb") ;;
+                    *) err "диапазон: 192.168.1.200-192.168.1.230" ;;
+                esac ;;
             *) err "неизвестный параметр: $k" ;;
         esac
     done
@@ -2735,6 +3025,8 @@ case "$1" in
         # уходить; снесённые перестройкой файрвола правила встают заново.
         uplink_apply
         uplink_rebuild_check
+        # Правила и маршруты адресов LAN могла снести перестройка файрвола/NDM.
+        [ -f "$LAN_SIG" ] && lan_up
         # Keenetic: NDM при переподключениях WAN может снести наши ip rule/neigh.
         [ "$KEENETIC" = 1 ] && vless_on && vless_running && vless_net_up >/dev/null 2>&1
         stats_tick ;;
@@ -2748,7 +3040,7 @@ case "$1" in
     down)
         # Удаление пакета: снять всё, файрвол чистит вызывающий (на Keenetic
         # своих правил у NDM нет — снимаем сами).
-        load_conf; stats_tick; stats_flush; uplink_down; awg_down; vless_down; sub_down
+        load_conf; stats_tick; stats_flush; lan_down; uplink_down; awg_down; vless_down; sub_down
         if [ "$KEENETIC" = 1 ]; then
             fw_remove
             [ -n "$NDMIF" ] && ndm_wg && ndm_cli "system configuration save" >/dev/null 2>&1
@@ -2759,7 +3051,8 @@ case "$1" in
         [ "$KEENETIC" = 1 ] || exit 0
         [ -f "$CONF" ] || exit 0
         kill_stuck_ipt
-        load_conf; keen_fw; uplink_apply ;;
+        load_conf; keen_fw; uplink_apply
+        [ -f "$LAN_SIG" ] && lan_up ;;
     set) shift; lock; cmd_set "$@" ;;
     client-add) shift; lock; cmd_client_add "$@" ;;
     client-set) shift; lock; cmd_client_set "$@" ;;

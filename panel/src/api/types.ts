@@ -431,6 +431,10 @@ export interface ServerClient {
   route?: string;
   /** Логин админа панели, который завёл клиента; пусто — главный админ. */
   owner?: string;
+  /** Адрес клиента в домашней сети (режим «Адреса домашней сети», роутер с 2.19.0). */
+  lan_ip?: string;
+  /** В LAN есть устройство с тем же адресом. */
+  lan_conflict?: boolean;
   online: boolean;
   handshake: number;
   handshake_ago: number;
@@ -493,8 +497,30 @@ export interface ServerStatus {
   /** Правила меток каналов (detour-wanpin) стоят — без них выбор канала ничего не меняет. */
   uplink_pinned?: boolean;
   uplinks?: ServerUplink[];
+  /** Адреса домашней сети для клиентов (роутер, с 2.19.0). */
+  lanaddr?: ServerLanAddr;
   clients: ServerClient[];
   now: number;
+}
+
+/** Клиент получает свой адрес из LAN: NAT 1:1 + proxy-ARP, конфиги клиентов не меняются. */
+export interface ServerLanAddr {
+  enabled: boolean;
+  /** Правила стоят. */
+  active: boolean;
+  /** Сеть LAN, пусто — у LAN нет IPv4. */
+  cidr: string;
+  router: string;
+  /** Действующий диапазон (заданный или автоматический). */
+  from: string;
+  to: string;
+  auto: boolean;
+  /** Пул DHCP; пусто — не узнать или DHCP выключен. */
+  pool_from: string;
+  pool_to: string;
+  /** Заданный диапазон перестал годиться — взят автоматический. */
+  invalid: boolean;
+  error: string;
 }
 
 export interface ServerUplink {
@@ -625,6 +651,9 @@ export interface ServerSettingsPatch {
   xhpath?: string;
   xhsec?: "reality" | "tls" | "proxy";
   xhsni?: string;
+  lanaddr?: boolean;
+  /** «192.168.1.200-192.168.1.230» или "" — автоматически. */
+  lanrange?: string;
 }
 
 export interface ApplyLogResponse {
