@@ -317,11 +317,15 @@ export interface HealthResult {
   /** socks/http-профиль проверку не прошёл, но тот же адрес отвечает по этому
       протоколу — почти наверняка в профиле выбран не тот протокол. */
   alt?: "http" | "socks5";
+  /** Ответ движка на неудачный замер (приложение): почему профиль не прошёл. */
+  err?: string;
 }
 
 export interface HealthStatusResponse {
   now: number;
   supported?: boolean;
+  /** Приложение на телефоне: проверяется только подключённый профиль. */
+  active_only?: boolean;
   enabled?: boolean;
   auto_switch?: boolean;
   speed?: boolean;

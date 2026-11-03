@@ -30,11 +30,14 @@ pub struct Verdict {
     /// Скорость загрузки, кбит/с; -1 — не мерили или не вышло.
     pub dl: i64,
     pub delays: Vec<i64>,
+    /// Что ответил движок на первый неудачный замер.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub err: Option<String>,
 }
 
 impl Verdict {
     fn down(n: usize) -> Self {
-        Self { ok: false, ts: now_epoch(), rtt: -1, dl: -1, delays: vec![-1; n] }
+        Self { ok: false, ts: now_epoch(), rtt: -1, dl: -1, delays: vec![-1; n], err: None }
     }
 }
 
@@ -129,12 +132,15 @@ async fn validate(engine: &Engine, dir: &Path, items: Vec<Prepared>) -> (Vec<Pre
     (good, bad)
 }
 
-async fn delay(client: &reqwest::Client, base: &str, secret: &str, tag: &str, url: &str) -> Option<i64> {
-    let mut u = reqwest::Url::parse(&format!("{base}/proxies/{tag}/delay")).ok()?;
+async fn delay(client: &reqwest::Client, base: &str, secret: &str, tag: &str, url: &str) -> Result<i64, String> {
+    let mut u = reqwest::Url::parse(&format!("{base}/proxies/{tag}/delay")).map_err(|e| e.to_string())?;
     u.query_pairs_mut().append_pair("timeout", "4000").append_pair("url", url);
-    let resp = client.get(u).bearer_auth(secret).send().await.ok()?;
-    let v: Value = resp.json().await.ok()?;
-    v.get("delay").and_then(Value::as_i64).filter(|d| *d > 0)
+    let resp = client.get(u).bearer_auth(secret).send().await.map_err(|e| e.to_string())?;
+    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    if let Some(d) = v.get("delay").and_then(Value::as_i64).filter(|d| *d > 0) {
+        return Ok(d);
+    }
+    Err(v.get("message").and_then(Value::as_str).unwrap_or("нет ответа").to_owned())
 }
 
 /// Все цели по порядку, неудачная повторяется один раз; после первого
@@ -142,21 +148,23 @@ async fn delay(client: &reqwest::Client, base: &str, secret: &str, tag: &str, ur
 async fn probe_one(client: reqwest::Client, base: String, secret: String, tag: String, urls: Vec<String>) -> Verdict {
     let mut delays = vec![-1; urls.len()];
     let mut ok = !urls.is_empty();
+    let mut err = None;
     for (i, url) in urls.iter().enumerate() {
         let mut d = delay(&client, &base, &secret, &tag, url).await;
-        if d.is_none() {
+        if d.is_err() {
             d = delay(&client, &base, &secret, &tag, url).await;
         }
         match d {
-            Some(ms) => delays[i] = ms,
-            None => {
+            Ok(ms) => delays[i] = ms,
+            Err(e) => {
                 ok = false;
+                err = Some(e);
                 break;
             }
         }
     }
     let rtt = delays.first().copied().unwrap_or(-1);
-    Verdict { ok, ts: now_epoch(), rtt: if ok { rtt } else { -1 }, dl: -1, delays }
+    Verdict { ok, ts: now_epoch(), rtt: if ok { rtt } else { -1 }, dl: -1, delays, err }
 }
 
 fn speed_budget(bytes: u64) -> Duration {
@@ -171,7 +179,11 @@ fn speed_budget(bytes: u64) -> Duration {
 /// кбит/с по тому, что успело прийти за отведённое время (как `curl -m`
 /// с `%{speed_download}`: оборванная по времени загрузка тоже даёт замер).
 async fn measure(port: u16, url: &str, bytes: u64) -> i64 {
-    let Ok(proxy) = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}")) else { return -1 };
+    measure_via(&format!("socks5h://127.0.0.1:{port}"), url, bytes).await
+}
+
+async fn measure_via(proxy_url: &str, url: &str, bytes: u64) -> i64 {
+    let Ok(proxy) = reqwest::Proxy::all(proxy_url) else { return -1 };
     let budget = speed_budget(bytes);
     let Ok(client) = crate::http::client_builder().proxy(proxy).timeout(budget + Duration::from_secs(2)).build() else {
         return -1;
@@ -212,7 +224,11 @@ pub async fn run(engine: &Engine, run_dir: &Path, targets: Vec<Target>, opts: &O
     if targets.is_empty() {
         return out;
     }
-    let (awg, plain): (Vec<usize>, Vec<usize>) = (0..targets.len()).partition(|&i| crate::awg::is_awg(&targets[i].outbound));
+    // На телефоне sing-box вкомпилирован в приложение в единственном числе —
+    // временным движком для всех профилей служит mihomo.
+    let all_mihomo = cfg!(any(target_os = "android", target_os = "ios"));
+    let (awg, plain): (Vec<usize>, Vec<usize>) =
+        (0..targets.len()).partition(|&i| all_mihomo || crate::awg::is_awg(&targets[i].outbound));
     let (a, b) = tokio::join!(
         run_singbox(engine, run_dir, &targets, plain, opts),
         run_mihomo(engine, run_dir, &targets, awg, opts),
@@ -265,6 +281,14 @@ async fn run_singbox(engine: &Engine, run_dir: &Path, targets: &[Target], indice
     out
 }
 
+fn mihomo_proxy(tag: &str, ob: &Value) -> anyhow::Result<Value> {
+    if crate::awg::is_awg(ob) {
+        return crate::awg::proxy(tag, ob);
+    }
+    let (Hop::Outbound(v) | Hop::Endpoint(v)) = render::prepare(ob.clone(), tag, None)?;
+    crate::mihomo::proxy(&v).map_err(|e| anyhow::anyhow!(e))
+}
+
 /// Конфиг временного mihomo: по прокси `h<i>` на AWG-профиль, clash API для
 /// задержки и mixed-вход на профиль для скорости.
 fn mihomo_config(proxies: &[(usize, Value)], clash: Option<(u16, &str)>, mixed: &BTreeMap<usize, u16>) -> Value {
@@ -273,7 +297,7 @@ fn mihomo_config(proxies: &[(usize, Value)], clash: Option<(u16, &str)>, mixed: 
         .map(|(i, port)| json!({ "name": format!("m{i}"), "type": "mixed", "listen": "127.0.0.1", "port": port, "proxy": format!("h{i}") }))
         .collect();
     let mut cfg = json!({
-        "log-level": "warning",
+        "log-level": "info",
         "allow-lan": false,
         "bind-address": "127.0.0.1",
         "ipv6": true,
@@ -282,6 +306,16 @@ fn mihomo_config(proxies: &[(usize, Value)], clash: Option<(u16, &str)>, mixed: 
         "proxies": proxies.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>(),
         "rules": ["MATCH,REJECT"],
     });
+    // На Android нет /etc/resolv.conf: системный резолвер Go стучится в
+    // [::1]:53, и профиль с именем сервера вместо IP «не отвечает».
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        cfg["dns"] = json!({
+            "enable": true,
+            "ipv6": false,
+            "default-nameserver": ["1.1.1.1", "8.8.8.8"],
+            "nameserver": ["1.1.1.1", "8.8.8.8"],
+        });
+    }
     if !listeners.is_empty() {
         cfg["listeners"] = json!(listeners);
     }
@@ -307,7 +341,7 @@ async fn run_mihomo(engine: &Engine, run_dir: &Path, targets: &[Target], indices
 
     let mut good = Vec::new();
     for i in indices {
-        match crate::awg::proxy(&format!("h{i}"), &targets[i].outbound) {
+        match mihomo_proxy(&format!("h{i}"), &targets[i].outbound) {
             Ok(p) => good.push((i, p)),
             Err(_) => {
                 out.insert(i, Verdict::down(n_urls));
@@ -343,9 +377,40 @@ async fn run_mihomo(engine: &Engine, run_dir: &Path, targets: &[Target], indices
     }
     let Ok(child) = engine.spawn_aux_mihomo(&file, &dir) else { return out };
     let indices: Vec<usize> = good.iter().map(|(i, _)| *i).collect();
-    out.extend(drive(child, clash_port, &secret, &indices, &mixed, opts).await);
+    let mut verdicts = drive(child, clash_port, &secret, &indices, &mixed, opts).await;
+    // clash API на провал отвечает общим «error in the delay test»; настоящая
+    // причина — в журнале самого mihomo.
+    if verdicts.values().any(|v| !v.ok) {
+        let log = std::fs::read_to_string(dir.join(crate::engine::AUX_LOG)).unwrap_or_default();
+        for (i, v) in verdicts.iter_mut().filter(|(_, v)| !v.ok) {
+            let tag = format!("h{i}");
+            let line = log
+                .lines()
+                .rev()
+                .find(|l| (l.contains("level=error") || l.contains("level=warning")) && (l.contains(&tag) || indices.len() == 1));
+            if let Some(l) = line {
+                let msg = l.split("msg=").nth(1).unwrap_or(l).trim().trim_matches('"');
+                v.err = Some(msg.chars().take(300).collect());
+            }
+        }
+    }
+    out.extend(verdicts);
     let _ = std::fs::remove_dir_all(&dir);
     out
+}
+
+/// Проба через рабочий движок — там, где второй экземпляр не поднять
+/// (Android, iOS): задержка — clash API живого конфига по выходу `proxy`,
+/// скорость — загрузкой через его вход `fetch-in`. Годится только для
+/// профиля, который сейчас активен.
+pub async fn run_live(clash_port: u16, secret: &str, proxy_url: &str, opts: &Opts<'_>) -> Verdict {
+    let client = crate::http::client_builder().no_proxy().timeout(Duration::from_secs(6)).build().expect("reqwest");
+    let urls: Vec<String> = opts.urls.iter().map(|(_, u)| u.clone()).collect();
+    let mut v = probe_one(client, format!("http://127.0.0.1:{clash_port}"), secret.to_owned(), "proxy".to_owned(), urls).await;
+    if let Some(sp) = opts.speed.filter(|_| v.ok) {
+        v.dl = measure_via(proxy_url, &sp.url, sp.bytes).await;
+    }
+    v
 }
 
 /// Дождаться clash API временного движка, снять задержки и скорость, убить.
@@ -435,3 +500,32 @@ pub fn urls(store: &crate::store::Store) -> Vec<(String, String)> {
     }
     v
 }
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Обычный (не AWG) профиль через временный mihomo — путь проб на телефоне.
+    /// `DETOUR_MIHOMO_BIN=<mihomo> DETOUR_PROBE_LINK=<файл со ссылкой> cargo test -p detour-core mihomo_probe -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn mihomo_probe_plain_profile() {
+        let link = std::fs::read_to_string(std::env::var("DETOUR_PROBE_LINK").expect("DETOUR_PROBE_LINK")).unwrap();
+        let parsed = crate::sharelink::parse(link.trim()).expect("ссылка не разобралась");
+        let dir = std::env::temp_dir().join(format!("detour-probe-test-{}", random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let engine = Engine::new(&dir, dir.join("run"), dir.join("stderr.log"));
+        assert!(engine.mihomo_binary().is_file(), "нет mihomo: {}", engine.mihomo_binary().display());
+        let targets = vec![Target { id: "t".into(), outbound: parsed.outbound }];
+        let urls = vec![("Google".to_owned(), "https://www.google.com/generate_204".to_owned())];
+        let speed = Speed { url: "https://speed.cloudflare.com/__down?bytes=8000000".into(), bytes: 8_000_000, skip: HashSet::new() };
+        let opts = Opts { urls: &urls, speed: Some(&speed) };
+        let out = run_mihomo(&engine, &dir, &targets, vec![0], &opts).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let v = out.get(&0).expect("нет вердикта");
+        println!("verdict: {v:?}");
+        assert!(v.ok && v.rtt > 0 && v.dl > 0, "{v:?}");
+    }
+}
+
+

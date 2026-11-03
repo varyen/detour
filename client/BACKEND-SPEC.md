@@ -209,7 +209,7 @@ Tauri-команду `api`: `invoke("api", {action, params: Record<string,string
 | `log_to_syslog_singbox` | `"1"/"0"` | `"0"` (`:642-643`) | `log_config` |
 | `self_intercept` | CSV id целей маршрута | `""` (`:649-651`) | `self_intercept` |
 | `self_intercept_full` | CSV | `""` | `self_intercept` |
-| `udp_vpn_mode` | `off\|list\|all` | `off`; legacy `discord_voice_vpn=1` → `list` (`:653-661`, `:1283-1288`) | `udp_vpn`; на Keenetic всегда `off` |
+| `udp_vpn_mode` | `off\|list\|all` | `all` (на роутере `off`); legacy `discord_voice_vpn=1` → `list` (`:653-661`, `:1283-1288`) | `udp_vpn`; на Keenetic всегда `off` |
 
 Механизм override: вызывающий экспортирует `HEALTH_ENABLED_OVERRIDE`,
 `HEALTH_AUTOSWITCH_OVERRIDE`, `HEALTH_SPEED_OVERRIDE`, `HEALTH_SPEED_BYTES_OVERRIDE`,

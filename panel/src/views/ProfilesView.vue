@@ -118,6 +118,7 @@ const rowState = computed(() => {
     if (alt) {
       out.push(`Сервер отвечает по ${alt}, а профиль заведён другим протоколом — смените протокол`);
     }
+    if (!r.health.ok && r.health.err) out.push(`Причина: ${r.health.err}`);
     /* По каждой цели отдельно: «не проходит» само по себе не говорит, что
        именно отвалилось — YouTube или весь выход в сеть. */
     const delays = r.health.delays ?? [];

@@ -52,6 +52,9 @@ pub mod tunnel {
 
 /// Движок mihomo целиком (не сайдкар) — только там, где процессы можно
 /// запускать самим: на телефонах sing-box вкомпилирован библиотекой.
+/// Журнал временного mihomo проб — в его каталоге, читается до удаления.
+pub const AUX_LOG: &str = "engine.log";
+
 pub const MIHOMO_ENGINE_SUPPORTED: bool = !cfg!(any(target_os = "android", target_os = "ios"));
 
 pub struct Engine {
@@ -109,10 +112,13 @@ impl Engine {
     }
 
     /// Пробы профилей поднимают второй экземпляр движка рядом с рабочим. На
-    /// Android такого нет: ядро вкомпилировано в приложение в единственном
-    /// числе, и проверять профили нечем.
+    /// телефоне sing-box вкомпилирован в приложение в единственном числе —
+    /// там вторым служит mihomo из APK.
     pub fn probes_supported(&self) -> bool {
-        !cfg!(any(target_os = "android", target_os = "ios")) && self.present()
+        if cfg!(any(target_os = "android", target_os = "ios")) {
+            return crate::awg::SUPPORTED && self.mihomo.is_file();
+        }
+        self.present()
     }
 
     fn command_for(&self, bin: &Path, dir: &Path) -> Command {
@@ -313,13 +319,14 @@ impl Engine {
             bail!("mihomo не найден: {}", self.mihomo.display());
         }
         std::fs::create_dir_all(dir)?;
+        let log = std::fs::File::create(dir.join(AUX_LOG))?;
         self.command_for(&self.mihomo, dir)
             .arg("-d")
             .arg(dir)
             .arg("-f")
             .arg(config)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log.try_clone()?))
+            .stderr(log)
             .kill_on_drop(true)
             .spawn()
             .context("не удалось запустить mihomo для проверки")

@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
@@ -23,6 +24,10 @@ class MainActivity : TauriActivity() {
   private var asking = false
 
   /** Отступы системных полос в CSS-пикселях, JSON для панели. */
+  private var webView: WebView? = null
+
+  override val handleBackNavigation: Boolean = false
+
   @Volatile private var insetsJson = """{"top":0,"bottom":0,"left":0,"right":0}"""
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -33,6 +38,14 @@ class MainActivity : TauriActivity() {
     DetourBridge.nativeInit(File(applicationInfo.nativeLibraryDir, "libtpws.so").absolutePath)
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    // «Назад» на корне закрывал Activity, вслед за ней Tauri завершал процесс,
+    // а VPN-служба живёт в нём же — туннель падал. Сворачиваемся, как «домой».
+    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        val wv = webView
+        if (wv != null && wv.canGoBack()) wv.goBack() else moveTaskToBack(true)
+      }
+    })
     requestVpn()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
       runCatching { notifications.launch(Manifest.permission.POST_NOTIFICATIONS) }
@@ -43,6 +56,7 @@ class MainActivity : TauriActivity() {
   // Chromium 136 не отдаёт env(safe-area-inset-*) — без этого шапка панели
   // уезжает под шторку и её кнопки не нажать. Отступы уходят в CSS-переменные.
   override fun onWebViewCreate(webView: WebView) {
+    this.webView = webView
     webView.addJavascriptInterface(Bridge(), "DetourInsets")
     ViewCompat.setOnApplyWindowInsetsListener(webView) { v, insets ->
       val b = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())

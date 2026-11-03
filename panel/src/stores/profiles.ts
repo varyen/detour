@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { chains, diag, profiles as profilesApi } from "@/api";
+import { useStatusStore } from "./status";
 import type {
   Chain,
   HealthResult,
@@ -76,6 +77,20 @@ export const useProfilesStore = defineStore("profiles", () => {
   });
 
   const activeRow = computed(() => rows.value.find((r) => r.isActive));
+
+  /* Список грузится один раз, а активный профиль меняется и без панели:
+     автопереключение, другое окно. Статус опрашивается постоянно — берём оттуда,
+     иначе «активен» остаётся на профиле, с которого уже ушли. */
+  const status = useStatusStore();
+  watch(
+    () => [status.activeProfile, status.activeChain.join(",")] as const,
+    ([id]) => {
+      if (!id || switching.value) return;
+      if (id !== active.value) active.value = id;
+      const chain = status.activeChain.length ? [...status.activeChain] : [id];
+      if (chain.join(",") !== activeChain.value.join(",")) activeChain.value = chain;
+    },
+  );
 
   async function load(force = false) {
     if (loading.value) return;

@@ -129,7 +129,9 @@ impl Settings {
         if self.flag("discord_voice_vpn", false) {
             return UdpMode::List;
         }
-        UdpMode::Off
+        // Не как на роутере (там off): на телефоне UDP мимо VPN ломает Telegram,
+        // звонки и QUIC, а TPROXY-ограничений у TUN нет.
+        UdpMode::All
     }
 
     /// «Все через VPN». На роутере это iptables-цепочка, которая не переживает

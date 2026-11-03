@@ -106,7 +106,48 @@ impl Backend {
     async fn probe(&self, ids: &[String], speed: Option<Speed>) -> BTreeMap<String, Verdict> {
         let urls = probe::urls(&self.store);
         let opts = probe::Opts { urls: &urls, speed: speed.as_ref() };
-        probe::run(&self.engine, &self.store.path("run"), self.health_targets(ids), &opts).await
+        if self.live_only() {
+            return self.probe_live(ids, &opts).await;
+        }
+        // На телефоне подключённый профиль меряется рабочим движком: туннель
+        // держит sing-box, а временный mihomo шлёт другой ClientHello, и там,
+        // где ТСПУ режет отпечаток, проверка врала «не отвечает» при живом VPN.
+        let mut out = BTreeMap::new();
+        let mut rest: Vec<String> = ids.to_vec();
+        if cfg!(any(target_os = "android", target_os = "ios")) && self.engine.pid().await.is_some() {
+            out = self.probe_live(ids, &opts).await;
+            rest.retain(|id| !out.contains_key(id));
+        }
+        if !rest.is_empty() {
+            out.extend(probe::run(&self.engine, &self.store.path("run"), self.health_targets(&rest), &opts).await);
+        }
+        out
+    }
+
+    /// Телефон без временного движка (iOS: mihomo там нет) — проверяется
+    /// только подключённый профиль, через рабочий движок.
+    fn live_only(&self) -> bool {
+        cfg!(any(target_os = "android", target_os = "ios")) && !self.engine.probes_supported()
+    }
+
+    async fn probe_live(&self, ids: &[String], opts: &probe::Opts<'_>) -> BTreeMap<String, Verdict> {
+        let mut out = BTreeMap::new();
+        let Some(active) = self.live_target() else { return out };
+        if !ids.contains(&active) {
+            return out;
+        }
+        let Some(proxy) = self.fetch_proxy().await else { return out };
+        out.insert(active, probe::run_live(super::CLASH_PORT, &self.clash_secret, &proxy, opts).await);
+        out
+    }
+
+    /// Цепочку из нескольких звеньев живой движок меряет только целиком —
+    /// приписать результат одному профилю нельзя.
+    fn live_target(&self) -> Option<String> {
+        match Settings::load(&self.store).active_chain().as_slice() {
+            [id] => Some(id.clone()),
+            _ => None,
+        }
     }
 
     /// Вердикты в базу. Проба без замера скорости не стирает прошлую скорость.
@@ -136,7 +177,8 @@ impl Backend {
         let urls: Vec<Value> = probe::urls(&self.store).into_iter().map(|(l, u)| json!({ "label": l, "url": u })).collect();
         Response::json(&json!({
             "now": now_epoch(),
-            "supported": self.engine.probes_supported(),
+            "supported": self.live_only() || self.engine.probes_supported(),
+            "active_only": self.live_only(),
             "enabled": cfg.enabled,
             "auto_switch": cfg.auto_switch,
             "speed": cfg.speed,
@@ -154,6 +196,14 @@ impl Backend {
         };
         if !profiles::exists(&self.store, id) {
             return Err(anyhow!("profile not found"));
+        }
+        if self.live_only() {
+            if self.live_target().as_deref() != Some(id) {
+                return Err(anyhow!("на телефоне проверяется только подключённый профиль — подключитесь к нему и повторите"));
+            }
+            if self.engine.pid().await.is_none() {
+                return Err(anyhow!("VPN не запущен — подключитесь и повторите проверку"));
+            }
         }
         let cfg = self.health_cfg();
         let ids = vec![id.to_owned()];
@@ -264,7 +314,7 @@ impl Backend {
     /// случайной фазой, чтобы не проверять всё разом. `all` — полная проверка.
     pub(super) async fn health_tick(&self, all: bool) {
         let cfg = self.health_cfg();
-        if !cfg.enabled || !self.engine.probes_supported() {
+        if !cfg.enabled || !(self.live_only() || self.engine.probes_supported()) {
             return;
         }
         let _sweep = self.sweep_lock.lock().await;
