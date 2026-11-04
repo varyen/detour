@@ -719,8 +719,10 @@ issue|issue-dns)
     # given we reuse the existing account untouched — re-registering with an empty
     # contact would drop the one the operator may have set elsewhere.
     if [ -n "$EMAIL_IN" ]; then
-        "$ACME" --register-account -m "$EMAIL_IN" >/dev/null 2>&1 || \
-            "$ACME" --update-account -m "$EMAIL_IN" >/dev/null 2>&1 || true
+        # Без --server acme.sh 3.x регистрирует аккаунт у ZeroSSL (CA по умолчанию),
+        # а не у того CA, где потом выпускает, — и этот запрос может висеть вечно.
+        "$ACME" --register-account --server "$LE_SERVER" -m "$EMAIL_IN" >/dev/null 2>&1 || \
+            "$ACME" --update-account --server "$LE_SERVER" -m "$EMAIL_IN" >/dev/null 2>&1 || true
     fi
 
     H80=$(http80_server)

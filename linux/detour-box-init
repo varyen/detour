@@ -123,6 +123,20 @@ grep -v 'detour/.box' /etc/crontabs/root 2>/dev/null > /etc/crontabs/root.new
 echo "* * * * * $sync_cmd" >> /etc/crontabs/root.new
 mv /etc/crontabs/root.new /etc/crontabs/root
 
+# acme.sh (сертификат из панели) ставится в /root/.acme.sh — вне томов, и после
+# пересоздания контейнера продление пропадало молча: серт жил свои 90 дней и
+# истекал. Держим его в томе, а строку cron возвращаем при каждом старте.
+ACME_KEEP=/etc/detour/.box/acme.sh
+if [ -d /root/.acme.sh ] && [ ! -L /root/.acme.sh ]; then
+    [ -e "$ACME_KEEP" ] || mv /root/.acme.sh "$ACME_KEEP"
+    rm -rf /root/.acme.sh
+fi
+mkdir -p "$ACME_KEEP"
+ln -sfn "$ACME_KEEP" /root/.acme.sh
+if [ -x /root/.acme.sh/acme.sh ] && ! grep -q 'acme.sh --cron' /etc/crontabs/root; then
+    echo '8 1,7,13,19 * * * "/root/.acme.sh"/acme.sh --cron --home "/root/.acme.sh" > /dev/null' >> /etc/crontabs/root
+fi
+
 # /etc/detour — том, и /etc/detour/version в нём остаётся от прежнего образа:
 # пакет в новом образе свежее, а панель и detour-update видели старую версию
 # (обновление «ставилось», но проверка после установки падала). Версия — из
