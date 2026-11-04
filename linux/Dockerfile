@@ -61,14 +61,18 @@ COPY --from=xray /xray /usr/bin/xray
 # сборка не ходит за ним на GitHub. Иначе берётся последний релиз. Глоб с
 # detour-box-init в одной строке: COPY с глобом, не совпавшим ни с чем, падает.
 COPY detour-box-init detour_*_noarch.ap[k] /root/
+# Версию передаёт install.sh. Без неё слой ниже брался из кэша Docker, и
+# пересборка «на последний релиз» молча оставляла прежний пакет.
+ARG DETOUR_VERSION=
 RUN mkdir -p /var/lock /tmp \
  && mv /root/detour-box-init /sbin/detour-box-init \
  && apk update \
  && apk add ca-bundle curl ip-full \
  && set -- /root/detour_*_noarch.apk \
  && if [ ! -f "$1" ]; then \
-        tag=$(curl -fsSL "https://api.github.com/repos/$DETOUR_REPO/releases/latest" \
-              | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1) \
+        tag=$DETOUR_VERSION \
+     && { [ -n "$tag" ] || tag=$(curl -fsSL "https://api.github.com/repos/$DETOUR_REPO/releases/latest" \
+              | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1); } \
      && curl -fsSL -o "/root/detour_${tag}_noarch.apk" \
             "https://github.com/$DETOUR_REPO/releases/download/v$tag/detour_${tag}_noarch.apk" \
      && set -- "/root/detour_${tag}_noarch.apk"; \

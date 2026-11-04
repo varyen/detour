@@ -151,7 +151,11 @@ fi
 say "Внешний адрес для клиентов: $ENDPOINT — AmneziaWG $PORT/udp, VLESS $VPORT/tcp"
 
 say "Сборка образа (OpenWrt $OWRT + Detour + AmneziaWG) — несколько минут"
-docker build --build-arg OWRT="$OWRT" -t "$NAME-box" "$HERE"
+REPO=$(sed -n 's/^ARG DETOUR_REPO=//p' "$HERE/Dockerfile" | head -1)
+DVER=$(curl -fsSL --max-time 15 "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+    | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1 || true)
+[ -n "$DVER" ] && say "Detour $DVER (последний релиз)"
+docker build --build-arg OWRT="$OWRT" --build-arg DETOUR_VERSION="$DVER" -t "$NAME-box" "$HERE"
 
 docker network inspect "$NAME-net" >/dev/null 2>&1 || docker network create "$NAME-net" >/dev/null
 docker rm -f "$NAME" >/dev/null 2>&1 || true
