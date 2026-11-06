@@ -1,0 +1,90 @@
+Package: detour-awg-go
+Version: 1.0.1-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 3670178
+Description: Userspace AmneziaWG (amneziawg-go + awg subset) for the Detour VPN server on OpenWrt without kmod-amneziawg. (1.0.1-1)
+Filename: detour-awg-go_1.0.1-1_all.ipk
+Size: 1478138
+MD5Sum: 70f0c92e557eac4c1eb180b5273bde0c
+SHA256sum: a01701e1e391948a0222ee2d8e5df5290bee73e2d992824913c1a52b06d539f4
+
+Package: mihomo
+Version: 1.19.33-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 57475198
+Description: mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar for AmneziaWG profiles (sing-box has no AmneziaWG). (1.19.33-1)
+Filename: mihomo_1.19.33-1_all.ipk
+Size: 20638335
+MD5Sum: bf0973dab8d6c57d6d508c2bfdfb637d
+SHA256sum: a6b6a3ba4bb33c5dc3a1980e9346b9b1bbe575fd87542a69fec52e0bc278ac01
+
+Package: nfqws2
+Version: 1.0.7-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 484899
+Description: zapret2 nfqws2 NFQUEUE DPI-bypass engine + LuaJIT desync scripts (bol-van/zapret2). Optional — used by zapret2 mode. (1.0.7-1)
+Filename: nfqws2_1.0.7-1_all.ipk
+Size: 357681
+MD5Sum: 6284475340cce14b2b95a77bfe6214f7
+SHA256sum: aaef82379083e9cd0e178722abc818efcc9d8ff5264012c1a60d92372825ce3e
+
+Package: sing-box
+Version: 1.14.4-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 86155608
+Description: sing-box universal proxy platform. Detour feed build for OpenWrt/GL.iNet (the distro feed is stuck on 1.8.x). (1.14.4-1)
+Filename: sing-box_1.14.4-1_all.ipk
+Size: 29458370
+MD5Sum: 8442e741f571768fb94e212bea7cfe29
+SHA256sum: fa933f862d423834fd87dd037e9b443350f1c4de620b36172f6502a2af8c83b0
+
+Package: tpws-zapret
+Version: 72.13-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 110488
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build — zapret is in no opkg feed. (72.13-1)
+Filename: tpws-zapret_72.13-1_all.ipk
+Size: 110727
+MD5Sum: b4b8df4104eafe4640c568c8fc66e370
+SHA256sum: 03b4e339c2a294fdbb6e653415472f296f95ea5cefab00c658fc0ac058c5eb4a
+
+Package: xray-detour
+Version: 26.3.27-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 34209918
+Description: Xray-core (XTLS) as xray-detour. Detour feed build - VLESS xhttp inbound of the Detour VPN server (sing-box has no xhttp). (26.3.27-1)
+Filename: xray-detour_26.3.27-1_all.ipk
+Size: 12118864
+MD5Sum: a8b05694fc1bcb7b4bd19ecc5b9ad4b3
+SHA256sum: bde2ff4c601ac345ebfb0912d34a401c54dc47b07027af4f9123447567899c17
+
