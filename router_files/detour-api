@@ -102,6 +102,7 @@ PUSH_BIN="/usr/sbin/detour-push"            # Web Push (VAPID) sender — backs 
 PUSH_MSG="/tmp/detour-push.msg"             # latest push message JSON (read by the service worker; tmpfs, not remapped)
 CERT_BIN="/usr/sbin/detour-cert"            # Let's Encrypt helper (acme.sh) — backs the cert_* actions
 CERT_STATE="/var/state/detour-cert.json"    # cert issue/renew status (written by detour-cert)
+DDNS_BIN="/usr/sbin/detour-ddns"            # бесплатное динамическое имя (DuckDNS / deSEC)
 OFFLOAD_BIN="/usr/sbin/detour-offload"      # QCA HW-offload watchdog/recovery — backs the offload_* actions
 PORTMAP_BIN="/usr/sbin/detour-portmap"      # публикация внутренних сервисов наружу — backs the portmap_* actions
 WANLINK_BIN="/usr/sbin/detour-wan-link"     # WAN PHY/link-speed monitor — warns on 100M negotiation (not offload-related)
@@ -248,6 +249,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PUSH_BIN="$OPT/sbin/detour-push"   # PUSH_MSG stays /tmp (not remapped, like HEALTH_DB)
     CERT_BIN="$OPT/sbin/detour-cert"
     CERT_STATE="$OPT/var/state/detour-cert.json"
+    DDNS_BIN="$OPT/sbin/detour-ddns"
     OFFLOAD_BIN="$OPT/sbin/detour-offload"   # QCA-only; no-op on Keenetic (no NSS accelerator)
     PORTMAP_BIN="$OPT/sbin/detour-portmap"
     WANLINK_BIN="$OPT/sbin/detour-wan-link"
@@ -5798,11 +5800,13 @@ cert_dns_set)
     [ -x "$CERT_BIN" ] || { json_err "detour-cert not installed"; exit 0; }
     DPROV=$(printf '%s' "$POST_DATA" | sed -n 's/.*"provider"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     case "$DPROV" in ''|*[!a-z0-9_-]*) json_err "bad provider"; exit 0 ;; esac
-    # NUL-separated so a value with spaces or newlines survives the round trip.
-    DKV=$(printf '%s' "$POST_DATA" | lua -e 'local c=require("cjson.safe"); local o=c.decode(io.read("*a")) or {}; local v=o.values; if type(v)~="table" then return end; for k,val in pairs(v) do if type(k)=="string" and type(val)=="string" and k:match("^[A-Za-z0-9_]+$") then io.write(k.."="..val.."\0") end end' 2>/dev/null)
-    [ -n "$DKV" ] || { json_err "нет значений для сохранения"; exit 0; }
+    # NUL-separated so a value with spaces or newlines survives the round trip — and piped
+    # straight into xargs: ash's $(…) silently drops NUL bytes, which glued every
+    # KEY=VALUE into one argument (PowerDNS with URL + token could not be saved).
+    DKV_LUA='local c=require("cjson.safe"); local o=c.decode(io.read("*a")) or {}; local v=o.values; local n=0; if type(v)=="table" then for k,val in pairs(v) do if type(k)=="string" and type(val)=="string" and k:match("^[A-Za-z0-9_]+$") then if not os.getenv("DKV_COUNT") then io.write(k.."="..val.."\0") end; n=n+1 end end end; if os.getenv("DKV_COUNT") and n==0 then os.exit(3) end'
+    printf '%s' "$POST_DATA" | DKV_COUNT=1 lua -e "$DKV_LUA" 2>/dev/null || { json_err "нет значений для сохранения"; exit 0; }
     # xargs -0 keeps each KEY=VALUE one argv entry; the helper validates the keys.
-    printf '%s' "$DKV" | xargs -0 "$CERT_BIN" dns-set "$DPROV"
+    printf '%s' "$POST_DATA" | lua -e "$DKV_LUA" 2>/dev/null | xargs -0 "$CERT_BIN" dns-set "$DPROV"
     ;;
 
 cert_issue_dns)
@@ -5827,6 +5831,53 @@ cert_issue_dns)
         CALT_Q="$CALT_Q '$_a'"
     done
     detach_bg "/tmp/detour-cert-bg.log" "$CERT_BIN" issue-dns "$CDOM" "$CEML" $CALT_Q
+    printf '{"ok":true,"started":true}'
+    ;;
+
+# ==================== DYNAMIC DNS (DuckDNS / deSEC) ====================
+# Бесплатное имя для внешнего адреса и сертификат на него по DNS-01 (ключ
+# DDNS-провайдера ставит и TXT-запись проверки). Значения идут в helper аргументами,
+# не через `sh -c`.
+ddns_status)
+    if [ -x "$DDNS_BIN" ]; then "$DDNS_BIN" status
+    else printf '{"ok":true,"supported":false}'; fi
+    ;;
+
+ddns_set)
+    # Body = {"provider":"duckdns","domain":"myhome","token":"…","lan":true,"wildcard":false,"enabled":true}
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$DDNS_BIN" ] || { json_err "detour-ddns not installed"; exit 0; }
+    DKV_LUA='local c=require("cjson.safe"); local o=c.decode(io.read("*a")) or {}; local n=0; local function out(k,v) n=n+1; if not os.getenv("DKV_COUNT") then io.write(k.."="..v.."\0") end end; for _,k in ipairs({"provider","domain","token"}) do if type(o[k])=="string" then out(k,o[k]) end end; for _,k in ipairs({"lan","wildcard","enabled"}) do if o[k]==true then out(k,"1") elseif o[k]==false then out(k,"0") end end; if os.getenv("DKV_COUNT") and n==0 then os.exit(3) end'
+    printf '%s' "$POST_DATA" | DKV_COUNT=1 lua -e "$DKV_LUA" 2>/dev/null || { json_err "нет значений для сохранения"; exit 0; }
+    printf '%s' "$POST_DATA" | lua -e "$DKV_LUA" 2>/dev/null | xargs -0 "$DDNS_BIN" set
+    ;;
+
+ddns_update)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$DDNS_BIN" ] || { json_err "detour-ddns not installed"; exit 0; }
+    "$DDNS_BIN" update --force
+    ;;
+
+ddns_off)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$DDNS_BIN" ] || { json_err "detour-ddns not installed"; exit 0; }
+    "$DDNS_BIN" off
+    ;;
+
+ddns_delete)
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$DDNS_BIN" ] || { json_err "detour-ddns not installed"; exit 0; }
+    "$DDNS_BIN" delete
+    ;;
+
+ddns_cert)
+    # Body = {"email":"…"} — выпуск идёт в фон, ход — через cert_status, как у cert_issue_dns.
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    [ -x "$DDNS_BIN" ] || { json_err "detour-ddns not installed"; exit 0; }
+    CEML=$(printf '%s' "$POST_DATA" | lua -e 'local c=require("cjson.safe"); local o=c.decode(io.read("*a")) or {}; io.write(type(o.email)=="string" and o.email or "")' 2>/dev/null)
+    [ -n "$CEML" ] || CEML="-"
+    case "$CEML" in *[!a-zA-Z0-9.@_+-]*) json_err "bad email"; exit 0 ;; esac
+    detach_bg "/tmp/detour-cert-bg.log" "$DDNS_BIN" cert "$CEML"
     printf '{"ok":true,"started":true}'
     ;;
 

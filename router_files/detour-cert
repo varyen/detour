@@ -195,6 +195,8 @@ dns_plugin() {  # $1 provider → acme.sh dnsapi plugin name
     case "$1" in
         pdns)  echo dns_pdns ;;
         gcore) echo dns_gcore ;;
+        duckdns) echo dns_duckdns ;;
+        desec) echo dns_desec ;;
         *)     echo "" ;;
     esac
 }
@@ -202,15 +204,21 @@ dns_vars() {  # $1 provider → every variable the plugin reads
     case "$1" in
         pdns)  echo "PDNS_Url PDNS_ServerId PDNS_Token PDNS_Ttl" ;;
         gcore) echo "GCORE_Key" ;;
+        duckdns) echo "DuckDNS_Token" ;;
+        desec) echo "DEDYN_TOKEN" ;;
     esac
 }
 dns_required() {  # $1 provider → the ones without which issuance cannot even start
     case "$1" in
         pdns)  echo "PDNS_Url PDNS_Token" ;;
         gcore) echo "GCORE_Key" ;;
+        duckdns) echo "DuckDNS_Token" ;;
+        desec) echo "DEDYN_TOKEN" ;;
     esac
 }
-dns_providers() { echo "pdns gcore"; }
+# duckdns/desec — бесплатные DDNS (detour-ddns): их ключ обновления адреса годится и
+# для TXT-записи проверки.
+dns_providers() { echo "pdns gcore duckdns desec"; }
 
 # Is the plugin actually present in this acme.sh install? A missing dnsapi file fails
 # deep inside acme.sh with a message the panel would never surface.
@@ -260,6 +268,17 @@ dns_probe() {
         gcore)
             _b=$(curl -sS -m 15 -H "Authorization: APIKey $GCORE_Key" \
                  -w '\n%{http_code}' "https://api.gcore.com/dns/v2/zones" 2>/dev/null) ;;
+        desec)
+            _b=$(curl -sS -m 15 -H "Authorization: Token $DEDYN_TOKEN" \
+                 -w '\n%{http_code}' "https://desec.io/api/v1/domains/" 2>/dev/null) ;;
+        duckdns)
+            # Чтения у DuckDNS нет, а токен проверяется только вместе с именем: берём
+            # имя из detour-ddns и шлём обычное обновление адреса (оно и так его работа).
+            _sub=$( . "$DETOUR_DIR/ddns.conf" 2>/dev/null; printf '%s' "${DDNS_DOMAIN%.duckdns.org}" )
+            [ -n "$_sub" ] || return 1
+            _b=$(curl -4 -sS -m 15 -w '\n%{http_code}' \
+                 "https://www.duckdns.org/update?domains=$_sub&token=$DuckDNS_Token" 2>/dev/null)
+            case "$_b" in KO*) _b=$(printf 'KO\n401') ;; esac ;;
         *) return 1 ;;
     esac
     [ -n "$_b" ] || return 1
@@ -981,7 +1000,7 @@ dns-status)
         case " $(dns_required "$DNS_PROVIDER") " in *" $_v "*) _req=true ;; esac
         # A token never leaves the router — the panel only needs to know it is there.
         case "$_v" in
-            *Token*|*Key*|*Secret*|*Password*) [ -n "$_val" ] && _val="********" ;;
+            *Token*|*TOKEN*|*Key*|*Secret*|*Password*) [ -n "$_val" ] && _val="********" ;;
         esac
         [ "$_f" = 1 ] || printf ','
         _f=0

@@ -157,6 +157,9 @@ while :; do
     # что панель рисует их одинаково.
     [ -x /opt/sbin/detour-trafficlog ] &&         /opt/sbin/detour-trafficlog tick >/dev/null 2>&1
 
+    # Динамическое имя — каждый тик (300 с): сам решает, пора ли слать адрес.
+    [ -x /opt/sbin/detour-ddns ] &&         /opt/sbin/detour-ddns tick >/dev/null 2>&1
+
     # Плагины: каждый тик, срок каждой задачи detour-plugin считает по интервалу
     # из манифеста (интервал короче тика — значит каждый тик).
     [ -x /opt/sbin/detour-plugin ] && \

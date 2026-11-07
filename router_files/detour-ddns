@@ -1,0 +1,374 @@
+#!/bin/sh
+# detour-ddns — бесплатное динамическое имя для внешнего адреса роутера.
+#
+# Провайдеры выбраны по одному признаку: их API умеет ставить TXT-запись, а значит
+# detour-cert может получить на это имя сертификат Let's Encrypt по DNS-01 — без
+# открытого 80-го порта, за CGNAT, на Keenetic без проброса:
+#   duckdns — <имя>.duckdns.org, токен со страницы duckdns.org. Одна TXT-запись на
+#             имя, поэтому wildcard вместе с самим именем выпустить нельзя;
+#   desec   — <имя>.dedyn.io (desec.io), токен из личного кабинета. Полноценная
+#             зона: wildcard *.<имя>.dedyn.io выпускается вместе с именем.
+#
+# Подкоманды:
+#   status                 JSON для панели
+#   set k=v…               provider= domain= token= lan=0|1 wildcard=0|1 enabled=0|1
+#   update [--force]       отправить адрес сейчас
+#   tick                   cron: адрес сменился / прошли сутки / прошлый раз не вышло
+#   cert <email|->         выпустить сертификат на имя (detour-cert issue-dns)
+#   off | delete           выключить / забыть настройки
+#
+# lan=1 — имя в домашней сети ведёт прямо на роутер (запись в /tmp/hosts, которую
+# читает dnsmasq). Так панель открывается по https://<имя>/ с действительным
+# сертификатом изнутри сети, даже если снаружи порт закрыт или адрес за CGNAT.
+
+DETOUR_DIR=/etc/detour
+STATE_DIR=/var/state
+LOG=/var/log/detour-ddns.log
+CERT_BIN=/usr/sbin/detour-cert
+HOSTS_FILE=/tmp/hosts/detour-ddns
+PLATFORM=openwrt
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    PLATFORM=keenetic
+    DETOUR_DIR=/opt/etc/detour
+    STATE_DIR=/opt/var/state
+    LOG=/opt/var/log/detour-ddns.log
+    CERT_BIN=/opt/sbin/detour-cert
+fi
+BOX=0
+[ -f /etc/detour/box.conf ] && . /etc/detour/box.conf
+CONF="$DETOUR_DIR/ddns.conf"          # 0600: в нём токен
+STATE="$STATE_DIR/detour-ddns.json"
+LAST="$STATE_DIR/detour-ddns.last"    # «ip ts rc» последней отправки (tmpfs: после ребута шлём заново)
+REFRESH_AFTER=86400                   # раз в сутки подтверждаем адрес, даже если он не менялся
+RETRY_AFTER=600                       # после ошибки — не чаще, чем раз в 10 минут (deSEC режет частые)
+
+mkdir -p "$STATE_DIR" "$(dirname "$LOG")" 2>/dev/null
+
+log() { echo "[$(date '+%F %T' 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t')"; }
+die_json() { printf '{"ok":false,"error":%s}\n' "$(json_str "$1")"; exit 0; }
+now() { date +%s 2>/dev/null || echo 0; }
+
+DDNS_ENABLED=0; DDNS_PROVIDER=""; DDNS_DOMAIN=""; DDNS_TOKEN=""; DDNS_LAN=1; DDNS_WILDCARD=0
+load_conf() { [ -f "$CONF" ] && . "$CONF" 2>/dev/null; return 0; }
+
+save_conf() {
+    mkdir -p "$DETOUR_DIR" 2>/dev/null
+    _tok=$(printf '%s' "$DDNS_TOKEN" | sed "s/'/'\\\\''/g")
+    ( umask 077
+      {
+        echo "# Managed by detour-ddns. Holds an API token — do not commit."
+        echo "DDNS_ENABLED='$DDNS_ENABLED'"
+        echo "DDNS_PROVIDER='$DDNS_PROVIDER'"
+        echo "DDNS_DOMAIN='$DDNS_DOMAIN'"
+        echo "DDNS_TOKEN='$_tok'"
+        echo "DDNS_LAN='$DDNS_LAN'"
+        echo "DDNS_WILDCARD='$DDNS_WILDCARD'"
+      } > "$CONF.tmp" ) && mv "$CONF.tmp" "$CONF"
+    chmod 0600 "$CONF" 2>/dev/null
+}
+
+suffix_of() {
+    case "$1" in
+        duckdns) echo duckdns.org ;;
+        desec)   echo dedyn.io ;;
+    esac
+}
+
+# «myhome» → «myhome.duckdns.org»; полное имя оставляем как есть.
+normalize_domain() {  # $1 provider  $2 input
+    _d=$(printf '%s' "$2" | tr 'A-Z' 'a-z' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s#^https\?://##; s#/.*##')
+    _s=$(suffix_of "$1")
+    case "$_d" in
+        *.*) ;;
+        *)   [ -n "$_d" ] && _d="$_d.$_s" ;;
+    esac
+    printf '%s' "$_d"
+}
+
+valid_domain() {  # $1 provider  $2 domain
+    printf '%s' "$2" | grep -qE '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$' || return 1
+    # DuckDNS обновляет только свои поддомены первого уровня; у deSEC имя может
+    # быть и своим доменом, делегированным в deSEC.
+    [ "$1" = duckdns ] && { printf '%s' "$2" | grep -qE '^[a-z0-9-]+\.duckdns\.org$' || return 1; }
+    return 0
+}
+
+is_private() {
+    case "$1" in
+        10.*|127.*|192.168.*|169.254.*|0.*|'') return 0 ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 0 ;;  # 100.64/10, CGNAT
+    esac
+    return 1
+}
+
+valid_ip4() { printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
+
+# Адрес интерфейса, через который идёт маршрут по умолчанию.
+iface_ip() {
+    _dev=$(ip -4 route show default 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+    [ -n "$_dev" ] || return 0
+    ip -4 addr show dev "$_dev" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1
+}
+
+# Адрес, каким роутер виден из интернета. Свой трафик роутера идёт мимо VPN,
+# поэтому внешний сервис видит настоящий адрес канала.
+external_ip() {
+    command -v curl >/dev/null 2>&1 || return 0
+    for _u in https://checkipv4.dedyn.io/ https://api.ipify.org/ https://ipv4.icanhazip.com/; do
+        _ip=$(curl -4 -sS -m 10 "$_u" 2>/dev/null | tr -d ' \r\n')
+        valid_ip4 "$_ip" && { printf '%s' "$_ip"; return 0; }
+    done
+}
+
+# Публичный адрес + признак «за чужим NAT». Пишет PUB_IP, IFACE_IP, CGNAT.
+detect_ip() {
+    IFACE_IP=$(iface_ip); CGNAT=0; PUB_IP=""
+    if [ -n "$IFACE_IP" ] && ! is_private "$IFACE_IP"; then
+        PUB_IP="$IFACE_IP"
+        return 0
+    fi
+    PUB_IP=$(external_ip)
+    # В контейнере Linux-сервера свой адрес служебный по определению — это не CGNAT.
+    [ "$BOX" != 1 ] && [ -n "$PUB_IP" ] && [ "$PUB_IP" != "$IFACE_IP" ] && CGNAT=1
+    return 0
+}
+
+lan_ip() {
+    _ip=""
+    if [ "$PLATFORM" = openwrt ] && command -v uci >/dev/null 2>&1; then
+        _ip=$(uci -q get network.lan.ipaddr 2>/dev/null | awk '{print $1}' | cut -d/ -f1)
+    fi
+    if [ -z "$_ip" ]; then
+        for _if in br-lan br0; do
+            _ip=$(ip -4 addr show dev "$_if" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
+            [ -n "$_ip" ] && break
+        done
+    fi
+    printf '%s' "$_ip"
+}
+
+hup_dnsmasq() { killall -HUP dnsmasq >/dev/null 2>&1; }
+
+# Запись в домашнем DNS. /tmp — tmpfs, поэтому tick пересоздаёт её после ребута.
+lan_apply() {
+    load_conf
+    if [ "$DDNS_ENABLED" = 1 ] && [ "$DDNS_LAN" = 1 ] && [ -n "$DDNS_DOMAIN" ] && [ "$BOX" != 1 ]; then
+        _l=$(lan_ip)
+        [ -n "$_l" ] || return 0
+        _want="$_l $DDNS_DOMAIN"
+        if [ "$(cat "$HOSTS_FILE" 2>/dev/null)" != "$_want" ]; then
+            mkdir -p "$(dirname "$HOSTS_FILE")" 2>/dev/null
+            printf '%s\n' "$_want" > "$HOSTS_FILE"
+            hup_dnsmasq
+        fi
+    elif [ -f "$HOSTS_FILE" ]; then
+        rm -f "$HOSTS_FILE"
+        hup_dnsmasq
+    fi
+}
+
+write_state() {  # $1 result  $2 error  $3 ip
+    printf '{"last_result":%s,"last_error":%s,"last_ip":%s,"last_ts":%s,"cgnat":%s,"iface_ip":%s}\n' \
+        "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "$(now)" \
+        "$([ "${CGNAT:-0}" = 1 ] && echo true || echo false)" "$(json_str "$IFACE_IP")" > "$STATE.tmp" \
+        && mv "$STATE.tmp" "$STATE"
+}
+
+# Один запрос к провайдеру. Возвращает 0 при успехе, текст ошибки — в UPD_ERR.
+push_ip() {  # $1 ip
+    UPD_ERR=""
+    command -v curl >/dev/null 2>&1 || { UPD_ERR="на роутере нет curl"; return 1; }
+    case "$DDNS_PROVIDER" in
+        duckdns)
+            _sub=${DDNS_DOMAIN%.duckdns.org}
+            # Токен — в запросе: так устроен API DuckDNS. Через -K из stdin он хотя бы
+            # не попадает в список процессов.
+            _r=$(printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip=%s"\n' "$_sub" "$DDNS_TOKEN" "$1" \
+                 | curl -4 -sS -m 20 -K - -w '\n%{http_code}' 2>&1)
+            _code=$(printf '%s' "$_r" | tail -1); _body=$(printf '%s' "$_r" | sed '$d' | tr -d '\r\n ')
+            [ "$_body" = OK ] && return 0
+            case "$_body" in
+                KO) UPD_ERR="DuckDNS отказал: неверный токен или имя не принадлежит этой учётной записи" ;;
+                *)  UPD_ERR="DuckDNS не ответил (HTTP ${_code:-000})" ;;
+            esac
+            return 1 ;;
+        desec)
+            _r=$(printf 'header = "Authorization: Token %s"\nurl = "https://update.dedyn.io/?hostname=%s&myipv4=%s&myipv6=preserve"\n' \
+                    "$DDNS_TOKEN" "$DDNS_DOMAIN" "$1" \
+                 | curl -4 -sS -m 20 -K - -w '\n%{http_code}' 2>&1)
+            _code=$(printf '%s' "$_r" | tail -1); _body=$(printf '%s' "$_r" | sed '$d' | tr -d '\r\n ')
+            case "$_code" in
+                200) [ "$_body" = good ] && return 0; UPD_ERR="deSEC ответил: $_body" ;;
+                401) UPD_ERR="deSEC отклонил токен" ;;
+                404) UPD_ERR="в учётной записи deSEC нет имени $DDNS_DOMAIN — создайте его на desec.io" ;;
+                429) UPD_ERR="deSEC просит обновлять реже — повторю позже" ;;
+                *)   UPD_ERR="deSEC не ответил (HTTP ${_code:-000})" ;;
+            esac
+            return 1 ;;
+    esac
+    UPD_ERR="неизвестный провайдер: $DDNS_PROVIDER"
+    return 1
+}
+
+do_update() {  # $1 force(0|1) → печатает JSON
+    load_conf
+    [ -n "$DDNS_PROVIDER" ] && [ -n "$DDNS_DOMAIN" ] && [ -n "$DDNS_TOKEN" ] || die_json "сначала укажите провайдера, имя и токен"
+    detect_ip
+    [ -n "$PUB_IP" ] || { write_state error "не удалось узнать внешний адрес роутера" ""; log "no public ip"; die_json "не удалось узнать внешний адрес роутера"; }
+    set -- "$1" $(cat "$LAST" 2>/dev/null)
+    _force=$1; _lip=$2; _lts=${3:-0}; _lrc=${4:-1}; _t=$(now)
+    if [ "$_force" != 1 ] && [ "$_lip" = "$PUB_IP" ]; then
+        if [ "$_lrc" = 0 ] && [ $((_t - _lts)) -lt "$REFRESH_AFTER" ]; then
+            printf '{"ok":true,"ip":%s,"changed":false}\n' "$(json_str "$PUB_IP")"; return 0
+        fi
+        if [ "$_lrc" != 0 ] && [ $((_t - _lts)) -lt "$RETRY_AFTER" ]; then
+            printf '{"ok":false,"error":"повтор позже","ip":%s}\n' "$(json_str "$PUB_IP")"; return 0
+        fi
+    fi
+    if push_ip "$PUB_IP"; then
+        echo "$PUB_IP $_t 0" > "$LAST"
+        write_state ok "" "$PUB_IP"
+        log "$DDNS_DOMAIN → $PUB_IP (cgnat=$CGNAT)"
+        printf '{"ok":true,"ip":%s,"changed":true}\n' "$(json_str "$PUB_IP")"
+    else
+        echo "$PUB_IP $_t 1" > "$LAST"
+        write_state error "$UPD_ERR" "$PUB_IP"
+        log "update FAILED: $UPD_ERR"
+        die_json "$UPD_ERR"
+    fi
+}
+
+CMD="${1:-status}"
+case "$CMD" in
+status)
+    load_conf
+    _res=""; _err=""; _ip=""; _ts=0; _cg=false; _ifip=""
+    if [ -f "$STATE" ]; then
+        _s=$(cat "$STATE")
+        _res=$(printf '%s' "$_s" | sed -n 's/.*"last_result":"\([^"]*\)".*/\1/p')
+        _err=$(printf '%s' "$_s" | sed -n 's/.*"last_error":"\([^"]*\)".*/\1/p')
+        _ip=$(printf '%s' "$_s" | sed -n 's/.*"last_ip":"\([^"]*\)".*/\1/p')
+        _ts=$(printf '%s' "$_s" | sed -n 's/.*"last_ts":\([0-9]*\).*/\1/p')
+        _cg=$(printf '%s' "$_s" | sed -n 's/.*"cgnat":\([a-z]*\).*/\1/p')
+        _ifip=$(printf '%s' "$_s" | sed -n 's/.*"iface_ip":"\([^"]*\)".*/\1/p')
+    fi
+    _cdom=""
+    [ -f "$DETOUR_DIR/cert.conf" ] && _cdom=$( . "$DETOUR_DIR/cert.conf" 2>/dev/null; printf '%s' "${PANEL_HOST:-$DOMAIN}" )
+    printf '{"ok":true,"platform":%s,"box":%s,"providers":["duckdns","desec"],"enabled":%s,"provider":%s,"domain":%s,"token_set":%s,"lan":%s,"wildcard":%s,"lan_ip":%s,' \
+        "$(json_str "$PLATFORM")" "$([ "$BOX" = 1 ] && echo true || echo false)" \
+        "$([ "$DDNS_ENABLED" = 1 ] && echo true || echo false)" \
+        "$(json_str "$DDNS_PROVIDER")" "$(json_str "$DDNS_DOMAIN")" \
+        "$([ -n "$DDNS_TOKEN" ] && echo true || echo false)" \
+        "$([ "$DDNS_LAN" = 1 ] && echo true || echo false)" \
+        "$([ "$DDNS_WILDCARD" = 1 ] && echo true || echo false)" "$(json_str "$(lan_ip)")"
+    printf '"last_result":%s,"last_error":%s,"last_ip":%s,"last_ts":%s,"cgnat":%s,"iface_ip":%s,"cert_domain":%s,"curl":%s}\n' \
+        "$(json_str "$_res")" "$(json_str "$_err")" "$(json_str "$_ip")" "${_ts:-0}" "${_cg:-false}" \
+        "$(json_str "$_ifip")" "$(json_str "$_cdom")" \
+        "$(command -v curl >/dev/null 2>&1 && echo true || echo false)"
+    ;;
+
+set)
+    shift
+    load_conf
+    _old_dom="$DDNS_DOMAIN"; _old_prov="$DDNS_PROVIDER"; _new_tok=""
+    for _kv in "$@"; do
+        _k=${_kv%%=*}; _v=${_kv#*=}
+        [ "$_k" = "$_kv" ] && die_json "ожидается ключ=значение: $_kv"
+        case "$_k" in
+            provider) case "$_v" in duckdns|desec) DDNS_PROVIDER=$_v ;; *) die_json "неизвестный провайдер: $_v" ;; esac ;;
+            domain)   _dom_in=$_v ;;
+            token)    [ -n "$_v" ] && { DDNS_TOKEN=$_v; _new_tok=1; } ;;
+            lan)      case "$_v" in 0|1) DDNS_LAN=$_v ;; *) die_json "lan: 0 или 1" ;; esac ;;
+            wildcard) case "$_v" in 0|1) DDNS_WILDCARD=$_v ;; *) die_json "wildcard: 0 или 1" ;; esac ;;
+            enabled)  case "$_v" in 0|1) DDNS_ENABLED=$_v ;; *) die_json "enabled: 0 или 1" ;; esac ;;
+            *) die_json "неизвестный параметр: $_k" ;;
+        esac
+    done
+    [ -n "$DDNS_PROVIDER" ] || die_json "выберите провайдера"
+    [ -n "${_dom_in+x}" ] && DDNS_DOMAIN=$(normalize_domain "$DDNS_PROVIDER" "$_dom_in")
+    [ -n "$DDNS_DOMAIN" ] || die_json "укажите имя"
+    valid_domain "$DDNS_PROVIDER" "$DDNS_DOMAIN" || die_json "имя «$DDNS_DOMAIN» не подходит для $DDNS_PROVIDER"
+    printf '%s' "$DDNS_TOKEN" | grep -q '[[:space:]"]' && die_json "в токене не может быть пробелов и кавычек"
+    [ "$DDNS_PROVIDER" = duckdns ] && DDNS_WILDCARD=0
+    if [ "$DDNS_ENABLED" = 1 ] && [ -z "$DDNS_TOKEN" ]; then die_json "укажите токен"; fi
+    save_conf
+    # Новое имя или токен — прошлый «успех» к ним не относится.
+    if [ "$_old_dom" != "$DDNS_DOMAIN" ] || [ "$_old_prov" != "$DDNS_PROVIDER" ] || [ -n "$_new_tok" ]; then
+        rm -f "$LAST" "$STATE"
+    fi
+    log "set provider=$DDNS_PROVIDER domain=$DDNS_DOMAIN enabled=$DDNS_ENABLED lan=$DDNS_LAN"
+    lan_apply
+    if [ "$DDNS_ENABLED" = 1 ]; then
+        do_update 1
+    else
+        printf '{"ok":true}\n'
+    fi
+    ;;
+
+update)
+    [ "$2" = "--force" ] && do_update 1 || do_update 0
+    ;;
+
+tick)
+    load_conf
+    lan_apply
+    [ "$DDNS_ENABLED" = 1 ] || exit 0
+    do_update 0 >/dev/null 2>&1
+    exit 0
+    ;;
+
+off)
+    load_conf
+    DDNS_ENABLED=0; save_conf
+    lan_apply
+    log "disabled"
+    printf '{"ok":true}\n'
+    ;;
+
+delete)
+    rm -f "$CONF" "$LAST" "$STATE"
+    DDNS_ENABLED=0; lan_apply
+    log "deleted"
+    printf '{"ok":true}\n'
+    ;;
+
+# Сертификат на имя: ключ DDNS-провайдера и есть ключ DNS-API для DNS-01. Прежний
+# доступ к DNS-API сохраняется и возвращается, если выпуск не удался, — иначе
+# продление прошлого сертификата пошло бы уже с чужим провайдером.
+cert)
+    load_conf
+    [ -n "$DDNS_DOMAIN" ] && [ -n "$DDNS_TOKEN" ] || { echo "ddns not configured" >&2; exit 2; }
+    [ -x "$CERT_BIN" ] || { echo "detour-cert missing" >&2; exit 2; }
+    _email="${2:--}"
+    _dnsconf="$DETOUR_DIR/dns-api.conf"; _bak="$_dnsconf.ddns-bak"
+    rm -f "$_bak"; [ -f "$_dnsconf" ] && cp -p "$_dnsconf" "$_bak"
+    case "$DDNS_PROVIDER" in
+        duckdns) "$CERT_BIN" dns-set duckdns "DuckDNS_Token=$DDNS_TOKEN" >/dev/null ;;
+        desec)   "$CERT_BIN" dns-set desec "DEDYN_TOKEN=$DDNS_TOKEN" >/dev/null ;;
+    esac
+    _alt=""
+    [ "$DDNS_PROVIDER" = desec ] && [ "$DDNS_WILDCARD" = 1 ] && _alt="*.$DDNS_DOMAIN"
+    log "cert: issue-dns $DDNS_DOMAIN $_alt"
+    if [ -n "$_alt" ]; then
+        "$CERT_BIN" issue-dns "$DDNS_DOMAIN" "$_email" "$_alt"
+    else
+        "$CERT_BIN" issue-dns "$DDNS_DOMAIN" "$_email"
+    fi
+    _rc=$?
+    if [ "$_rc" != 0 ]; then
+        if [ -f "$_bak" ]; then mv -f "$_bak" "$_dnsconf"; else rm -f "$_dnsconf"; fi
+        log "cert FAILED (rc=$_rc), DNS-API credentials restored"
+    else
+        rm -f "$_bak"
+        log "cert OK for $DDNS_DOMAIN"
+    fi
+    exit "$_rc"
+    ;;
+
+*)
+    echo "usage: detour-ddns {status | set k=v… | update [--force] | tick | cert <email|-> | off | delete}" >&2
+    exit 2 ;;
+esac

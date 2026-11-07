@@ -738,6 +738,35 @@ export interface CertDnsVar {
   required?: boolean;
 }
 
+export type DdnsProvider = "duckdns" | "desec";
+
+/** Бесплатное динамическое имя (detour-ddns). Токен наружу не отдаётся. */
+export interface DdnsStatus {
+  ok?: boolean;
+  supported?: boolean;
+  platform?: string;
+  box?: boolean;
+  providers?: DdnsProvider[];
+  enabled?: boolean;
+  provider?: DdnsProvider | "";
+  domain?: string;
+  token_set?: boolean;
+  /** Имя в домашней сети ведёт прямо на роутер. */
+  lan?: boolean;
+  wildcard?: boolean;
+  lan_ip?: string;
+  last_result?: "ok" | "error" | "";
+  last_error?: string;
+  last_ip?: string;
+  last_ts?: number;
+  /** Адрес канала приватный, а снаружи виден другой — роутер за чужим NAT. */
+  cgnat?: boolean;
+  iface_ip?: string;
+  /** На какое имя выпущен нынешний сертификат. */
+  cert_domain?: string;
+  curl?: boolean;
+}
+
 export interface CertDnsStatus {
   ok?: boolean;
   provider?: string;

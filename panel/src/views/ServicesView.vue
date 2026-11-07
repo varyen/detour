@@ -12,6 +12,7 @@ import ServicePanel from "@/components/services/ServicePanel.vue";
 import PortmapSheet from "@/components/services/PortmapSheet.vue";
 import ServerPanel from "@/components/services/ServerPanel.vue";
 import CertSheet from "@/components/services/CertSheet.vue";
+import DdnsPanel from "@/components/services/DdnsPanel.vue";
 import KeenHttpsSheet from "@/components/services/KeenHttpsSheet.vue";
 import PasswordSheet from "@/components/services/PasswordSheet.vue";
 import PanelUsers from "@/components/services/PanelUsers.vue";
@@ -151,6 +152,7 @@ const open = reactive<Record<string, boolean>>({
   engine: false,
   portmap: false,
   server: false,
+  ddns: false,
   cert: false,
   push: false,
   offload: false,
@@ -902,6 +904,16 @@ onMounted(async () => {
       run: () => void applyPortmap(),
     },
     {
+      id: "svc:ddns",
+      title: "Бесплатное имя для роутера (DynDNS)",
+      group: "сервисы",
+      keywords: "ddns dyndns duckdns desec домен имя адрес",
+      available: () => !status.isClient,
+      run: () => {
+        open.ddns = true;
+      },
+    },
+    {
       id: "svc:cert",
       title: "Выпустить сертификат для своего домена",
       group: "сервисы",
@@ -1078,6 +1090,14 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- ===== свой VPN-сервер ===== -->
     <ServerPanel v-model:open="open.server" />
+
+    <!-- ===== бесплатное имя ===== -->
+    <DdnsPanel
+      v-if="!status.isClient"
+      v-model:open="open.ddns"
+      :cert-email="cert?.email ?? ''"
+      @cert="loadCert"
+    />
 
     <!-- ===== сертификат ===== -->
     <ServicePanel

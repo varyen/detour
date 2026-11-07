@@ -77,10 +77,14 @@ const VAR_LABELS: Record<string, { label: string; hint?: string; secret?: boolea
   PDNS_Token: { label: "Ключ API (X-API-Key)", secret: true },
   PDNS_Ttl: { label: "TTL записи, секунд", hint: "60 — чтобы проверка не ждала лишнего" },
   GCORE_Key: { label: "Ключ API Gcore", secret: true },
+  DuckDNS_Token: { label: "Токен DuckDNS", secret: true },
+  DEDYN_TOKEN: { label: "Токен deSEC", secret: true },
 };
 const PROVIDER_LABELS: Record<string, string> = {
   pdns: "Свой PowerDNS",
   gcore: "Gcore DNS",
+  duckdns: "DuckDNS (бесплатно)",
+  desec: "deSEC (бесплатно)",
 };
 
 function labelFor(name: string) {

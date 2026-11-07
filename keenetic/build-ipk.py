@@ -85,6 +85,8 @@ FILES = [
     # detour-cron; на Keenetic качает базу через curl -4 — Entware wget-ssl не
     # умеет HTTPS к GitHub по IPv6. fix_shebang → /opt/bin/sh.
     (os.path.join(ROUTER_FILES, "detour-geo"), "opt/sbin/detour-geo", 0o755, True),
+    # Динамическое имя DuckDNS / deSEC (общий источник, /opt-шим). Тикает из detour-cron.
+    (os.path.join(ROUTER_FILES, "detour-ddns"), "opt/sbin/detour-ddns", 0o755, True),
     (os.path.join(ROUTER_FILES, "detour-trafficlog"), "opt/sbin/detour-trafficlog", 0o755, True),
     # Пер-профильный запрет торрентов (общий источник, /opt-шим внутри). На
     # Keenetic вместо nft — цепочка в iptables mangle, байты матчатся xt_string с
@@ -319,7 +321,7 @@ fi
 rm -rf /opt/share/www/detour-next
 chmod 0755 /opt/sbin/detour-hosts /opt/sbin/detour-rulist /opt/sbin/detour-bootstrap-install /opt/sbin/detour-update /opt/sbin/vpn-keepalive \\
     /opt/sbin/detour-ping /opt/sbin/detour-health /opt/sbin/detour-bypass /opt/sbin/detour-power /opt/sbin/detour-cron /opt/sbin/detour-plugin \
-    /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp /opt/sbin/detour-geo /opt/sbin/detour-trafficlog /opt/sbin/detour-filter \
+    /opt/sbin/detour-wan-link /opt/sbin/detour-portmap /opt/sbin/detour-warp /opt/sbin/detour-geo /opt/sbin/detour-ddns /opt/sbin/detour-trafficlog /opt/sbin/detour-filter \
     /opt/etc/init.d/S05swap /opt/etc/init.d/S50detour-dns /opt/etc/init.d/S51detour-panel \\
     /opt/etc/init.d/S52detour-singbox /opt/etc/init.d/S53detour-zapret /opt/etc/init.d/S54detour-bypass \\
     /opt/etc/init.d/S90detour-cron /opt/sbin/detour-logbridge /opt/etc/init.d/S91detour-logbridge \\

@@ -1,6 +1,8 @@
 import { requestJson, requestJsonTolerant } from "./client";
 import type {
   CertDnsStatus,
+  DdnsProvider,
+  DdnsStatus,
   CertStatus,
   EngineConfig,
   EngineMode,
@@ -112,6 +114,26 @@ export const services = {
     requestJson<{ ok: boolean; started: boolean }>("cert_issue_dns", {
       body: { domain, email, alts },
     }),
+
+  /* --- бесплатное динамическое имя (DuckDNS / deSEC) --- */
+  ddnsStatus: () => requestJsonTolerant<DdnsStatus>("ddns_status"),
+  /** Сохранение сразу отправляет адрес — ответ несёт результат этой отправки. */
+  ddnsSet: (body: {
+    provider: DdnsProvider;
+    domain: string;
+    token?: string;
+    lan: boolean;
+    wildcard: boolean;
+    enabled: boolean;
+  }) =>
+    requestJson<{ ok: boolean; ip?: string }>("ddns_set", { body, timeoutMs: 60_000 }),
+  ddnsUpdate: () =>
+    requestJson<{ ok: boolean; ip?: string }>("ddns_update", { method: "POST", timeoutMs: 60_000 }),
+  ddnsOff: () => requestJson<{ ok: boolean }>("ddns_off", { method: "POST" }),
+  ddnsDelete: () => requestJson<{ ok: boolean }>("ddns_delete", { method: "POST" }),
+  /** Выпуск сертификата на имя уходит в фон: следить через certStatus. */
+  ddnsCert: (email: string) =>
+    requestJson<{ ok: boolean; started: boolean }>("ddns_cert", { body: { email } }),
 
   /* --- уведомления в браузер --- */
   pushConfig: () => requestJsonTolerant<PushConfig>("push_config"),
