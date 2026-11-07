@@ -258,6 +258,7 @@ async function issueCert() {
       </p>
       <p v-else-if="st.enabled && st.last_result === 'ok'" class="note">
         {{ st.domain }} → {{ st.last_ip }}<template v-if="st.last_ts">, отправлено {{ fmtAgo(st.last_ts) }}</template>.
+        <template v-if="st.via_vpn"> Напрямую провайдер не пустил к {{ st.provider === "desec" ? "deSEC" : "DuckDNS" }} — адрес ушёл через VPN.</template>
         Роутер проверяет адрес каждые 5 минут.
       </p>
 

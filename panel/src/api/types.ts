@@ -759,6 +759,8 @@ export interface DdnsStatus {
   last_error?: string;
   last_ip?: string;
   last_ts?: number;
+  /** Напрямую провайдер не пустил — адрес ушёл через активный VPN. */
+  via_vpn?: boolean;
   /** Адрес канала приватный, а снаружи виден другой — роутер за чужим NAT. */
   cgnat?: boolean;
   iface_ip?: string;

@@ -25,6 +25,7 @@ DETOUR_DIR=/etc/detour
 STATE_DIR=/var/state
 LOG=/var/log/detour-ddns.log
 CERT_BIN=/usr/sbin/detour-cert
+API_BIN=/www/cgi-bin/detour-api
 HOSTS_FILE=/tmp/hosts/detour-ddns
 PLATFORM=openwrt
 if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
@@ -34,6 +35,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     STATE_DIR=/opt/var/state
     LOG=/opt/var/log/detour-ddns.log
     CERT_BIN=/opt/sbin/detour-cert
+    API_BIN=/opt/share/www/cgi-bin/detour-api
 fi
 BOX=0
 [ -f /etc/detour/box.conf ] && . /etc/detour/box.conf
@@ -42,6 +44,7 @@ STATE="$STATE_DIR/detour-ddns.json"
 LAST="$STATE_DIR/detour-ddns.last"    # «ip ts rc» последней отправки (tmpfs: после ребута шлём заново)
 REFRESH_AFTER=86400                   # раз в сутки подтверждаем адрес, даже если он не менялся
 RETRY_AFTER=600                       # после ошибки — не чаще, чем раз в 10 минут (deSEC режет частые)
+PROXY_PORT=19486                      # временный mixed-вход на активной цепочке (запасной путь через VPN)
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG")" 2>/dev/null
 
@@ -102,6 +105,48 @@ is_private() {
         100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 0 ;;  # 100.64/10, CGNAT
     esac
     return 1
+}
+
+# ---- запасной путь через VPN -------------------------------------------------
+# Свой трафик роутера идёт мимо VPN. На мобильных сетях ТСПУ режет адреса Hetzner,
+# где живёт deSEC, и curl падает ещё до HTTP (код 000). Тогда тот же запрос
+# повторяется через временный экземпляр движка с mixed-входом на активной цепочке —
+# так же, как ходят подписки и WARP. Адрес в запросе указан явно, поэтому через
+# VPN уходит правильный.
+SBPID=""; SBCONF=""; SBDATA=""; VIA_VPN=0
+proxy_up() {
+    [ -n "$SBPID" ] && return 0
+    [ -x "$API_BIN" ] || return 1
+    SBCONF="/tmp/detour-ddns.conf.$$"; SBDATA="/tmp/detour-ddns.data.$$"
+    "$API_BIN" render-mixed "" "$PROXY_PORT" > "$SBCONF" 2>/dev/null || return 1
+    [ -s "$SBCONF" ] || return 1
+    "$API_BIN" engine-check "$SBCONF" "$SBDATA" >/dev/null 2>&1 || return 1
+    "$API_BIN" engine-run "$SBCONF" "$SBDATA" >/tmp/detour-ddns-sb.log 2>&1 &
+    SBPID=$!
+    sleep 2
+    kill -0 "$SBPID" 2>/dev/null || { SBPID=""; return 1; }
+    return 0
+}
+proxy_down() {
+    [ -n "$SBPID" ] && { kill "$SBPID" 2>/dev/null; sleep 1; kill -9 "$SBPID" 2>/dev/null; }
+    SBPID=""
+    [ -n "$SBCONF" ] && rm -f "$SBCONF"
+    [ -n "$SBDATA" ] && rm -rf "$SBDATA"
+    SBCONF=""; SBDATA=""
+}
+trap proxy_down EXIT
+trap 'proxy_down; exit 1' INT TERM
+
+# $1 — конфиг curl (url/header; токен не попадает в список процессов). Результат —
+# в CURL_OUT («тело\nкод»), а не в stdout: в $(…) прокси и VIA_VPN остались бы в
+# подоболочке, а поднятый движок — без хозяина. Код 000 напрямую → повтор через VPN.
+curl_cfg() {
+    CURL_OUT=$(printf '%s\n' "$1" | curl -4 -sS -m 20 -K - -w '\n%{http_code}' 2>/dev/null)
+    if [ "$(printf '%s' "$CURL_OUT" | tail -1)" = 000 ] && proxy_up; then
+        CURL_OUT=$(printf '%s\n' "$1" | curl -4 -sS -m 30 -x "socks5h://127.0.0.1:$PROXY_PORT" -K - -w '\n%{http_code}' 2>/dev/null)
+        VIA_VPN=1
+        log "direct request failed (000), retried through VPN"
+    fi
 }
 
 valid_ip4() { printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
@@ -171,8 +216,8 @@ lan_apply() {
 }
 
 write_state() {  # $1 result  $2 error  $3 ip
-    printf '{"last_result":%s,"last_error":%s,"last_ip":%s,"last_ts":%s,"cgnat":%s,"iface_ip":%s}\n' \
-        "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "$(now)" \
+    printf '{"last_result":%s,"last_error":%s,"last_ip":%s,"last_ts":%s,"via_vpn":%s,"cgnat":%s,"iface_ip":%s}\n' \
+        "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "$(now)" "$([ "$VIA_VPN" = 1 ] && echo true || echo false)" \
         "$([ "${CGNAT:-0}" = 1 ] && echo true || echo false)" "$(json_str "$IFACE_IP")" > "$STATE.tmp" \
         && mv "$STATE.tmp" "$STATE"
 }
@@ -186,26 +231,26 @@ push_ip() {  # $1 ip
             _sub=${DDNS_DOMAIN%.duckdns.org}
             # Токен — в запросе: так устроен API DuckDNS. Через -K из stdin он хотя бы
             # не попадает в список процессов.
-            _r=$(printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip=%s"\n' "$_sub" "$DDNS_TOKEN" "$1" \
-                 | curl -4 -sS -m 20 -K - -w '\n%{http_code}' 2>&1)
+            curl_cfg "$(printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip=%s"' "$_sub" "$DDNS_TOKEN" "$1")"; _r=$CURL_OUT
             _code=$(printf '%s' "$_r" | tail -1); _body=$(printf '%s' "$_r" | sed '$d' | tr -d '\r\n ')
             [ "$_body" = OK ] && return 0
             case "$_body" in
                 KO) UPD_ERR="DuckDNS отказал: неверный токен или имя не принадлежит этой учётной записи" ;;
-                *)  UPD_ERR="DuckDNS не ответил (HTTP ${_code:-000})" ;;
+                *)  [ "${_code:-000}" = 000 ] && UPD_ERR="DuckDNS недоступен ни напрямую, ни через VPN" \
+                        || UPD_ERR="DuckDNS не ответил (HTTP $_code)" ;;
             esac
             return 1 ;;
         desec)
-            _r=$(printf 'header = "Authorization: Token %s"\nurl = "https://update.dedyn.io/?hostname=%s&myipv4=%s&myipv6=preserve"\n' \
-                    "$DDNS_TOKEN" "$DDNS_DOMAIN" "$1" \
-                 | curl -4 -sS -m 20 -K - -w '\n%{http_code}' 2>&1)
+            curl_cfg "$(printf 'header = "Authorization: Token %s"\nurl = "https://update.dedyn.io/?hostname=%s&myipv4=%s&myipv6=preserve"' \
+                    "$DDNS_TOKEN" "$DDNS_DOMAIN" "$1")"; _r=$CURL_OUT
             _code=$(printf '%s' "$_r" | tail -1); _body=$(printf '%s' "$_r" | sed '$d' | tr -d '\r\n ')
             case "$_code" in
                 200) [ "$_body" = good ] && return 0; UPD_ERR="deSEC ответил: $_body" ;;
                 401) UPD_ERR="deSEC отклонил токен" ;;
                 404) UPD_ERR="в учётной записи deSEC нет имени $DDNS_DOMAIN — создайте его на desec.io" ;;
                 429) UPD_ERR="deSEC просит обновлять реже — повторю позже" ;;
-                *)   UPD_ERR="deSEC не ответил (HTTP ${_code:-000})" ;;
+                000|'') UPD_ERR="deSEC недоступен ни напрямую, ни через VPN (провайдер режет адрес deSEC, а VPN не включён?)" ;;
+                *)   UPD_ERR="deSEC не ответил (HTTP $_code)" ;;
             esac
             return 1 ;;
     esac
@@ -245,7 +290,7 @@ CMD="${1:-status}"
 case "$CMD" in
 status)
     load_conf
-    _res=""; _err=""; _ip=""; _ts=0; _cg=false; _ifip=""
+    _res=""; _err=""; _ip=""; _ts=0; _cg=false; _vv=false; _ifip=""
     if [ -f "$STATE" ]; then
         _s=$(cat "$STATE")
         _res=$(printf '%s' "$_s" | sed -n 's/.*"last_result":"\([^"]*\)".*/\1/p')
@@ -253,6 +298,7 @@ status)
         _ip=$(printf '%s' "$_s" | sed -n 's/.*"last_ip":"\([^"]*\)".*/\1/p')
         _ts=$(printf '%s' "$_s" | sed -n 's/.*"last_ts":\([0-9]*\).*/\1/p')
         _cg=$(printf '%s' "$_s" | sed -n 's/.*"cgnat":\([a-z]*\).*/\1/p')
+        _vv=$(printf '%s' "$_s" | sed -n 's/.*"via_vpn":\([a-z]*\).*/\1/p')
         _ifip=$(printf '%s' "$_s" | sed -n 's/.*"iface_ip":"\([^"]*\)".*/\1/p')
     fi
     _cdom=""
@@ -264,8 +310,8 @@ status)
         "$([ -n "$DDNS_TOKEN" ] && echo true || echo false)" \
         "$([ "$DDNS_LAN" = 1 ] && echo true || echo false)" \
         "$([ "$DDNS_WILDCARD" = 1 ] && echo true || echo false)" "$(json_str "$(lan_ip)")"
-    printf '"last_result":%s,"last_error":%s,"last_ip":%s,"last_ts":%s,"cgnat":%s,"iface_ip":%s,"cert_domain":%s,"curl":%s}\n' \
-        "$(json_str "$_res")" "$(json_str "$_err")" "$(json_str "$_ip")" "${_ts:-0}" "${_cg:-false}" \
+    printf '"last_result":%s,"last_error":%s,"last_ip":%s,"last_ts":%s,"via_vpn":%s,"cgnat":%s,"iface_ip":%s,"cert_domain":%s,"curl":%s}\n' \
+        "$(json_str "$_res")" "$(json_str "$_err")" "$(json_str "$_ip")" "${_ts:-0}" "${_vv:-false}" "${_cg:-false}" \
         "$(json_str "$_ifip")" "$(json_str "$_cdom")" \
         "$(command -v curl >/dev/null 2>&1 && echo true || echo false)"
     ;;
@@ -351,6 +397,20 @@ cert)
     esac
     _alt=""
     [ "$DDNS_PROVIDER" = desec ] && [ "$DDNS_WILDCARD" = 1 ] && _alt="*.$DDNS_DOMAIN"
+    # acme.sh ставит TXT через API провайдера своим curl, а curl слушает https_proxy.
+    case "$DDNS_PROVIDER" in
+        desec)   _api=https://desec.io/api/v1/ ;;
+        *)       _api=https://www.duckdns.org/ ;;
+    esac
+    if [ "$(curl -4 -sS -m 15 -o /dev/null -w '%{http_code}' "$_api" 2>/dev/null)" = 000 ]; then
+        if proxy_up; then
+            export https_proxy="socks5h://127.0.0.1:$PROXY_PORT" HTTPS_PROXY="socks5h://127.0.0.1:$PROXY_PORT"
+            export no_proxy="localhost,127.0.0.1" NO_PROXY="localhost,127.0.0.1"
+            log "cert: $_api unreachable directly — acme.sh goes through VPN"
+        else
+            log "cert: $_api unreachable directly and no VPN chain to fall back on"
+        fi
+    fi
     log "cert: issue-dns $DDNS_DOMAIN $_alt"
     if [ -n "$_alt" ]; then
         "$CERT_BIN" issue-dns "$DDNS_DOMAIN" "$_email" "$_alt"
