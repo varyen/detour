@@ -548,6 +548,11 @@ export interface RtunStatus {
   enabled?: boolean;
   configured?: boolean;
   up?: boolean;
+  /** direct — AmneziaWG напрямую; vless — UDP туннеля внутри VLESS-Reality (мобильные сети). */
+  transport?: "direct" | "vless";
+  /** Сервер VLESS из сохранённой ссылки («host:port»), пусто — ссылки нет. */
+  vless?: string;
+  vless_up?: boolean;
   server?: string;
   address?: string;
   server_ip?: string;

@@ -6135,7 +6135,7 @@ server_status|server_sessions|server_install|server_set|server_client_add|server
 # Роутер за CGNAT держит туннель AmneziaWG к своему VPN-серверу Detour, сервер
 # публикует его порты наружу (server_pub_*), здесь пришедшее переводится на
 # устройство домашней сети.
-rtun_status|rtun_install|rtun_import|rtun_set|rtun_map_add|rtun_map_set|rtun_map_del|rtun_forget)
+rtun_status|rtun_install|rtun_import|rtun_set|rtun_vless|rtun_map_add|rtun_map_set|rtun_map_del|rtun_forget)
     RTUN_BIN="$OPT/usr/sbin/detour-rtun"
     [ "$PLATFORM" = keenetic ] && RTUN_BIN="$OPT/sbin/detour-rtun"
     if [ ! -x "$RTUN_BIN" ]; then
@@ -6163,8 +6163,15 @@ rtun_status|rtun_install|rtun_import|rtun_set|rtun_map_add|rtun_map_set|rtun_map
             printf '%s' "$POST_DATA" | lua -e 'local c=require("cjson.safe"); local o=c.decode(io.read("*a")) or {}; io.write(type(o.conf)=="string" and o.conf or "")' 2>/dev/null \
                 | "$RTUN_BIN" import ;;
         rtun_set)
-            v=$(rt_bool enabled); [ -n "$v" ] || { json_err "нечего менять"; exit 0; }
-            "$RTUN_BIN" set "enabled=$v" ;;
+            set --
+            v=$(rt_bool enabled); [ -n "$v" ] && set -- "$@" "enabled=$v"
+            v=$(rt_str transport)
+            case "$v" in direct|vless) set -- "$@" "transport=$v" ;; '') ;; *) json_err "bad transport"; exit 0 ;; esac
+            [ $# -gt 0 ] || { json_err "нечего менять"; exit 0; }
+            "$RTUN_BIN" set "$@" ;;
+        rtun_vless)
+            # Ссылка клиента VLESS (TCP, Reality/TLS) — через stdin, проверяет helper.
+            rt_str link | "$RTUN_BIN" vless-set ;;
         rtun_map_add)
             "$RTUN_BIN" map-add "$(rt_str proto)" "$(rt_num port)" "$(rt_str ip)" "$(rt_num dport)" "$(rt_str note)" ;;
         rtun_map_set)

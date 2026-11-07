@@ -6,7 +6,8 @@
 #
 #   detour-rtun status                     JSON для панели
 #   detour-rtun import  < client.conf      конфиг клиента с сервера (кнопка «Конфиг»)
-#   detour-rtun set enabled=0|1
+#   detour-rtun set enabled=0|1 transport=direct|vless
+#   detour-rtun vless-set  < ссылка        vless:// клиента с того же сервера
 #   detour-rtun map-add <tcp|udp|both> <порт> <ip> [порт устройства] [заметка]
 #   detour-rtun map-set <id> enabled=0|1 | map-del <id>
 #   detour-rtun apply | stop | tick | down | forget
@@ -19,8 +20,15 @@
 # Порт на сервере и порт в туннеле совпадают: сервер шлёт на <адрес клиента>:N,
 # здесь N переводится на <ip>:<порт устройства>.
 #
+# Транспорт vless — для мобильных сетей, где ТСПУ пропускает первый пакет
+# AmneziaWG и режет поток: UDP туннеля уходит в локальный sing-box (direct-вход на
+# 127.0.0.1:$SB_PORT) и дальше VLESS-Reality по TCP до того же сервера, а VLESS-вход
+# сервера отдаёт его на собственный AmneziaWG ($NET.1:<порт>). У клиента сервера
+# режим «Только дом» это разрешает.
+#
 # Хранение (под /etc/detour → keeplist): rtun/tunnel.conf (как выдал сервер, 0600),
-# rtun/rtun.conf (ENABLED), rtun/maps.list:  id|proto|port|ip|dport|enabled|note
+# rtun/rtun.conf (ENABLED, TRANSPORT), rtun/vless.link, rtun/maps.list:
+#   id|proto|port|ip|dport|enabled|note
 
 IFACE=drtun0
 ZONE=detour_rtun
@@ -42,6 +50,11 @@ MAPS="$DIR/maps.list"
 RENDER="$RUN/detour-rtun.conf"
 EPSTATE="$RUN/detour-rtun.ep"      # «ip ts» — последнее разрешение адреса сервера
 LOCKD="$RUN/detour-rtun.lock"
+VLINK="$DIR/vless.link"
+SB_PORT=19491
+SB_CONF="$RUN/detour-rtun-sb.json"
+SB_PID="$RUN/detour-rtun-sb.pid"
+SB_LOG="$RUN/detour-rtun-sb.log"
 
 if ! command -v awg >/dev/null 2>&1 && command -v amneziawg-go >/dev/null 2>&1 && \
         amneziawg-go awg genpsk 2>/dev/null | grep -qE '^[A-Za-z0-9+/]{43}=$'; then
@@ -63,9 +76,9 @@ lock() {
     trap 'rm -rf "$LOCKD"; exit 1' INT TERM
 }
 
-ENABLED=0
-load_conf() { [ -f "$CONF" ] && . "$CONF"; return 0; }
-save_conf() { mkdir -p "$DIR"; chmod 700 "$DIR"; echo "ENABLED=$ENABLED" > "$CONF"; }
+ENABLED=0; TRANSPORT=direct
+load_conf() { [ -f "$CONF" ] && . "$CONF"; [ "$TRANSPORT" = vless ] || TRANSPORT=direct; return 0; }
+save_conf() { mkdir -p "$DIR"; chmod 700 "$DIR"; printf 'ENABLED=%s\nTRANSPORT=%s\n' "$ENABLED" "$TRANSPORT" > "$CONF"; }
 
 backend() {
     if lsmod 2>/dev/null | grep -q '^amneziawg ' || modprobe amneziawg 2>/dev/null; then echo kernel; return; fi
@@ -100,14 +113,81 @@ resolve4() {  # $1 имя → IPv4
     nslookup "$1" 2>/dev/null | awk '/^Name:/ { n = 1; next } n && /^Address/ { sub(/^Address[^:]*:[[:space:]]*/, ""); if ($1 ~ /^[0-9.]+$/) { print $1; exit } }'
 }
 
+# ---------- транспорт vless: локальный sing-box ----------
+
+urldec() { printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')"; }
+
+# Параметр запроса ссылки: $1 ключ (ссылка — в $L).
+lq() { q=${L#*\?}; q=${q%%#*}; printf '%s' "$q" | tr '&' '\n' | sed -n "s/^$1=//p" | head -1; }
+
+# vless://uuid@host:port?…  → переменные V_*. Только TCP (Reality или TLS).
+vless_parse() {
+    L=$(tr -d ' \r\n' < "$VLINK" 2>/dev/null)
+    case "$L" in vless://*) ;; *) return 1 ;; esac
+    b=${L#vless://}; b=${b%%\?*}; b=${b%%#*}
+    V_UUID=${b%%@*}; hp=${b#*@}
+    V_PORT=${hp##*:}; V_HOST=${hp%:*}; V_HOST=${V_HOST#[}; V_HOST=${V_HOST%]}
+    V_SEC=$(lq security); V_TYPE=$(lq type); V_FLOW=$(lq flow)
+    V_SNI=$(urldec "$(lq sni)"); V_FP=$(lq fp); V_PBK=$(lq pbk); V_SID=$(lq sid)
+    [ -n "$V_UUID" ] && [ -n "$V_HOST" ] && [ -n "$V_PORT" ] || return 1
+    case "${V_TYPE:-tcp}" in tcp|raw) ;; *) return 2 ;; esac
+    case "$V_SEC" in reality) [ -n "$V_PBK" ] || return 1 ;; tls) ;; *) return 3 ;; esac
+    return 0
+}
+
+sb_bin() { command -v sing-box 2>/dev/null; }
+
+sb_render() {
+    vless_parse || return 1
+    ip=$(resolve4 "$V_HOST")
+    [ -n "$ip" ] || { log "не удалось разрешить $V_HOST"; return 1; }
+    echo "$ip $(date +%s)" > "$EPSTATE"
+    tls="\"enabled\":true,\"server_name\":\"${V_SNI:-$V_HOST}\",\"utls\":{\"enabled\":true,\"fingerprint\":\"${V_FP:-chrome}\"}"
+    [ "$V_SEC" = reality ] && tls="$tls,\"reality\":{\"enabled\":true,\"public_key\":\"$V_PBK\",\"short_id\":\"$V_SID\"}"
+    flow=""; [ -n "$V_FLOW" ] && flow=",\"flow\":\"$V_FLOW\""
+    umask 077
+    printf '{"log":{"level":"warn","timestamp":true},"inbounds":[{"type":"direct","tag":"in","listen":"127.0.0.1","listen_port":%s,"network":"udp","override_address":"%s.1","override_port":%s}],' \
+        "$SB_PORT" "$(net3)" "$(ep_port)" > "$SB_CONF"
+    printf '"outbounds":[{"type":"vless","tag":"vl","server":"%s","server_port":%s,"uuid":"%s"%s,"packet_encoding":"xudp","tls":{%s}}],"route":{"final":"vl"}}\n' \
+        "$ip" "$V_PORT" "$V_UUID" "$flow" "$tls" >> "$SB_CONF"
+}
+
+sb_running() { [ -f "$SB_PID" ] && kill -0 "$(cat "$SB_PID")" 2>/dev/null; }
+
+sb_down() {
+    sb_running && { kill "$(cat "$SB_PID")" 2>/dev/null; sleep 1; kill -9 "$(cat "$SB_PID")" 2>/dev/null; }
+    rm -f "$SB_PID"
+}
+
+sb_up() {
+    SBB=$(sb_bin); [ -n "$SBB" ] || { log "vless: нет sing-box"; return 1; }
+    sb_render || { log "vless: ссылка не разобрана"; return 1; }
+    "$SBB" check -c "$SB_CONF" >>"$LOG" 2>&1 || { log "vless: sing-box отверг конфиг"; return 1; }
+    if sb_running && cmp -s "$SB_CONF" "$SB_CONF.run" 2>/dev/null; then return 0; fi
+    sb_down
+    cp "$SB_CONF" "$SB_CONF.run"
+    "$SBB" run -c "$SB_CONF.run" >"$SB_LOG" 2>&1 &
+    echo $! > "$SB_PID"
+    sleep 1
+    sb_running || { log "vless: sing-box упал: $(tail -2 "$SB_LOG" | tr '\n' ' ')"; return 1; }
+    log "vless: sing-box на 127.0.0.1:$SB_PORT → $V_HOST:$V_PORT"
+}
+
 # Конфиг для `awg setconf`: всё из [Interface], кроме ключей wg-quick, и пир
 # с AllowedIPs = подсеть сервера.
 render() {
-    ip=$(resolve4 "$(ep_host)")
-    [ -n "$ip" ] || { log "не удалось разрешить $(ep_host)"; return 1; }
-    echo "$ip $(date +%s)" > "$EPSTATE"
+    if [ "$TRANSPORT" = vless ]; then
+        sb_up || return 1
+        ep="127.0.0.1:$SB_PORT"
+    else
+        sb_down
+        ip=$(resolve4 "$(ep_host)")
+        [ -n "$ip" ] || { log "не удалось разрешить $(ep_host)"; return 1; }
+        echo "$ip $(date +%s)" > "$EPSTATE"
+        ep="$ip:$(ep_port)"
+    fi
     umask 077
-    awk -v net="$(net3)" -v ep="$ip:$(ep_port)" '
+    awk -v net="$(net3)" -v ep="$ep" '
         { sub(/\r$/, "") }
         /^\[Interface\]/ { s = "i"; print; next }
         /^\[Peer\]/ { s = "p"; print "\n[Peer]"; next }
@@ -127,9 +207,14 @@ render() {
 
 iface_up() { ip link show "$IFACE" >/dev/null 2>&1; }
 
+# Пакет в туннель сразу: рукопожатие не ждёт keepalive, а сервер узнаёт новый
+# адрес клиента (после перезапуска sing-box он другой) без паузы до 25 с.
+kick() { ( ping -c 2 -W 2 "$(net3).1" >/dev/null 2>&1 & ) ; }
+
 tun_down() {
     iface_up && ip link del "$IFACE" 2>/dev/null
     rm -f "$RENDER"
+    sb_down
 }
 
 tun_up() {
@@ -153,6 +238,7 @@ tun_up() {
     mtu=$(cval Interface MTU)
     ip link set "$IFACE" mtu "${mtu:-1376}" up
     rm -f "$RENDER"
+    kick
     return 0
 }
 
@@ -255,6 +341,8 @@ status_json() {
         "$([ "$r" = keenetic ] && echo false || echo true)" "$r" \
         "$([ "$ENABLED" = 1 ] && echo true || echo false)" "$([ -s "$TUNNEL" ] && echo true || echo false)" \
         "$(iface_up && echo true || echo false)"
+    vh=""; vless_parse >/dev/null 2>&1 && vh="$V_HOST:$V_PORT"
+    printf '"transport":"%s","vless":"%s","vless_up":%s,' "$TRANSPORT" "$(json_esc "$vh")" "$(sb_running && echo true || echo false)"
     printf '"server":"%s","address":"%s","server_ip":"%s","lan_ip":"%s","handshake":%s,"handshake_ago":%s,"rx":%s,"tx":%s,"maps":[' \
         "$(json_esc "$(ep_host)")" "$(addr)" "$([ -n "$(net3)" ] && echo "$(net3).1")" "$(lan_ip)" \
         "$hs" "$([ "$hs" -gt 0 ] && echo $((now - hs)) || echo -1)" "$rx" "$tx"
@@ -353,11 +441,38 @@ case "$1" in
     set)
         shift; lock; load_conf
         for kv in "$@"; do
-            case "$kv" in enabled=0|enabled=1) ENABLED=${kv#*=} ;; *) err "неизвестный параметр: $kv" ;; esac
+            case "$kv" in
+                enabled=0|enabled=1) ENABLED=${kv#*=} ;;
+                transport=direct|transport=vless) TRANSPORT=${kv#*=} ;;
+                *) err "неизвестный параметр: $kv" ;;
+            esac
         done
         [ "$ENABLED" = 1 ] && [ ! -s "$TUNNEL" ] && err "сначала загрузите конфиг клиента с сервера"
+        if [ "$TRANSPORT" = vless ]; then
+            [ -s "$VLINK" ] || err "сначала вставьте ссылку VLESS этого клиента с сервера"
+            [ -n "$(sb_bin)" ] || err "на роутере нет sing-box"
+        fi
         save_conf
         do_apply || err "туннель не поднялся — подробности в $LOG"
+        echo '{"ok":true}' ;;
+    vless-set)
+        [ "$KEENETIC" = 1 ] && err "встречный канал пока только на OpenWrt"
+        lock; load_conf
+        tmp="$RUN/detour-rtun.vlink.$$"; umask 077
+        head -c 4096 | tr -d ' \r\n' > "$tmp"
+        VLINK_REAL=$VLINK; VLINK=$tmp
+        vless_parse; rc=$?
+        VLINK=$VLINK_REAL
+        case "$rc" in
+            0) ;;
+            2) rm -f "$tmp"; err "нужна ссылка VLESS по TCP (Reality или TLS) — WebSocket и xhttp здесь не подходят" ;;
+            3) rm -f "$tmp"; err "ссылка без TLS/Reality не подходит" ;;
+            *) rm -f "$tmp"; err "это не ссылка vless:// клиента" ;;
+        esac
+        mkdir -p "$DIR"; chmod 700 "$DIR"; mv "$tmp" "$VLINK"
+        TRANSPORT=vless; save_conf
+        log "vless-set: $V_HOST:$V_PORT ($V_SEC)"
+        do_apply || err "ссылка сохранена, но туннель не поднялся — подробности в $LOG"
         echo '{"ok":true}' ;;
     map-add) lock; cmd_map_add "$2" "$3" "$4" "$5" "$6" ;;
     map-set) shift; lock; cmd_map_set "$@" ;;
@@ -372,11 +487,18 @@ case "$1" in
         if ! iface_up; then
             log "tick: $IFACE нет — поднимаю"; do_apply; exit 0
         fi
+        if [ "$TRANSPORT" = vless ] && ! sb_running; then
+            log "tick: sing-box встречного канала упал — поднимаю"; do_apply; exit 0
+        fi
         # Нет рукопожатия дольше 3 минут: сервер мог сменить адрес (DDNS) —
         # разрешаем имя заново, не чаще раза в 5 минут.
         hs=$(handshake); now=$(date +%s)
         set -- $(cat "$EPSTATE" 2>/dev/null)
-        if [ $((now - ${hs:-0})) -gt 180 ] && [ $((now - ${2:-0})) -gt 300 ]; then
+        if [ $((now - ${hs:-0})) -gt 180 ] && [ $((now - ${2:-0})) -gt 300 ] && [ "$TRANSPORT" = vless ]; then
+            # Сервер VLESS мог сменить адрес: sb_up сверит конфиг и перезапустит.
+            echo "${1:-} $now" > "$EPSTATE"
+            sb_up >/dev/null 2>&1
+        elif [ $((now - ${hs:-0})) -gt 180 ] && [ $((now - ${2:-0})) -gt 300 ]; then
             nip=$(resolve4 "$(ep_host)")
             echo "${nip:-$1} $now" > "$EPSTATE"
             if [ -n "$nip" ]; then
@@ -394,6 +516,7 @@ case "$1" in
         lock; tun_down
         [ "$KEENETIC" = 1 ] || fw_remove
         rm -rf "$DIR"
+        rm -f "$SB_CONF" "$SB_CONF.run"
         log "forget"
         echo '{"ok":true}' ;;
     *)

@@ -98,8 +98,11 @@ export const services = {
   rtunInstall: () => requestJson<{ ok: boolean }>("rtun_install", { method: "POST" }),
   rtunImport: (conf: string) =>
     requestJson<{ ok: boolean }>("rtun_import", { body: { conf }, timeoutMs: 60_000 }),
-  rtunSet: (enabled: boolean) =>
-    requestJson<{ ok: boolean }>("rtun_set", { body: { enabled }, timeoutMs: 60_000 }),
+  rtunSet: (patch: { enabled?: boolean; transport?: "direct" | "vless" }) =>
+    requestJson<{ ok: boolean }>("rtun_set", { body: patch, timeoutMs: 60_000 }),
+  /** Ссылка vless:// этого же клиента с сервера; включает транспорт VLESS. */
+  rtunVless: (link: string) =>
+    requestJson<{ ok: boolean }>("rtun_vless", { body: { link }, timeoutMs: 60_000 }),
   rtunMapAdd: (m: { proto: PubProto; port: number; ip: string; dport: number; note: string }) =>
     requestJson<{ ok: boolean; id: string }>("rtun_map_add", { body: m, timeoutMs: 60_000 }),
   rtunMapSet: (id: string, patch: { enabled?: boolean; note?: string }) =>

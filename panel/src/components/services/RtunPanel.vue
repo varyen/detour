@@ -20,6 +20,13 @@ const st = ref<RtunStatus | null>(null);
 const busy = ref("");
 const installLog = ref("");
 const confText = ref("");
+const vlessLink = ref("");
+const showVless = ref(false);
+type Transport = "direct" | "vless";
+const TRANSPORT_OPTIONS = [
+  { value: "direct" as Transport, label: "Напрямую" },
+  { value: "vless" as Transport, label: "Через VLESS" },
+];
 const showImport = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 
@@ -134,9 +141,47 @@ async function doImport() {
 async function toggle(on: boolean) {
   busy.value = "toggle";
   try {
-    await services.rtunSet(on);
+    await services.rtunSet({ enabled: on });
   } catch (e) {
     toast.fromError(e, "Не удалось переключить");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
+async function setTransport(t: Transport) {
+  if (t === st.value?.transport) return;
+  if (t === "vless" && !st.value?.vless) {
+    showVless.value = true;
+    return;
+  }
+  busy.value = "transport";
+  try {
+    await services.rtunSet({ transport: t });
+    toast.ok(t === "vless" ? "Канал идёт через VLESS" : "Канал идёт напрямую");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
+async function saveVless() {
+  const l = vlessLink.value.trim();
+  if (!l.startsWith("vless://")) {
+    toast.error("Нужна ссылка vless:// этого клиента с сервера");
+    return;
+  }
+  busy.value = "vless";
+  try {
+    await services.rtunVless(l);
+    toast.ok("Канал идёт через VLESS");
+    vlessLink.value = "";
+    showVless.value = false;
+  } catch (e) {
+    toast.fromError(e, "Не удалось сохранить ссылку");
   } finally {
     busy.value = "";
     await load();
@@ -258,6 +303,37 @@ function deviceName(ip: string) {
             :busy="busy === 'toggle'"
             @update:model-value="toggle"
           />
+          <div class="block">
+            <span class="lbl">Как подключаться к серверу</span>
+            <SegmentedControl
+              :model-value="st.transport ?? 'direct'"
+              label="Как подключаться к серверу"
+              :options="TRANSPORT_OPTIONS"
+              @update:model-value="(v: Transport) => setTransport(v)"
+            />
+            <p class="hint">
+              {{
+                st.transport === "vless"
+                  ? `AmneziaWG идёт внутри VLESS-Reality (TCP) до ${st.vless}. Для мобильного интернета, где оператор режет AmneziaWG.`
+                  : "AmneziaWG напрямую по UDP. На мобильном интернете оператор может его резать — тогда «Через VLESS»."
+              }}
+            </p>
+            <template v-if="showVless || (st.transport === 'vless' && !st.vless)">
+              <p class="hint">
+                Нужна ссылка VLESS этого же клиента: на сервере «Свой VPN-сервер» → клиент →
+                «Подключение и QR» → «VLESS» → «Скопировать ссылку» (первая, Reality).
+              </p>
+              <input v-model="vlessLink" type="text" spellcheck="false" placeholder="vless://…" aria-label="Ссылка VLESS" />
+              <div class="actions">
+                <UiButton variant="primary" :busy="busy === 'vless'" @click="saveVless">Подключаться через VLESS</UiButton>
+                <UiButton v-if="showVless" @click="showVless = false">Отмена</UiButton>
+              </div>
+            </template>
+            <UiButton v-else-if="st.transport === 'vless'" @click="showVless = true">Заменить ссылку VLESS</UiButton>
+          </div>
+          <p v-if="st.enabled && st.transport === 'vless' && !st.vless_up" class="note bad">
+            Локальный sing-box для VLESS не запущен — роутер попробует поднять его сам в течение минуты.
+          </p>
           <p v-if="st.enabled && online" class="note ok">
             Связь есть: рукопожатие {{ st.handshake_ago }} с назад · ↓ {{ fmtBytes(st.rx ?? 0) }} · ↑ {{ fmtBytes(st.tx ?? 0) }}
           </p>
@@ -337,6 +413,20 @@ function deviceName(ip: string) {
 .lbl {
   font-size: 12.5px;
   color: var(--dim);
+}
+.block {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.block > input {
+  min-width: 0;
+  width: 100%;
+}
+.hint {
+  font-size: 12px;
+  color: var(--faint);
+  overflow-wrap: anywhere;
 }
 .note {
   font-size: 12.5px;
