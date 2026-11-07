@@ -6,7 +6,7 @@
 #   sh install.sh [--port 51820] [--vless-port 443] [--endpoint <IP или домен>]
 #                 [--panel-port 8080] [--sub-port 2096] [--sub-local] [--tls-port 4430]
 #                 [--https-port 8443] [--acme-port 80] [--no-acme] [--ws-port 10080]
-#                 [--xhttp-port 10081] [--xhttp-reality]
+#                 [--xhttp-port 10081] [--xhttp-reality] [--pub-ports 40000-40009]
 #                 [--panel-public] [--name detour] [--uninstall]
 #
 # Что делает:
@@ -48,6 +48,11 @@
 # (0 — не публиковать), подписки переходят на HTTPS, вход VLESS+TLS (если
 # опубликован --tls-port) берёт тот же сертификат. --acme-port — другой порт
 # хоста, если 80-й держит свой веб-сервер, который отдаёт /.well-known/ туда.
+#
+# --pub-ports — диапазон портов хоста (TCP и UDP), проброшенный в контейнер для
+# встречного канала: роутер за CGNAT подключается к серверу клиентом AmneziaWG,
+# а порт отсюда ведёт на устройство в его сети («Опубликовать порт» у клиента в
+# панели). Порт вне диапазона снаружи не виден. 0 — не пробрасывать.
 
 set -eu
 
@@ -66,6 +71,7 @@ XHTTP_REALITY=0
 HTTPS_PORT=8443
 ACME=1
 ACME_PORT=80
+PUB_PORTS=40000-40009
 UNINSTALL=0
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -85,9 +91,10 @@ while [ $# -gt 0 ]; do
         --https-port) HTTPS_PORT=$2; shift 2 ;;
         --no-acme) ACME=0; shift ;;
         --acme-port) ACME_PORT=$2; shift 2 ;;
+        --pub-ports) PUB_PORTS=$2; shift 2 ;;
         --name) NAME=$2; shift 2 ;;
         --uninstall) UNINSTALL=1; shift ;;
-        -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
         *) echo "неизвестный параметр: $1" >&2; exit 2 ;;
     esac
 done
@@ -191,6 +198,16 @@ if [ "$ACME" = 1 ]; then
         set -- "$@" -p "$ACME_PORT:8088/tcp" -e DETOUR_ACME=1
     fi
 fi
+
+case "$PUB_PORTS" in
+    0|'') ;;
+    *-*)
+        _pa=${PUB_PORTS%-*}; _pb=${PUB_PORTS#*-}
+        case "$_pa$_pb" in *[!0-9]*) die "--pub-ports: ожидается диапазон вида 40000-40009" ;; esac
+        [ "$_pa" -le "$_pb" ] && [ $((_pb - _pa)) -lt 200 ] || die "--pub-ports: от меньшего к большему, не больше 200 портов"
+        set -- "$@" -p "$PUB_PORTS:$PUB_PORTS/tcp" -p "$PUB_PORTS:$PUB_PORTS/udp" -e DETOUR_PUB_RANGE="$PUB_PORTS" ;;
+    *) die "--pub-ports: ожидается диапазон вида 40000-40009 или 0" ;;
+esac
 
 say "Запуск контейнера $NAME"
 # --privileged: OpenWrt внутри управляет своим файрволом и интерфейсами (tun,

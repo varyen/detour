@@ -51,6 +51,7 @@
 #   mihomo-remove          — stop the AWG sidecar and remove mihomo
 #   ttyd-apply             — поставить ttyd (консоль роутера в панели) из штатного фида
 #   server-apply           — поставить AmneziaWG (kmod + tools) для VPN-сервера из штатного фида
+#   awg-apply              — только AmneziaWG (без xray/сервера) — для встречного канала detour-rtun
 #   nfqueue-ensure         — поставить NFQUEUE (iptables-mod-nfqueue) для zapret2
 #   mihomo-ensure          — поставить mihomo, если есть AWG-профили и движок не «singbox»
 #   netfilter-ensure       — поставить iptables-nft (+tproxy), если iptables нет вовсе
@@ -1246,8 +1247,8 @@ cmd_server_apply() {
     if [ "$KEENETIC" = 1 ]; then
         local kerr=""
         # ip-full — для входа VLESS (veth, onlink, ip rule iif); из фида Entware.
-        if [ -x /opt/sbin/ip ]; then
-            log "ip-full уже есть"
+        if [ -x /opt/sbin/ip ] || [ "$AWG_ONLY" = 1 ]; then
+            [ "$AWG_ONLY" = 1 ] || log "ip-full уже есть"
         else
             pkg_index_update >/dev/null 2>&1
             pkg_install ip-full 2>&1 || log "WARNING: ip-full не установился — вход VLESS будет недоступен"
@@ -1262,8 +1263,8 @@ cmd_server_apply() {
             ensure_feed
             feed_curl_install "$AWGGO_PKG" || kerr="$AWGGO_PKG не установился из фида Detour"
         fi
-        server_xray_maybe
-        [ -x /opt/sbin/detour-server ] && /opt/sbin/detour-server start >/dev/null 2>&1
+        [ "$AWG_ONLY" = 1 ] || server_xray_maybe
+        [ "$AWG_ONLY" = 1 ] || { [ -x /opt/sbin/detour-server ] && /opt/sbin/detour-server start >/dev/null 2>&1; }
         [ -z "$kerr" ] || die "$kerr"
         log "VPN-сервер: компоненты готовы"
         return 0
@@ -1272,8 +1273,8 @@ cmd_server_apply() {
     opkg_update_retry || log "WARNING: $PKGM update не удался — ставлю из кэша индекса"
     # ip-full — для входа VLESS (ip netns; у busybox ip его нет). Независим от
     # AmneziaWG: на OpenWrt без kmod-amneziawg сервер работает одним VLESS.
-    if ip netns list >/dev/null 2>&1; then
-        log "ip netns уже есть"
+    if ip netns list >/dev/null 2>&1 || [ "$AWG_ONLY" = 1 ]; then
+        [ "$AWG_ONLY" = 1 ] || log "ip netns уже есть"
     else
         pkg_install ip-full 2>&1 || log "WARNING: ip-full не установился — вход VLESS будет недоступен"
     fi
@@ -1299,8 +1300,13 @@ cmd_server_apply() {
         modprobe tun 2>/dev/null
         [ -z "$awg_err" ] && [ ! -c /dev/net/tun ] && awg_err="нет /dev/net/tun (kmod-tun) — userspace AmneziaWG не поднимется"
     fi
-    server_xray_maybe
-    [ -x /usr/sbin/detour-server ] && /usr/sbin/detour-server start >/dev/null 2>&1
+    if [ "$AWG_ONLY" = 1 ]; then
+        # Встречный канал: только AmneziaWG, без xray и без запуска сервера.
+        [ -x /usr/sbin/detour-rtun ] && /usr/sbin/detour-rtun apply >/dev/null 2>&1
+    else
+        server_xray_maybe
+        [ -x /usr/sbin/detour-server ] && /usr/sbin/detour-server start >/dev/null 2>&1
+    fi
     [ -z "$awg_err" ] || die "$awg_err"
     log "AmneziaWG готов"
 }
@@ -2100,6 +2106,8 @@ case "$ACTION" in
     mihomo-remove)     cmd_mihomo_remove ;;
     ttyd-apply)        cmd_ttyd_apply ;;
     server-apply)      cmd_server_apply ;;
+    # Только AmneziaWG (ядро или userspace) — для встречного канала detour-rtun.
+    awg-apply)         AWG_ONLY=1 cmd_server_apply ;;
     netfilter-ensure)  cmd_netfilter_ensure ;;
     mihomo-ensure)     cmd_mihomo_ensure ;;
     nfqueue-ensure)    cmd_nfqueue_ensure ;;

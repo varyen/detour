@@ -3,6 +3,8 @@ import type {
   CertDnsStatus,
   DdnsProvider,
   DdnsStatus,
+  PubProto,
+  RtunStatus,
   CertStatus,
   EngineConfig,
   EngineMode,
@@ -80,6 +82,32 @@ export const services = {
     requestJson<{ ok: boolean; url: string }>("server_client_sub", { body: { id } }),
   serverClientSubReset: (id: string) =>
     requestJson<{ ok: boolean }>("server_client_sub_reset", { body: { id } }),
+  serverPubAdd: (id: string, proto: PubProto, port: number, note: string) =>
+    requestJson<{ ok: boolean; id: string }>("server_pub_add", {
+      body: { id, proto, port, note },
+      timeoutMs: 60_000,
+    }),
+  serverPubSet: (pid: string, patch: { enabled?: boolean; note?: string }) =>
+    requestJson<{ ok: boolean }>("server_pub_set", { body: { pid, ...patch }, timeoutMs: 60_000 }),
+  serverPubDel: (pid: string) =>
+    requestJson<{ ok: boolean }>("server_pub_del", { body: { pid }, timeoutMs: 60_000 }),
+
+  /* --- встречный канал (роутер за CGNAT ↔ свой VPN-сервер) --- */
+  rtunStatus: () => requestJsonTolerant<RtunStatus>("rtun_status"),
+  /** Ставит только AmneziaWG; ход — через diag.applyLog. */
+  rtunInstall: () => requestJson<{ ok: boolean }>("rtun_install", { method: "POST" }),
+  rtunImport: (conf: string) =>
+    requestJson<{ ok: boolean }>("rtun_import", { body: { conf }, timeoutMs: 60_000 }),
+  rtunSet: (enabled: boolean) =>
+    requestJson<{ ok: boolean }>("rtun_set", { body: { enabled }, timeoutMs: 60_000 }),
+  rtunMapAdd: (m: { proto: PubProto; port: number; ip: string; dport: number; note: string }) =>
+    requestJson<{ ok: boolean; id: string }>("rtun_map_add", { body: m, timeoutMs: 60_000 }),
+  rtunMapSet: (id: string, patch: { enabled?: boolean; note?: string }) =>
+    requestJson<{ ok: boolean }>("rtun_map_set", { body: { id, ...patch }, timeoutMs: 60_000 }),
+  rtunMapDel: (id: string) =>
+    requestJson<{ ok: boolean }>("rtun_map_del", { body: { id }, timeoutMs: 60_000 }),
+  rtunForget: () => requestJson<{ ok: boolean }>("rtun_forget", { method: "POST", timeoutMs: 60_000 }),
+
   serverRegen: () =>
     requestJson<{ ok: boolean }>("server_regen", { method: "POST", timeoutMs: 120_000 }),
   serverSessions: (id?: string) =>

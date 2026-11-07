@@ -37,6 +37,8 @@ mkdir -p "$ACME_WWW"
     echo "BOX_ACME_PORT=$ACME_PORT"
     echo "BOX_ACME_WWW=$ACME_WWW"
     echo "BOX_HTTPS_PORT=${DETOUR_HTTPS_PORT:-}"
+    # Порты хоста, проброшенные в контейнер для встречного канала (pub-add).
+    echo "BOX_PUB_RANGE=${DETOUR_PUB_RANGE:-}"
 } > /etc/detour/box.conf
 
 mkdir -p /etc/uci-defaults

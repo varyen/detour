@@ -504,7 +504,60 @@ export interface ServerStatus {
   /** Адреса домашней сети для клиентов (роутер, с 2.19.0). */
   lanaddr?: ServerLanAddr;
   clients: ServerClient[];
+  /** Встречный канал: порты сервера, ведущие в туннель клиента (с 2.22.0). */
+  publish?: ServerPublish[];
+  /** Сервер в контейнере: снаружи доступны только эти порты («40000-40009»). */
+  pub_range?: string;
+  /** Адрес, по которому публикации видны снаружи. */
+  pub_host?: string;
   now: number;
+}
+
+export type PubProto = "tcp" | "udp" | "both";
+
+/** Порт сервера → тот же порт клиента в туннеле; дальше его ведёт detour-rtun клиента. */
+export interface ServerPublish {
+  id: string;
+  client: string;
+  client_name: string;
+  proto: PubProto;
+  port: number;
+  enabled: boolean;
+  /** Включена, а клиент включён и с ключами AmneziaWG. */
+  active: boolean;
+  note: string;
+}
+
+/** Перевод пришедшего по встречному каналу порта на устройство домашней сети. */
+export interface RtunMap {
+  id: string;
+  proto: PubProto;
+  port: number;
+  ip: string;
+  dport: number;
+  enabled: boolean;
+  note: string;
+}
+
+export interface RtunStatus {
+  ok?: boolean;
+  /** false — платформа не умеет (Keenetic) или пакет старый. */
+  supported?: boolean;
+  /** not_installed — нет AmneziaWG; keenetic; not_shipped. */
+  reason?: string;
+  enabled?: boolean;
+  configured?: boolean;
+  up?: boolean;
+  server?: string;
+  address?: string;
+  server_ip?: string;
+  lan_ip?: string;
+  handshake?: number;
+  /** Секунд с последнего рукопожатия; -1 — ещё не было. */
+  handshake_ago?: number;
+  rx?: number;
+  tx?: number;
+  maps?: RtunMap[];
 }
 
 /** Клиент получает свой адрес из LAN: NAT 1:1 + proxy-ARP, конфиги клиентов не меняются. */

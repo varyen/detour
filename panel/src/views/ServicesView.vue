@@ -13,6 +13,7 @@ import PortmapSheet from "@/components/services/PortmapSheet.vue";
 import ServerPanel from "@/components/services/ServerPanel.vue";
 import CertSheet from "@/components/services/CertSheet.vue";
 import DdnsPanel from "@/components/services/DdnsPanel.vue";
+import RtunPanel from "@/components/services/RtunPanel.vue";
 import KeenHttpsSheet from "@/components/services/KeenHttpsSheet.vue";
 import PasswordSheet from "@/components/services/PasswordSheet.vue";
 import PanelUsers from "@/components/services/PanelUsers.vue";
@@ -153,6 +154,7 @@ const open = reactive<Record<string, boolean>>({
   portmap: false,
   server: false,
   ddns: false,
+  rtun: false,
   cert: false,
   push: false,
   offload: false,
@@ -1090,6 +1092,9 @@ onBeforeUnmount(() => unregister?.());
 
     <!-- ===== свой VPN-сервер ===== -->
     <ServerPanel v-model:open="open.server" />
+
+    <!-- ===== встречный канал ===== -->
+    <RtunPanel v-if="!status.isClient" v-model:open="open.rtun" />
 
     <!-- ===== бесплатное имя ===== -->
     <DdnsPanel

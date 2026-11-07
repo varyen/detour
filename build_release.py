@@ -175,6 +175,8 @@ PANEL_FILES = [
     (("router_files", "detour-geo"), "usr/sbin/detour-geo", 0o755),
     # Бесплатное динамическое имя (DuckDNS / deSEC) + сертификат на него по DNS-01.
     (("router_files", "detour-ddns"), "usr/sbin/detour-ddns", 0o755),
+    # Встречный канал: туннель AmneziaWG к своему VPN-серверу + перевод портов на LAN.
+    (("router_files", "detour-rtun"), "usr/sbin/detour-rtun", 0o755),
     (("router_files", "detour-trafficlog"), "usr/sbin/detour-trafficlog", 0o755),
     # Пер-профильный запрет торрентов: nft-матчеры uTP/DHT/трекеров перед nat
     # REDIRECT + счётчики, по которым панель показывает, кого и чем поймали.
@@ -634,7 +636,7 @@ fi
 # AUTO_CHECK=0 in update.conf. The toggle survives upgrades — prerm strips the
 # cron line and we re-add it here unless explicitly disabled.
 AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | tail -1)
-( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'proxy-admin-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-ddns' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent' | grep -v 'detour-filter' | grep -v 'detour-server' | grep -v 'detour-plugin'
+( crontab -l 2>/dev/null | grep -v 'detour-update' | grep -v 'proxy-admin-update' | grep -v 'subscription-refresh' | grep -v 'vpn-keepalive' | grep -v 'detour-ping' | grep -v 'detour-health' | grep -v 'detour-hosts' | grep -v 'detour-offload' | grep -v 'detour-wan-link' | grep -v 'detour-rulist' | grep -v 'detour-geo' | grep -v 'detour-ddns' | grep -v 'detour-rtun' | grep -v 'detour-trafficlog' | grep -v 'detour-torrent' | grep -v 'detour-filter' | grep -v 'detour-server' | grep -v 'detour-plugin'
   [ "$AUTO_CHECK" = "0" ] || echo "0 */6 * * * /usr/sbin/detour-update check-all >/var/log/detour-update.log 2>&1"
   echo "17 * * * * /usr/sbin/subscription-refresh >/var/log/subscription-refresh.log 2>&1"
   echo "*/5 * * * * /usr/sbin/vpn-keepalive >/dev/null 2>&1"
@@ -656,6 +658,9 @@ AUTO_CHECK=$(sed -n 's/^AUTO_CHECK=//p' /etc/detour/update.conf 2>/dev/null | ta
   # Динамическое имя: адрес шлётся, только если сменился (и раз в сутки для
   # верности); выключено → выход сразу. Заодно восстанавливает запись в /tmp/hosts.
   echo "*/5 * * * * /usr/sbin/detour-ddns tick >/dev/null 2>&1"
+  # Встречный канал: поднять упавший туннель, переразрешить адрес сервера. Не
+  # настроен → выход сразу.
+  echo "* * * * * /usr/sbin/detour-rtun tick >/dev/null 2>&1"
   # Временной ряд трафика для графика: снимок раз в минуту. Стоит ~60 мс (0.1%
   # ядра), пишет в tmpfs, на флеш сбрасывает свёрнутый час раз в час.
   echo "* * * * * /usr/sbin/detour-trafficlog tick >/dev/null 2>&1"
@@ -739,6 +744,7 @@ esac
 case "$1" in
     remove|purge)
         [ -x /usr/sbin/detour-server ] && /usr/sbin/detour-server down >/dev/null 2>&1
+        [ -x /usr/sbin/detour-rtun ] && /usr/sbin/detour-rtun down >/dev/null 2>&1
         ip link del dsrv0 2>/dev/null ;;
 esac
 # Stop the bypass engine (nfqws2/tpws + its firewall) WITHOUT changing the
@@ -767,6 +773,7 @@ crontab -l 2>/dev/null | grep -v 'detour-update' \\
                       | grep -v 'detour-rulist' \\
                       | grep -v 'detour-geo' \\
                       | grep -v 'detour-ddns' \\
+                      | grep -v 'detour-rtun' \\
                       | grep -v 'detour-trafficlog' \\
                       | grep -v 'detour-torrent' \\
                       | grep -v 'detour-filter' \\

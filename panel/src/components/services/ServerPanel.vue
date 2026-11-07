@@ -511,7 +511,7 @@ async function saveLanRange(auto = false) {
 const newName = ref("");
 const newMode = ref<ServerClientMode>("full");
 
-type SheetTab = "sub" | "conf" | "vless" | "history";
+type SheetTab = "sub" | "conf" | "vless" | "ports" | "history";
 const sheet = reactive<{ open: boolean; id: string; tab: SheetTab }>({
   open: false,
   id: "",
@@ -972,6 +972,9 @@ function hint(c: ServerClient): string {
             </label>
             <div class="row-actions">
               <UiButton @click="openSheet(c, subOn ? 'sub' : vlessOn && !awgOn ? 'vless' : 'conf')">Подключение и QR</UiButton>
+              <UiButton v-if="awgOn && !limited && !status.isClient && c.awg !== false" @click="openSheet(c, 'ports')">
+                Порты{{ (st?.publish ?? []).filter((p) => p.client === c.id).length ? ` (${(st?.publish ?? []).filter((p) => p.client === c.id).length})` : "" }}
+              </UiButton>
               <UiButton @click="openSheet(c, 'history')">История</UiButton>
               <UiButton
                 :busy="busy === `c:${c.id}`"
@@ -1142,6 +1145,11 @@ function hint(c: ServerClient): string {
     :sub="subOn"
     :sub-plain="subPlain"
     :traffic="st?.awg_traffic"
+    :publish="(st?.publish ?? []).filter((p) => p.client === sheet.id)"
+    :pub-range="st?.pub_range"
+    :pub-host="st?.pub_host"
+    :can-publish="!limited && !status.isClient"
+    @changed="load"
     @close="sheet.open = false"
   />
 </template>

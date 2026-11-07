@@ -1,0 +1,402 @@
+#!/bin/sh
+# detour-rtun — встречный канал: роутер за CGNAT (мобильный интернет) держит
+# туннель AmneziaWG к своему VPN-серверу Detour на VPS, а сервер публикует его
+# порты наружу (detour-server pub-add). Пришедшее по туннелю здесь переводится
+# на устройство домашней сети.
+#
+#   detour-rtun status                     JSON для панели
+#   detour-rtun import  < client.conf      конфиг клиента с сервера (кнопка «Конфиг»)
+#   detour-rtun set enabled=0|1
+#   detour-rtun map-add <tcp|udp|both> <порт> <ip> [порт устройства] [заметка]
+#   detour-rtun map-set <id> enabled=0|1 | map-del <id>
+#   detour-rtun apply | stop | tick | down | forget
+#
+# Маршрутов по умолчанию туннель не трогает: AllowedIPs сводится к подсети сервера,
+# адрес — /24 на интерфейсе, и только эта подсеть уходит в туннель. Сервер
+# подменяет источник на свой адрес в туннеле, поэтому ответ устройства сам
+# возвращается сюда, а VPN и маршруты Detour на этом роутере не задеты.
+#
+# Порт на сервере и порт в туннеле совпадают: сервер шлёт на <адрес клиента>:N,
+# здесь N переводится на <ip>:<порт устройства>.
+#
+# Хранение (под /etc/detour → keeplist): rtun/tunnel.conf (как выдал сервер, 0600),
+# rtun/rtun.conf (ENABLED), rtun/maps.list:  id|proto|port|ip|dport|enabled|note
+
+IFACE=drtun0
+ZONE=detour_rtun
+if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
+    export PATH="/opt/bin:/opt/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    KEENETIC=1
+    DIR=/opt/etc/detour/rtun
+    RUN=/opt/var/run
+    LOG=/opt/var/log/detour-rtun.log
+else
+    KEENETIC=0
+    DIR=/etc/detour/rtun
+    RUN=/var/run
+    LOG=/var/log/detour-rtun.log
+fi
+TUNNEL="$DIR/tunnel.conf"
+CONF="$DIR/rtun.conf"
+MAPS="$DIR/maps.list"
+RENDER="$RUN/detour-rtun.conf"
+EPSTATE="$RUN/detour-rtun.ep"      # «ip ts» — последнее разрешение адреса сервера
+LOCKD="$RUN/detour-rtun.lock"
+
+if ! command -v awg >/dev/null 2>&1 && command -v amneziawg-go >/dev/null 2>&1 && \
+        amneziawg-go awg genpsk 2>/dev/null | grep -qE '^[A-Za-z0-9+/]{43}=$'; then
+    awg() { amneziawg-go awg "$@"; }
+fi
+
+mkdir -p "$RUN" "$(dirname "$LOG")" 2>/dev/null
+log() { echo "$(date '+%F %T') $*" >> "$LOG" 2>/dev/null; }
+json_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t'; }
+err() { printf '{"ok":false,"error":"%s"}\n' "$(json_esc "$1")"; exit 0; }
+
+lock() {
+    i=0
+    until mkdir "$LOCKD" 2>/dev/null; do
+        i=$((i + 1)); [ "$i" -gt 60 ] && { rm -rf "$LOCKD"; mkdir "$LOCKD" 2>/dev/null; break; }
+        sleep 1
+    done
+    trap 'rm -rf "$LOCKD"' EXIT
+    trap 'rm -rf "$LOCKD"; exit 1' INT TERM
+}
+
+ENABLED=0
+load_conf() { [ -f "$CONF" ] && . "$CONF"; return 0; }
+save_conf() { mkdir -p "$DIR"; chmod 700 "$DIR"; echo "ENABLED=$ENABLED" > "$CONF"; }
+
+backend() {
+    if lsmod 2>/dev/null | grep -q '^amneziawg ' || modprobe amneziawg 2>/dev/null; then echo kernel; return; fi
+    if command -v amneziawg-go >/dev/null 2>&1 && [ -c /dev/net/tun ]; then echo userspace; fi
+}
+
+unsupported_reason() {
+    [ "$KEENETIC" = 1 ] && { echo "keenetic"; return; }
+    command -v awg >/dev/null 2>&1 && [ -n "$(backend)" ] || echo "not_installed"
+}
+
+# Значение ключа из секции конфига: $1 секция (Interface|Peer)  $2 ключ.
+cval() {
+    awk -v sec="[$1]" -v key="$2" '
+        { sub(/\r$/, "") }
+        /^\[/ { in_s = ($0 == sec); next }
+        in_s {
+            k = $0; sub(/[[:space:]]*=.*/, "", k); gsub(/^[[:space:]]+/, "", k)
+            if (tolower(k) == tolower(key)) { v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v); print v; exit }
+        }' "$TUNNEL" 2>/dev/null
+}
+
+addr() { cval Interface Address | cut -d, -f1 | cut -d/ -f1 | tr -d ' '; }
+net3() { addr | cut -d. -f1-3; }
+ep_host() { e=$(cval Peer Endpoint); printf '%s' "${e%:*}"; }
+ep_port() { e=$(cval Peer Endpoint); printf '%s' "${e##*:}"; }
+
+valid_ip4() { printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
+
+resolve4() {  # $1 имя → IPv4
+    valid_ip4 "$1" && { printf '%s' "$1"; return 0; }
+    nslookup "$1" 2>/dev/null | awk '/^Name:/ { n = 1; next } n && /^Address/ { sub(/^Address[^:]*:[[:space:]]*/, ""); if ($1 ~ /^[0-9.]+$/) { print $1; exit } }'
+}
+
+# Конфиг для `awg setconf`: всё из [Interface], кроме ключей wg-quick, и пир
+# с AllowedIPs = подсеть сервера.
+render() {
+    ip=$(resolve4 "$(ep_host)")
+    [ -n "$ip" ] || { log "не удалось разрешить $(ep_host)"; return 1; }
+    echo "$ip $(date +%s)" > "$EPSTATE"
+    umask 077
+    awk -v net="$(net3)" -v ep="$ip:$(ep_port)" '
+        { sub(/\r$/, "") }
+        /^\[Interface\]/ { s = "i"; print; next }
+        /^\[Peer\]/ { s = "p"; print "\n[Peer]"; next }
+        /^[[:space:]]*($|#)/ { next }
+        {
+            k = $0; sub(/[[:space:]]*=.*/, "", k); gsub(/^[[:space:]]+/, "", k); lk = tolower(k)
+            if (s == "i" && lk !~ /^(address|dns|mtu|table|preup|postup|predown|postdown|saveconfig)$/) print
+            if (s == "p") {
+                if (lk == "endpoint") print "Endpoint = " ep
+                else if (lk == "allowedips") print "AllowedIPs = " net ".0/24"
+                else if (lk == "persistentkeepalive") print "PersistentKeepalive = 25"
+                else print
+            }
+        }' "$TUNNEL" > "$RENDER"
+    grep -qi '^PersistentKeepalive' "$RENDER" || echo "PersistentKeepalive = 25" >> "$RENDER"
+}
+
+iface_up() { ip link show "$IFACE" >/dev/null 2>&1; }
+
+tun_down() {
+    iface_up && ip link del "$IFACE" 2>/dev/null
+    rm -f "$RENDER"
+}
+
+tun_up() {
+    r=$(unsupported_reason); [ -z "$r" ] || { log "apply: $r"; return 1; }
+    [ -s "$TUNNEL" ] || { log "apply: нет конфига"; return 1; }
+    render || return 1
+    if ! iface_up; then
+        if [ "$(backend)" = kernel ]; then
+            ip link add "$IFACE" type amneziawg || { log "ip link add $IFACE не удался"; return 1; }
+        else
+            mkdir -p /var/run/amneziawg
+            amneziawg-go "$IFACE" >>"$LOG" 2>&1 || { log "amneziawg-go не запустился"; return 1; }
+            i=0
+            while [ ! -S "/var/run/amneziawg/$IFACE.sock" ] && [ "$i" -lt 30 ]; do sleep 1; i=$((i + 1)); done
+        fi
+        awg setconf "$IFACE" "$RENDER" || { log "awg setconf не удался"; ip link del "$IFACE"; return 1; }
+    else
+        awg syncconf "$IFACE" "$RENDER" 2>/dev/null || awg setconf "$IFACE" "$RENDER" || return 1
+    fi
+    ip addr replace "$(addr)/24" dev "$IFACE" 2>/dev/null || ip addr add "$(addr)/24" dev "$IFACE" 2>/dev/null
+    mtu=$(cval Interface MTU)
+    ip link set "$IFACE" mtu "${mtu:-1376}" up
+    rm -f "$RENDER"
+    return 0
+}
+
+# ---------- файрвол (fw4/fw3 через uci) ----------
+
+lan_ip() { uci -q get network.lan.ipaddr 2>/dev/null | awk '{ print $1 }' | cut -d/ -f1; }
+
+fw_apply() {  # $1 — 1 = туннель включён
+    on=${1:-0}
+    changed=0
+    want() {
+        [ "$(uci -q get "firewall.$1")" = "$2" ] && return
+        uci -q set "firewall.$1=$2"; changed=1
+    }
+    want "$ZONE" zone
+    want "$ZONE.name" "$ZONE"
+    want "$ZONE.device" "$IFACE"
+    want "$ZONE.input" REJECT
+    want "$ZONE.output" ACCEPT
+    want "$ZONE.forward" REJECT
+    want "$ZONE.mtu_fix" 1
+    keep=" "
+    lip=$(lan_ip)
+    if [ -s "$MAPS" ]; then
+        while IFS='|' read -r id proto port ip dport en note; do
+            [ -n "$id" ] || continue
+            s="${ZONE}_$id"; keep="$keep$s "
+            case "$proto" in both) pp="tcp udp" ;; *) pp=$proto ;; esac
+            m=0; [ "$on" = 1 ] && [ "$en" = 1 ] && m=1
+            want "$s" redirect
+            want "$s.name" "detour-rtun-$port"
+            want "$s.src" "$ZONE"
+            want "$s.proto" "$pp"
+            want "$s.src_dport" "$port"
+            want "$s.dest" lan
+            want "$s.dest_ip" "$ip"
+            want "$s.dest_port" "${dport:-$port}"
+            want "$s.target" DNAT
+            want "$s.enabled" "$m"
+            # Сам роутер — цель: после DNAT пакет идёт во вход, а зона его режет.
+            r="${ZONE}_r$id"
+            if [ -n "$lip" ] && [ "$ip" = "$lip" ]; then
+                keep="$keep$r "
+                want "$r" rule
+                want "$r.name" "detour-rtun-in-$port"
+                want "$r.src" "$ZONE"
+                want "$r.proto" "$pp"
+                want "$r.dest_port" "${dport:-$port}"
+                want "$r.target" ACCEPT
+                want "$r.enabled" "$m"
+            fi
+        done < "$MAPS"
+    fi
+    for s in $(uci -q show firewall 2>/dev/null | sed -nE "s/^firewall\.(${ZONE}_r?m[0-9a-f]*)=(redirect|rule)$/\1/p"); do
+        case "$keep" in *" $s "*) ;; *) uci -q delete "firewall.$s"; changed=1 ;; esac
+    done
+    if [ "$changed" = 1 ]; then
+        uci commit firewall
+        /etc/init.d/firewall reload >/dev/null 2>&1
+        log "firewall: зона $ZONE обновлена"
+    fi
+}
+
+fw_remove() {
+    for s in "$ZONE" $(uci -q show firewall 2>/dev/null | sed -nE "s/^firewall\.(${ZONE}_r?m[0-9a-f]*)=(redirect|rule)$/\1/p"); do
+        uci -q delete "firewall.$s"
+    done
+    uci commit firewall
+    /etc/init.d/firewall reload >/dev/null 2>&1
+}
+
+do_apply() {
+    load_conf
+    if [ "$ENABLED" = 1 ] && [ -s "$TUNNEL" ]; then
+        tun_up || { fw_apply 0; return 1; }
+        fw_apply 1
+    else
+        tun_down
+        [ "$KEENETIC" = 1 ] || { uci -q get "firewall.$ZONE" >/dev/null && fw_apply 0; }
+    fi
+    return 0
+}
+
+new_id() {
+    hexdump -n 4 -v -e '/1 "%02x"' /dev/urandom 2>/dev/null || od -An -N4 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+handshake() {
+    iface_up || { echo 0; return; }
+    awg show "$IFACE" latest-handshakes 2>/dev/null | awk '{ print $2; exit }'
+}
+
+status_json() {
+    load_conf
+    r=$(unsupported_reason)
+    hs=$(handshake); hs=${hs:-0}; now=$(date +%s)
+    rx=0; tx=0
+    iface_up && set -- $(awg show "$IFACE" transfer 2>/dev/null | awk '{ print $2, $3; exit }') && { rx=${1:-0}; tx=${2:-0}; }
+    printf '{"ok":true,"supported":%s,"reason":"%s","enabled":%s,"configured":%s,"up":%s,' \
+        "$([ "$r" = keenetic ] && echo false || echo true)" "$r" \
+        "$([ "$ENABLED" = 1 ] && echo true || echo false)" "$([ -s "$TUNNEL" ] && echo true || echo false)" \
+        "$(iface_up && echo true || echo false)"
+    printf '"server":"%s","address":"%s","server_ip":"%s","lan_ip":"%s","handshake":%s,"handshake_ago":%s,"rx":%s,"tx":%s,"maps":[' \
+        "$(json_esc "$(ep_host)")" "$(addr)" "$([ -n "$(net3)" ] && echo "$(net3).1")" "$(lan_ip)" \
+        "$hs" "$([ "$hs" -gt 0 ] && echo $((now - hs)) || echo -1)" "$rx" "$tx"
+    [ -s "$MAPS" ] && awk -F'|' '
+        function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+        { printf "%s{\"id\":\"%s\",\"proto\":\"%s\",\"port\":%d,\"ip\":\"%s\",\"dport\":%d,\"enabled\":%s,\"note\":\"%s\"}",
+            (n++ ? "," : ""), $1, $2, $3, $4, ($5 == "" ? $3 : $5), ($6 == 1 ? "true" : "false"), esc($7) }' "$MAPS"
+    printf ']}\n'
+}
+
+check_map() {  # proto port ip dport
+    case "$1" in tcp|udp|both) ;; *) err "протокол: tcp, udp или both" ;; esac
+    for p in "$2" "$4"; do
+        case "$p" in ''|*[!0-9]*) err "порт — число" ;; esac
+        [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || err "порт от 1 до 65535"
+    done
+    valid_ip4 "$3" || err "адрес устройства — IPv4 домашней сети"
+}
+
+cmd_import() {
+    tmp="$RUN/detour-rtun.import.$$"
+    umask 077
+    head -c 16384 | tr -d '\r' > "$tmp"
+    for k in "Interface PrivateKey" "Interface Address" "Peer PublicKey" "Peer Endpoint"; do
+        set -- $k
+        v=$(TUNNEL=$tmp; cval "$1" "$2")
+        [ -n "$v" ] || { rm -f "$tmp"; err "в конфиге нет $2 — нужен .conf AmneziaWG клиента с VPN-сервера Detour"; }
+    done
+    a=$(TUNNEL=$tmp; addr)
+    valid_ip4 "$a" || { rm -f "$tmp"; err "в конфиге нет IPv4-адреса клиента"; }
+    n=$(echo "$a" | cut -d. -f1-3)
+    if [ "$n.0/24" = "$(ip -4 route show dev br-lan 2>/dev/null | awk '/proto kernel/ { print $1; exit }')" ]; then
+        rm -f "$tmp"; err "подсеть туннеля $n.0/24 совпадает с домашней сетью"
+    fi
+    mkdir -p "$DIR"; chmod 700 "$DIR"
+    mv "$tmp" "$TUNNEL"
+    load_conf; ENABLED=1; save_conf
+    log "import: адрес $a, сервер $(ep_host)"
+    do_apply || err "конфиг сохранён, но туннель не поднялся — подробности в $LOG"
+    echo '{"ok":true}'
+}
+
+cmd_map_add() {  # proto port ip [dport] [note]
+    dport=${4:-$2}
+    check_map "$1" "$2" "$3" "$dport"
+    [ -s "$MAPS" ] && awk -F'|' -v p="$2" -v pr="$1" '$3 == p && ($2 == pr || $2 == "both" || pr == "both") { f = 1 } END { exit !f }' "$MAPS" && \
+        err "порт $2 уже переведён"
+    _mid="m$(new_id)"
+    note=$(printf '%s' "$5" | tr -d '|\n\r' | cut -c1-60)
+    mkdir -p "$DIR"; umask 077
+    printf '%s|%s|%s|%s|%s|1|%s\n' "$_mid" "$1" "$2" "$3" "$dport" "$note" >> "$MAPS"
+    do_apply
+    log "map-add $_mid $1 $2 → $3:$dport"
+    printf '{"ok":true,"id":"%s"}\n' "$_mid"
+}
+
+cmd_map_set() {
+    id=$1; shift
+    old=$(awk -F'|' -v id="$id" '$1 == id' "$MAPS" 2>/dev/null)
+    [ -n "$old" ] || err "перевод не найден"
+    IFS='|' read -r _i proto port ip dport en note <<EOF
+$old
+EOF
+    for kv in "$@"; do
+        case "$kv" in
+            enabled=0|enabled=1) en=${kv#*=} ;;
+            proto=*) proto=${kv#*=} ;;
+            port=*) port=${kv#*=} ;;
+            ip=*) ip=${kv#*=} ;;
+            dport=*) dport=${kv#*=} ;;
+            note=*) note=$(printf '%s' "${kv#*=}" | tr -d '|\n\r' | cut -c1-60) ;;
+            *) err "неизвестный параметр: ${kv%%=*}" ;;
+        esac
+    done
+    check_map "$proto" "$port" "$ip" "$dport"
+    umask 077
+    awk -F'|' -v OFS='|' -v id="$id" -v l="$id|$proto|$port|$ip|$dport|$en|$note" '$1 == id { print l; next } { print }' \
+        "$MAPS" > "$MAPS.tmp" && mv "$MAPS.tmp" "$MAPS"
+    do_apply
+    echo '{"ok":true}'
+}
+
+cmd_map_del() {
+    awk -F'|' -v id="$1" '$1 == id { f = 1 } END { exit !f }' "$MAPS" 2>/dev/null || err "перевод не найден"
+    umask 077
+    awk -F'|' -v id="$1" '$1 != id' "$MAPS" > "$MAPS.tmp" && mv "$MAPS.tmp" "$MAPS"
+    do_apply
+    echo '{"ok":true}'
+}
+
+case "$1" in
+    status) status_json ;;
+    import)
+        [ "$KEENETIC" = 1 ] && err "встречный канал пока только на OpenWrt"
+        lock; cmd_import ;;
+    set)
+        shift; lock; load_conf
+        for kv in "$@"; do
+            case "$kv" in enabled=0|enabled=1) ENABLED=${kv#*=} ;; *) err "неизвестный параметр: $kv" ;; esac
+        done
+        [ "$ENABLED" = 1 ] && [ ! -s "$TUNNEL" ] && err "сначала загрузите конфиг клиента с сервера"
+        save_conf
+        do_apply || err "туннель не поднялся — подробности в $LOG"
+        echo '{"ok":true}' ;;
+    map-add) lock; cmd_map_add "$2" "$3" "$4" "$5" "$6" ;;
+    map-set) shift; lock; cmd_map_set "$@" ;;
+    map-del) lock; cmd_map_del "$2" ;;
+    apply|start) lock; do_apply; [ "$1" = apply ] && echo '{"ok":true}'; exit 0 ;;
+    stop) lock; tun_down ;;
+    tick)
+        [ -f "$CONF" ] || exit 0
+        load_conf
+        [ "$ENABLED" = 1 ] || exit 0
+        lock
+        if ! iface_up; then
+            log "tick: $IFACE нет — поднимаю"; do_apply; exit 0
+        fi
+        # Нет рукопожатия дольше 3 минут: сервер мог сменить адрес (DDNS) —
+        # разрешаем имя заново, не чаще раза в 5 минут.
+        hs=$(handshake); now=$(date +%s)
+        set -- $(cat "$EPSTATE" 2>/dev/null)
+        if [ $((now - ${hs:-0})) -gt 180 ] && [ $((now - ${2:-0})) -gt 300 ]; then
+            nip=$(resolve4 "$(ep_host)")
+            echo "${nip:-$1} $now" > "$EPSTATE"
+            if [ -n "$nip" ]; then
+                pk=$(cval Peer PublicKey)
+                awg set "$IFACE" peer "$pk" endpoint "$nip:$(ep_port)" 2>/dev/null
+                [ "$nip" != "$1" ] && log "tick: адрес сервера $1 → $nip"
+            fi
+        fi
+        # Перестройка файрвола могла снести секции — fw_apply сверит.
+        fw_apply 1 ;;
+    down)
+        tun_down
+        [ "$KEENETIC" = 1 ] || fw_remove ;;
+    forget)
+        lock; tun_down
+        [ "$KEENETIC" = 1 ] || fw_remove
+        rm -rf "$DIR"
+        log "forget"
+        echo '{"ok":true}' ;;
+    *)
+        echo "usage: $0 {status|import|set enabled=0|1|map-add|map-set|map-del|apply|stop|tick|down|forget}" >&2
+        exit 2 ;;
+esac

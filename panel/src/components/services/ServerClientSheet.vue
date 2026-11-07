@@ -8,12 +8,12 @@ import DrawerSheet from "@/components/DrawerSheet.vue";
 import UiButton from "@/components/UiButton.vue";
 import SegmentedControl from "@/components/SegmentedControl.vue";
 import { services } from "@/api";
-import type { ServerClient, ServerSession } from "@/api";
+import type { PubProto, ServerClient, ServerPublish, ServerSession } from "@/api";
 import { fmtBytes } from "@/lib/format";
 import { saveFile, savedWhere } from "@/lib/download";
 import { useToastStore } from "@/stores/toast";
 
-type Tab = "sub" | "conf" | "vless" | "history";
+type Tab = "sub" | "conf" | "vless" | "ports" | "history";
 
 const props = defineProps<{
   open: boolean;
@@ -28,8 +28,14 @@ const props = defineProps<{
   subPlain?: boolean;
   /** false — объём трафика клиента роутер не видит (встроенный WireGuard KeeneticOS). */
   traffic?: boolean;
+  /** Встречный канал: публикации этого клиента, диапазон портов сервера, внешний адрес. */
+  publish?: ServerPublish[];
+  pubRange?: string;
+  pubHost?: string;
+  /** Публиковать может только главный админ. */
+  canPublish?: boolean;
 }>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; changed: [] }>();
 const toast = useToastStore();
 
 const view = ref<Tab>("conf");
@@ -65,6 +71,7 @@ const tabs = computed(() => {
   if (props.sub) t.push({ value: "sub", label: "Подписка" });
   if (props.awg && props.client?.awg !== false) t.push({ value: "conf", label: "AmneziaWG" });
   if (props.vless && props.client?.vless) t.push({ value: "vless", label: "VLESS" });
+  if (props.canPublish && props.awg && props.client?.awg !== false) t.push({ value: "ports", label: "Порты" });
   t.push({ value: "history", label: "История" });
   return t;
 });
@@ -79,6 +86,71 @@ const fileName = computed(() => {
   const base = (ascii.length >= 2 ? ascii : `detour-${octet}`).slice(0, 15);
   return `${base}.conf`;
 });
+
+/* ---------------- встречный канал ---------------- */
+
+const pubPort = ref("");
+const pubProto = ref<PubProto>("tcp");
+const pubNote = ref("");
+const pubBusy = ref("");
+const PROTO_OPTIONS = [
+  { value: "tcp" as PubProto, label: "TCP" },
+  { value: "udp" as PubProto, label: "UDP" },
+  { value: "both" as PubProto, label: "Оба" },
+];
+const protoName = (p: PubProto) => (p === "both" ? "TCP и UDP" : p.toUpperCase());
+
+const pubRangeHint = computed(() =>
+  props.pubRange
+    ? `Сервер в контейнере: снаружи доступны только порты ${props.pubRange}.`
+    : "Любой свободный порт сервера, кроме его собственных.",
+);
+
+async function addPub() {
+  if (!props.client) return;
+  const port = Number(pubPort.value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    toast.error("Порт — число от 1 до 65535");
+    return;
+  }
+  pubBusy.value = "add";
+  try {
+    await services.serverPubAdd(props.client.id, pubProto.value, port, pubNote.value.trim());
+    toast.ok(`Порт ${port} опубликован`);
+    pubPort.value = "";
+    pubNote.value = "";
+    emit("changed");
+  } catch (e) {
+    toast.fromError(e, "Не удалось опубликовать порт");
+  } finally {
+    pubBusy.value = "";
+  }
+}
+
+async function togglePub(p: ServerPublish) {
+  pubBusy.value = p.id;
+  try {
+    await services.serverPubSet(p.id, { enabled: !p.enabled });
+    emit("changed");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить");
+  } finally {
+    pubBusy.value = "";
+  }
+}
+
+async function delPub(p: ServerPublish) {
+  if (!confirm(`Снять публикацию порта ${p.port}?`)) return;
+  pubBusy.value = p.id;
+  try {
+    await services.serverPubDel(p.id);
+    emit("changed");
+  } catch (e) {
+    toast.fromError(e, "Не удалось удалить");
+  } finally {
+    pubBusy.value = "";
+  }
+}
 
 async function loadConf() {
   if (!props.client) return;
@@ -370,6 +442,50 @@ function host(remote: string): string {
         </template>
       </template>
 
+      <template v-else-if="view === 'ports'">
+        <p class="lead">
+          Встречный канал для роутера за CGNAT (мобильный интернет). Роутер
+          подключается к этому серверу как клиент AmneziaWG — в его панели
+          «Сервисы → Встречный канал» загрузите конфиг с вкладки «AmneziaWG».
+          Порт отсюда ведёт в его туннель, а там — на устройство, которое вы
+          укажете на роутере для того же порта.
+        </p>
+        <p class="note faint">
+          Приложение за роутером увидит адрес этого сервера, а не посетителя.
+          {{ pubRangeHint }}
+        </p>
+        <ul v-if="publish?.length" class="pubs">
+          <li v-for="p in publish" :key="p.id">
+            <div class="p-main">
+              <span class="mono">{{ pubHost || "сервер" }}:{{ p.port }}</span>
+              <span class="dim">{{ protoName(p.proto) }}{{ p.note ? ` · ${p.note}` : "" }}</span>
+              <span v-if="p.enabled && !p.active" class="dim warn-t">клиент выключен</span>
+            </div>
+            <div class="actions">
+              <UiButton :busy="pubBusy === p.id" @click="togglePub(p)">
+                {{ p.enabled ? "Выключить" : "Включить" }}
+              </UiButton>
+              <UiButton variant="danger" :disabled="!!pubBusy" @click="delPub(p)">Удалить</UiButton>
+            </div>
+          </li>
+        </ul>
+        <p v-else class="note">Опубликованных портов пока нет.</p>
+        <div class="pub-form">
+          <SegmentedControl v-model="pubProto" label="Протокол" :options="PROTO_OPTIONS" />
+          <div class="pub-row">
+            <input
+              v-model="pubPort"
+              type="text"
+              inputmode="numeric"
+              :placeholder="pubRange ? pubRange.split('-')[0] : '8443'"
+              aria-label="Порт сервера"
+            />
+            <input v-model="pubNote" type="text" placeholder="Заметка (например, Home Assistant)" aria-label="Заметка" />
+          </div>
+          <UiButton variant="primary" :busy="pubBusy === 'add'" @click="addPub">Опубликовать порт</UiButton>
+        </div>
+      </template>
+
       <template v-else>
         <p v-if="loading" class="note">Загружаю…</p>
         <p v-else-if="!sessions.length" class="note">
@@ -394,6 +510,46 @@ function host(remote: string): string {
 </template>
 
 <style scoped>
+.pubs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.pubs li {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 11px;
+  min-width: 0;
+}
+.p-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: baseline;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.warn-t {
+  color: var(--warn);
+}
+.pub-form {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.pub-row {
+  display: grid;
+  grid-template-columns: minmax(0, 110px) minmax(0, 1fr);
+  gap: 8px;
+}
+.pub-row input {
+  min-width: 0;
+  width: 100%;
+}
 .wrap {
   display: flex;
   flex-direction: column;

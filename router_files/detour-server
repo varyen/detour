@@ -13,6 +13,10 @@
 #                                          должны заново импортировать конфиг)
 #   detour-server client-link <id>       — ссылка vless:// (VLESS-Reality)
 #   detour-server down                   — снять всё (удаление пакета)
+#   detour-server pub-add <id> <tcp|udp|both> <порт> [заметка]
+#                                        — порт сервера → тот же порт клиента
+#                                          в туннеле (встречный канал, detour-rtun)
+#   detour-server pub-set <pid> enabled=0|1 note=… | pub-del <pid>
 #
 # Два входа, один набор клиентов: AmneziaWG (UDP, интерфейс $IFACE) и
 # VLESS-Reality (TCP). VLESS принимает отдельный sing-box в своём сетевом
@@ -859,6 +863,7 @@ fw_apply() {
         want "${ZONE}_sub.target" ACCEPT
         want "${ZONE}_sub.enabled" "$(sub_on && echo 1 || echo 0)"
     fi
+    pub_fw_uci
     if [ "$changed" = 1 ]; then
         uci commit firewall
         /etc/init.d/firewall reload >/dev/null 2>&1
@@ -869,7 +874,8 @@ fw_apply() {
 fw_remove() {
     [ "$KEENETIC" = 1 ] && { ENABLED=0; keen_fw; return 0; }
     uci -q get "firewall.$ZONE" >/dev/null || return 0
-    for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_fromlan" "${ZONE}_in" "${ZONE}_vin" "${ZONE}_tin" "${ZONE}_win" "${ZONE}_xin" "${ZONE}_sub"; do
+    for s in "$ZONE" "${ZONE}_wan" "${ZONE}_lan" "${ZONE}_fromlan" "${ZONE}_in" "${ZONE}_vin" "${ZONE}_tin" "${ZONE}_win" "${ZONE}_xin" "${ZONE}_sub" \
+             $(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\(${ZONE}_p[0-9a-f]*\)=redirect$/\1/p"); do
         uci -q delete "firewall.$s"
     done
     uci commit firewall
@@ -2115,6 +2121,7 @@ lan_apply() {
 }
 
 do_stop() {
+    pub_nat_down
     lan_down
     uplink_down
     awg_down
@@ -2139,6 +2146,7 @@ do_apply() {
     fi
     if sub_on; then sub_up || rc=1; else sub_down; fi
     fw_apply
+    pub_nat_apply
     uplink_apply
     lan_apply || rc=1
     set --
@@ -2523,7 +2531,9 @@ status_json() {
             printf "\"day_rx\":%.0f,\"day_tx\":%.0f,\"month_rx\":%.0f,\"month_tx\":%.0f,\"total_rx\":%.0f,\"total_tx\":%.0f}",
                 dyrx, dytx, mrx, mtx, a[4] + drx, a[5] + dtx
         }' - "$(stats_src)" "$lmap" "$CLIENTS"
-    printf '],"now":%s}\n' "$now"
+    printf '],'
+    pub_json
+    printf '"now":%s}\n' "$now"
 }
 
 # ---------- подписка ----------
@@ -3039,6 +3049,218 @@ cmd_client_add() {
     printf '{"ok":true,"id":"%s"}\n' "$id"
 }
 
+# ---------- публикация портов клиента (встречный канал) ----------
+#
+# Клиент за CGNAT (роутер с Detour на мобильном интернете) держит туннель AWG к
+# этому серверу. Порт сервера N публикуется: вход с WAN на N → DNAT на адрес
+# клиента в туннеле $NET.<octet>:N, а клиентский detour-rtun переводит его дальше
+# на устройство своей сети. Источник подменяется на адрес сервера в туннеле
+# ($NET.1): ответ тогда сам идёт обратно в туннель — без политик маршрутизации на
+# клиенте, которые пришлось бы согласовывать с его VPN. Цена — приложение за
+# клиентом видит адрес сервера, а не посетителя.
+#
+#   publish.list: id|client|proto|port|enabled|note   (proto: tcp, udp, both)
+#
+# Линукс-сервер (контейнер): docker пробрасывает внутрь только заранее заданный
+# диапазон (install.sh --pub-ports, BOX_PUB_RANGE в box.conf) — порт вне его
+# снаружи не виден, поэтому такой и не принимаем.
+PUBLIST="$DIR/publish.list"
+PUB_PRE=DSRV_PUB_PRE
+PUB_POST=DSRV_PUB_POST
+PUB_FWD=DSRV_PUB_FWD
+PUB_SIG="$RUN/detour-server.pub"
+
+pub_range() {
+    [ -f /etc/detour/box.conf ] || return 0
+    sed -n "s/^BOX_PUB_RANGE=['\"]*\([0-9][0-9]*-[0-9][0-9]*\).*/\1/p" /etc/detour/box.conf | head -1
+}
+
+# «proto port ip id» для действующих публикаций (proto уже раскрыт: tcp/udp).
+pub_active() {
+    [ -s "$PUBLIST" ] && [ -s "$CLIENTS" ] && awg_on || return 0
+    awk -F'|' -v net="$NET" '
+        FILENAME == ARGV[1] { if ($2 == 1 && $5 != "") ip[$1] = net "." $4; next }
+        $5 == 1 && ($2 in ip) {
+            if ($3 == "tcp" || $3 == "both") print "tcp", $4, ip[$2], $1
+            if ($3 == "udp" || $3 == "both") print "udp", $4, ip[$2], $1
+        }' "$CLIENTS" "$PUBLIST"
+}
+
+# Вызывается из fw_apply (там определены want и changed): секция uci на публикацию.
+pub_fw_uci() {
+    keep=" "
+    if [ -s "$PUBLIST" ] && [ -s "$CLIENTS" ]; then
+        while IFS='|' read -r pid pcl pproto pport pen pnote; do
+            [ -n "$pid" ] || continue
+            s="${ZONE}_$pid"
+            keep="$keep$s "
+            pip=$(awk -F'|' -v id="$pcl" -v net="$NET" '$1 == id { print net "." $4 }' "$CLIENTS")
+            on=0
+            awg_on && [ "$pen" = 1 ] && [ -n "$pip" ] && \
+                awk -F'|' -v id="$pcl" '$1 == id && $2 == 1 && $5 != "" { f = 1 } END { exit !f }' "$CLIENTS" && on=1
+            case "$pproto" in both) pp="tcp udp" ;; *) pp=$pproto ;; esac
+            want "$s" redirect
+            want "$s.name" "detour-pub-$pport"
+            want "$s.src" wan
+            want "$s.proto" "$pp"
+            want "$s.src_dport" "$pport"
+            want "$s.dest" "$ZONE"
+            want "$s.dest_ip" "${pip:-$NET.254}"
+            want "$s.dest_port" "$pport"
+            want "$s.target" DNAT
+            want "$s.enabled" "$on"
+        done < "$PUBLIST"
+    fi
+    for s in $(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\(${ZONE}_p[0-9a-f]*\)=redirect$/\1/p"); do
+        case "$keep" in *" $s "*) ;; *) uci -q delete "firewall.$s"; changed=1 ;; esac
+    done
+}
+
+pub_hook() {  # $1 -I/-D  $2 таблица  $3 цепочка  $4 наша цепочка
+    while iptables -t "$2" -D "$3" -j "$4" 2>/dev/null; do :; done
+    [ "$1" = -I ] && iptables -t "$2" -I "$3" 1 -j "$4"
+    return 0
+}
+
+pub_jumps() {  # $1 — -I или -D
+    pub_hook "$1" nat POSTROUTING "$PUB_POST"
+    if [ "$KEENETIC" = 1 ]; then
+        pub_hook "$1" nat PREROUTING "$PUB_PRE"
+        pub_hook "$1" filter FORWARD "$PUB_FWD"
+    fi
+}
+
+# SNAT в туннель (обе платформы) + на Keenetic ещё DNAT и разрешение FORWARD:
+# uci там нет. DNAT только на адреса самого роутера — иначе публикация порта 443
+# перехватила бы HTTPS устройств домашней сети ко всему интернету.
+pub_nat_apply() {
+    rules=$(pub_active)
+    if [ -z "$rules" ]; then pub_nat_down; return 0; fi
+    if [ "$rules" != "$(cat "$PUB_SIG" 2>/dev/null)" ] || ! iptables -t nat -L "$PUB_POST" -n >/dev/null 2>&1; then
+        iptables -t nat -N "$PUB_POST" 2>/dev/null; iptables -t nat -F "$PUB_POST"
+        if [ "$KEENETIC" = 1 ]; then
+            iptables -t nat -N "$PUB_PRE" 2>/dev/null; iptables -t nat -F "$PUB_PRE"
+            iptables -N "$PUB_FWD" 2>/dev/null; iptables -F "$PUB_FWD"
+        fi
+        printf '%s\n' "$rules" | while read -r pr po ip _id; do
+            iptables -t nat -A "$PUB_POST" -o "$IFACE" -d "$ip" -p "$pr" --dport "$po" -j SNAT --to-source "$(server_ip)"
+            if [ "$KEENETIC" = 1 ]; then
+                iptables -t nat -A "$PUB_PRE" ! -i "$IFACE" -m addrtype --dst-type LOCAL -p "$pr" --dport "$po" \
+                    -j DNAT --to-destination "$ip:$po"
+                iptables -A "$PUB_FWD" -o "$IFACE" -d "$ip" -p "$pr" --dport "$po" -j ACCEPT
+            fi
+        done
+        printf '%s\n' "$rules" > "$PUB_SIG"
+        log "publish: $(printf '%s\n' "$rules" | wc -l) правил"
+    fi
+    pub_jumps -I
+}
+
+pub_nat_down() {
+    [ -f "$PUB_SIG" ] || iptables -t nat -L "$PUB_POST" -n >/dev/null 2>&1 || return 0
+    pub_jumps -D
+    iptables -t nat -F "$PUB_POST" 2>/dev/null; iptables -t nat -X "$PUB_POST" 2>/dev/null
+    if [ "$KEENETIC" = 1 ]; then
+        iptables -t nat -F "$PUB_PRE" 2>/dev/null; iptables -t nat -X "$PUB_PRE" 2>/dev/null
+        iptables -F "$PUB_FWD" 2>/dev/null; iptables -X "$PUB_FWD" 2>/dev/null
+    fi
+    rm -f "$PUB_SIG"
+}
+
+pub_json() {
+    printf '"pub_range":"%s","pub_host":"%s","publish":[' "$(pub_range)" "$(json_esc "$(endpoint_host)")"
+    [ -s "$PUBLIST" ] && awk -F'|' -v own="${DETOUR_SRV_OWNER:-}" '
+        function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+        FILENAME == ARGV[1] { name[$1] = $3; on[$1] = ($2 == 1 && $5 != ""); owner[$1] = $13; next }
+        own != "" && owner[$2] != own { next }
+        { printf "%s{\"id\":\"%s\",\"client\":\"%s\",\"client_name\":\"%s\",\"proto\":\"%s\",\"port\":%d,\"enabled\":%s,\"active\":%s,\"note\":\"%s\"}",
+            (n++ ? "," : ""), $1, $2, esc(name[$2]), $3, $4, ($5 == 1 ? "true" : "false"),
+            (($5 == 1 && on[$2]) ? "true" : "false"), esc($6) }' "$CLIENTS" "$PUBLIST"
+    printf '],'
+}
+
+# Порт занят: свои входы сервера, слушающие сокеты, чужие пробросы uci.
+pub_port_err() {  # $1 proto  $2 port  $3 — id, который не считать
+    for p in "$PORT" "$VPORT" "$TPORT" "$WSPORT" "$XHPORT" "$SPORT"; do
+        [ "$p" = "$2" ] && { echo "порт $2 занят самим VPN-сервером"; return; }
+    done
+    case "$2" in 22|53|80|443|8080) echo "порт $2 нужен роутеру (SSH, DNS, веб)"; return ;; esac
+    if [ -s "$PUBLIST" ] && awk -F'|' -v p="$2" -v pr="$1" -v me="$3" '
+        $1 != me && $4 == p && ($3 == pr || $3 == "both" || pr == "both") { f = 1 } END { exit !f }' "$PUBLIST"; then
+        echo "порт $2 уже опубликован"; return
+    fi
+    # Свои публикации в uci уже учтены выше — чужим считается всё остальное.
+    if [ "$1" != udp ]; then
+        netstat -lnt 2>/dev/null | awk -v p=":$2" '$4 ~ p"$" { f = 1 } END { exit !f }' && \
+            { echo "TCP-порт $2 уже занят на роутере"; return; }
+        uci -q show firewall 2>/dev/null | grep -v "^firewall\.${ZONE}_" | grep -qE "\.(src_dport|dest_port)='$2'$" && \
+            { echo "порт $2 уже занят другим пробросом"; return; }
+    fi
+    if [ "$1" != tcp ] && port_busy "$2"; then echo "UDP-порт $2 уже занят на роутере"; return; fi
+}
+
+pub_check_port() {  # $1 proto  $2 port  $3 id
+    case "$1" in tcp|udp|both) ;; *) err "протокол: tcp, udp или both" ;; esac
+    case "$2" in ''|*[!0-9]*) err "порт — число" ;; esac
+    [ "$2" -ge 1 ] && [ "$2" -le 65535 ] || err "порт от 1 до 65535"
+    r=$(pub_range)
+    if [ -n "$r" ]; then
+        [ "$2" -ge "${r%-*}" ] && [ "$2" -le "${r#*-}" ] || \
+            err "сервер в контейнере: снаружи доступны только порты $r (install.sh --pub-ports)"
+    fi
+    e=$(pub_port_err "$1" "$2" "$3")
+    [ -z "$e" ] || err "$e"
+}
+
+cmd_pub_add() {  # client proto port [note]
+    load_conf
+    line=$(client_line "$1"); [ -n "$line" ] || err "клиент не найден"
+    [ -n "$(echo "$line" | cut -d'|' -f5)" ] || err "у клиента нет ключей AmneziaWG — встречный канал идёт через AmneziaWG"
+    _pubid="p$(new_id)"
+    pub_check_port "$2" "$3" "$_pubid"
+    note=$(printf '%s' "$4" | tr -d '|\n\r' | cut -c1-60)
+    umask 077
+    printf '%s|%s|%s|%s|1|%s\n' "$_pubid" "$1" "$2" "$3" "$note" >> "$PUBLIST"
+    do_apply
+    log "pub-add $_pubid $1 $2/$3"
+    printf '{"ok":true,"id":"%s"}\n' "$_pubid"
+}
+
+cmd_pub_set() {  # id k=v…
+    load_conf
+    pid=$1; shift
+    old=$(awk -F'|' -v id="$pid" '$1 == id' "$PUBLIST" 2>/dev/null)
+    [ -n "$old" ] || err "публикация не найдена"
+    pen=$(echo "$old" | cut -d'|' -f5); pnote=$(echo "$old" | cut -d'|' -f6)
+    pproto=$(echo "$old" | cut -d'|' -f3); pport=$(echo "$old" | cut -d'|' -f4)
+    for kv in "$@"; do
+        case "$kv" in
+            enabled=0|enabled=1) pen=${kv#*=} ;;
+            note=*) pnote=$(printf '%s' "${kv#*=}" | tr -d '|\n\r' | cut -c1-60) ;;
+            proto=*) pproto=${kv#*=} ;;
+            port=*) pport=${kv#*=} ;;
+            *) err "неизвестный параметр: ${kv%%=*}" ;;
+        esac
+    done
+    pub_check_port "$pproto" "$pport" "$pid"
+    umask 077
+    awk -F'|' -v OFS='|' -v id="$pid" -v e="$pen" -v n="$pnote" -v pr="$pproto" -v po="$pport" \
+        '$1 == id { $3 = pr; $4 = po; $5 = e; $6 = n } { print }' "$PUBLIST" > "$PUBLIST.tmp" && mv "$PUBLIST.tmp" "$PUBLIST"
+    do_apply
+    log "pub-set $pid $*"
+    echo '{"ok":true}'
+}
+
+cmd_pub_del() {
+    load_conf
+    awk -F'|' -v id="$1" '$1 == id { f = 1 } END { exit !f }' "$PUBLIST" 2>/dev/null || err "публикация не найдена"
+    umask 077
+    awk -F'|' -v id="$1" '$1 != id' "$PUBLIST" > "$PUBLIST.tmp" && mv "$PUBLIST.tmp" "$PUBLIST"
+    do_apply
+    log "pub-del $1"
+    echo '{"ok":true}'
+}
+
 rewrite_client() {  # $1 id, остальное — awk-программа над полями
     id=$1; prog=$2; shift 2
     umask 077
@@ -3083,6 +3305,9 @@ cmd_client_del() {
     load_conf
     [ -n "$(client_line "$1")" ] || err "клиент не найден"
     rewrite_client "$1" '$1 != id { print }'
+    if [ -s "$PUBLIST" ]; then
+        awk -F'|' -v id="$1" '$2 != id' "$PUBLIST" > "$PUBLIST.tmp" && mv "$PUBLIST.tmp" "$PUBLIST"
+    fi
     do_apply
     log "client-del $1"
     echo '{"ok":true}'
@@ -3131,6 +3356,7 @@ case "$1" in
         uplink_rebuild_check
         # Правила и маршруты адресов LAN могла снести перестройка файрвола/NDM.
         [ -f "$LAN_SIG" ] && lan_up
+        [ -f "$PUB_SIG" ] && pub_nat_apply
         # Keenetic: NDM при переподключениях WAN может снести наши ip rule/neigh.
         [ "$KEENETIC" = 1 ] && vless_on && vless_running && vless_net_up >/dev/null 2>&1
         stats_tick ;;
@@ -3144,7 +3370,7 @@ case "$1" in
     down)
         # Удаление пакета: снять всё, файрвол чистит вызывающий (на Keenetic
         # своих правил у NDM нет — снимаем сами).
-        load_conf; stats_tick; stats_flush; lan_down; uplink_down; uplink_fb_clear; awg_down; vless_down; sub_down
+        load_conf; stats_tick; stats_flush; pub_nat_down; lan_down; uplink_down; uplink_fb_clear; awg_down; vless_down; sub_down
         if [ "$KEENETIC" = 1 ]; then
             fw_remove
             [ -n "$NDMIF" ] && ndm_wg && ndm_cli "system configuration save" >/dev/null 2>&1
@@ -3156,11 +3382,15 @@ case "$1" in
         [ -f "$CONF" ] || exit 0
         kill_stuck_ipt
         load_conf; keen_fw; uplink_apply
-        [ -f "$LAN_SIG" ] && lan_up ;;
+        [ -f "$LAN_SIG" ] && lan_up
+        [ -f "$PUB_SIG" ] && { rm -f "$PUB_SIG"; pub_nat_apply; } ;;
     set) shift; lock; cmd_set "$@" ;;
     client-add) shift; lock; cmd_client_add "$@" ;;
     client-set) shift; lock; cmd_client_set "$@" ;;
     client-del) lock; cmd_client_del "$2" ;;
+    pub-add) lock; cmd_pub_add "$2" "$3" "$4" "$5" ;;
+    pub-set) shift; lock; cmd_pub_set "$@" ;;
+    pub-del) lock; cmd_pub_del "$2" ;;
     client-conf)
         load_conf
         client_conf "$2" || { echo "клиент не найден или у него нет ключей AmneziaWG" >&2; exit 1; } ;;
