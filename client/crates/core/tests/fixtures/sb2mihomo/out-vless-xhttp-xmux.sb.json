@@ -1,0 +1,54 @@
+{
+ "log": {
+  "level": "error"
+ },
+ "inbounds": [
+  {
+   "type": "mixed",
+   "tag": "mixed-in",
+   "listen": "127.0.0.1",
+   "listen_port": 19482
+  }
+ ],
+ "outbounds": [
+  {
+   "type": "vless",
+   "server": "vpn.example.com",
+   "server_port": 8443,
+   "uuid": "00000000-0000-4000-8000-000000000001",
+   "tls": {
+    "enabled": true,
+    "server_name": "www.example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+     "short_id": "0123abcd"
+    }
+   },
+   "transport": {
+    "type": "xhttp",
+    "path": "/xhttp",
+    "mode": "packet-up",
+    "xmux": {
+     "max_concurrency": "16-32",
+     "c_max_reuse_times": "64-128",
+     "h_max_request_times": "600-900",
+     "h_max_reusable_secs": 45,
+     "h_keep_alive_period": 15
+    }
+   },
+   "tag": "proxy"
+  },
+  {
+   "type": "direct",
+   "tag": "direct"
+  }
+ ],
+ "route": {
+  "final": "proxy"
+ }
+}

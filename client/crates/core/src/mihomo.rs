@@ -163,6 +163,26 @@ fn apply_transport(p: &mut Map<String, Value>, ob: &Value, tls_on: bool) -> Resu
             if let Some(n) = num(tr, "sc_min_posts_interval_ms") {
                 o.insert("sc-min-posts-interval-ms".into(), json!(n));
             }
+            // xmux (ротация соединений): у mihomo диапазоны — строки «16-32».
+            if let Some(x) = tr.get("xmux").filter(|x| x.is_object()) {
+                let mut r = Map::new();
+                for k in ["max_concurrency", "max_connections", "c_max_reuse_times", "h_max_request_times", "h_max_reusable_secs"] {
+                    let v = match x.get(k) {
+                        Some(Value::String(v)) if !v.is_empty() => Some(v.clone()),
+                        Some(Value::Number(n)) => n.as_f64().map(|f| (f.floor() as i64).to_string()),
+                        _ => None,
+                    };
+                    if let Some(v) = v {
+                        r.insert(k.replace('_', "-"), json!(v));
+                    }
+                }
+                if let Some(n) = num(x, "h_keep_alive_period") {
+                    r.insert("h-keep-alive-period".into(), json!(n));
+                }
+                if !r.is_empty() {
+                    o.insert("reuse-settings".into(), Value::Object(r));
+                }
+            }
             p.insert("xhttp-opts".into(), Value::Object(o));
         }
         other => return Err(format!("транспорт {other} не поддерживается mihomo")),

@@ -426,6 +426,7 @@ XHPORT=$XHPORT
 XHPATH=$XHPATH
 XHSEC=$XHSEC
 XHSNI=$XHSNI
+XHROT=$XHROT
 LANADDR=$LANADDR
 LANFROM=$LANFROM
 LANTO=$LANTO
@@ -451,7 +452,7 @@ load_conf() {
     SUB=0; SPORT=""; SUBURL=""
     VTLS=0; TPORT=""; TDOMAIN=""
     WS=0; WSPORT=""; WSPATH=""; WSPUB=""
-    XH=0; XHPORT=""; XHPATH=""; XHSEC=""; XHSNI=""
+    XH=0; XHPORT=""; XHPATH=""; XHSEC=""; XHSNI=""; XHROT=""
     LANADDR=0; LANFROM=""; LANTO=""
     [ -f "$CONF" ] && . "$CONF"
     set_iface
@@ -1239,6 +1240,17 @@ xh_port() { if [ "$(xh_mode)" = proxy ]; then ws_port; else printf '%s' "$XHPORT
 xh_dom() { if [ "$(xh_mode)" = proxy ]; then ws_host; else tls_domain; fi; }
 xh_host() { if xh_reality; then endpoint_host; else xh_dom; fi; }
 
+# Профиль «XHTTP ротация»: тот же вход, но клиент режет трафик на короткие
+# HTTP-запросы (packet-up) и меняет TCP-соединения по времени и числу запросов
+# (xmux). Долгая сессия к одному адресу — то, что ТСПУ на мобильных замораживает.
+# Серверу ничего не нужно: xray в режиме auto принимает любой режим клиента.
+XM_CONC="16-32"; XM_CREUSE="64-128"; XM_HREQ="600-900"; XM_HSECS="30-60"
+xh_rot_on() { [ "${XHROT:-1}" = 1 ] && xh_on; }
+xh_extra() {
+    printf '{"xmux":{"maxConcurrency":"%s","cMaxReuseTimes":"%s","hMaxRequestTimes":"%s","hMaxReusableSecs":"%s"}}' \
+        "$XM_CONC" "$XM_CREUSE" "$XM_HREQ" "$XM_HSECS"
+}
+
 xh_on() {
     vless_on && [ "$XH" = 1 ] && [ -n "$XHPORT" ] && [ -n "$XHPATH" ] && xray_xhttp_ok || return 1
     [ "$(xh_mode)" = tls ] || return 0
@@ -1254,20 +1266,25 @@ xh_reason() {
     [ -n "$(tls_domain)" ] || echo "не задан домен сертификата"
 }
 
-client_xh_link() {
+client_xh_link() {  # $1 id, $2 rot — профиль с ротацией соединений
     line=$(client_line "$1")
     [ -n "$line" ] || return 1
     uuid=$(echo "$line" | cut -d'|' -f10)
     [ -n "$uuid" ] && xh_on || return 1
     name=$(echo "$line" | cut -d'|' -f3)
+    xm=auto; xx=""; xs=XHTTP
+    if [ "$2" = rot ]; then
+        xh_rot_on || return 1
+        xm=packet-up; xx="&extra=$(urlenc "$(xh_extra)")"; xs="XHTTP ротация"
+    fi
     if xh_reality; then
-        printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=xhttp&path=%s&mode=auto#%s\n' \
-            "$uuid" "$(endpoint_host)" "$XHPORT" "$(xh_sni)" "${FP:-chrome}" "$VPUB" "$VSID" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
+        printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=xhttp&path=%s&mode=%s%s#%s\n' \
+            "$uuid" "$(endpoint_host)" "$XHPORT" "$(xh_sni)" "${FP:-chrome}" "$VPUB" "$VSID" "$(urlenc "$XHPATH")" "$xm" "$xx" "$(urlenc "$name $xs")"
         return 0
     fi
     h=$(xh_dom)
-    printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=%s&type=xhttp&host=%s&path=%s&mode=auto#%s\n' \
-        "$uuid" "$h" "$(xh_port)" "$h" "${FP:-chrome}" "$h" "$(urlenc "$XHPATH")" "$(urlenc "$name XHTTP")"
+    printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&fp=%s&type=xhttp&host=%s&path=%s&mode=%s%s#%s\n' \
+        "$uuid" "$h" "$(xh_port)" "$h" "${FP:-chrome}" "$h" "$(urlenc "$XHPATH")" "$xm" "$xx" "$(urlenc "$name $xs")"
 }
 
 xh_render() {
@@ -1728,6 +1745,75 @@ uplink_rebuild_check() {
     [ -n "$ch" ] || return 0
     log "каналы изменились (${cur:-нет} вместо $(head -1 "$f")) — пересобираю конфиг"
     "$api" activate "$ch" >/dev/null 2>&1 || log "пересборка не удалась"
+}
+
+# Сторож выбранного канала. wanpin считает канал рабочим, пока интерфейс поднят
+# и есть шлюз, — а второй WAN за CGNAT так и висел «up» без интернета (07.11.2026):
+# все клиенты шли в мёртвый канал. Канал, не прошедший проверку два раза
+# подряд, получает правило «метка → main» выше правил wanpin — и прямой трафик
+# (connmark), и туннельный (routing_mark исходящих sing-box) идут как у роутера.
+# Обратно — после трёх успешных проверок подряд, чтобы мигающий канал не
+# дёргал клиентов туда-сюда.
+UPL_LIVE="$RUN/detour-server.uplive"
+UPL_FB_PREF=12190
+
+uplink_probe() {  # $1 iface → 0 есть интернет
+    ipr -4 route show default dev "$1" 2>/dev/null | grep -qw dead && return 1
+    command -v curl >/dev/null 2>&1 || return 0
+    for u in http://connectivitycheck.gstatic.com/generate_204 http://cp.cloudflare.com/generate_204; do
+        [ "$(curl -s -o /dev/null -m 5 --interface "$1" -w '%{http_code}' "$u" 2>/dev/null)" = 204 ] && return 0
+    done
+    return 1
+}
+
+uplink_fb_rules() {  # метки, у которых стоит правило отката
+    ipr -4 rule show 2>/dev/null | awk -v p="$UPL_FB_PREF:" '$1 == p { for (i = 1; i < NF; i++) if ($i == "fwmark") { split($(i + 1), a, "/"); print a[1] } }'
+}
+
+uplink_fb_clear() {
+    for m in $(uplink_fb_rules); do
+        ipr -4 rule del fwmark "$m/$UPL_MASK" lookup main pref "$UPL_FB_PREF" 2>/dev/null
+    done
+    rm -f "$UPL_LIVE"
+}
+
+uplink_watch() {
+    case "$UPLINK" in ''|auto) [ -f "$UPL_LIVE" ] && { uplink_fb_clear; log "канал выхода: сторож снят"; }; return 0 ;; esac
+    [ "$ENABLED" = 1 ] || return 0
+    mkdir -p "$RUN"
+    uplink_table | awk -v u="$UPLINK" '(u == "all" || $1 == u) { print $1, $2, $3, $5 }' > "$UPL_LIVE.cur"
+    : > "$UPL_LIVE.new"
+    while read -r id if mk usable; do
+        st=$(awk -v m="$mk" '$1 == m { print $2, $3, $4 }' "$UPL_LIVE" 2>/dev/null)
+        set -- ${st:-ok 0 0}
+        state=$1; fails=$2; oks=$3
+        if [ "$usable" = 1 ] && uplink_probe "$if"; then
+            fails=0; oks=$((oks + 1))
+            if [ "$state" = dead ] && [ "$oks" -ge 3 ]; then
+                state=ok
+                log "канал выхода: $id ($if) снова работает — возвращаю клиентов"
+            fi
+        else
+            oks=0; fails=$((fails + 1))
+            if [ "$state" = ok ] && [ "$fails" -ge 2 ]; then
+                state=dead
+                log "канал выхода: $id ($if) без интернета — клиенты идут как у роутера"
+            fi
+        fi
+        # ip rule печатает метку без ведущих нулей (0x20000), wanpin — с ними.
+        nm=$(printf '0x%x' "$((mk))")
+        echo "$mk $state $fails $oks $id $nm" >> "$UPL_LIVE.new"
+        have=0; uplink_fb_rules | grep -qx "$nm" && have=1
+        if [ "$state" = dead ] && [ "$have" = 0 ]; then
+            ipr -4 rule add fwmark "$nm/$UPL_MASK" lookup main pref "$UPL_FB_PREF"
+        elif [ "$state" = ok ] && [ "$have" = 1 ]; then
+            ipr -4 rule del fwmark "$nm/$UPL_MASK" lookup main pref "$UPL_FB_PREF" 2>/dev/null
+        fi
+    done < "$UPL_LIVE.cur"
+    for m in $(uplink_fb_rules); do
+        awk -v m="$m" '$6 == m { f = 1 } END { exit !f }' "$UPL_LIVE.new" || ipr -4 rule del fwmark "$m/$UPL_MASK" lookup main pref "$UPL_FB_PREF" 2>/dev/null
+    done
+    mv "$UPL_LIVE.new" "$UPL_LIVE"; rm -f "$UPL_LIVE.cur"
 }
 
 uplink_down() {
@@ -2334,9 +2420,9 @@ status_json() {
     xinst=false; xray_xhttp_ok && xinst=true
     xpp=$(xh_port); case "$xpp" in ''|*[!0-9]*) xpp=0 ;; esac
     xsec=$(xh_mode)
-    printf '"xhttp":{"enabled":%s,"active":%s,"running":%s,"installed":%s,"port":%s,"public_port":%s,"path":"%s","security":"%s","host":"%s","sni":"%s","reason":"%s"}},' \
+    printf '"xhttp":{"enabled":%s,"active":%s,"running":%s,"installed":%s,"port":%s,"public_port":%s,"path":"%s","security":"%s","host":"%s","sni":"%s","rotation":%s,"reason":"%s"}},' \
         "$([ "$XH" = 1 ] && echo true || echo false)" "$(xh_on && echo true || echo false)" "$xrun" "$xinst" \
-        "${XHPORT:-0}" "$xpp" "$(json_esc "$XHPATH")" "$xsec" "$(json_esc "$(xh_host)")" "$(json_esc "$(xh_sni)")" "$(json_esc "$(xh_reason)")"
+        "${XHPORT:-0}" "$xpp" "$(json_esc "$XHPATH")" "$xsec" "$(json_esc "$(xh_host)")" "$(json_esc "$(xh_sni)")" "$([ "${XHROT:-1}" = 1 ] && echo true || echo false)" "$(json_esc "$(xh_reason)")"
     srun=false; [ -n "$(sub_pid)" ] && srun=true
     shttps=false; sub_https && shttps=true
     printf '"sub":{"enabled":%s,"running":%s,"port":%s,"https":%s,"url":"%s","base":"%s"},' \
@@ -2377,8 +2463,9 @@ status_json() {
     lmap=/dev/null; [ "$LANADDR" = 1 ] && [ -f "$LANMAP" ] && lmap=$LANMAP
     printf '"uplink":"%s","uplink_pinned":%s,"uplinks":[%s],"clients":[' \
         "$(json_esc "${UPLINK:-auto}")" "$upl_pinned" \
-        "$(uplink_table | awk '{ printf "%s{\"id\":\"%s\",\"iface\":\"%s\",\"usable\":%s,\"ip\":\"%s\",\"private\":%s}", \
-            (n++ ? "," : ""), $1, $2, ($5 == 1 ? "true" : "false"), ($6 == "-" ? "" : $6), \
+        "$(uplink_table | awk -v live="$UPL_LIVE" 'BEGIN { while ((getline l < live) > 0) { split(l, a, " "); dead[a[1]] = (a[2] == "dead") } }
+            { printf "%s{\"id\":\"%s\",\"iface\":\"%s\",\"usable\":%s,\"online\":%s,\"ip\":\"%s\",\"private\":%s}", \
+            (n++ ? "," : ""), $1, $2, ($5 == 1 ? "true" : "false"), (($5 == 1 && !dead[$3]) ? "true" : "false"), ($6 == "-" ? "" : $6), \
             ($6 ~ /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)/ ? "true" : "false") }')"
     dump=$(server_dump)
     now=$(date +%s)
@@ -2580,20 +2667,23 @@ sub_vless_ws_json() {  # $1 tag
 
 # xhttp sing-box не умеет: в формате Detour такой профиль поднимает сайдкар
 # mihomo (как xhttp из чужих подписок), в формат sing-box он не попадает.
-sub_vless_xh_json() {  # $1 tag
+sub_vless_xh_json() {  # $1 tag, $2 rot
+    xt='"type":"xhttp"'
+    [ "$2" = rot ] && xt=$(printf '"type":"xhttp","mode":"packet-up","xmux":{"max_concurrency":"%s","c_max_reuse_times":"%s","h_max_request_times":"%s","h_max_reusable_secs":"%s"}' \
+        "$XM_CONC" "$XM_CREUSE" "$XM_HREQ" "$XM_HSECS")
     if xh_reality; then
         printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s",' \
             "$(json_esc "$1")" "$(json_esc "$host")" "$XHPORT" "$uuid"
         printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"},' "$(xh_sni)" "${FP:-chrome}"
         printf '"reality":{"enabled":true,"public_key":"%s","short_id":"%s"}},' "$VPUB" "$VSID"
-        printf '"transport":{"type":"xhttp","path":"%s"}}' "$(json_esc "$XHPATH")"
+        printf '"transport":{%s,"path":"%s"}}' "$xt" "$(json_esc "$XHPATH")"
         return
     fi
     xdom=$(xh_dom)
     printf '{"type":"vless","tag":"%s","server":"%s","server_port":%s,"uuid":"%s",' \
         "$(json_esc "$1")" "$xdom" "$(xh_port)" "$uuid"
     printf '"tls":{"enabled":true,"server_name":"%s","utls":{"enabled":true,"fingerprint":"%s"}},' "$xdom" "${FP:-chrome}"
-    printf '"transport":{"type":"xhttp","path":"%s","host":"%s"}}' "$(json_esc "$XHPATH")" "$xdom"
+    printf '"transport":{%s,"path":"%s","host":"%s"}}' "$xt" "$(json_esc "$XHPATH")" "$xdom"
 }
 
 # Профиль AmneziaWG в форме профилей Detour (detour-awg): ключи amnezia — mihomo.
@@ -2606,22 +2696,31 @@ sub_awg_json() {  # $1 tag
         "$JC" "$JMIN" "$JMAX" "$S1" "$S2" "$H1" "$H2" "$H3" "$H4"
 }
 
-sub_clash() {
-    vn="$name · VLESS"; an="$name · AmneziaWG"; tn="$name · VLESS TLS"; wn="$name · VLESS WS"; xn="$name · VLESS XHTTP"
-    echo "proxies:"
-    if [ "$has_x" = 1 ] && xh_reality; then
-        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$xn" "$host" "$XHPORT" "$uuid"
+sub_clash_xh() {  # $1 имя, $2 rot
+    if xh_reality; then
+        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$1" "$host" "$XHPORT" "$uuid"
         printf '    network: xhttp\n    udp: true\n    tls: true\n'
         printf '    servername: %s\n    client-fingerprint: %s\n' "$(xh_sni)" "${FP:-chrome}"
         printf '    reality-opts:\n      public-key: %s\n      short-id: "%s"\n' "$VPUB" "$VSID"
         printf '    xhttp-opts:\n      path: "%s"\n' "$XHPATH"
-    elif [ "$has_x" = 1 ]; then
+    else
         xdom=$(xh_dom)
-        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$xn" "$xdom" "$(xh_port)" "$uuid"
+        printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$1" "$xdom" "$(xh_port)" "$uuid"
         printf '    network: xhttp\n    udp: true\n    tls: true\n'
         printf '    servername: %s\n    client-fingerprint: %s\n' "$xdom" "${FP:-chrome}"
         printf '    xhttp-opts:\n      path: "%s"\n      host: %s\n' "$XHPATH" "$xdom"
     fi
+    [ "$2" = rot ] || return 0
+    printf '      mode: packet-up\n      reuse-settings:\n'
+    printf '        max-concurrency: "%s"\n        c-max-reuse-times: "%s"\n        h-max-request-times: "%s"\n        h-max-reusable-secs: "%s"\n' \
+        "$XM_CONC" "$XM_CREUSE" "$XM_HREQ" "$XM_HSECS"
+}
+
+sub_clash() {
+    vn="$name · VLESS"; an="$name · AmneziaWG"; tn="$name · VLESS TLS"; wn="$name · VLESS WS"; xn="$name · VLESS XHTTP"; rn="$name · VLESS XHTTP ротация"
+    echo "proxies:"
+    [ "$has_x" = 1 ] && sub_clash_xh "$xn"
+    [ "$has_r" = 1 ] && sub_clash_xh "$rn" rot
     if [ "$has_w" = 1 ]; then
         printf '  - name: "%s"\n    type: vless\n    server: %s\n    port: %s\n    uuid: %s\n' "$wn" "$wdom" "$(ws_port)" "$uuid"
         printf '    network: ws\n    udp: true\n    tls: true\n'
@@ -2658,6 +2757,7 @@ sub_clash() {
     [ "$has_t" = 1 ] && printf '      - "%s"\n' "$tn"
     [ "$has_w" = 1 ] && printf '      - "%s"\n' "$wn"
     [ "$has_x" = 1 ] && printf '      - "%s"\n' "$xn"
+    [ "$has_r" = 1 ] && printf '      - "%s"\n' "$rn"
     [ "$has_a" = 1 ] && printf '      - "%s"\n' "$an"
     echo "rules:"
     if [ "$mode" = lan ]; then
@@ -2721,6 +2821,7 @@ cmd_sub() {
     has_t=0; [ "$has_v" = 1 ] && vtls_on && has_t=1 && tdom=$(tls_domain)
     has_w=0; [ "$has_v" = 1 ] && ws_on && has_w=1
     has_x=0; [ "$has_v" = 1 ] && xh_on && has_x=1
+    has_r=0; [ "$has_x" = 1 ] && xh_rot_on && has_r=1
     wdom=$(ws_host)
     f=$2
     # Отпечаток TLS клиента выбирает CGI по приложению (iOS — safari): на части
@@ -2740,6 +2841,7 @@ cmd_sub() {
             [ "$has_t" = 1 ] && { printf ','; sub_vless_tls_json "$name · VLESS TLS"; }
             [ "$has_w" = 1 ] && { printf ','; sub_vless_ws_json "$name · VLESS WS"; }
             [ "$has_x" = 1 ] && { printf ','; sub_vless_xh_json "$name · VLESS XHTTP"; }
+            [ "$has_r" = 1 ] && { printf ','; sub_vless_xh_json "$name · VLESS XHTTP ротация" rot; }
             [ "$has_v" = 1 ] && [ "$has_a" = 1 ] && printf ','
             [ "$has_a" = 1 ] && sub_awg_json "$name · AmneziaWG"
             printf ']}\n' ;;
@@ -2748,7 +2850,7 @@ cmd_sub() {
             client_conf "$id" ;;
         *)
             printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
-            { client_link "$id"; [ "$has_t" = 1 ] && client_tls_link "$id"; [ "$has_w" = 1 ] && client_ws_link "$id"; [ "$has_x" = 1 ] && client_xh_link "$id"; } | sub_b64; echo ;;
+            { client_link "$id"; [ "$has_t" = 1 ] && client_tls_link "$id"; [ "$has_w" = 1 ] && client_ws_link "$id"; [ "$has_x" = 1 ] && client_xh_link "$id"; [ "$has_r" = 1 ] && client_xh_link "$id" rot; } | sub_b64; echo ;;
     esac
 }
 
@@ -2848,6 +2950,7 @@ cmd_set() {
                 if [ "$v" != "$WSPORT" ] && tcp_port_busy "$v"; then err "TCP-порт $v уже занят на роутере"; fi
                 WSPORT=$v ;;
             xhttp) case "$v" in 0|1) XH=$v ;; *) err "xhttp: 0 или 1" ;; esac ;;
+            xhrot) case "$v" in 0|1) XHROT=$v ;; *) err "xhrot: 0 или 1" ;; esac ;;
             xhsec) case "$v" in reality|tls|proxy) XHSEC=$v ;; *) err "xhsec: reality, tls или proxy" ;; esac ;;
             xhport)
                 case "$v" in ''|*[!0-9]*) err "порт — число" ;; esac
@@ -3023,6 +3126,7 @@ case "$1" in
         [ "$ENABLED" = 1 ] && attach_all
         # Канал упал/поднялся — прямой трафик клиентов перестаёт/начинает в него
         # уходить; снесённые перестройкой файрвола правила встают заново.
+        uplink_watch
         uplink_apply
         uplink_rebuild_check
         # Правила и маршруты адресов LAN могла снести перестройка файрвола/NDM.
@@ -3040,7 +3144,7 @@ case "$1" in
     down)
         # Удаление пакета: снять всё, файрвол чистит вызывающий (на Keenetic
         # своих правил у NDM нет — снимаем сами).
-        load_conf; stats_tick; stats_flush; lan_down; uplink_down; awg_down; vless_down; sub_down
+        load_conf; stats_tick; stats_flush; lan_down; uplink_down; uplink_fb_clear; awg_down; vless_down; sub_down
         if [ "$KEENETIC" = 1 ]; then
             fw_remove
             [ -n "$NDMIF" ] && ndm_wg && ndm_cli "system configuration save" >/dev/null 2>&1
@@ -3068,7 +3172,7 @@ case "$1" in
         client_tls_link "$2" || { echo "клиент не найден или вход VLESS+TLS не работает" >&2; exit 1; } ;;
     client-xhttp-link)
         load_conf
-        client_xh_link "$2" || { echo "клиент не найден или вход VLESS xhttp не работает" >&2; exit 1; } ;;
+        client_xh_link "$2" "$3" || { echo "клиент не найден или вход VLESS xhttp не работает" >&2; exit 1; } ;;
     client-ws-link)
         load_conf
         client_ws_link "$2" || { echo "клиент не найден или вход VLESS WebSocket не работает" >&2; exit 1; } ;;

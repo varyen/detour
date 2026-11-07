@@ -1,0 +1,56 @@
+{
+ "allow-lan": true,
+ "dns": {
+  "enable": false
+ },
+ "ipv6": true,
+ "listeners": [
+  {
+   "listen": "127.0.0.1",
+   "name": "mixed-in",
+   "port": 19482,
+   "type": "mixed",
+   "udp": true
+  }
+ ],
+ "log-level": "error",
+ "mode": "rule",
+ "profile": {
+  "store-fake-ip": false,
+  "store-selected": false
+ },
+ "proxies": [
+  {
+   "client-fingerprint": "chrome",
+   "name": "proxy",
+   "network": "xhttp",
+   "port": 8443,
+   "reality-opts": {
+    "public-key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+    "short-id": "0123abcd"
+   },
+   "server": "vpn.example.com",
+   "servername": "www.example.com",
+   "tls": true,
+   "type": "vless",
+   "udp": true,
+   "uuid": "00000000-0000-4000-8000-000000000001",
+   "xhttp-opts": {
+    "mode": "packet-up",
+    "path": "/xhttp",
+    "reuse-settings": {
+     "c-max-reuse-times": "64-128",
+     "h-keep-alive-period": 15,
+     "h-max-request-times": "600-900",
+     "h-max-reusable-secs": "45",
+     "max-concurrency": "16-32"
+    }
+   }
+  }
+ ],
+ "rules": [
+  "MATCH,proxy"
+ ],
+ "tcp-concurrent": false,
+ "unified-delay": true
+}

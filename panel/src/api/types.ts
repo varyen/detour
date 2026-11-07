@@ -574,6 +574,8 @@ export interface ServerVlessXhttp {
   host?: string;
   /** Сайт-маска Reality у xhttp (2.17.5+). */
   sni?: string;
+  /** Профиль «XHTTP ротация» в подписке: packet-up + xmux (2.20.0+). */
+  rotation?: boolean;
   reason: string;
 }
 
@@ -655,6 +657,7 @@ export interface ServerSettingsPatch {
   xhpath?: string;
   xhsec?: "reality" | "tls" | "proxy";
   xhsni?: string;
+  xhrot?: boolean;
   lanaddr?: boolean;
   /** «192.168.1.200-192.168.1.230» или "" — автоматически. */
   lanrange?: string;

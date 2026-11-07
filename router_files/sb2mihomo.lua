@@ -101,6 +101,18 @@ local function apply_transport(p, ob, tls_on)
         set(o, "x-padding-bytes", tr.x_padding_bytes)
         if tonumber(tr.sc_max_each_post_bytes) then o["sc-max-each-post-bytes"] = tonumber(tr.sc_max_each_post_bytes) end
         if tonumber(tr.sc_min_posts_interval_ms) then o["sc-min-posts-interval-ms"] = tonumber(tr.sc_min_posts_interval_ms) end
+        -- xmux (ротация соединений): у mihomo диапазоны — строки «16-32».
+        if type(tr.xmux) == "table" then
+            local r = {}
+            for _, k in ipairs({ "max_concurrency", "max_connections", "c_max_reuse_times",
+                                 "h_max_request_times", "h_max_reusable_secs" }) do
+                local v = tr.xmux[k]
+                if type(v) == "number" then v = tostring(math.floor(v)) end
+                if type(v) == "string" and v ~= "" then r[(k:gsub("_", "-"))] = v end
+            end
+            if tonumber(tr.xmux.h_keep_alive_period) then r["h-keep-alive-period"] = math.floor(tonumber(tr.xmux.h_keep_alive_period)) end
+            if next(r) then o["reuse-settings"] = r end
+        end
         p["xhttp-opts"] = o
     else
         return "транспорт " .. tostring(t) .. " не поддерживается mihomo"

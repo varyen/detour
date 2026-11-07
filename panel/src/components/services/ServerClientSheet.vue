@@ -38,6 +38,7 @@ const link = ref("");
 const tlsLink = ref("");
 const wsLink = ref("");
 const xhLink = ref("");
+const xrLink = ref("");
 const subUrl = ref("");
 const confirmReset = ref(false);
 const loading = ref(false);
@@ -56,6 +57,7 @@ const linkQr = computed(() => qrOf(link.value));
 const tlsQr = computed(() => qrOf(tlsLink.value));
 const wsQr = computed(() => qrOf(wsLink.value));
 const xhQr = computed(() => qrOf(xhLink.value));
+const xrQr = computed(() => qrOf(xrLink.value));
 const subQr = computed(() => qrOf(subUrl.value));
 
 const tabs = computed(() => {
@@ -101,6 +103,7 @@ async function loadLink() {
     tlsLink.value = r.tls_link ?? "";
     wsLink.value = r.ws_link ?? "";
     xhLink.value = r.xhttp_link ?? "";
+    xrLink.value = r.xhttp_rot_link ?? "";
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Не удалось получить ссылку";
   } finally {
@@ -166,6 +169,7 @@ watch(
       tlsLink.value = "";
       wsLink.value = "";
       xhLink.value = "";
+      xrLink.value = "";
       subUrl.value = "";
       confirmReset.value = false;
       sessions.value = [];
@@ -346,6 +350,21 @@ function host(remote: string): string {
             <details class="raw">
               <summary>Показать ссылку xhttp</summary>
               <pre>{{ xhLink }}</pre>
+            </details>
+          </template>
+          <template v-if="xrLink">
+            <p class="lead">
+              Ссылка xhttp с ротацией — тот же вход, но трафик идёт короткими запросами,
+              а TCP-соединение меняется раз в 30–60 секунд. Для мобильных сетей, где
+              долгие соединения замораживаются.
+            </p>
+            <div class="qr" v-html="xrQr"></div>
+            <div class="actions">
+              <UiButton @click="copy(xrLink, 'Ссылка')">Скопировать ссылку xhttp с ротацией</UiButton>
+            </div>
+            <details class="raw">
+              <summary>Показать ссылку xhttp с ротацией</summary>
+              <pre>{{ xrLink }}</pre>
             </details>
           </template>
         </template>

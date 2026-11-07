@@ -258,6 +258,19 @@ async function toggleXhttp(on: boolean) {
   }
 }
 
+async function toggleXhRot(on: boolean) {
+  busy.value = "xhrot";
+  try {
+    await services.serverSet({ xhrot: on });
+    toast.ok(on ? "Профиль с ротацией соединений добавлен в подписки" : "Профиль с ротацией соединений убран");
+  } catch (e) {
+    toast.fromError(e, "Не удалось переключить ротацию");
+  } finally {
+    busy.value = "";
+    await load();
+  }
+}
+
 async function toggleSub(on: boolean) {
   busy.value = "sub";
   try {
@@ -748,6 +761,14 @@ function hint(c: ServerClient): string {
             :hint="vx.active ? `${vx.host || vw.host}:${vx.public_port || vw.public_port}${vw.public ? ' через реверс-прокси' : vx.security === 'reality' ? ' · Reality' : ' · TLS'} · xray · Happ, v2rayNG, Hiddify, Detour` : vx.enabled ? vx.reason || 'не работает' : 'Как WebSocket, но запросами HTTP — ещё ближе к обычному сайту; нужен xray'"
             :busy="busy === 'xhttp'"
             @update:model-value="toggleXhttp"
+          />
+          <SwitchToggle
+            v-if="vx && vx.enabled && vx.rotation !== undefined && vlessOn"
+            :model-value="vx.rotation"
+            label="xhttp с ротацией соединений"
+            hint="Второй профиль xhttp: короткие запросы и смена TCP-соединения раз в 30–60 с. Помогает там, где мобильный оператор замораживает долгие соединения"
+            :busy="busy === 'xhrot'"
+            @update:model-value="toggleXhRot"
           />
           <div v-if="vx?.enabled && !vx.installed" class="actions">
             <UiButton :busy="busy === 'install'" @click="install">Установить xray</UiButton>
