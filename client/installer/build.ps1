@@ -71,7 +71,7 @@ Copy-Item $Mihomo (Join-Path $stage 'mihomo.exe')
 Remove-Item -Recurse -Force (Join-Path $stage '_mihomo'), (Join-Path $stage '_mihomo.zip') -ErrorAction SilentlyContinue
 # Загрузчик WebView2 (~2 МБ) едет внутри установщика: без среды окно не откроется,
 # а в песочнице и на урезанных сборках Windows её нет.
-& curl.exe -sfL --max-time 120 -o (Join-Path $stage 'MicrosoftEdgeWebview2Setup.exe') 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+& curl.exe -sfL --retry 3 --retry-all-errors --max-time 120 -o (Join-Path $stage 'MicrosoftEdgeWebview2Setup.exe') 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
 if ($LASTEXITCODE) { throw "не скачался загрузчик WebView2" }
 $wv = Get-AuthenticodeSignature (Join-Path $stage 'MicrosoftEdgeWebview2Setup.exe')
 if ($wv.Status -ne 'Valid' -or $wv.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw "загрузчик WebView2 без подписи Microsoft" }
