@@ -21,6 +21,9 @@ pub const DPI_DOMAINS: &str = "lists/zapret-domains.list";
 pub const EGRESS_BLOCK: &str = "lists/blocked-egress-ips.list";
 
 pub const AUTOSWITCH_EXCLUDE: &str = "flags/autoswitch-exclude.list";
+/// Закреплённые профили: упав на закреплённом, автопереключение ищет замену
+/// только среди них (`/etc/sing-box/autoswitch-pin.list` роутера).
+pub const AUTOSWITCH_PIN: &str = "flags/autoswitch-pin.list";
 pub const SPEEDCHECK_EXCLUDE: &str = "flags/speedcheck-exclude.list";
 pub const TORRENT_ALLOW: &str = "flags/torrent-allow.list";
 /// «block» | «direct» | «via <id>» — что делать с торрентами на профиле, где

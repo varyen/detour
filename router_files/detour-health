@@ -47,6 +47,8 @@ URLS_FILE=/etc/sing-box/health-urls.list
 # absent/empty file = every profile eligible (preserves the original behaviour). Kept
 # OUT of the profile JSON because subscription-refresh rebuilds those from scratch.
 AUTOSWITCH_EXCLUDE=/etc/sing-box/autoswitch-exclude.list
+# Закреплённые профили: упав на закреплённом, ищем замену только среди закреплённых.
+AUTOSWITCH_PIN=/etc/sing-box/autoswitch-pin.list
 # Profiles the user EXCLUDED from BACKGROUND speed checks (one id per line). Manual
 # per-row checks remain explicit user actions and may still measure speed once.
 SPEEDCHECK_EXCLUDE=/etc/sing-box/speedcheck-exclude.list
@@ -128,6 +130,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     PROFILES=/opt/etc/sing-box/profiles
     URLS_FILE=/opt/etc/sing-box/health-urls.list
     AUTOSWITCH_EXCLUDE=/opt/etc/sing-box/autoswitch-exclude.list
+    AUTOSWITCH_PIN=/opt/etc/sing-box/autoswitch-pin.list
     SPEEDCHECK_EXCLUDE=/opt/etc/sing-box/speedcheck-exclude.list
     SINGBOX_BIN=/opt/bin/sing-box
     # lighttpd doc-root is /opt/share/www (see keenetic/lighttpd/detour.conf and
@@ -853,10 +856,15 @@ switch_guard() { # $1 = профиль, который проверяли
 # Prints the id (empty if none). Shared by `active` and the tail-block auto-switch so
 # both honour the per-profile opt-out the panel manages. Reading the exclude file in
 # awk's BEGIN keeps it a single pass; a missing file just leaves `excl` empty.
+# Pin: if the ACTIVE profile is in AUTOSWITCH_PIN, only other pinned profiles qualify.
 pick_switch_candidate() {
-    awk -F'\t' -v active="$1" -v exf="$AUTOSWITCH_EXCLUDE" '
-        BEGIN { while ((getline l < exf) > 0) { gsub(/[ \t\r]/, "", l); if (l != "") excl[l] = 1 } }
-        $1 != active && $2 == "1" && !($1 in excl) {
+    awk -F'\t' -v active="$1" -v exf="$AUTOSWITCH_EXCLUDE" -v pnf="$AUTOSWITCH_PIN" '
+        BEGIN {
+            while ((getline l < exf) > 0) { gsub(/[ \t\r]/, "", l); if (l != "") excl[l] = 1 }
+            while ((getline l < pnf) > 0) { gsub(/[ \t\r]/, "", l); if (l != "") pin[l] = 1 }
+            onlypin = (active in pin)
+        }
+        $1 != active && $2 == "1" && !($1 in excl) && (!onlypin || ($1 in pin)) {
             r = ($4 == "" || $4 < 0) ? 999999 : $4
             if (best == "" || r < bestr) { best = $1; bestr = r }
         } END { if (best != "") print best }' "$HEALTH_DB" 2>/dev/null
@@ -903,7 +911,11 @@ autoswitch_active() {
     _cand=$(pick_switch_candidate "$_a")
     if [ -z "$_cand" ]; then
         log "active-check: $_a down, no healthy ELIGIBLE candidate — staying put"
-        ASW_REASON="нет исправного профиля для переключения"
+        if grep -qxF "$_a" "$AUTOSWITCH_PIN" 2>/dev/null; then
+            ASW_REASON="среди закреплённых профилей нет исправного"
+        else
+            ASW_REASON="нет исправного профиля для переключения"
+        fi
         return 1
     fi
     log "active-check AUTO-SWITCH: $_a → $_cand"

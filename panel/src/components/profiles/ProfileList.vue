@@ -50,7 +50,7 @@ const emit = defineEmits<{
   stop: [ProfileRow];
   ping: [ProfileRow];
   health: [ProfileRow];
-  flag: [{ row: ProfileRow; kind: "autoswitch" | "speedcheck" | "torrents"; value: boolean }];
+  flag: [{ row: ProfileRow; kind: "autoswitch" | "speedcheck" | "torrents" | "pinned"; value: boolean }];
   geoscan: [];
 }>();
 
@@ -331,7 +331,7 @@ function healthTitle(r: ProfileRow): string {
   return [hint, parts.join(" · ") || "нет данных", speed ? `↓ ${speed}` : "", when].filter(Boolean).join(" · ");
 }
 
-function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck" | "torrents"): boolean {
+function flagBusyFor(r: ProfileRow, kind: "autoswitch" | "speedcheck" | "torrents" | "pinned"): boolean {
   return props.flagBusy === `${r.id}:${kind}`;
 }
 
@@ -581,6 +581,7 @@ function stateTile(r: ProfileRow): string {
               <!-- Пишем только про разрешение: запрет — состояние по умолчанию,
                    и подпись «торренты запрещены» висела бы на каждой строке. -->
               <template v-if="r.torrents === true"> · торренты разрешены</template>
+              <template v-if="r.pinned === true"> · закреплён</template>
             </small>
             <!-- Плитки только на телефоне: на широком экране те же три числа
                  стоят своими колонками, и дублировать их под именем незачем. -->
@@ -661,6 +662,23 @@ function stateTile(r: ProfileRow): string {
             @click="emit('flag', { row: r, kind: 'torrents', value: r.torrents !== true })"
           >
             <span class="glyph" aria-hidden="true">⇅</span>
+          </button>
+          <button
+            class="ico"
+            type="button"
+            role="switch"
+            :aria-checked="r.pinned === true"
+            :class="{ on: r.pinned === true }"
+            :disabled="flagBusyFor(r, 'pinned')"
+            :title="
+              r.pinned === true
+                ? 'Закреплён: если он упадёт, автопереключение выберет замену только среди закреплённых — нажмите, чтобы открепить'
+                : 'Закрепить: упав на закреплённом профиле, автопереключение останется внутри группы закреплённых'
+            "
+            aria-label="Закрепить профиль"
+            @click="emit('flag', { row: r, kind: 'pinned', value: r.pinned !== true })"
+          >
+            <SectionIcon name="pin" :size="15" />
           </button>
           <button
             class="ico"
@@ -752,9 +770,9 @@ function stateTile(r: ProfileRow): string {
      grid-контейнеры, поэтому `auto` каждый считал по своему содержимому: у строк
      там шесть кнопок (~290px), у шапки — пустой span (0). Разницу забирали
      резиновые колонки, и подписи уезжали от своих столбцов тем сильнее, чем шире
-     окно. Здесь: 5 иконок по 32 + «Подключить» (~90) + «…» на 36 + шесть
+     окно. Здесь: 6 иконок по 32 + «Подключить» (~90) + «…» на 36 + семь
      зазоров по 6 и запас под шрифт. */
-  --act-w: 336px;
+  --act-w: 374px;
 }
 .tools {
   display: flex;

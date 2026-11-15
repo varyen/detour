@@ -17,6 +17,7 @@ impl Backend {
         let no_autoswitch = lists::parse_id_list(&s.read_text(store::AUTOSWITCH_EXCLUDE));
         let no_speed = lists::parse_id_list(&s.read_text(store::SPEEDCHECK_EXCLUDE));
         let torrents = lists::parse_id_list(&s.read_text(store::TORRENT_ALLOW));
+        let pinned = lists::parse_id_list(&s.read_text(store::AUTOSWITCH_PIN));
         let cc = crate::geo::countries(s);
         let list: Vec<Value> = profiles::list_ids(s)
             .into_iter()
@@ -33,6 +34,7 @@ impl Backend {
                     "autoswitch": !no_autoswitch.contains(&id),
                     "speedcheck": !no_speed.contains(&id),
                     "torrents": torrents.contains(&id),
+                    "pinned": pinned.contains(&id),
                     "cc": cc.get(&id).cloned().unwrap_or_default(),
                 }))
             })

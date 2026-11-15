@@ -26,13 +26,14 @@ const ROUTER_TEXTS: [(&str, &str); 3] = [
 ];
 
 /// Клиентские разделы: присутствие ключа — это значение, в том числе пустое.
-const CLIENT_TEXTS: [(&str, &str); 9] = [
+const CLIENT_TEXTS: [(&str, &str); 10] = [
     ("route_map", store::ROUTE_MAP),
     ("health_urls", store::HEALTH_URLS),
     ("udp_vpn_list", store::UDP_VPN),
     ("egress_blocklist", store::EGRESS_BLOCK),
     ("ru_subnets_exclude", store::RU_EXCLUDE),
     ("autoswitch_exclude", store::AUTOSWITCH_EXCLUDE),
+    ("autoswitch_pin", store::AUTOSWITCH_PIN),
     ("speedcheck_exclude", store::SPEEDCHECK_EXCLUDE),
     ("torrent_allow", store::TORRENT_ALLOW),
     ("app_rules", store::APP_RULES),

@@ -251,6 +251,7 @@ impl Backend {
                 ok()
             }
             "autoswitch_set" => self.id_flag(req, store::AUTOSWITCH_EXCLUDE, "eligible", false, "excluded", body()?)?,
+            "pin_set" => self.id_flag(req, store::AUTOSWITCH_PIN, "pin", true, "pinned", body()?)?,
             "speedcheck_set" => self.id_flag(req, store::SPEEDCHECK_EXCLUDE, "eligible", false, "excluded", body()?)?,
             "torrent_set" => self.torrent_set(req, body()?).await?,
             "torrent_status" => self.torrent_status().await,

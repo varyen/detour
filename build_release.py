@@ -441,6 +441,7 @@ $BEGIN
 /etc/sing-box/route-map.list
 /etc/sing-box/chains.json
 /etc/sing-box/autoswitch-exclude.list
+/etc/sing-box/autoswitch-pin.list
 /etc/sing-box/torrent-allow.list
 /etc/sing-box/ru-subnets.list
 /etc/sing-box/ru-subnets-exclude.list

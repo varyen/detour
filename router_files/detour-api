@@ -40,6 +40,9 @@ SINGBOX_PROFILES_DIR="/etc/sing-box/profiles"
 # Profiles EXCLUDED from auto-switch (one id per line; absent/empty = all eligible).
 # Read by detour-health's candidate pick; managed by the autoswitch_set action below.
 AUTOSWITCH_EXCLUDE="/etc/sing-box/autoswitch-exclude.list"
+# Закреплённые профили (pin): если активен профиль из этого списка, автопереключение
+# выбирает замену только среди закреплённых. Пишет pin_set, читает detour-health.
+AUTOSWITCH_PIN="/etc/sing-box/autoswitch-pin.list"
 # Profiles EXCLUDED from BACKGROUND speed checks (one id per line; absent/empty =
 # all eligible). Kept outside profile JSON for the same reason as auto-switch.
 SPEEDCHECK_EXCLUDE="/etc/sing-box/speedcheck-exclude.list"
@@ -201,6 +204,7 @@ if [ -d /opt/etc/ndm ] || [ -f /opt/etc/detour/platform ]; then
     SINGBOX_SETTINGS="$OPT/etc/sing-box/settings.json"
     SINGBOX_PROFILES_DIR="$OPT/etc/sing-box/profiles"
     AUTOSWITCH_EXCLUDE="$OPT/etc/sing-box/autoswitch-exclude.list"
+    AUTOSWITCH_PIN="$OPT/etc/sing-box/autoswitch-pin.list"
     SPEEDCHECK_EXCLUDE="$OPT/etc/sing-box/speedcheck-exclude.list"
     TORRENT_ALLOW="$OPT/etc/sing-box/torrent-allow.list"
     TORRENT_BIN="$OPT/sbin/detour-torrent"
@@ -4367,9 +4371,9 @@ profiles_list)
     PL_TMP="/tmp/detour-profiles.$$"
     lua - "$PLATFORM" "$AUTOSWITCH_EXCLUDE" "$SPEEDCHECK_EXCLUDE" \
           "$(get_active_profile)" "$(get_active_chain)" "$GEO_DB" "$TORRENT_ALLOW" \
-          "$SINGBOX_PROFILES_DIR"/*.json > "$PL_TMP" 2>/dev/null <<'LUA'
-local platform, ex_as, ex_sc, active, chain_csv, geo_db, allow_bt =
-    arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7]
+          "$AUTOSWITCH_PIN" "$SINGBOX_PROFILES_DIR"/*.json > "$PL_TMP" 2>/dev/null <<'LUA'
+local platform, ex_as, ex_sc, active, chain_csv, geo_db, allow_bt, pin_as =
+    arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7], arg[8]
 if platform == "keenetic" then
     package.path = "/opt/share/lua/5.1/?.lua;/opt/share/lua/5.1/?/init.lua;" .. package.path
 end
@@ -4396,6 +4400,7 @@ local no_speedcheck = read_set(ex_sc)
 -- профиль в файле = торренты на нём можно. По умолчанию (нет файла / нет строки)
 -- запрещено, поэтому новый профиль из подписки не оказывается «пока можно».
 local allow_torrents = read_set(allow_bt)
+local pinned = read_set(pin_as)
 
 -- Страна эндпоинта: тот же приём, что и со списками исключений — один проход по
 -- кэшу detour-geo вместо grep-а на каждый профиль. Файла может не быть вовсе
@@ -4416,7 +4421,7 @@ end
 -- таблицу cjson отдал бы как {}, и панель упала бы на `profiles.map` там, где
 -- профилей ещё нет (свежий роутер).
 local parts = {}
-local i = 8
+local i = 9
 while arg[i] do
     local path = arg[i]
     local id = path:match("([^/]+)%.json$")
@@ -4434,6 +4439,7 @@ while arg[i] do
             autoswitch = not no_autoswitch[id],
             speedcheck = not no_speedcheck[id],
             torrents = allow_torrents[id] == true,
+            pinned = pinned[id] == true,
             cc = geo[id] or "",
         })
     end
@@ -4484,14 +4490,19 @@ LUA
         else
             PBT=false
         fi
+        if grep -qxF "$PNAME" "$AUTOSWITCH_PIN" 2>/dev/null; then
+            PPIN=true
+        else
+            PPIN=false
+        fi
         # Страна эндпоинта из кэша detour-geo (пусто, если скан не гоняли).
         PCC=$(awk -F'\t' -v id="$PNAME" '$1 == id { print $3; exit }' "$GEO_DB" 2>/dev/null)
         if [ "$FIRST" = "1" ]; then FIRST=0; else printf ','; fi
-        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s","autoswitch":%s,"speedcheck":%s,"torrents":%s,"cc":"%s"}' \
+        printf '{"id":"%s","type":"%s","name":"%s","group":"%s","routing_mode":"%s","autoswitch":%s,"speedcheck":%s,"torrents":%s,"pinned":%s,"cc":"%s"}' \
             "$PNAME" "$PTYPE" \
             "$(echo "$PDESC" | json_escape)" \
             "$(echo "$PGROUP" | json_escape)" \
-            "$PRMODE" "$PAS" "$PSC" "$PBT" "$PCC"
+            "$PRMODE" "$PAS" "$PSC" "$PBT" "$PPIN" "$PCC"
     done
     printf '],"active":"%s","active_chain":' "$(get_active_profile)"
     print_csv_json_array "$(get_active_chain)"
@@ -4529,6 +4540,34 @@ autoswitch_set)
     rm -f "$AS_IDS"
     AS_CNT=$(grep -c . "$AUTOSWITCH_EXCLUDE" 2>/dev/null); [ -z "$AS_CNT" ] && AS_CNT=0
     printf '{"ok":true,"excluded":%s}' "$AS_CNT"
+    ;;
+
+pin_set)
+    # Закрепить/открепить профили. ?pin=1|0 + POST-тело = id через перевод строки
+    # или запятую. Закреплённые образуют группу: упав на закреплённом, автопереклю-
+    # чение ищет замену только внутри неё (detour-health, pick_switch_candidate).
+    if [ "$REQUEST_METHOD" != "POST" ]; then json_err "POST required"; exit 0; fi
+    PN_ON=$(echo "$QUERY_STRING" | sed -n 's/.*[?&]pin=\([^&]*\).*/\1/p' | head -1)
+    mkdir -p "$(dirname "$AUTOSWITCH_PIN")" 2>/dev/null
+    touch "$AUTOSWITCH_PIN" 2>/dev/null
+    PN_IDS="/tmp/detour-pin-ids.$$"
+    printf '%s' "$POST_DATA" | tr ',\r' '\n\n' | while IFS= read -r _l || [ -n "$_l" ]; do
+        _s=$(printf '%s' "$_l" | tr -cd 'a-zA-Z0-9_-')
+        [ -n "$_s" ] && echo "$_s"
+    done | sort -u > "$PN_IDS"
+    if [ -s "$PN_IDS" ]; then
+        if [ "$PN_ON" = "1" ]; then
+            awk 'NF && !seen[$0]++' "$AUTOSWITCH_PIN" "$PN_IDS" \
+                > "$AUTOSWITCH_PIN.new" 2>/dev/null
+        else
+            awk 'NR==FNR{rm[$0]=1; next} !($0 in rm)' "$PN_IDS" "$AUTOSWITCH_PIN" \
+                > "$AUTOSWITCH_PIN.new" 2>/dev/null
+        fi
+        mv "$AUTOSWITCH_PIN.new" "$AUTOSWITCH_PIN" 2>/dev/null
+    fi
+    rm -f "$PN_IDS"
+    PN_CNT=$(grep -c . "$AUTOSWITCH_PIN" 2>/dev/null); [ -z "$PN_CNT" ] && PN_CNT=0
+    printf '{"ok":true,"pinned":%s}' "$PN_CNT"
     ;;
 
 speedcheck_set)

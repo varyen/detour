@@ -797,6 +797,7 @@ const SECTION_LABELS: Record<string, string> = {
   egress_blocklist: "запрещённые адреса",
   ru_subnets_exclude: "исключения из российских адресов",
   autoswitch_exclude: "профили вне автопереключения",
+  autoswitch_pin: "закреплённые профили",
   speedcheck_exclude: "профили без замера скорости",
   torrent_allow: "профили с разрешёнными торрентами",
   router_files: "роутерные настройки: проброс, сертификат, WAN, уведомления",

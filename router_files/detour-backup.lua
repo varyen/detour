@@ -158,6 +158,7 @@ local TEXTS = {
   { "health_urls",        "sb", "health-urls.list" },
   { "ru_subnets_exclude", "sb", "ru-subnets-exclude.list" },
   { "autoswitch_exclude", "sb", "autoswitch-exclude.list" },
+  { "autoswitch_pin",     "sb", "autoswitch-pin.list" },
   { "speedcheck_exclude", "sb", "speedcheck-exclude.list" },
   { "torrent_allow",      "sb", "torrent-allow.list" },
   { "egress_blocklist",   "dd", "blocked-egress-ips.list" },

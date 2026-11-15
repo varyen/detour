@@ -93,6 +93,13 @@ export const profiles = {
       body: ids.join("\n"),
     }),
 
+  /** Закрепить/открепить профили (группа автопереключения). */
+  setPinned: (ids: string[], pinned: boolean) =>
+    requestJson<{ ok: boolean; pinned: number }>("pin_set", {
+      params: { pin: pinned ? 1 : 0 },
+      body: ids.join("\n"),
+    }),
+
   /** Состояние блокировки торрентов: включена ли и последнее событие. */
   torrentStatus: () => requestJsonTolerant<TorrentStatus>("torrent_status"),
   /** Запрет, «напрямую» или «через профиль, где торренты разрешены». */

@@ -225,6 +225,10 @@ defineProps<{ name: string; size?: number }>();
     <template v-else-if="name === 'cloud'">
       <path d="M7 18a4.5 4.5 0 0 1-.6-9A6 6 0 0 1 18 9.5a4.3 4.3 0 0 1-.5 8.5z" />
     </template>
+    <template v-else-if="name === 'pin'">
+      <path d="M9 4h6l-1 6 3 3H7l3-3z" />
+      <path d="M12 13v7" />
+    </template>
     <template v-else-if="name === 'qr'">
       <rect x="4" y="4" width="6" height="6" rx="1" />
       <rect x="14" y="4" width="6" height="6" rx="1" />

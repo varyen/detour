@@ -364,7 +364,7 @@ function bulkHealth() {
 /** Флаг одного профиля: то же, что массовая операция, но на один id. */
 async function setFlag(
   r: ProfileRow,
-  kind: "autoswitch" | "speedcheck" | "torrents",
+  kind: "autoswitch" | "speedcheck" | "torrents" | "pinned",
   value: boolean,
 ) {
   if (flagBusy.value) return;
@@ -372,6 +372,7 @@ async function setFlag(
   try {
     if (kind === "autoswitch") await profilesApi.setAutoswitch([r.id], value);
     else if (kind === "torrents") await profilesApi.setTorrents([r.id], value);
+    else if (kind === "pinned") await profilesApi.setPinned([r.id], value);
     else await profilesApi.setSpeedcheck([r.id], value);
     /* Правим строку на месте: перечитывать сотню профилей и все пинги ради
        одного флага — заметная пауза на каждое нажатие. */
@@ -470,13 +471,19 @@ async function removeRow(r: ProfileRow) {
 
 /* ---------- массовые действия ---------- */
 
-async function bulkFlag(kind: "autoswitch" | "speedcheck" | "torrents", eligible: boolean) {
+async function bulkFlag(kind: "autoswitch" | "speedcheck" | "torrents" | "pinned", eligible: boolean) {
   if (!selected.value.length) return;
   busy.value = `bulk:${kind}`;
   try {
     if (kind === "autoswitch") await profilesApi.setAutoswitch(selected.value, eligible);
     else if (kind === "torrents") await profilesApi.setTorrents(selected.value, eligible);
+    else if (kind === "pinned") await profilesApi.setPinned(selected.value, eligible);
     else await profilesApi.setSpeedcheck(selected.value, eligible);
+    if (kind === "pinned") {
+      toast.ok(`${selected.value.length} профилей ${eligible ? "закреплены" : "откреплены"}`);
+      await reload(true);
+      return;
+    }
     if (kind === "torrents") {
       toast.ok(
         `На ${selected.value.length} профилях торренты ${eligible ? "разрешены" : "запрещены"}`,
@@ -931,6 +938,12 @@ onBeforeUnmount(() => unregister?.());
         <UiButton :busy="busy === 'bulk:torrents'" @click="bulkFlag('torrents', false)">
           Запретить торренты
         </UiButton>
+        <UiButton :busy="busy === 'bulk:pinned'" @click="bulkFlag('pinned', true)">
+          Закрепить
+        </UiButton>
+        <UiButton :busy="busy === 'bulk:pinned'" @click="bulkFlag('pinned', false)">
+          Открепить
+        </UiButton>
       </template>
     </div>
     <PluginSections v-if="!status.isClient" area="profiles" />
@@ -993,6 +1006,12 @@ onBeforeUnmount(() => unregister?.());
         label="Торренты разрешены"
         :busy="flagBusy === `${rowItem.id}:torrents`"
         @update:model-value="setFlag(rowItem, 'torrents', $event)"
+      />
+      <SwitchToggle
+        :model-value="rowItem.pinned === true"
+        label="Закреплён: автопереключение только между закреплёнными"
+        :busy="flagBusy === `${rowItem.id}:pinned`"
+        @update:model-value="setFlag(rowItem, 'pinned', $event)"
       />
     </div>
     <div v-if="rowItem" class="rowacts">

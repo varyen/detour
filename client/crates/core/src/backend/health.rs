@@ -255,12 +255,21 @@ impl Backend {
 
     /// Кандидат на автопереключение — из уже проверенных: рабочий, не
     /// текущий, не исключённый; побеждает меньшая задержка. Перед
-    /// переключением не перепроверяется — так же, как на роутере.
+    /// переключением не перепроверяется — так же, как на роутере. Если
+    /// текущий закреплён, замена ищется только среди закреплённых.
     fn candidate(&self, db: &HealthDb, current: &str) -> Option<String> {
         let excluded = lists::parse_id_list(&self.store.read_text(store::AUTOSWITCH_EXCLUDE));
+        let pinned = lists::parse_id_list(&self.store.read_text(store::AUTOSWITCH_PIN));
+        let only_pinned = pinned.iter().any(|p| p == current);
         db.results
             .iter()
-            .filter(|(id, v)| v.ok && id.as_str() != current && !excluded.contains(id) && profiles::exists(&self.store, id))
+            .filter(|(id, v)| {
+                v.ok
+                    && id.as_str() != current
+                    && !excluded.contains(id)
+                    && (!only_pinned || pinned.contains(id))
+                    && profiles::exists(&self.store, id)
+            })
             .min_by_key(|(_, v)| if v.rtt > 0 { v.rtt } else { 999_999 })
             .map(|(id, _)| id.clone())
     }
