@@ -5942,6 +5942,11 @@ engine_config)
         SBMODE=$(get_singbox_mode)
         # «работает ли» — до пересборки: после неё engine_pid смотрит уже на новый движок
         WAS_RUNNING="$(engine_pid)"
+        # Без единого профиля (чистый VPN-сервер) get_active_chain отдаёт
+        # заглушку «default» — собирать нечего, режим просто сохраняется.
+        if [ -n "$ACHAIN" ] && ! ls "$SINGBOX_PROFILES_DIR"/*.json >/dev/null 2>&1; then
+            ACHAIN=""
+        fi
         if [ -n "$ACHAIN" ]; then
             BUILD_ERR=$(build_config "$SBMODE" "$ACHAIN")
             if [ $? -ne 0 ]; then
