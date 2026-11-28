@@ -1,0 +1,75 @@
+Package: detour-awg-go
+Version: 1.0.1-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 4194497
+Description: Userspace AmneziaWG (amneziawg-go + awg subset) for the Detour VPN server. Keenetic/Entware (mipsel soft-float). (1.0.1-1)
+Filename: detour-awg-go_1.0.1-1_all.ipk
+Size: 1501040
+MD5Sum: ce9050651f58086803c5c997e052604e
+SHA256sum: 99d0a54585a110b856da284dea469346da87c260a92711ca0f83a71b4ad5e589
+
+Package: mihomo
+Version: 1.19.34-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 63570077
+Description: mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar for AmneziaWG profiles (sing-box has no AmneziaWG). Keenetic/Entware (mipsel soft-float). (1.19.34-1)
+Filename: mihomo_1.19.34-1_all.ipk
+Size: 19987306
+MD5Sum: 4864405f102427eb1020e192d7e07406
+SHA256sum: 90e5a98e1732c684047418b3c08283318aad63130bbadc08ffb0f317982c359c
+
+Package: sing-box
+Version: 1.14.6-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 103425872
+Description: sing-box universal proxy platform. Detour feed build for Keenetic/Entware (mipsel soft-float, musl-static). (1.14.6-1)
+Filename: sing-box_1.14.6-1_all.ipk
+Size: 30027464
+MD5Sum: 172e9471d676bcd14b502506180b9241
+SHA256sum: fb0fc085fc91f2dc85499c58858367efdc8ba5668f1177a3330db157d06faa66
+
+Package: tpws-zapret
+Version: 72.13-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 127024
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build for Keenetic/Entware (mipsel). (72.13-1)
+Filename: tpws-zapret_72.13-1_all.ipk
+Size: 126768
+MD5Sum: 51a6aacbfddf89e742e4649dd63e97e2
+SHA256sum: 2b1a12d66aba28be05d40b079ef3598e70993a271b4dfa3b8c78f54b0abde8f3
+
+Package: xray-detour
+Version: 26.3.27-1
+Source: https://github.com/varyen/detour
+License: GPL-3.0-or-later
+Section: net
+Priority: optional
+Maintainer: Maintainer <you@example.com>
+Architecture: all
+Installed-Size: 34341021
+Description: Xray-core (XTLS) as xray-detour. Detour feed build - VLESS xhttp inbound of the Detour VPN server (sing-box has no xhttp). Keenetic/Entware (mipsel soft-float). (26.3.27-1)
+Filename: xray-detour_26.3.27-1_all.ipk
+Size: 10384435
+MD5Sum: f572cba8c8defcfced5960c85acd05af
+SHA256sum: 8615e49ebd5652bc14f5a5a5483c727616a205033deac93b67f121f4f667930d
+

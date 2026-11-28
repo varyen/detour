@@ -1,0 +1,50 @@
+Package: detour-awg-go
+Version: 1.0.1
+Architecture: noarch
+Installed-Size: 3735714
+Description: Userspace AmneziaWG (amneziawg-go + awg subset) for the Detour VPN server on OpenWrt without kmod-amneziawg.
+Filename: detour-awg-go_1.0.1_noarch.apk
+Size: 1550135
+MD5Sum: 523165d6b7fa73fb554fec20afe48525
+SHA256sum: fc58b649a03abec1e5ccfd6972206b6a1603f7c03b50bb33ca21f3d00afbe524
+
+Package: mihomo
+Version: 1.19.34
+Architecture: noarch
+Installed-Size: 56230014
+Description: mihomo (MetaCubeX, Clash.Meta core). Detour feed build - sidecar for AmneziaWG profiles (sing-box has no AmneziaWG).
+Filename: mihomo_1.19.34_noarch.apk
+Size: 20875433
+MD5Sum: 23c15d30e2928f081b823d3f8beaec64
+SHA256sum: d2c15ea33bb21ad2a1c7271201da9b12714e1a72bd97427d7d56558b2934f200
+
+Package: nfqws2
+Version: 1.0.8
+Architecture: noarch
+Installed-Size: 468908
+Description: zapret2 nfqws2 NFQUEUE DPI-bypass engine + LuaJIT desync scripts (bol-van/zapret2). Optional — used by zapret2 mode.
+Filename: nfqws2_1.0.8_noarch.apk
+Size: 338937
+MD5Sum: 4050f23d5fac785f2eaab9d7469c4393
+SHA256sum: ca5b5b5ab759e1954297979afeee855e676e3add16a9488d754cc65e08030dc6
+
+Package: tpws-zapret
+Version: 72.13
+Architecture: noarch
+Installed-Size: 107276
+Description: zapret tpws transparent DPI-bypass proxy (bol-van/zapret). Detour feed build — zapret is in no opkg feed.
+Filename: tpws-zapret_72.13_noarch.apk
+Size: 107300
+MD5Sum: 58c6f00cc20a00b142fecaa1b44300fd
+SHA256sum: 72ceb44da26a309c98935649f5ce2f5379159082fd29c70fdf022746c4a54fa6
+
+Package: xray-detour
+Version: 26.3.27
+Architecture: noarch
+Installed-Size: 34865278
+Description: Xray-core (XTLS) as xray-detour. Detour feed build - VLESS xhttp inbound of the Detour VPN server (sing-box has no xhttp).
+Filename: xray-detour_26.3.27_noarch.apk
+Size: 12649330
+MD5Sum: b0a6fd0ab8fa2f0b41a1a792907328ea
+SHA256sum: 856a2c7cbac15dd61c078514b0e6f1f11d7acefd88892bc1a8601e7cb3f2818b
+
